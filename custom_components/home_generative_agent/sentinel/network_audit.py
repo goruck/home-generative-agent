@@ -27,9 +27,13 @@ from custom_components.home_generative_agent.snapshot.network import (
     radio_cap,
 )
 
+from .notifier_messages import notif_msg
+
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Callable, Iterable, Mapping
     from datetime import datetime
+
+    from homeassistant.core import HomeAssistant
 
     from .models import AnomalyFinding, Severity
 
@@ -333,6 +337,100 @@ def empty_report(status: AuditStatus, now: datetime, note: str) -> NetworkAuditR
         "privacy_notes": list(PRIVACY_NOTES),
         "inventory": None,
     }
+
+
+def finding_title(finding_type: str, hass: HomeAssistant | None = None) -> str:
+    """
+    Return the fixed title of a finding type ("UPnP is on at the router").
+
+    The notification label, which is written per rule and never carries a
+    name from the home. English when *hass* is None (what a model is given).
+    """
+    key = f"type_{finding_type}"
+    label = notif_msg(hass, key)
+    return finding_type.replace("_", " ") if label == key else label
+
+
+def digest(report: NetworkAuditReport, note: str) -> dict[str, Any]:
+    """
+    Return what a conversation model may see when details are withheld.
+
+    Deterministic by construction: counts, each finding's severity, rule id,
+    and fixed title, the rule ids that ran, the static reasons others could
+    not, the inventory counts, and the static privacy notes. Nothing here is
+    copied from the home: no summary, suggested action, entity id, or note
+    (notes carry gateway and discovery names).
+    """
+    payload: dict[str, Any] = {
+        "generated_at": report["generated_at"],
+        "summary": summarize(report),
+        "details": "withheld",
+        "findings": [
+            {
+                "severity": finding["severity"],
+                "type": finding["type"],
+                "title": finding_title(str(finding["type"])),
+            }
+            for finding in report["findings"]
+        ],
+        "checks_run": list(report["checks_run"]),
+        "checks_not_run": dict(report["checks_not_run"]),
+        "notes": [note],
+        "privacy_notes": list(report["privacy_notes"]),
+    }
+    inventory = report.get("inventory")
+    if inventory is not None:
+        payload["device_inventory"] = {
+            "trusted": inventory["trusted"],
+            "untrusted": inventory["untrusted"],
+        }
+    return payload
+
+
+_SEVERITY_HEADINGS: tuple[str, ...] = ("high", "medium", "low")
+
+
+def render_report_markdown(
+    report: NetworkAuditReport,
+    hass: HomeAssistant | None,
+    escape: Callable[[str], str],
+    max_chars: int,
+) -> str:
+    """
+    Render the full report for a persistent notification (Markdown).
+
+    For the owner, not for a model: names and addresses stay as they are.
+    Every string from the home goes through *escape*, since parts of a
+    summary come from the LAN and the notification renders Markdown.
+    """
+    lines: list[str] = [escape(summarize(report)), ""]
+    for severity in _SEVERITY_HEADINGS:
+        group = [f for f in report["findings"] if f.get("severity") == severity]
+        if not group:
+            continue
+        word = notif_msg(hass, f"severity_word_{severity}")
+        lines.append(f"**{word.capitalize()}**")
+        for finding in group:
+            title = escape(finding_title(str(finding["type"]), hass))
+            lines.append(f"- **{title}.** {escape(str(finding['summary']))}")
+            lines.extend(
+                f"  - {escape(str(action))}"
+                for action in finding.get("suggested_actions") or []
+            )
+        lines.append("")
+    if report["checks_not_run"]:
+        lines.append(f"**{notif_msg(hass, 'audit_report_not_run')}**")
+        lines.extend(
+            f"- {escape(finding_title(rule_id, hass))}: {escape(reason)}"
+            for rule_id, reason in report["checks_not_run"].items()
+        )
+        lines.append("")
+    lines.extend(escape(str(note)) for note in report["notes"])
+    text = "\n".join(lines).strip()
+    if len(text) > max_chars:
+        tail = "\n\n… truncated; run the run_network_audit service for the rest."
+        text = text[: max_chars - len(tail)].rstrip() + tail
+    return text
 
 
 def summarize(report: NetworkAuditReport) -> str:

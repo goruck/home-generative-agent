@@ -102,6 +102,8 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "digest_message": (
             "Sentinel: {count} alert{plural} in the last 24 h ({sev_summary})."
         ),
+        "audit_report_title": "Security audit report",
+        "audit_report_not_run": "Checks that could not run",
         "severity_word_high": "high",
         "severity_word_medium": "medium",
         "severity_word_low": "low",
@@ -187,6 +189,8 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "digest_message": (
             "Sentinel: {count} upozornění za posledních 24 h ({sev_summary})."
         ),
+        "audit_report_title": "Zpráva z bezpečnostního auditu",
+        "audit_report_not_run": "Kontroly, které nebylo možné provést",
         "severity_word_high": "vysoká",
         "severity_word_medium": "střední",
         "severity_word_low": "nízká",

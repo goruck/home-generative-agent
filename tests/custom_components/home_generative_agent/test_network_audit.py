@@ -16,8 +16,12 @@ import yaml
 import custom_components.home_generative_agent as hga_component
 from custom_components.home_generative_agent.agent.tools import audit_home_security
 from custom_components.home_generative_agent.const import (
+    CONF_SENTINEL_NETWORK_AUDIT_SHARE_DETAILS,
     CONF_SENTINEL_NETWORK_ENABLED,
     CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
+    NETWORK_AUDIT_REPORT_NOTIFICATION_ID,
+    NETWORK_AUDIT_TOOL_DIGEST_NOTE,
+    NETWORK_AUDIT_TOOL_DIGEST_NOTE_UNDELIVERED,
     NETWORK_AUDIT_TOOL_LABEL_NOTE,
     NETWORK_AUDIT_TOOL_MAX_ENTITIES,
     NETWORK_AUDIT_TOOL_MAX_SUMMARY_CHARS,
@@ -29,8 +33,11 @@ from custom_components.home_generative_agent.sentinel.network_audit import (
     build_report,
     capability_reason,
     empty_report,
+    finding_title,
+    render_report_markdown,
     summarize,
 )
+from custom_components.home_generative_agent.sentinel.notifier import escape_markdown
 from custom_components.home_generative_agent.sentinel.rules.network_common import (
     NETWORK_RULE_TYPES,
     make_finding,
@@ -669,3 +676,149 @@ async def test_tool_adds_device_inventory_counts_but_no_names() -> None:
         await _run_tool(_tool_config(SimpleNamespace(async_audit_network=_audit)))
     )
     assert payload["device_inventory"] == {"trusted": 10, "untrusted": 1}
+
+
+# ---------------------------------------------------------------------------
+# Digest mode: details withheld from the conversation model
+# ---------------------------------------------------------------------------
+
+
+class _FakeServices:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
+        self._fail = fail
+
+    async def async_call(
+        self, domain: str, service: str, data: dict[str, Any], **_kw: Any
+    ) -> None:
+        if self._fail:
+            msg = "notify down"
+            raise RuntimeError(msg)
+        self.calls.append((domain, service, data))
+
+
+def _digest_config(sentinel: Any, services: _FakeServices | None) -> Any:
+    hass = SimpleNamespace(services=services) if services is not None else None
+    return {
+        "configurable": {
+            "hga_runtime_data": SimpleNamespace(sentinel=sentinel),
+            "hass": hass,
+        }
+    }
+
+
+_LEAKY_SNAPSHOT_FIELDS: dict[str, Any] = {
+    "failed_login_notification_present": True,
+    "addons_unprotected": ["ssh"],
+    "addon_names": {"ssh": "Terminal & SSH"},
+}
+
+
+@pytest.mark.asyncio
+async def test_digest_mode_gives_the_model_nothing_copied_from_the_home(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, _, _, _ = _engine(
+        monkeypatch,
+        _snapshot(_LEAKY_SNAPSHOT_FIELDS),
+        options={CONF_SENTINEL_NETWORK_AUDIT_SHARE_DETAILS: False},
+    )
+    services = _FakeServices()
+
+    text = await _run_tool(_digest_config(engine, services))
+    payload = yaml.safe_load(text)
+
+    assert payload["details"] == "withheld"
+    assert payload["summary"].startswith("2 findings (1 high, 1 medium)")
+    assert payload["findings"][0] == {
+        "severity": "high",
+        "type": "ha_addon_unprotected",
+        "title": finding_title("ha_addon_unprotected"),
+    }
+    # Fixed per-rule copy only: no summary, action, entity id, or note.
+    assert all(set(f) == {"severity", "type", "title"} for f in payload["findings"])
+    assert "Terminal" not in text
+    assert payload["notes"] == [NETWORK_AUDIT_TOOL_DIGEST_NOTE]
+    assert "ha_addon_unprotected" in payload["checks_run"]
+    assert "Supervisor" in payload["checks_not_run"]["ha_addon_exposed_port"]
+    assert payload["privacy_notes"] == list(PRIVACY_NOTES)
+
+    # The owner gets the report itself, names included, as one replaceable
+    # persistent notification.
+    ((domain, service, data),) = services.calls
+    assert (domain, service) == ("persistent_notification", "create")
+    assert data["notification_id"] == NETWORK_AUDIT_REPORT_NOTIFICATION_ID
+    assert data["title"] == "Security audit report"
+    assert "Terminal & SSH" in data["message"].replace("\\", "")
+    assert "**High**" in data["message"]
+    assert "Checks that could not run" in data["message"]
+
+
+@pytest.mark.asyncio
+async def test_digest_mode_says_so_when_the_report_could_not_be_posted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, _, _, _ = _engine(
+        monkeypatch,
+        _snapshot(_LEAKY_SNAPSHOT_FIELDS),
+        options={CONF_SENTINEL_NETWORK_AUDIT_SHARE_DETAILS: False},
+    )
+    for config in (
+        _digest_config(engine, _FakeServices(fail=True)),
+        _digest_config(engine, None),
+    ):
+        payload = yaml.safe_load(await _run_tool(config))
+        assert payload["notes"] == [NETWORK_AUDIT_TOOL_DIGEST_NOTE_UNDELIVERED]
+        assert payload["details"] == "withheld"
+        assert "Terminal" not in yaml.dump(payload)
+
+
+@pytest.mark.asyncio
+async def test_details_are_shared_by_default_and_nothing_is_posted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, _, _, _ = _engine(monkeypatch, _snapshot(_LEAKY_SNAPSHOT_FIELDS))
+    services = _FakeServices()
+    payload = yaml.safe_load(await _run_tool(_digest_config(engine, services)))
+    assert "details" not in payload
+    assert "Terminal & SSH" in payload["findings"][0]["summary"]
+    assert services.calls == []
+
+
+def test_every_network_rule_has_a_fixed_title_for_the_digest() -> None:
+    # A missing label would fall back to the rule id with spaces, which is
+    # still name-free, but the digest should read like the notifications do.
+    for rule_id in sorted(NETWORK_RULE_TYPES):
+        assert finding_title(rule_id) != rule_id.replace("_", " "), rule_id
+
+
+def test_report_markdown_escapes_names_from_the_lan_and_is_capped() -> None:
+    finding = make_finding(
+        "network_unconfigured_discovered_device",
+        severity="low",
+        evidence={"handlers": ["x"]},
+        summary="Found [click](http://evil) <b>cam</b>.",
+        suggested_actions=["Configure or ignore it"],
+    )
+    report = build_report(
+        now=NOW,
+        findings=[finding],
+        checks_run=["network_unconfigured_discovered_device"],
+        inactive_rules={},
+        failed_rules=[],
+        capabilities=[],
+        notes=["Gateway *Evil* seen"],
+        inventory=None,
+    )
+    text = render_report_markdown(report, None, escape_markdown, 12000)
+    assert "\\[click\\](http://evil)" in text
+    assert "\\<b\\>cam\\</b\\>" in text
+    assert "Gateway \\*Evil\\* seen" in text
+    assert "  - Configure or ignore it" in text
+    # The chrome follows Home Assistant's language; the facts stay as written.
+    czech = SimpleNamespace(config=SimpleNamespace(language="cs"))
+    text_cs = render_report_markdown(report, cast("Any", czech), escape_markdown, 12000)
+    assert "**Nízká**" in text_cs
+    short = render_report_markdown(report, None, escape_markdown, 120)
+    assert len(short) <= 120
+    assert short.endswith("run the run_network_audit service for the rest.")

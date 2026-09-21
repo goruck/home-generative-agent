@@ -38,6 +38,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_INTERVAL_SECONDS,
     CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
     CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT,
+    CONF_SENTINEL_NETWORK_AUDIT_SHARE_DETAILS,
     CONF_SENTINEL_NETWORK_ENABLED,
     CONF_SENTINEL_NETWORK_GUEST_IDLE_DAYS,
     CONF_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
@@ -60,6 +61,7 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_BASELINE_SUSTAINED_MINUTES,
     RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS,
     RECOMMENDED_SENTINEL_HA_TOKEN_STALE_DAYS,
+    RECOMMENDED_SENTINEL_NETWORK_AUDIT_SHARE_DETAILS,
     RECOMMENDED_SENTINEL_NETWORK_ENABLED,
     RECOMMENDED_SENTINEL_NETWORK_GUEST_IDLE_DAYS,
     RECOMMENDED_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
@@ -365,6 +367,12 @@ class SentinelEngine:
                 CONF_SENTINEL_NETWORK_ENABLED, RECOMMENDED_SENTINEL_NETWORK_ENABLED
             )
         )
+        self._network_audit_share_details = bool(
+            options.get(
+                CONF_SENTINEL_NETWORK_AUDIT_SHARE_DETAILS,
+                RECOMMENDED_SENTINEL_NETWORK_AUDIT_SHARE_DETAILS,
+            )
+        )
         self._suppression = suppression
         self._notifier = notifier
         self._audit_store = audit_store
@@ -509,6 +517,11 @@ class SentinelEngine:
         # config-entry setup, so once it has been stopped it must never run
         # again — see the note in start().
         self._stopped = False
+
+    @property
+    def network_audit_share_details(self) -> bool:
+        """Whether the audit tool may hand the chat model the findings' details."""
+        return self._network_audit_share_details
 
     @property
     def learned_suppressions_count(self) -> int:
