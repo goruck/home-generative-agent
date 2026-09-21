@@ -90,6 +90,7 @@ class NetworkClient(TypedDict):
     network_name: NotRequired[str | None]
     last_seen: NotRequired[str | None]
     first_seen: NotRequired[str | None]  # from the device inventory, once recorded
+    trusted: NotRequired[bool]  # the inventory row's verdict, once recorded
     ha_device_id: NotRequired[str | None]
     ha_integration: NotRequired[str | None]
     tracker_entity_id: NotRequired[str | None]

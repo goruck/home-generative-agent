@@ -166,6 +166,7 @@ _KNOWN_TYPE_LABELS = {
     "network_upnp_port_mapping_added": "New UPnP port mapping",
     "radio_new_device_joined": "New radio device joined",
     "network_unknown_device_joined": "New device on the network",
+    "network_guest_client_present": "Untrusted device on the guest Wi-Fi",
     "network_guest_network_idle": "Guest Wi-Fi left on unused",
     "network_wpa3_disabled": "WPA3 is off",
     "network_protection_disabled": "Router threat blocking is off",

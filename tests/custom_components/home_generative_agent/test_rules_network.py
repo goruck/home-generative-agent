@@ -46,6 +46,9 @@ from custom_components.home_generative_agent.sentinel.rules.network_common impor
     POSTURE_COOLDOWN_MINUTES,
     make_finding,
 )
+from custom_components.home_generative_agent.sentinel.rules.network_guest_client_present import (
+    NetworkGuestClientPresentRule,
+)
 from custom_components.home_generative_agent.sentinel.rules.network_public_ip_changed import (
     NetworkPublicIpChangedRule,
 )
@@ -116,6 +119,7 @@ ALL_RULES = [
     NetworkUpnpPortMappingAddedRule(),
     RadioNewDeviceJoinedRule(),
     NetworkUnknownDeviceJoinedRule(),
+    NetworkGuestClientPresentRule(),
     NetworkGuestNetworkIdleRule(),
     NetworkWpa3DisabledRule(),
     NetworkProtectionDisabledRule(),

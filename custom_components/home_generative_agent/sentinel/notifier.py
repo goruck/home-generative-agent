@@ -115,8 +115,27 @@ _FINDING_COOLDOWN_SECS = 1800  # 30 minutes
 
 # Findings whose primary button records their devices as trusted.
 _TRUST_DEVICE_TYPES = frozenset(
-    {"radio_new_device_joined", "network_unknown_device_joined"}
+    {
+        "radio_new_device_joined",
+        "network_unknown_device_joined",
+        "network_guest_client_present",
+    }
 )
+
+# Of those, the types that aggregate standing clients: one tap trusts every
+# device the finding carries, and the push shows 220 characters, so the button
+# is offered only when the finding names exactly one device.
+_TRUST_ONE_DEVICE_TYPES = frozenset({"network_guest_client_present"})
+
+
+def _offers_trust(finding: AnomalyFinding) -> bool:
+    """Return True when the finding's primary button is Trust device."""
+    if finding.type not in _TRUST_DEVICE_TYPES:
+        return False
+    if finding.type in _TRUST_ONE_DEVICE_TYPES:
+        return len(finding.evidence.get("device_ids") or []) == 1
+    return True
+
 
 _SNOOZE_VERBS = frozenset(
     {
@@ -619,7 +638,7 @@ def _build_actions(finding: AnomalyFinding) -> list[dict[str, Any]]:
     """
     actions: list[dict[str, Any]] = []
 
-    if finding.type in _TRUST_DEVICE_TYPES:
+    if _offers_trust(finding):
         # Android shows three buttons; for a newly paired device the useful
         # primary action is recording it as recognized, not asking the agent.
         actions.append(
@@ -791,6 +810,7 @@ _KNOWN_TYPE_LABEL_KEYS = {
     "network_upnp_port_mapping_added": "type_network_upnp_port_mapping_added",
     "radio_new_device_joined": "type_radio_new_device_joined",
     "network_unknown_device_joined": "type_network_unknown_device_joined",
+    "network_guest_client_present": "type_network_guest_client_present",
     "network_guest_network_idle": "type_network_guest_network_idle",
     "network_wpa3_disabled": "type_network_wpa3_disabled",
     "network_protection_disabled": "type_network_protection_disabled",

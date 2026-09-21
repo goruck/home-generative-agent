@@ -23,6 +23,8 @@ from custom_components.home_generative_agent.snapshot.network import (
 
 from .network_common import (
     anyone_home,
+    client_excluded,
+    client_known_for,
     clients,
     is_night,
     listed,
@@ -46,19 +48,24 @@ if TYPE_CHECKING:
 
 def describe_client(client: Mapping[str, Any]) -> str:
     """
-    Return ``Name (Apple, wireless, 192.168.1.23)`` for a client.
+    Return ``Name (Apple, wireless, guest Wi-Fi, 192.168.1.23)`` for a client.
 
     The name is the tracker entity's, the label the user already sees in
     Home Assistant; a client without one is named by manufacturer and key.
     The DHCP hostname is never used here: the summary reaches the audit
     tool's model, and a hostname in free text cannot be redacted.
     """
-    name = client.get("name") or client_display_name(client)
+    name = client.get("name")
+    # A client without a name is called by manufacturer and key, so the
+    # details must not say the manufacturer a second time.
+    manufacturer = client.get("manufacturer") if name else None
+    name = name or client_display_name(client)
     details = [
         part
         for part in (
-            client.get("manufacturer"),
+            manufacturer,
             client.get("connection_type"),
+            "guest Wi-Fi" if client.get("is_guest") is True else None,
             client.get("ip"),
         )
         if part
@@ -105,20 +112,10 @@ class NetworkUnknownDeviceJoinedRule:
         self._is_entity_excluded = is_entity_excluded
 
     def _excluded(self, client: Mapping[str, Any]) -> bool:
-        entity_id = client.get("tracker_entity_id")
-        if not entity_id or self._is_entity_excluded is None:
-            return False
-        return self._is_entity_excluded(str(entity_id), self.rule_id)
+        return client_excluded(client, self.rule_id, self._is_entity_excluded)
 
     def _past_grace(self, client: Mapping[str, Any], now: Any) -> bool:
-        if not self._grace:
-            return True
-        first_seen = dt_util.parse_datetime(str(client.get("first_seen") or ""))
-        if first_seen is None:
-            # Not recorded yet: the commit after this run records it, and
-            # the grace period runs from there.
-            return False
-        return dt_util.as_utc(now) - dt_util.as_utc(first_seen) >= self._grace
+        return not self._grace or client_known_for(client, now, self._grace)
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
         """Return one finding naming every new client past its grace period."""

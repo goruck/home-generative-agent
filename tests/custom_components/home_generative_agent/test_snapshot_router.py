@@ -312,6 +312,9 @@ async def test_attach_inventory_marks_new_clients_first_seen_and_known_names() -
     assert CAP_NEW_CLIENTS in section["capabilities"]
     assert by_key[KEY_B]["first_seen"] == NOW.isoformat()
     assert "first_seen" not in by_key[KEY_A]
+    # The row's verdict rides along; a client without a row carries none.
+    assert by_key[KEY_B]["trusted"] is True
+    assert "trusted" not in by_key[KEY_A]
     assert by_key[random_key]["mac_randomized"] is True
     assert by_key[random_key]["hostname_trusted"] is True
     assert "hostname_trusted" not in by_key[KEY_A]
@@ -612,6 +615,73 @@ def test_merge_publishes_client_capabilities_and_hides_entity_twins() -> None:
     assert section["sources"][CAP_CLIENTS] == "eero"
     assert posture_cap("upnp_enabled") in section["capabilities"]
     assert posture_cap("upnp_enabled_entity_id") not in section["capabilities"]
+
+
+def test_merge_publishes_the_guest_flag_and_counts_the_clients_it_cannot_cover() -> (
+    None
+):
+    from custom_components.home_generative_agent.snapshot.network import (  # noqa: PLC0415
+        CAP_GUEST_CLIENTS,
+        GUEST_FLAG_PARTIAL_NOTE,
+        AdapterResult,
+    )
+
+    def merged(*clients: dict[str, Any]) -> Any:
+        return merge_adapter_results(
+            [AdapterResult(name="eero_runtime", clients=list(clients))]  # type: ignore[arg-type]
+        )
+
+    # No client says anything about the guest network: no source reports it.
+    section = merged({"key": "a", "connected": True})
+    assert CAP_GUEST_CLIENTS not in section["capabilities"]
+    assert section["notes"] == []
+    # Every connected client carries the flag; an offline one without it
+    # (a stale tracker the router forgot) does not matter.
+    section = merged(
+        {"key": "a", "connected": True, "is_guest": False},
+        {"key": "b", "connected": True, "is_guest": True},
+        {"key": "c", "connected": False},
+    )
+    assert CAP_GUEST_CLIENTS in section["capabilities"]
+    assert section["sources"][CAP_GUEST_CLIENTS] == "eero_runtime"
+    assert section["notes"] == []
+    # A flagged guest is a guest whatever the others say, so the check runs;
+    # the connected clients no source covers are a stated gap.
+    section = merged(
+        {"key": "a", "connected": True, "is_guest": True},
+        {"key": "b", "connected": True},
+        {"key": "c", "connected": True},
+    )
+    assert CAP_GUEST_CLIENTS in section["capabilities"]
+    assert section["notes"] == [GUEST_FLAG_PARTIAL_NOTE.format(count=2)]
+
+
+def test_merge_never_carries_an_older_sources_guest_flag_forward() -> None:
+    from custom_components.home_generative_agent.snapshot.network import (  # noqa: PLC0415
+        CAP_GUEST_CLIENTS,
+        AdapterResult,
+    )
+
+    # The tracker attribute dates from the last reload, when the device was
+    # on the guest SSID; the fresher source sees it connected and says
+    # nothing about the network. The old flag must not describe the new
+    # connection.
+    stale = AdapterResult(
+        name="generic_router_tracker",
+        clients=[{"key": "k1", "connected": False, "is_guest": True, "vlan": 20}],
+    )
+    fresh = AdapterResult(
+        name="eero_runtime", clients=[{"key": "k1", "connected": True}]
+    )
+    section = merge_adapter_results([stale, fresh])
+    client = dict(section["clients"][0])
+    assert "is_guest" not in client
+    assert client["vlan"] == 20  # other unknown fields are still filled
+    assert CAP_GUEST_CLIENTS not in section["capabilities"]
+    # A fresher source that does know wins, either way.
+    fresh.clients = [{"key": "k1", "connected": True, "is_guest": False}]
+    remerged = merge_adapter_results([stale, fresh])["clients"][0]
+    assert remerged.get("is_guest") is False
 
 
 @pytest.mark.asyncio

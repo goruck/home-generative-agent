@@ -221,6 +221,8 @@ def test_capability_reasons_name_what_would_unlock_the_check() -> None:
     )
     assert "source_type router" in capability_reason(CAP_CLIENTS)
     assert "device inventory" in capability_reason(CAP_NEW_CLIENTS)
+    # More specific than the clients prefix it shares, so it is matched first.
+    assert "guest" in capability_reason("network.clients.is_guest")
     assert "router or DNS" in capability_reason(posture_cap("wpa3_enabled"))
     assert "SSDP" in capability_reason(posture_cap("upnp_enabled"))
     assert "port-mapping count sensor" in capability_reason(

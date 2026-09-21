@@ -752,7 +752,7 @@ validation.
 
 ### Network security plan steps 7–11 (router adapters, redaction, audit tool)
 
-**What:** `docs/network-security-plan.md` implementation-order steps 7, 8, 10, and 11 are unimplemented except for step 7's `upnp_igd`, `generic_router_tracker`, and `eero` adapters (with `network_unknown_device_joined`, the eero runtime adapter in `snapshot/eero.py`, and the router posture rules `network_guest_network_idle`, `network_wpa3_disabled`, `network_protection_disabled`, and `network_ddns_enabled`; `network_guest_client_present` is the next small rule, since the eero read now reports `is_guest`) and step 8's redaction half (`sentinel/redaction.py`, applied at the explainer, triage, discovery, and audit-tool boundaries; the `network_audit` feature type waits for the step 9 remainder so it has a consumer, and needs the resolver to give `conversation` ownership of the `chat` category first) (step 6, the radio adapters and device inventory, is implemented per `docs/network-security-radio-plan.md`; the `upnp_igd` adapter in `snapshot/upnp.py` shipped with `network_upnp_enabled`, `network_public_ip_changed`, and `network_upnp_port_mapping_added`; the phase 2 Bluetooth unknown-tracker and phase 3 Matter fabric adapters remain): the remaining router adapters (UniFi, Fritz!Box, AdGuard/Pi-hole; none validatable on the maintainer's hardware, so each needs a pre-release volunteer), the `network_audit` feature type, baseline counters (eero's per-client signal/usage/blocked sensors join the client then), and discovery templates. Phase 1 (steps 1–5) shipped in v3.39.0 and passed its field-validation gate on 2026-09-08. Step 9 shipped in its HA-only form in v3.40.0 (`audit_home_security` tool + `run_network_audit` service); the tool's privacy digest and provider override are still owed once router client data exists.
+**What:** `docs/network-security-plan.md` implementation-order steps 7, 8, 10, and 11 are unimplemented except for step 7's `upnp_igd`, `generic_router_tracker`, and `eero` adapters (with `network_unknown_device_joined`, the eero runtime adapter in `snapshot/eero.py`, and the router posture rules `network_guest_network_idle`, `network_wpa3_disabled`, `network_protection_disabled`, and `network_ddns_enabled`; and `network_guest_client_present` over the eero read's `is_guest` flag) and step 8's redaction half (`sentinel/redaction.py`, applied at the explainer, triage, discovery, and audit-tool boundaries; the `network_audit` feature type waits for the step 9 remainder so it has a consumer, and needs the resolver to give `conversation` ownership of the `chat` category first) (step 6, the radio adapters and device inventory, is implemented per `docs/network-security-radio-plan.md`; the `upnp_igd` adapter in `snapshot/upnp.py` shipped with `network_upnp_enabled`, `network_public_ip_changed`, and `network_upnp_port_mapping_added`; the phase 2 Bluetooth unknown-tracker and phase 3 Matter fabric adapters remain): the remaining router adapters (UniFi, Fritz!Box, AdGuard/Pi-hole; none validatable on the maintainer's hardware, so each needs a pre-release volunteer), the `network_audit` feature type, baseline counters (eero's per-client signal/usage/blocked sensors join the client then), and discovery templates. Phase 1 (steps 1–5) shipped in v3.39.0 and passed its field-validation gate on 2026-09-08. Step 9 shipped in its HA-only form in v3.40.0 (`audit_home_security` tool + `run_network_audit` service); the tool's privacy digest and provider override are still owed once router client data exists.
 
 **Why:** The plan deliberately sequenced the router work after the HA-only audit was validated on a plain install so the adapter framework (`AdapterResult`, `merge_adapter_results`, per-rule `requires`) was proven before it grew. That gate has passed. Runtime adapters for zwave_js and zha need `zwave-js-server-python==0.73.1` and `zha==2.2.0` (the HA 2026.9.0b4 pins) added to `requirements/test.txt`; neither is installed in the test venv today.
 
@@ -760,6 +760,28 @@ validation.
 
 **Effort:** L
 **Priority:** P2
+
+### The Trust device button trusts every device in a multi-device finding
+
+**What:** `radio_new_device_joined` and `network_unknown_device_joined` aggregate every new device into one finding, and the push's **Trust device** button (`notify/actions.py` `_outcome_for_trust`) trusts every id in `device_ids` at once. The summary lists at most 10 names (`listed()`) and the mobile push is cut at 220 characters (`MAX_MOBILE_MESSAGE_CHARS`), so one tap can trust a device the user never saw named. Seen in the field on 2026-09-19: one tap trusted a visitor's laptop together with an unidentified `[mac]` client. `network_guest_client_present` already offers the button only for a single-device finding (`notifier._TRUST_ONE_DEVICE_TYPES`); the two shipped rules were left as they are because changing them alters released behavior.
+
+**Why:** Trust is permanent and silences both client rules for that device. Surfaced by the Codex pass on PR #646.
+
+**How to apply:** Decide between (a) the single-device gate for all three types, (b) one finding per device for the join rules (needs a per-identity cooldown so siblings are not starved), or (c) a confirm step that lists what will be trusted. Whatever is chosen, the handler should refuse ids the delivered message did not name.
+
+**Effort:** M
+**Priority:** P2
+
+### `network_guest_client_present`: per-type daily floor and sub-daily MAC rotation
+
+**What:** Two accepted limits of the guest client rule. (1) Its 24 h cooldown floor is per type (`suppression.should_suppress` step 5), so after an alert about guest A, a different untrusted guest B that connects and leaves within the day is not reported by this rule. (2) A client is judged only once its inventory row is a day old (`FIRST_DAY_HOLDOFF`), so a device that rotates its MAC more often than daily (Windows "change daily", a deliberate attacker) never qualifies.
+
+**Why:** Both were accepted because `network_unknown_device_joined` (cooldown 0, per-key) announces B when it first joins and announces every rotated address as a new device, so the owner is still told; this rule adds the *standing presence* signal only. Surfaced by the Codex pass on PR #646.
+
+**How to apply:** (1) needs a per-identity (or "newly implicated client") cooldown in `suppression.py`, which the multi-device Trust item above also wants. (2) would need the holdoff to be based on the unknown-device alert's delivery time per client rather than the row's age.
+
+**Effort:** M
+**Priority:** P3
 
 ### Radio checks the pinned Home Assistant version cannot observe
 

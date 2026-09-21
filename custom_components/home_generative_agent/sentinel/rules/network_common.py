@@ -14,6 +14,8 @@ from __future__ import annotations
 import unicodedata
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.util import dt as dt_util
+
 from custom_components.home_generative_agent.const import (
     SENTINEL_POSTURE_RULE_COOLDOWN_MINUTES,
 )
@@ -25,7 +27,8 @@ from custom_components.home_generative_agent.sentinel.models import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
+    from datetime import datetime, timedelta
 
     from custom_components.home_generative_agent.snapshot.schema import (
         FullStateSnapshot,
@@ -54,6 +57,7 @@ NETWORK_RULE_TYPES: frozenset[str] = frozenset(
         "network_upnp_port_mapping_added",
         "radio_new_device_joined",
         "network_unknown_device_joined",
+        "network_guest_client_present",
         "network_guest_network_idle",
         "network_wpa3_disabled",
         "network_protection_disabled",
@@ -135,6 +139,62 @@ def listed(names: Sequence[str], limit: int = MAX_LISTED_ITEMS) -> str:
 def anyone_home(snapshot: FullStateSnapshot) -> bool:
     """Return the derived occupancy flag."""
     return bool(snapshot["derived"].get("anyone_home", False))
+
+
+_INDETERMINATE_STATES = frozenset({"unknown", "unavailable"})
+
+
+def nobody_home_for_sure(snapshot: FullStateSnapshot) -> bool:
+    """
+    Return True only when tracked people exist and every one of them is away.
+
+    For a rule whose whole trigger is "nobody is home". The derived
+    ``anyone_home`` cannot carry that: it is False on an install with no
+    ``person`` entities, and it counts a person whose state is ``unknown`` or
+    ``unavailable`` as away, so a presence outage with everyone at home reads
+    as an empty house. Here a person with device trackers and no readable
+    state makes the answer "not sure"; a person with no trackers at all (the
+    default onboarding user) can never be located and is ignored; and at
+    least one person must be positively away.
+    """
+    away = 0
+    for entity in snapshot["entities"]:
+        if entity["domain"] != "person":
+            continue
+        state = entity["state"]
+        if state == "home":
+            return False
+        if state in _INDETERMINATE_STATES:
+            if (entity.get("attributes") or {}).get("device_trackers"):
+                return False
+            continue
+        away += 1
+    return away > 0
+
+
+def client_excluded(
+    client: Mapping[str, Any],
+    rule_id: str,
+    is_entity_excluded: Callable[[str, str], bool] | None,
+) -> bool:
+    """Return True when the client's tracker entity is excluded for *rule_id*."""
+    entity_id = client.get("tracker_entity_id")
+    if not entity_id or is_entity_excluded is None:
+        return False
+    return is_entity_excluded(str(entity_id), rule_id)
+
+
+def client_known_for(client: Mapping[str, Any], now: datetime, age: timedelta) -> bool:
+    """
+    Return True when the client's inventory row is at least *age* old.
+
+    A client without a readable ``first_seen`` is not recorded yet: the
+    commit after this run records it, and its age runs from there.
+    """
+    first_seen = dt_util.parse_datetime(str(client.get("first_seen") or ""))
+    if first_seen is None:
+        return False
+    return dt_util.as_utc(now) - dt_util.as_utc(first_seen) >= age
 
 
 def noun(count: int, singular: str, plural_form: str | None = None) -> str:

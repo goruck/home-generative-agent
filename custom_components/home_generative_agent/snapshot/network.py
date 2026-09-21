@@ -74,6 +74,10 @@ LOGGER = logging.getLogger(__name__)
 CAP_CLIENTS = "network.clients"
 # Present once the device inventory has compared this run's clients.
 CAP_NEW_CLIENTS = "network.new_clients"
+# Some source says which clients are on the guest network. Published by the
+# merge (``_publish_guest_flag``), which also names the connected clients no
+# such source covers, so they are a stated gap rather than a silent pass.
+CAP_GUEST_CLIENTS = "network.clients.is_guest"
 _CAP_RADIO_PREFIX = "network.radio."
 _CAP_POSTURE_PREFIX = "network.posture."
 _CAP_HA_PREFIX = "network.ha_security."
@@ -269,7 +273,6 @@ _CLIENT_FILL_FIELDS: tuple[str, ...] = (
     "ha_device_id",
     "ha_integration",
     "tracker_entity_id",
-    "is_guest",
     "vlan",
 )
 COUNTER_CLIENT_COUNT = "network.client_count"
@@ -288,6 +291,11 @@ def _merge_client(earlier: NetworkClient, incoming: NetworkClient) -> NetworkCli
     for field_name in _CLIENT_FILL_FIELDS:
         if incoming.get(field_name) is None and earlier.get(field_name) is not None:
             merged[field_name] = earlier[field_name]
+    # Which network a client is on belongs to the observation that says it is
+    # connected: an older source's guest flag (a tracker attribute from the
+    # last reload) must not describe the fresher source's connection.
+    if not isinstance(incoming.get("is_guest"), bool):
+        merged.pop("is_guest", None)
     return cast("NetworkClient", merged)
 
 
@@ -367,6 +375,7 @@ def merge_adapter_results(results: Iterable[AdapterResult]) -> NetworkSnapshot: 
         counters.update(result.counters)
         notes.extend(result.notes)
     if clients is not None:
+        _publish_guest_flag(clients.values(), sources, notes)
         counters[COUNTER_CLIENT_COUNT] = float(
             sum(1 for c in clients.values() if c.get("connected"))
         )
@@ -389,6 +398,37 @@ def merge_adapter_results(results: Iterable[AdapterResult]) -> NetworkSnapshot: 
             **{k: v for k, v in radio.items() if k != "devices"},
         }
     return section  # type: ignore[return-value]
+
+
+GUEST_FLAG_PARTIAL_NOTE = (
+    "Guest Wi-Fi: {count} connected client(s) come from a router integration "
+    "that does not say which network they are on, so they are not checked."
+)
+
+
+def _publish_guest_flag(
+    clients: Iterable[Mapping[str, Any]], sources: dict[str, str], notes: list[str]
+) -> None:
+    """
+    Publish the guest-flag capability for the merged client list.
+
+    Decided after the merge because the list mixes sources. A client flagged
+    as a guest is one whatever the others say, so one source reporting the
+    flag is enough for the rule to run; connected clients without the flag
+    (a second router integration's trackers) are counted in a note, since
+    for them "not reported" does not mean "not a guest".
+    """
+    merged = list(clients)
+    if not any(isinstance(c.get("is_guest"), bool) for c in merged):
+        return
+    sources[CAP_GUEST_CLIENTS] = sources[CAP_CLIENTS]
+    uncovered = sum(
+        1
+        for c in merged
+        if c.get("connected") and not isinstance(c.get("is_guest"), bool)
+    )
+    if uncovered:
+        notes.append(GUEST_FLAG_PARTIAL_NOTE.format(count=uncovered))
 
 
 # Names a router gives a client it cannot resolve; matching one of these
@@ -416,8 +456,9 @@ def attach_inventory(section: NetworkSnapshot, context: NetworkBuildContext) -> 
 
     Runs after the merge so every source's clients are diffed together:
     attaches each recorded client's ``first_seen`` (the rule applies the
-    grace period from it), marks a rotated random address whose name a
-    trusted row carries, and publishes ``new_clients`` with its capability.
+    grace period from it) and ``trusted`` verdict, marks a rotated random
+    address whose name a trusted row carries, and publishes ``new_clients``
+    with its capability.
     A section without the clients capability is left alone.
     """
     from custom_components.home_generative_agent.sentinel.network_inventory import (  # noqa: PLC0415
@@ -435,6 +476,8 @@ def attach_inventory(section: NetworkSnapshot, context: NetworkBuildContext) -> 
         row = inventory.row(client_key(client["key"]))
         if row is not None and isinstance(row.get("first_seen"), str):
             client["first_seen"] = row["first_seen"]
+        if row is not None:
+            client["trusted"] = bool(row.get("trusted"))
         if client.get("mac_randomized"):
             client["hostname_trusted"] = bool(_matchable_names(client) & trusted_names)
         observations.append(client_observation(client))
