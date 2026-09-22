@@ -385,6 +385,66 @@ def _current_subentry(flow: ConfigSubentryFlow) -> ConfigSubentry | None:
     return None
 
 
+def _carry_basic_setup_survivors(
+    data: dict[str, Any], current: ConfigSubentry | None
+) -> None:
+    """
+    Copy the settings Basic setup must not reset out of *current* into *data*.
+
+    Basic setup rebuilds the payload from ``_default_payload()`` and exposes four
+    fields, so every unexposed setting silently returns to its recommended
+    default. That is the point for tunables, and wrong for two classes of value:
+
+    * hand-curated maps no default can reconstruct -- the entity exclusions a
+      user picked to silence phantom alerts, and the camera-to-entry links. The
+      symptom of losing them is phantom alerts returning with nothing in the UI
+      to explain why.
+    * the critical-action PIN gate. The recommended default for
+      ``sentinel_require_pin_for_level_increase`` is ``False`` and the Basic
+      form's PIN box is always blank, so a plain re-run reset ``require_pin``
+      to ``False`` and dropped the stored hash and salt --
+      and ``SentinelEngine._check_level_increase_pin`` gates the whole check on
+      ``require_pin``, so ``sentinel_set_autonomy_level`` then succeeded with no
+      PIN at all. ``async_step_settings`` already preserves the hash on the
+      advanced path; this keeps the two paths honest with each other. A PIN typed
+      into the Basic form still overwrites what is carried here, because the
+      caller applies it after this runs.
+
+    Both maps are rebuilt rather than assigned: the values are mutable lists that
+    would otherwise stay aliased to the previous subentry's stored data.
+    """
+    if current is None:
+        return
+
+    stored = dict(current.data)
+
+    # _exclusions_map normalizes and copies: non-dict input, non-list values and
+    # non-str members are dropped rather than persisted. Hand-edited storage is
+    # explicitly supported here, so a malformed map must not raise inside the flow.
+    exclusions = _exclusions_map(stored)
+    if exclusions:
+        data[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] = exclusions
+
+    links = stored.get(CONF_SENTINEL_CAMERA_ENTRY_LINKS)
+    if isinstance(links, dict):
+        carried_links = {
+            key: list(value)
+            for key, value in links.items()
+            if isinstance(key, str) and isinstance(value, list)
+        }
+        if carried_links:
+            data[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = carried_links
+
+    if stored.get(CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE):
+        data[CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE] = True
+        for key in (
+            CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
+            CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT,
+        ):
+            if stored.get(key):
+                data[key] = stored[key]
+
+
 def _default_payload() -> dict[str, Any]:
     """Return default Sentinel configuration payload."""
     return {
@@ -900,8 +960,12 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             payload.update(dict(current.data))
 
         mobile_opts = list_mobile_notify_services(self.hass)
-        # Basic setup always starts from defaults — no pre-existing notify service.
-        notify_value = ""
+        # Show the configured notify service rather than a blank box: the submit
+        # path drops CONF_NOTIFY_SERVICE when the field comes back empty, so a
+        # blank pre-fill silently turned off mobile push for anyone who ran Basic
+        # setup without touching the dropdown. Blanking it deliberately still
+        # clears it.
+        notify_value = str(payload.get(CONF_NOTIFY_SERVICE, "") or "").strip()
 
         schema: dict[Any, Any] = {
             vol.Required(
@@ -979,22 +1043,7 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             )
 
         data = _default_payload()
-        # Basic setup resets everything else to recommended defaults, but these two
-        # are hand-curated maps that no default can reconstruct: the entity
-        # exclusions a user picked to silence phantom alerts, and the camera-to-entry
-        # links that bind a camera to its Sentinel entry. Wiping them brings the
-        # phantom alerts back with nothing in the UI to explain why, so carry them
-        # across (see the matching promise in ``sentinel_overwrite_warning``).
-        if current is not None:
-            carried_exclusions = current.data.get(CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS)
-            if isinstance(carried_exclusions, dict) and carried_exclusions:
-                data[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] = {
-                    str(rule): list(entities)
-                    for rule, entities in carried_exclusions.items()
-                }
-            carried_links = current.data.get(CONF_SENTINEL_CAMERA_ENTRY_LINKS)
-            if isinstance(carried_links, dict) and carried_links:
-                data[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = dict(carried_links)
+        _carry_basic_setup_survivors(data, current)
 
         errors: dict[str, str] = {}
 

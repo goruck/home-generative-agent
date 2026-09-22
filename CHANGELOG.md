@@ -46,7 +46,7 @@ their own. See [RELEASING.md](RELEASING.md).
 ### Fixed
 
 - Re-running Sentinel **Basic setup** no longer wipes your entity exclusions or camera-to-entry links. Basic setup restores recommended defaults for everything else, but those two are lists you picked by hand and no default can reconstruct them; losing the exclusions brought back exactly the phantom alerts they were added to silence, with nothing in the UI to say why. The overwrite warning now says the two are kept.
-- The integration no longer uses a Home Assistant helper class that Home Assistant deprecated and will remove in 2026.12. It logged a deprecation warning against this integration on every startup, and the `save_and_analyze_snapshot` service would have stopped resolving its camera target altogether on that release. Older Home Assistant versions are unaffected.
+- The integration will keep loading on Home Assistant 2026.12. It imported a helper class that Home Assistant deprecated and removes in that release, at the top of the module — so on 2026.12 the import itself would have failed and the whole integration would not have set up. Until then the only visible sign was a deprecation warning, logged each time the `save_and_analyze_snapshot` service ran and asking you to report it against this repository. Older Home Assistant versions are unaffected.
 
 ### Documentation
 

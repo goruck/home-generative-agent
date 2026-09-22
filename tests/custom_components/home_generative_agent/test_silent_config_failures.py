@@ -3,14 +3,19 @@
 Regression tests for three settings that failed with nothing in the logs.
 
 * ``TargetSelectorData`` is deprecated in Home Assistant core with removal in
-  2026.12.0. Every startup logged the deprecation against this integration, and
-  the ``save_and_analyze_snapshot`` service would stop resolving targets
-  outright once core drops the name.
+  2026.12.0. It was imported at module scope, so on 2026.12 the import itself
+  fails and the whole integration never sets up. HA's ``deprecated_class``
+  wraps the metaclass ``__call__``, so the warning fired on *instantiation* --
+  once per ``save_and_analyze_snapshot`` call, not at startup.
 * Re-running Sentinel **Basic setup** rebuilt the payload from
   ``_default_payload()``, wiping ``sentinel_rule_entity_exclusions`` and
   ``sentinel_camera_entry_links`` — two hand-curated maps no default can
   reconstruct. The symptom was phantom alerts returning with nothing in the UI
   to explain why.
+* Re-running Basic setup also reset ``sentinel_require_pin_for_level_increase``
+  to ``False`` and dropped the level-increase PIN hash and salt. The engine gates
+  the whole PIN check on that flag, so ``sentinel_set_autonomy_level`` then
+  succeeded with no PIN -- a security downgrade with nothing logged.
 * ``sentinel_triage_enabled`` had no config-flow field and was missing from
   ``_apply_sentinel_options``' defaults dict, so the whole triage service was
   unreachable from the UI and would have been ignored even if injected into
@@ -20,17 +25,22 @@ Regression tests for three settings that failed with nothing in the logs.
 from __future__ import annotations
 
 import inspect
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from homeassistant.helpers import target as ha_target
 
 import custom_components.home_generative_agent as hga_component
 from custom_components.home_generative_agent.const import (
+    CONF_CRITICAL_ACTION_PIN,
+    CONF_NOTIFY_SERVICE,
     CONF_SENTINEL_CAMERA_ENTRY_LINKS,
     CONF_SENTINEL_DAILY_DIGEST_ENABLED,
     CONF_SENTINEL_DAILY_DIGEST_TIME,
     CONF_SENTINEL_ENABLED,
+    CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
+    CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT,
+    CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
     CONF_SENTINEL_TRIAGE_ENABLED,
     CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
@@ -92,7 +102,7 @@ def test_target_selection_resolves_a_service_target() -> None:
 # ---------------------------------------------------------------------------
 
 _EXCLUSIONS = {"unlocked_lock_at_night": ["lock.template_mirror"]}
-_LINKS = {"camera.porch": "entry_abc"}
+_LINKS = {"camera.porch": ["entry_abc"]}
 
 
 def _sentinel_flow_with_existing(
@@ -213,6 +223,152 @@ async def test_basic_setup_on_a_fresh_install_writes_the_defaults(
     assert data is not None
     assert data[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] == {}
     assert data[CONF_SENTINEL_CAMERA_ENTRY_LINKS] == {}
+
+
+@pytest.mark.asyncio
+async def test_basic_setup_keeps_the_level_increase_pin_gate(
+    hass: HomeAssistant,
+) -> None:
+    """Basic setup must not silently disarm the critical-action PIN."""
+    flow, update_calls = _sentinel_flow_with_existing(
+        hass,
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: True,
+            CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH: "stored-hash",
+            CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT: "stored-salt",
+        },
+    )
+
+    await flow.async_step_setup_mode({"setup_mode": "basic"})
+    await flow.async_step_basic_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_DAILY_DIGEST_ENABLED: False,
+            CONF_SENTINEL_DAILY_DIGEST_TIME: "08:00:00",
+            # PIN box left blank, which is how the Basic form always renders it.
+        }
+    )
+
+    data = update_calls[0]["data"]
+    assert data[CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE] is True
+    assert data[CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH] == "stored-hash"
+    assert data[CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT] == "stored-salt"
+
+
+@pytest.mark.asyncio
+async def test_basic_setup_lets_a_typed_pin_replace_the_stored_one(
+    hass: HomeAssistant,
+) -> None:
+    """Carrying the old hash must not block setting a new PIN."""
+    flow, update_calls = _sentinel_flow_with_existing(
+        hass,
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: True,
+            CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH: "stored-hash",
+            CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT: "stored-salt",
+        },
+    )
+
+    await flow.async_step_setup_mode({"setup_mode": "basic"})
+    await flow.async_step_basic_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_DAILY_DIGEST_ENABLED: False,
+            CONF_SENTINEL_DAILY_DIGEST_TIME: "08:00:00",
+            CONF_CRITICAL_ACTION_PIN: "4321",
+        }
+    )
+
+    data = update_calls[0]["data"]
+    assert data[CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH] != "stored-hash"
+    assert data[CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT] != "stored-salt"
+
+
+@pytest.mark.asyncio
+async def test_basic_setup_form_prefills_the_notify_service(
+    hass: HomeAssistant,
+) -> None:
+    """
+    The Basic form shows the configured notify service rather than a blank box.
+
+    The submit path drops ``CONF_NOTIFY_SERVICE`` whenever the field comes back
+    empty, so a blank pre-fill meant that running Basic setup and touching only
+    the four visible fields silently turned off mobile push. The fix is at the
+    form, not the submit: blanking the box deliberately must still clear it, so
+    asserting on submitted data cannot tell the two apart. Assert the rendered
+    default instead.
+    """
+    flow, _ = _sentinel_flow_with_existing(
+        hass,
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_NOTIFY_SERVICE: "notify.mobile_app_phone",
+        },
+    )
+
+    await flow.async_step_setup_mode({"setup_mode": "basic"})
+    result = await flow.async_step_basic_settings(None)
+
+    schema = cast("vol.Schema", result.get("data_schema")).schema
+    notify_key = next(k for k in schema if str(k) == CONF_NOTIFY_SERVICE)
+    assert notify_key.default() == "notify.mobile_app_phone", (
+        "a blank pre-fill silently clears the notify service on submit"
+    )
+
+
+@pytest.mark.asyncio
+async def test_basic_setup_carried_camera_links_are_not_aliased(
+    hass: HomeAssistant,
+) -> None:
+    """The carried camera links are copied, lists included."""
+    links = {"camera.porch": ["entry_abc"]}
+    flow, update_calls = _sentinel_flow_with_existing(
+        hass,
+        {CONF_SENTINEL_ENABLED: True, CONF_SENTINEL_CAMERA_ENTRY_LINKS: links},
+    )
+
+    await flow.async_step_setup_mode({"setup_mode": "basic"})
+    await flow.async_step_basic_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_DAILY_DIGEST_ENABLED: False,
+            CONF_SENTINEL_DAILY_DIGEST_TIME: "08:00:00",
+        }
+    )
+
+    carried = update_calls[0]["data"][CONF_SENTINEL_CAMERA_ENTRY_LINKS]
+    carried["camera.porch"].append("entry_xyz")
+    assert links["camera.porch"] == ["entry_abc"]
+
+
+@pytest.mark.asyncio
+async def test_basic_setup_survives_hand_edited_exclusions(
+    hass: HomeAssistant,
+) -> None:
+    """A malformed stored exclusions map must not raise inside the flow."""
+    flow, update_calls = _sentinel_flow_with_existing(
+        hass,
+        {
+            CONF_SENTINEL_ENABLED: True,
+            # Hand-edited .storage is explicitly supported; a scalar where a
+            # list belongs used to be exploded per-character and persisted.
+            CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: {"*": "lock.foo", "x": None},
+        },
+    )
+
+    await flow.async_step_setup_mode({"setup_mode": "basic"})
+    await flow.async_step_basic_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_DAILY_DIGEST_ENABLED: False,
+            CONF_SENTINEL_DAILY_DIGEST_TIME: "08:00:00",
+        }
+    )
+
+    carried = update_calls[0]["data"][CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS]
+    assert carried == {}, "malformed values are dropped, never exploded"
 
 
 # ---------------------------------------------------------------------------

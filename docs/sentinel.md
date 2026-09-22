@@ -234,7 +234,7 @@ When `sentinel_triage_enabled` is `true`, each finding passes through an LLM tri
 - Triage cannot alter any finding field — it can only gate the notification.
 - Fails open: on timeout or error the decision becomes `notify` with `reason_code: triage_error`.
 
-**Configuration** — Settings → Devices & Services → Home Generative Agent → Sentinel → Configure → **Advanced**:
+**Configuration** (in the Sentinel subentry, Advanced setup — reconfiguring an existing Sentinel opens the full settings form directly):
 
 | Option | UI label | Default | Description |
 |---|---|---|---|
@@ -242,7 +242,8 @@ When `sentinel_triage_enabled` is `true`, each finding passes through an LLM tri
 | `sentinel_triage_timeout_seconds` | Triage timeout (seconds) | `10` | Max time to wait for triage LLM response |
 
 Triage is off by default and costs one extra LLM call per finding. It requires a
-configured chat model and autonomy level ≥ 1; Basic setup does not expose it.
+configured chat model and autonomy level ≥ 1 — at level 0, or while suppression
+state is read-only, the switch has no effect. Basic setup does not expose it.
 
 ---
 

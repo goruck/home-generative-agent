@@ -834,6 +834,76 @@ Since step 6 this also covers `radio_new_device_joined`, and since step 7 `netwo
 **Effort:** S
 **Priority:** P3
 
+### Triage-suppressed findings never register a cooldown
+
+**What:** `_dispatch_item` returns at `sentinel/engine.py:1703` on a `TRIAGE_SUPPRESS` decision, before the `register_finding(self._suppression.state, finding, now)` call at line 1743 that updates both the per-type and per-entity cooldown maps. A standing condition -- a phone battery that stays low, a door that stays open -- is therefore re-triaged on every poll *and* every event-driven evaluation for as long as it persists, each one a paid model call plus an audit write, none of which reduce future work. Triage is also sequential in the dispatch loop, so the wasted calls delay every later finding in the cycle.
+
+**Why:** Found by the Codex adversarial pass on the triage-exposure branch (2026-09-22) and confirmed by reading the two line numbers. Latent since #262 because triage was unreachable; it became live the moment the UI switch shipped. Left out of that branch deliberately: where the cooldown should be registered is a behavior decision (a suppressed finding arguably *should* start a cooldown, but "suppressed" and "delivered" have different natural cooldown lengths), and it changes suppression semantics enough to want its own field validation.
+
+**How to apply:** Either call `register_finding` before the suppress-branch return, or give triage its own retry cooldown keyed on the finding's anomaly id so a suppressed finding is not re-triaged until the existing cooldown would have let it through. Prefer the second if a suppressed finding should still alert promptly once its condition *changes*. Pin it with a test that dispatches the same unchanged finding twice and asserts one triage call.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** None
+
+---
+
+### Autonomy level is captured before the triage await and reused after it
+
+**What:** `_dispatch_item` computes `effective_autonomy` at `sentinel/engine.py:1672`, then awaits `self._triage_service.triage(...)`, then passes that captured value into `self._execution_service.evaluate_canary(finding, snapshot, effective_autonomy, now)`. `now` is stale across the same await. Lowering the autonomy level -- or a temporary elevated level expiring -- while the model call is in flight still authorizes execution at the old level. The configurable triage timeout makes the window up to 120 seconds wide.
+
+**Why:** Codex adversarial pass, 2026-09-22; mechanically confirmed. Codex rated it P1; downgraded here because auto-execution additionally requires autonomy >= 2 (`_MIN_AUTO_EXECUTE_LEVEL`) *and* a non-empty `sentinel_auto_execute_allowed_services`, which defaults to `[]` meaning no service may be invoked at all. Note the window is *created* by triage: without it there is no await between the capture and the use.
+
+**How to apply:** Re-read the autonomy level (and `now`) immediately before the execution-policy evaluation rather than reusing the pre-triage capture. Keep the captured value for the audit record, which should reflect the level the triage decision was made under.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
+### Sentinel model-call wrappers swallow shutdown cancellation
+
+**What:** `run_sentinel_llm_call_in_executor` and its async twin convert every `asyncio.CancelledError` into `SentinelLLMDeferredError` (`core/utils.py:483`), on the assumption that cancellation means "interrupted by foreground chat". Cancellation raised by `SentinelEngine.stop()` is caught by the same handler, so triage reads it as a deferral and fails open to `notify`; the cycle then continues through notification dispatch and, in principle, authorized actions after shutdown was requested. `stop()` waits for that cycle, and the loop can wait another polling interval (300 s by default) before re-checking its stop flag. Swallowing `CancelledError` rather than re-raising is also the documented asyncio anti-pattern.
+
+**Why:** Codex adversarial pass, 2026-09-22; confirmed at the cited line. Pre-existing and *not* newly exposed by the triage switch -- discovery and explain use the same wrappers and are already reachable -- so it was filed rather than fixed on that branch.
+
+**How to apply:** Distinguish the two cancellation sources: check the stop event (or a dedicated "shutting down" flag) in the handler and re-raise `CancelledError` when the engine is stopping, converting to `SentinelLLMDeferredError` only for the foreground-chat pre-emption the message claims.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** None
+
+---
+
+### A timed-out Sentinel model call leaves its worker thread running
+
+**What:** `run_sentinel_model_call` (`core/utils.py:501`) prefers the model's sync `invoke` and runs it through `asyncio.to_thread`. `asyncio.wait_for` cancels the awaiting task, but nothing can interrupt the thread already inside the provider client, and the `finally` discards it from `_sentinel_llm_tasks` -- so the call stops being tracked while it is still consuming an executor slot and provider capacity. Concrete for the OpenAI clients, whose transport timeout is 120 s against a triage timeout that now defaults to 10 s: up to twelve abandoned calls can stack per timed-out one.
+
+**Why:** Codex adversarial pass, 2026-09-22; confirmed at the cited lines. Pre-existing and shared with discovery and explain, so not fixed on the triage-exposure branch. Newly exposed triage makes it easier to reach, since its timeout is both short and user-settable.
+
+**How to apply:** Prefer `ainvoke` where the provider offers it so cancellation actually propagates, or give the sync path a transport deadline no longer than `call_timeout_s` and keep abandoned work tracked (and counted on the health sensor) until it really finishes.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** None
+
+---
+
+### A PIN typed into Sentinel Basic setup is never enforced
+
+**What:** `async_step_basic_settings` hashes a typed `CONF_CRITICAL_ACTION_PIN` into `sentinel_level_increase_pin_hash`/`_salt`, but the Basic form has no `sentinel_require_pin_for_level_increase` field and `_default_payload()` sets it to the recommended `False`. `SentinelEngine._check_level_increase_pin` gates the entire check on that flag, so the hash it just stored is never consulted: the PIN box accepts input, validates its length, stores a hash, and changes nothing.
+
+**Why:** Noticed while fixing the adjacent Basic-setup wipe of the same PIN keys (review round, 2026-09-22). Not fixed there because it is a behavior change rather than a review finding -- typing a PIN arguably *should* enable the gate, but that is a product call, and the Advanced path deliberately gives the user a separate checkbox.
+
+**How to apply:** Either set `sentinel_require_pin_for_level_increase = True` when Basic setup accepts a PIN, or drop the PIN field from the Basic form and say it is configured under Advanced. The first matches what a user typing a PIN plainly intends.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** None
+
+---
+
 ## Audit Store
 
 ### Audit notifier-drop findings as non-user-facing (delivery status from async_notify)
@@ -2188,6 +2258,20 @@ label pair ("Server URL" vs "Base URL").
 
 
 ## Completed
+
+### docs/sentinel.md documents `sentinel_triage_enabled` as a settable option
+
+**What:** `docs/sentinel.md` and `docs/constants.md` presented `sentinel_triage_enabled` as a normal config option when there was no UI or supported path to set it.
+
+**Why:** Users following the docs looked for a switch that did not exist ("there is no sentinel UI switch called LLM triage" is what surfaced it). Docs should not describe unreachable configuration.
+
+**Resolution:** Resolved by the expose decision above rather than by annotating the rows: the option now has a real UI field, so the docs became true. The Sentinel rows gained the UI labels and the setup path, plus the autonomy >= 1 requirement that both docs already stated and neither config description did. `docs/constants.md` already said *UI-configurable* and is now correct without edits. (This item was deleted outright in 929200a instead of being archived; restored here from the review round so the docs fix keeps a record.)
+
+**Effort:** S
+**Priority:** P3
+**Completed:** unreleased (2026-09-22)
+
+---
 
 ### Migrate deprecated TargetSelectorData to TargetSelection before HA 2026.12
 
