@@ -794,6 +794,17 @@ validation.
 **Effort:** M
 **Priority:** P3
 
+### Tool index background task outlives a config-entry reload and fails on the closed pool
+
+**What:** `conversation.py` schedules `_run_tool_index_background` with a bare `hass.async_create_task` (around line 1839). It is neither tracked on the entry nor cancelled on unload, so a reload (any options change, such as toggling a Sentinel setting) closes the PostgreSQL pool while the task is still writing, and the log shows `Global tool index background task failed` with `psycopg_pool.PoolClosed: the pool 'pool-N' is already closed`. Seen three times on the maintainer's box on 2026-09-21 (19:31–19:36 local) while Sentinel options were being changed; the next load re-indexed cleanly. The failure also sets `tool_index_failed` on the OLD runtime data and fires `SIGNAL_TOOL_INDEX_UPDATED("failed")`, which the new entry's sensor may briefly show.
+
+**Why:** Same class as the lifecycle leaks fixed in PR #560: a task started from a turn is not owned by the entry that started it. Harmless today (self-heals on the next load, the index only gains rows), but it logs an ERROR with a traceback on every reload that races an index write, which users will report.
+
+**How to apply:** Create it with `entry.async_create_background_task` (or track it in `HGAData` and cancel + await it in `async_unload_entry` before the pool closes), and treat `PoolClosed` / `CancelledError` during unload as expected, without setting `tool_index_failed`.
+
+**Effort:** S
+**Priority:** P2
+
 ### Radio checks the pinned Home Assistant version cannot observe
 
 **What:** Two radio checks from step 6 are weaker than the plan wanted. ZHA permit-join is not readable at all (zigpy 2.1.0's `ControllerApplication.permit()` keeps no record of the join window, and the frontend's `zha/devices/permit` websocket command fires no event), so `zigbee_permit_join_open` covers Zigbee2MQTT only. `zwave_inclusion_active` is poll-only because the Z-Wave JS integration exposes no inclusion entity, so a window shorter than the detection interval is usually missed.
