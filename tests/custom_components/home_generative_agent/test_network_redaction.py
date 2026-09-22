@@ -501,7 +501,10 @@ async def test_audit_tool_payload_carries_no_identifier() -> None:
     config = {
         "configurable": {
             "hga_runtime_data": SimpleNamespace(
-                sentinel=SimpleNamespace(async_audit_network=_audit)
+                # This test covers the full-detail path: the redaction gate.
+                sentinel=SimpleNamespace(
+                    async_audit_network=_audit, network_audit_share_details=True
+                )
             )
         }
     }

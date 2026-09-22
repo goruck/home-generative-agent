@@ -57,6 +57,11 @@ from ..const import (  # noqa: TID252
     CRITICAL_PIN_MIN_LEN,
     HISTORY_TOOL_CONTEXT_LIMIT,
     HISTORY_TOOL_PURGE_KEEP_DAYS,
+    NETWORK_AUDIT_REPORT_MAX_CHARS,
+    NETWORK_AUDIT_REPORT_NOTIFICATION_ID,
+    NETWORK_AUDIT_TOOL_DIGEST_NOTE,
+    NETWORK_AUDIT_TOOL_DIGEST_NOTE_NOT_ADMIN,
+    NETWORK_AUDIT_TOOL_DIGEST_NOTE_UNDELIVERED,
     NETWORK_AUDIT_TOOL_LABEL_NOTE,
     NETWORK_AUDIT_TOOL_MAX_ENTITIES,
     NETWORK_AUDIT_TOOL_MAX_NOTES,
@@ -73,8 +78,19 @@ from ..core.conversation_helpers import _resolve_entity_id  # noqa: TID252
 from ..core.fallback import ainvoke_dropping_unsupported_params  # noqa: TID252
 from ..core.utils import extract_final, verify_pin  # noqa: TID252
 from ..sentinel.network_audit import (  # noqa: TID252
+    NetworkAuditReport,
+)
+from ..sentinel.network_audit import (  # noqa: TID252
+    digest as network_audit_digest,
+)
+from ..sentinel.network_audit import (  # noqa: TID252
+    render_report_markdown as render_network_audit_markdown,
+)
+from ..sentinel.network_audit import (  # noqa: TID252
     summarize as summarize_network_audit,
 )
+from ..sentinel.notifier import escape_markdown  # noqa: TID252
+from ..sentinel.notifier_messages import notif_msg  # noqa: TID252
 from ..sentinel.redaction import redact_network_identifiers  # noqa: TID252
 from .automation_pin import find_critical_automation_calls
 from .camera_activity import get_camera_last_events_from_states
@@ -1575,6 +1591,38 @@ def _clip_list(items: list[Any], limit: int) -> list[Any]:
     return [*items[:limit], f"… and {len(items) - limit} more"]
 
 
+async def _post_network_audit_report(hass: Any, report: NetworkAuditReport) -> bool:
+    """
+    Post the full audit report as a persistent notification; True on success.
+
+    One fixed notification id, so a repeated audit replaces the previous
+    report instead of stacking. The text is for the owner, so it is neither
+    redacted nor clipped per finding, only Markdown-escaped and capped.
+    Persistent notifications are visible to every signed-in Home Assistant
+    user, exactly like the alerts Sentinel already posts there with the same
+    names; the caller posts only when an administrator asked.
+    """
+    if hass is None:
+        return False
+    try:
+        await hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {
+                "notification_id": NETWORK_AUDIT_REPORT_NOTIFICATION_ID,
+                "title": notif_msg(hass, "audit_report_title"),
+                "message": render_network_audit_markdown(
+                    report, hass, escape_markdown, NETWORK_AUDIT_REPORT_MAX_CHARS
+                ),
+            },
+            blocking=True,
+        )
+    except Exception:
+        LOGGER.warning("Could not post the security audit report.", exc_info=True)
+        return False
+    return True
+
+
 @tool(parse_docstring=True)
 async def audit_home_security(
     *,
@@ -1612,6 +1660,23 @@ async def audit_home_security(
     if report["status"] != "ok":
         # The engine owns the wording for both "disabled" and "unavailable".
         return "The security audit could not run: " + "; ".join(report["notes"])
+    # Fails closed: a sentinel object that cannot say details may be shared
+    # (a wrapper, a renamed property) gets the digest, never the details.
+    if getattr(sentinel, "network_audit_share_details", False) is not True:
+        # The owner keeps audit details out of the conversation: the model
+        # gets a deterministic digest, an administrator gets the report.
+        if configurable.get("requester_is_admin") is not True:
+            note = NETWORK_AUDIT_TOOL_DIGEST_NOTE_NOT_ADMIN
+        elif await _post_network_audit_report(configurable.get("hass"), report):
+            note = NETWORK_AUDIT_TOOL_DIGEST_NOTE
+        else:
+            note = NETWORK_AUDIT_TOOL_DIGEST_NOTE_UNDELIVERED
+        return yaml.dump(
+            network_audit_digest(report, note),
+            default_flow_style=False,
+            allow_unicode=True,
+            sort_keys=False,
+        )
     # Summaries and notes carry text from the LAN (gateway names, discovery
     # titles) and, once a router adapter lands, client addresses: strip
     # every MAC, IP, and hostname before the conversation model sees them.

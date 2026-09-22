@@ -276,6 +276,7 @@
             "sentinel_network_offline_device_min": "Práh nedostupnosti bezpečnostního zařízení (minuty)",
             "sentinel_network_unknown_device_grace_min": "Ochranná lhůta nového zařízení v síti (minuty)",
             "sentinel_network_guest_idle_days": "Práh nevyužité hostovské Wi-Fi (dny)",
+            "sentinel_network_audit_share_details": "Sdílet podrobnosti bezpečnostního auditu s chatovacím modelem",
             "sentinel_ha_token_stale_days": "Práh nepoužívaného dlouhodobého tokenu (dny)",
             "sentinel_auth_ip_retention_days": "Doba uchování adres v inventáři přihlášení (dny)",
             "explain_enabled": "Povolit LLM vysvětlení pro nálezy Sentinel",

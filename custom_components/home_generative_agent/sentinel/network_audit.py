@@ -18,6 +18,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
+from custom_components.home_generative_agent.const import (
+    NETWORK_AUDIT_TOOL_DIGEST_COVERAGE_NOTE,
+)
 from custom_components.home_generative_agent.snapshot.network import (
     CAP_CLIENTS,
     CAP_GUEST_CLIENTS,
@@ -27,9 +30,13 @@ from custom_components.home_generative_agent.snapshot.network import (
     radio_cap,
 )
 
+from .notifier_messages import notif_msg
+
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Callable, Iterable, Mapping
     from datetime import datetime
+
+    from homeassistant.core import HomeAssistant
 
     from .models import AnomalyFinding, Severity
 
@@ -333,6 +340,139 @@ def empty_report(status: AuditStatus, now: datetime, note: str) -> NetworkAuditR
         "privacy_notes": list(PRIVACY_NOTES),
         "inventory": None,
     }
+
+
+def finding_title(finding_type: str, hass: HomeAssistant | None = None) -> str:
+    """
+    Return the fixed title of a finding type ("UPnP enabled on router").
+
+    The notification label, which is written per rule and never carries a
+    name from the home. English when *hass* is None (what a model is given).
+    """
+    key = f"type_{finding_type}"
+    label = notif_msg(hass, key)
+    return finding_type.replace("_", " ") if label == key else label
+
+
+def digest(report: NetworkAuditReport, note: str) -> dict[str, Any]:
+    """
+    Return what a conversation model may see when details are withheld.
+
+    Deterministic by construction: counts, each finding's severity, rule id,
+    and fixed title, the rule ids that ran, the static reasons others could
+    not, the inventory counts, and the static privacy notes. Nothing here is
+    copied from the home: no summary, suggested action, entity id, or note
+    (notes carry gateway and discovery names; only their number is given).
+    """
+    payload: dict[str, Any] = {
+        "generated_at": report["generated_at"],
+        "summary": summarize(report),
+        "details": "withheld",
+        "findings": [
+            {
+                "severity": finding["severity"],
+                "type": finding["type"],
+                "title": finding_title(str(finding["type"])),
+            }
+            for finding in report["findings"]
+        ],
+        "checks_run": list(report["checks_run"]),
+        "checks_not_run": dict(report["checks_not_run"]),
+        "notes": [note],
+        "privacy_notes": list(report["privacy_notes"]),
+    }
+    if report["notes"]:
+        # A note is how a check says it ran on incomplete data (an add-on
+        # whose details the Supervisor has not fetched reads as "no exposed
+        # ports"). Without this the digest would say "No findings" flatly.
+        payload["coverage_notes_withheld"] = len(report["notes"])
+        payload["notes"].append(
+            NETWORK_AUDIT_TOOL_DIGEST_COVERAGE_NOTE.format(count=len(report["notes"]))
+        )
+    inventory = report.get("inventory")
+    if inventory is not None:
+        payload["device_inventory"] = {
+            "trusted": inventory["trusted"],
+            "untrusted": inventory["untrusted"],
+        }
+    return payload
+
+
+_SEVERITY_HEADINGS: tuple[str, ...] = ("high", "medium", "low")
+
+
+def render_report_markdown(
+    report: NetworkAuditReport,
+    hass: HomeAssistant | None,
+    escape: Callable[[str], str],
+    max_chars: int,
+) -> str:
+    """
+    Render the full report for a persistent notification (Markdown).
+
+    For the owner, not for a model: names and addresses stay as they are.
+    Every string from the home goes through *escape*, since parts of a
+    summary come from the LAN and the notification renders Markdown.
+    """
+    lines: list[str] = [escape(summarize(report)), ""]
+    groups: list[tuple[str, list[dict[str, Any]]]] = [
+        (
+            notif_msg(hass, f"severity_word_{severity}").capitalize(),
+            [f for f in report["findings"] if f.get("severity") == severity],
+        )
+        for severity in _SEVERITY_HEADINGS
+    ]
+    # A severity this renderer does not know must not drop the finding: in
+    # digest mode this notification is the only place its details appear.
+    groups.append(
+        (
+            notif_msg(hass, "audit_report_other"),
+            [
+                f
+                for f in report["findings"]
+                if f.get("severity") not in _SEVERITY_HEADINGS
+            ],
+        )
+    )
+    for heading, group in groups:
+        if not group:
+            continue
+        lines.append(f"**{heading}**")
+        for finding in group:
+            title = escape(finding_title(str(finding["type"]), hass))
+            lines.append(f"- **{title}.** {escape(_one_line(finding['summary']))}")
+            lines.extend(
+                f"  - {escape(_one_line(action))}"
+                for action in finding.get("suggested_actions") or []
+            )
+        lines.append("")
+    if report["checks_not_run"]:
+        lines.append(f"**{notif_msg(hass, 'audit_report_not_run')}**")
+        lines.extend(
+            f"- {escape(finding_title(rule_id, hass))}: {escape(reason)}"
+            for rule_id, reason in report["checks_not_run"].items()
+        )
+        lines.append("")
+    if report["notes"]:
+        lines.append(f"**{notif_msg(hass, 'audit_report_notes')}**")
+        lines.extend(f"- {escape(_one_line(note))}" for note in report["notes"])
+    tail = f"… {notif_msg(hass, 'audit_report_truncated')}"
+    kept: list[str] = []
+    used = 0
+    for index, line in enumerate(lines):
+        # Cut between lines, never inside one: a slice could split ``**`` or
+        # separate a backslash from the character it escapes.
+        if used + len(line) + 1 > max_chars - len(tail) - 2 and index:
+            kept.extend(["", tail])
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return "\n".join(kept).strip()[:max_chars]
+
+
+def _one_line(value: Any) -> str:
+    """Collapse whitespace so text from the LAN cannot open a new Markdown block."""
+    return " ".join(str(value).split())
 
 
 def summarize(report: NetworkAuditReport) -> str:
