@@ -21,9 +21,18 @@ HTTP_STATUS_UNAUTHORIZED = 401
 HTTP_STATUS_FORBIDDEN = 403
 HTTP_STATUS_BAD_REQUEST = 400
 HTTP_STATUS_WEBPAGE_NOT_FOUND = 404
+HTTP_STATUS_METHOD_NOT_ALLOWED = 405
+HTTP_STATUS_NOT_IMPLEMENTED = 501
 HTTP_STATUS_OK = 200
 HTTP_STATUS_REQUEST_TOO_LARGE = 413
 HTTP_STATUS_SERVICE_UNAVAILABLE = 503
+
+# Paths the audio platforms POST to, relative to a normalized ``.../v1`` base
+# URL. The STT and TTS provider flows probe these to prove a local server
+# serves the route they will actually use, since an audio-only server need not
+# implement the ``/v1/models`` catalog at all.
+OPENAI_AUDIO_SPEECH_PATH = "/audio/speech"
+OPENAI_AUDIO_TRANSCRIPTIONS_PATH = "/audio/transcriptions"
 
 # One remediation sentence for every surface that reports a missing database
 # (startup log, enroll_person service, upload endpoint); the repair-issue

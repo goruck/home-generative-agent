@@ -29,6 +29,7 @@ from .const import (
     CONF_STT_RESPONSE_FORMAT,
     CONF_STT_TEMPERATURE,
     CONF_STT_TRANSLATE,
+    OPENAI_AUDIO_TRANSCRIPTIONS_PATH,
     RECOMMENDED_LOCAL_STT_MODEL,
     RECOMMENDED_OPENAI_STT_MODEL,
     STT_REQUEST_FORMAT_JSON,
@@ -328,7 +329,7 @@ class HGASttEntity(SpeechToTextEntity):
                     "translations endpoint; using transcription."
                 )
             return await client.post(
-                "/audio/transcriptions",
+                OPENAI_AUDIO_TRANSCRIPTIONS_PATH,
                 body=json_body,
                 cast_to=object,
                 options=connection.request_options(),

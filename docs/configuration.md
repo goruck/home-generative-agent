@@ -264,7 +264,7 @@ HGA provides a built-in STT engine — no separate STT integration required. Two
 3. Choose **OpenAI** or **Local (OpenAI-compatible)** and give it a name.
 4. On the **Credentials** step:
    - **OpenAI:** either reuse an existing OpenAI Model Provider subentry or select **Use a separate key** and enter a dedicated API key.
-   - **Local:** enter the server URL (e.g. `http://192.168.1.100:8000` — a missing `/v1` suffix is added automatically). The API key is optional; leave it blank for servers without authentication. The endpoint is validated when you submit the form.
+   - **Local:** enter the server URL (e.g. `http://192.168.1.100:8000` — a missing `/v1` suffix is added automatically). The API key is optional; leave it blank for servers without authentication. The endpoint is validated when you submit the form: HGA asks the server for its model catalog (`/v1/models`), and a server that does not serve one is accepted as long as it serves `/v1/audio/transcriptions`.
 5. On **Model & advanced options**, pick a model and set optional fields:
    - model: recommended `gpt-4o-mini-transcribe` (OpenAI) or `deepdml/faster-whisper-large-v3-turbo-ct2` (Local; any custom model ID your server exposes can be typed in)
    - `language` (optional): e.g. `en` or `en-US`
@@ -353,7 +353,7 @@ HGA also provides a built-in TTS engine for Assist pipelines, so a reply can be 
 3. Choose **OpenAI** or **Local (OpenAI-compatible)** and give it a name. The name is what the Assist pipeline's Text-to-speech dropdown shows.
 4. On the **Credentials** step:
    - **OpenAI:** reuse an existing OpenAI Model Provider subentry or select **Use a separate key** and enter a dedicated API key.
-   - **Local:** enter the server URL (e.g. `http://192.168.1.100:8000` — a missing `/v1` suffix is added automatically). The API key is optional; leave it blank for servers without authentication. The endpoint is validated when you submit the form.
+   - **Local:** enter the server URL (e.g. `http://192.168.1.100:8000` — a missing `/v1` suffix is added automatically). The API key is optional; leave it blank for servers without authentication. The endpoint is validated when you submit the form: HGA asks the server for its model catalog (`/v1/models`), and a server that does not serve one — several TTS-only servers, such as [Chatterbox-TTS-Server](https://github.com/devnen/Chatterbox-TTS-Server), answer 404 there — is accepted as long as it serves `/v1/audio/speech`.
 5. On **Model, voice & advanced options**:
    - model: `gpt-4o-mini-tts` (recommended), `tts-1`, or `tts-1-hd` for OpenAI; `speaches-ai/Kokoro-82M-v1.0-ONNX` (recommended) or any model ID your server serves for Local
    - voice: OpenAI offers `alloy`, `ash`, `ballad`, `cedar`, `coral`, `echo`, `fable`, `marin`, `nova`, `onyx`, `sage`, `shimmer`, and `verse`; for Local, type a voice id the model provides (Kokoro: `af_heart`, `af_bella`, `am_adam`, `bf_emma`, `bm_george`, …; piper: the voice name from the model id, e.g. `hfc_female` for `speaches-ai/piper-en_US-hfc_female-medium`)

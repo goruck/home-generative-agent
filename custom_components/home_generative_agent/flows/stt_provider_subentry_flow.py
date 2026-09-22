@@ -36,6 +36,7 @@ from ..const import (  # noqa: TID252
     CONF_STT_RESPONSE_FORMAT,
     CONF_STT_TEMPERATURE,
     CONF_STT_TRANSLATE,
+    OPENAI_AUDIO_TRANSCRIPTIONS_PATH,
     RECOMMENDED_LOCAL_STT_MODEL,
     RECOMMENDED_OPENAI_STT_MODEL,
     STT_MODEL_OPENAI_SUPPORTED,
@@ -220,7 +221,10 @@ class SttProviderSubentryFlow(ConfigSubentryFlow):
         if user_input is not None:
             if provider_type == "local":
                 settings, error = await build_local_endpoint_settings(
-                    self.hass, user_input, provider_id_key=CONF_STT_OPENAI_PROVIDER_ID
+                    self.hass,
+                    user_input,
+                    provider_id_key=CONF_STT_OPENAI_PROVIDER_ID,
+                    capability_path=OPENAI_AUDIO_TRANSCRIPTIONS_PATH,
                 )
             elif provider_type == "openai":
                 settings, error = await build_openai_key_settings(

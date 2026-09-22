@@ -347,9 +347,17 @@ async def test_stt_provider_flow_local_keyless(
 ) -> None:
     """Local STT flow stores a normalized base URL and no key or linked provider."""
     flow = _make_stt_flow(hass, DummyEntry())
+    validated: list[tuple[str, str | None]] = []
 
-    async def _noop_validate(*_args: Any, **_kwargs: Any) -> None:
-        return None
+    async def _noop_validate(
+        _hass: Any,
+        base_url: str,
+        _api_key: str | None = None,
+        _timeout_s: float = 10.0,
+        *,
+        capability_path: str | None = None,
+    ) -> None:
+        validated.append((base_url, capability_path))
 
     monkeypatch.setattr(
         "custom_components.home_generative_agent.flows.openai_compatible_endpoint.validate_openai_compatible_url",
@@ -364,6 +372,8 @@ async def test_stt_provider_flow_local_keyless(
     # Entered without /v1 on purpose: normalization must add it.
     third = await flow.async_step_credentials({"base_url": "http://ollama-box:8000"})
     assert third.get("type") == "form"
+    # STT falls back to its own route, not the TTS one (issue #648).
+    assert validated == [("http://ollama-box:8000/v1", "/audio/transcriptions")]
 
     result = await flow.async_step_model(
         {"model_name": "deepdml/faster-whisper-large-v3-turbo-ct2"}
@@ -667,10 +677,17 @@ async def test_tts_provider_flow_local_keyless(
 ) -> None:
     """Local TTS flow stores a normalized base URL and no key or linked provider."""
     flow = _make_tts_flow(hass, DummyEntry())
-    validated: list[tuple[str, str | None]] = []
+    validated: list[tuple[str, str | None, str | None]] = []
 
-    async def _validate(_hass: Any, base_url: str, api_key: str | None = None) -> None:
-        validated.append((base_url, api_key))
+    async def _validate(
+        _hass: Any,
+        base_url: str,
+        api_key: str | None = None,
+        _timeout_s: float = 10.0,
+        *,
+        capability_path: str | None = None,
+    ) -> None:
+        validated.append((base_url, api_key, capability_path))
 
     monkeypatch.setattr(f"{_ENDPOINT_MODULE}.validate_openai_compatible_url", _validate)
 
@@ -678,7 +695,9 @@ async def test_tts_provider_flow_local_keyless(
     # Entered without /v1 on purpose: normalization must add it before validation.
     third = await flow.async_step_credentials({"base_url": "speaches-box:8000"})
     assert third.get("type") == "form"
-    assert validated == [("http://speaches-box:8000/v1", None)]
+    # The speech route is the fallback probe for TTS-only servers that serve no
+    # model catalog (issue #648).
+    assert validated == [("http://speaches-box:8000/v1", None, "/audio/speech")]
     assert _schema_marker(third, "model_name").default() == (
         "speaches-ai/Kokoro-82M-v1.0-ONNX"
     )

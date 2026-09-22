@@ -157,7 +157,11 @@ def test_extract_final_no_collapse_max_chars_leaves_no_dangling_whitespace() -> 
 # ---------------------------------------------------------------------------
 
 HTTP_OK = 200
+HTTP_BAD_REQUEST = 400
 HTTP_UNAUTHORIZED = 401
+HTTP_NOT_FOUND = 404
+HTTP_METHOD_NOT_ALLOWED = 405
+HTTP_UNPROCESSABLE = 422
 HTTP_SERVER_ERROR = 503
 
 
@@ -176,11 +180,19 @@ class _FakeClient:
         *,
         status_code: int = HTTP_OK,
         exc: Exception | None = None,
+        post_status_code: int | None = None,
+        post_exc: Exception | None = None,
     ) -> None:
         self.status_code = status_code
         self.exc = exc
+        self.post_status_code = post_status_code
+        self.post_exc = post_exc
         self.last_url: str | None = None
         self.last_headers: dict[str, str] = {}
+        self.post_url: str | None = None
+        self.post_headers: dict[str, str] = {}
+        self.post_json: Any = None
+        self.post_calls = 0
 
     async def get(
         self, url: str, headers: dict[str, str] | None = None, **_: Any
@@ -190,6 +202,21 @@ class _FakeClient:
         if self.exc is not None:
             raise self.exc
         return _FakeResponse(self.status_code)
+
+    async def post(
+        self,
+        url: str,
+        headers: dict[str, str] | None = None,
+        json: Any = None,
+        **_: Any,
+    ) -> _FakeResponse:
+        self.post_calls += 1
+        self.post_url = url
+        self.post_headers = dict(headers or {})
+        self.post_json = json
+        if self.post_exc is not None:
+            raise self.post_exc
+        return _FakeResponse(self.post_status_code or HTTP_OK)
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +377,209 @@ async def test_validate_openai_compatible_url_5xx_raises_cannot_connect(
 
     with pytest.raises(CannotConnectError):
         await validate_openai_compatible_url(hass, "http://localhost:8000")
+
+
+# ---------------------------------------------------------------------------
+# capability-probe fallback tests (issue #648: TTS-only servers have no
+# /v1/models catalog)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_capability_probe_accepts_catalog_404(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 404 catalog plus a served speech route validates (Chatterbox-TTS)."""
+    client = _FakeClient(
+        status_code=HTTP_NOT_FOUND, post_status_code=HTTP_UNPROCESSABLE
+    )
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    await validate_openai_compatible_url(
+        hass, "http://localhost:8004", capability_path="/audio/speech"
+    )
+
+    assert client.post_url == "http://localhost:8004/v1/audio/speech"
+    assert client.post_json == {}
+
+
+@pytest.mark.asyncio
+async def test_capability_probe_not_run_when_catalog_succeeds(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A server with a catalog is validated by it alone — no second request."""
+    client = _FakeClient(status_code=HTTP_OK)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    await validate_openai_compatible_url(
+        hass, "http://localhost:8004", capability_path="/audio/speech"
+    )
+
+    assert client.post_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_capability_probe_route_absent_raises_cannot_connect(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A URL serving neither the catalog nor the route is still rejected."""
+    client = _FakeClient(status_code=HTTP_NOT_FOUND, post_status_code=HTTP_NOT_FOUND)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    with pytest.raises(CannotConnectError):
+        await validate_openai_compatible_url(
+            hass, "http://localhost:8004", capability_path="/audio/speech"
+        )
+
+
+@pytest.mark.asyncio
+async def test_capability_probe_405_means_route_absent(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """405 on the POST probe means nothing serves that route here."""
+    client = _FakeClient(
+        status_code=HTTP_NOT_FOUND, post_status_code=HTTP_METHOD_NOT_ALLOWED
+    )
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    with pytest.raises(CannotConnectError):
+        await validate_openai_compatible_url(
+            hass, "http://localhost:8004", capability_path="/audio/speech"
+        )
+
+
+@pytest.mark.asyncio
+async def test_capability_probe_400_means_route_present(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The empty probe body is rejected by a working route — that is a pass."""
+    client = _FakeClient(
+        status_code=HTTP_SERVER_ERROR, post_status_code=HTTP_BAD_REQUEST
+    )
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    await validate_openai_compatible_url(
+        hass, "http://localhost:8004", capability_path="/audio/speech"
+    )
+
+
+@pytest.mark.asyncio
+async def test_capability_probe_401_raises_invalid_auth(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A key the route rejects is reported as bad auth, not as unreachable."""
+    client = _FakeClient(status_code=HTTP_NOT_FOUND, post_status_code=HTTP_UNAUTHORIZED)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    with pytest.raises(InvalidAuthError):
+        await validate_openai_compatible_url(
+            hass,
+            "http://localhost:8004",
+            "bad-key",
+            capability_path="/audio/speech",
+        )
+
+    assert client.post_headers.get("Authorization") == "Bearer bad-key"
+
+
+@pytest.mark.asyncio
+async def test_capability_probe_skipped_on_catalog_401(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A catalog that rejects the key is final — the probe cannot overturn it."""
+    client = _FakeClient(status_code=HTTP_UNAUTHORIZED, post_status_code=HTTP_OK)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    with pytest.raises(InvalidAuthError):
+        await validate_openai_compatible_url(
+            hass,
+            "http://localhost:8004",
+            "bad-key",
+            capability_path="/audio/speech",
+        )
+
+    assert client.post_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_capability_probe_skipped_when_host_unreachable(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreachable host cannot serve the route either — no second attempt."""
+    request = httpx.Request("GET", "http://localhost:8004/v1/models")
+    client = _FakeClient(
+        exc=httpx.ConnectError("refused", request=request), post_status_code=HTTP_OK
+    )
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    with pytest.raises(CannotConnectError):
+        await validate_openai_compatible_url(
+            hass, "http://localhost:8004", capability_path="/audio/speech"
+        )
+
+    assert client.post_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_capability_probe_network_error_raises_cannot_connect(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A probe that cannot complete is a connection failure."""
+    request = httpx.Request("POST", "http://localhost:8004/v1/audio/speech")
+    client = _FakeClient(
+        status_code=HTTP_NOT_FOUND,
+        post_exc=httpx.ConnectError("refused", request=request),
+    )
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    with pytest.raises(CannotConnectError):
+        await validate_openai_compatible_url(
+            hass, "http://localhost:8004", capability_path="/audio/speech"
+        )
+
+
+@pytest.mark.asyncio
+async def test_no_capability_path_keeps_catalog_failure_final(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Callers without a known route (chat providers) still require the catalog."""
+    client = _FakeClient(status_code=HTTP_NOT_FOUND, post_status_code=HTTP_OK)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    with pytest.raises(CannotConnectError):
+        await validate_openai_compatible_url(hass, "http://localhost:8004")
+
+    assert client.post_calls == 0
 
 
 # ---------------------------------------------------------------------------
