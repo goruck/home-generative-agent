@@ -186,12 +186,19 @@ async def build_local_endpoint_settings(
     user_input: dict[str, Any],
     *,
     provider_id_key: str,
+    capability_path: str | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     """
     Build the settings for a local OpenAI-compatible server.
 
     The URL is normalized before validation so what is stored is exactly what
     was proven reachable. A blank key is stored as ``None`` (keyless server).
+
+    ``capability_path`` is the route the caller's platform will actually POST
+    to (``/audio/speech`` for TTS, ``/audio/transcriptions`` for STT). It is
+    the fallback probe for servers that serve only that route and answer 404
+    on the ``/v1/models`` catalog, which is the whole API surface of some
+    single-purpose TTS servers.
     """
     base_url = user_input.get(CONF_OPENAI_COMPATIBLE_ENDPOINT_BASE_URL)
     if not isinstance(base_url, str) or not base_url.strip():
@@ -200,7 +207,9 @@ async def build_local_endpoint_settings(
     api_key = user_input.get(CONF_API_KEY) or None
 
     try:
-        await validate_openai_compatible_url(hass, base_url, api_key)
+        await validate_openai_compatible_url(
+            hass, base_url, api_key, capability_path=capability_path
+        )
     except InvalidAuthError:
         return {}, "invalid_auth"
     except CannotConnectError:

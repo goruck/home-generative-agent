@@ -30,6 +30,7 @@ from ..const import (  # noqa: TID252
     CONF_TTS_OPENAI_PROVIDER_ID,
     CONF_TTS_SPEED,
     CONF_TTS_VOICE,
+    OPENAI_AUDIO_SPEECH_PATH,
     RECOMMENDED_LOCAL_TTS_MODEL,
     RECOMMENDED_LOCAL_TTS_VOICE,
     RECOMMENDED_OPENAI_TTS_MODEL,
@@ -169,7 +170,10 @@ class TtsProviderSubentryFlow(ConfigSubentryFlow):
         if user_input is not None:
             if provider_type == "local":
                 settings, error = await build_local_endpoint_settings(
-                    self.hass, user_input, provider_id_key=CONF_TTS_OPENAI_PROVIDER_ID
+                    self.hass,
+                    user_input,
+                    provider_id_key=CONF_TTS_OPENAI_PROVIDER_ID,
+                    capability_path=OPENAI_AUDIO_SPEECH_PATH,
                 )
             elif provider_type == "openai":
                 settings, error = await build_openai_key_settings(

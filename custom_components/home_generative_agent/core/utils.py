@@ -30,7 +30,10 @@ from ..const import (  # noqa: TID252
     GEMINI_3_RECOMMENDED_TEMPERATURE,
     HTTP_STATUS_BAD_REQUEST,
     HTTP_STATUS_FORBIDDEN,
+    HTTP_STATUS_METHOD_NOT_ALLOWED,
+    HTTP_STATUS_NOT_IMPLEMENTED,
     HTTP_STATUS_UNAUTHORIZED,
+    HTTP_STATUS_WEBPAGE_NOT_FOUND,
     OLLAMA_BOOL_HINT_TAGS,
     OLLAMA_CATEGORY_URL_KEYS,
     OLLAMA_GPT_EFFORT,
@@ -745,16 +748,81 @@ async def validate_openai_key(
             raise CannotConnectError
 
 
+# Statuses that mean "nothing serves this path here" rather than "your request
+# was wrong". The capability probe sends a deliberately empty body, so every
+# other error status still proves the route exists and is what makes the probe
+# able to tell a wrong base URL from a server that merely rejected the probe.
+_ROUTE_ABSENT_STATUSES = frozenset(
+    {
+        HTTP_STATUS_WEBPAGE_NOT_FOUND,
+        HTTP_STATUS_METHOD_NOT_ALLOWED,
+        HTTP_STATUS_NOT_IMPLEMENTED,
+    }
+)
+
+
+async def _probe_openai_compatible_route(
+    hass: HomeAssistant,
+    url: str,
+    headers: dict[str, str],
+    timeout_s: float,
+) -> None:
+    """
+    Prove a specific OpenAI-compatible route is served, or raise.
+
+    The body is empty on purpose: the question is whether the route exists,
+    not whether it can do work, and an empty body cannot synthesize speech or
+    transcribe anything. A well-formed server answers 400/422 to it, which is
+    proof enough; only 404/405/501 mean the URL points somewhere that does not
+    serve this API.
+    """
+    client = get_async_client(hass)
+    try:
+        async with asyncio.timeout(timeout_s):
+            resp = await client.post(url, headers=headers, json={})
+    except (TimeoutError, httpx.RequestError) as err:
+        LOGGER.debug("OpenAI-compatible capability probe exception: %s", err)
+        raise CannotConnectError from err
+    if resp.status_code == HTTP_STATUS_UNAUTHORIZED:
+        LOGGER.debug("OpenAI-compatible capability probe unauthorized: %s", url)
+        raise InvalidAuthError
+    if resp.status_code in _ROUTE_ABSENT_STATUSES:
+        LOGGER.debug(
+            "OpenAI-compatible capability probe: %s is not served here (HTTP %s)",
+            url,
+            resp.status_code,
+        )
+        raise CannotConnectError
+    LOGGER.debug(
+        "OpenAI-compatible capability probe: %s is served (HTTP %s)",
+        url,
+        resp.status_code,
+    )
+
+
 async def validate_openai_compatible_url(
     hass: HomeAssistant,
     base_url: str,
     api_key: str | None = None,
     timeout_s: float = 10.0,
+    *,
+    capability_path: str | None = None,
 ) -> None:
-    """Validate an OpenAI-compatible endpoint by calling its /v1/models path."""
+    """
+    Validate an OpenAI-compatible endpoint, by catalog or by capability.
+
+    The model catalog (``/v1/models``) is the primary probe because every
+    general-purpose server implements it. Audio-only servers need not:
+    Chatterbox-TTS-Server answers 404 there while serving ``/v1/audio/speech``
+    correctly. Callers that know which route they will actually use therefore
+    pass ``capability_path``; when the catalog probe fails with anything other
+    than an authorization error, that route is probed instead and decides the
+    outcome. Without ``capability_path`` a failed catalog probe is final.
+    """
     if not base_url:
         raise CannotConnectError
-    url = normalize_openai_compatible_base_url(base_url) + "/models"
+    base = normalize_openai_compatible_base_url(base_url)
+    url = base + "/models"
     headers: dict[str, str] = {}
     if api_key and api_key != "none":
         headers["Authorization"] = f"Bearer {api_key}"
@@ -764,12 +832,23 @@ async def validate_openai_compatible_url(
             resp = await client.get(url, headers=headers)
     except (TimeoutError, httpx.RequestError) as err:
         LOGGER.debug("OpenAI-compatible connectivity exception: %s", err)
+        # The host itself is unreachable, so the capability route cannot be
+        # reachable either — no second probe.
         raise CannotConnectError from err
-    else:
-        if resp.status_code == HTTP_STATUS_UNAUTHORIZED:
-            raise InvalidAuthError
-        if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
-            raise CannotConnectError
+    if resp.status_code == HTTP_STATUS_UNAUTHORIZED:
+        raise InvalidAuthError
+    if resp.status_code < HTTP_STATUS_BAD_REQUEST:
+        return
+    LOGGER.debug(
+        "OpenAI-compatible model catalog probe failed (HTTP %s): %s",
+        resp.status_code,
+        url,
+    )
+    if capability_path is None:
+        raise CannotConnectError
+    await _probe_openai_compatible_route(
+        hass, base + capability_path, headers, timeout_s
+    )
 
 
 async def openai_compatible_healthy(
