@@ -1,7 +1,7 @@
 {
   "common": {
     "feature_overwrite_warning": "⚠️ Features are already configured. Choosing **Basic setup** will overwrite your current provider assignments with recommended defaults.",
-    "sentinel_overwrite_warning": "⚠️ Sentinel is already configured. Choosing **Basic setup** will overwrite your current settings with recommended defaults.",
+    "sentinel_overwrite_warning": "⚠️ Sentinel is already configured. Choosing **Basic setup** will overwrite your current settings with recommended defaults. Your entity exclusions and camera-to-entry links are kept.",
     "no_model_provider_notice": "No model provider is configured. A default model will be assigned once available.",
     "no_capable_model_provider_notice": "None of your model providers support this feature. Add another Model Provider of a supported type - a provider can be added for each service you use, and each feature can point at a different one.",
     "supported_provider_types_label": "Supported here:"
@@ -262,6 +262,8 @@
             "sentinel_discovery_enabled": "Enable discovery (requires anomaly alerting)",
             "sentinel_discovery_interval_seconds": "Discovery interval (seconds)",
             "sentinel_discovery_max_records": "Max discovery records to retain",
+            "sentinel_triage_enabled": "Enable LLM triage of findings",
+            "sentinel_triage_timeout_seconds": "Triage timeout (seconds)",
             "sentinel_response_language": "Finding explanation language (optional)",
             "sentinel_baseline_enabled": "Enable baseline collection (requires anomaly alerting)",
             "sentinel_baseline_update_interval_minutes": "Baseline update interval (minutes)",
@@ -295,7 +297,9 @@
           "data_description": {
             "sentinel_response_language": "Language for the LLM-authored finding explanation shown in notifications, e.g. 'Czech'. Leave empty for English. Discovery candidate title/summary and triage decision/reason_code/summary are unaffected -- those are parsed by code and always stay in English.",
             "sentinel_rule_entity_exclusions_all": "Pick entities Sentinel should ignore everywhere -- e.g. a touch panel's template lock that only mirrors another entity's state. Excluded entities are dropped from every rule's findings and no longer wake Sentinel, so a real anomaly involving them is only caught on the next poll (default 5 minutes). Don't exclude a camera, lock, or alarm panel you still want instant alerts from.",
-            "sentinel_rule_entity_exclusions": "For excluding an entity from one specific rule only (not all of them), and for glob patterns such as camera.map_*, which the picker above cannot hold. Expects a JSON object whose keys are anomaly types and whose values are lists of entity IDs; the \"*\" key means all rules. See the Sentinel docs for examples. Most people won't need this -- use the picker above instead."
+            "sentinel_rule_entity_exclusions": "For excluding an entity from one specific rule only (not all of them), and for glob patterns such as camera.map_*, which the picker above cannot hold. Expects a JSON object whose keys are anomaly types and whose values are lists of entity IDs; the \"*\" key means all rules. See the Sentinel docs for examples. Most people won't need this -- use the picker above instead.",
+            "sentinel_triage_enabled": "Run one extra LLM call per finding that may suppress low-value alerts. The model can only suppress or pass a finding -- it never changes, creates or acts on one, and any error or timeout passes the finding through. Off by default.",
+            "sentinel_triage_timeout_seconds": "How long to wait for the triage call before passing the finding through unchanged."
           }
         }
       }

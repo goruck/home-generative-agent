@@ -45,7 +45,6 @@ from homeassistant.helpers.dispatcher import (
 from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.helpers.network import get_url
 from homeassistant.helpers.target import (
-    TargetSelectorData,
     async_extract_referenced_entity_ids,
 )
 from homeassistant.util import dt as dt_util
@@ -322,6 +321,16 @@ if TYPE_CHECKING:
     from psycopg import AsyncConnection
 
     from .core.subentry_types import ModelProviderConfig
+
+# Newer cores renamed TargetSelectorData to TargetSelection and deprecated the
+# old name (removal in HA 2026.12.0). Keep importing the old name as a fallback
+# so cores that predate the rename still load.
+try:
+    from homeassistant.helpers.target import TargetSelection
+except ImportError:  # pragma: no cover - older cores only expose the old name.
+    from homeassistant.helpers.target import (  # type: ignore[assignment]
+        TargetSelectorData as TargetSelection,
+    )
 
 LOGGER = logging.getLogger(__name__)
 
@@ -1591,7 +1600,7 @@ def _register_services(hass: HomeAssistant, entry: HGAConfigEntry) -> None:
         # 1) Resolve Target selector (entity/device/area/label[/floor])
         # raw 'target:' from the service call (may be absent)
         raw_target: ConfigType = cast("ConfigType", call.data.get("target", {}))
-        selector = TargetSelectorData(raw_target)
+        selector = TargetSelection(raw_target)
         refs = async_extract_referenced_entity_ids(hass, selector, expand_group=True)
         entity_ids = sorted(refs.referenced | refs.indirectly_referenced)
 

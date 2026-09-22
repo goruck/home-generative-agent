@@ -594,19 +594,6 @@ validation.
 
 ---
 
-### Basic setup silently wipes Sentinel entity exclusions and camera entry links
-
-**What:** `async_step_basic_settings` does `data = _default_payload()` and its schema exposes only four fields, so re-running Basic setup resets `sentinel_rule_entity_exclusions` and `sentinel_camera_entry_links` to `{}`. The overwrite warning says settings will be overwritten with recommended defaults but does not name these two.
-
-**Why:** Pre-existing, but PR #544 changed the exposure: exclusions used to be an advanced-only JSON field, so the population that configured them and the population that runs Basic setup did not overlap. A friendly entity picker is exactly what a Basic-setup user will configure and then destroy, and the symptom — phantom alerts returning with no visible cause — is hard to attribute.
-
-**How to apply:** Carry `CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS` and `CONF_SENTINEL_CAMERA_ENTRY_LINKS` over from `current.data` in the basic path, or name them explicitly in the `sentinel_overwrite_warning` string.
-
-**Effort:** S
-**Priority:** P2
-
----
-
 ## Explain / Prompts
 
 ### Sanitize area/entity strings before injecting into LLM prompts
@@ -625,34 +612,6 @@ validation.
 
 ## Sentinel Triage
 
-### Triage is unreachable: no UI field, not in resolver allowlist — expose or remove
-
-**What:** `sentinel_triage_enabled` (and `sentinel_triage_timeout_seconds`) has no config-flow field, no strings.json label, and is absent from `_apply_sentinel_options`' defaults dict in `core/subentry_resolver.py` — so it cannot be set from the UI and would be ignored even if injected into Sentinel subentry data (same allowlist-omission class as #480, sitting latent). The only live path is a legacy top-level entry option surviving through `resolve_runtime_options`' `{**entry.data, **entry.options}` base (`subentry_resolver.py:184` → `__init__.py:2723`). Default is `False`, so the entire `SentinelTriageService` (#262) is dormant on virtually every install.
-
-**Why:** Surfaced during PR #523 review (2026-07-31): the PR wires a response-language option into a service no user can enable. Either the feature earns a UI switch (Sentinel subentry field + resolver allowlist entry + strings/en/cs labels + docs) or it should be removed rather than shipped dark. Decide product-first: triage adds an LLM call per finding for suppress-only value that quiet hours + cooldowns already partially cover.
-
-**How to apply:** If exposing: add `CONF_SENTINEL_TRIAGE_ENABLED`/`CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS` to `_apply_sentinel_options` defaults, the Sentinel subentry schema (`flows/sentinel_subentry_flow.py`), and translations; add resolver plumbing tests (the #480 regression shape). If removing: delete `SentinelTriageService` wiring from `__init__.py`, the engine triage branch, and the docs rows.
-
-**Effort:** M
-**Priority:** P2
-**Depends on:** None
-
----
-
-### docs/sentinel.md documents `sentinel_triage_enabled` as a settable option
-
-**What:** `docs/sentinel.md:173` and the option table at `docs/sentinel.md:185` (plus `docs/constants.md:337`) present `sentinel_triage_enabled` as a normal config option, but there is no UI or supported path to set it (see previous item).
-
-**Why:** Users following the docs will look for a switch that does not exist (field report shape: "there is no sentinel UI switch called LLM triage" — exactly what surfaced this). Docs should not describe unreachable configuration.
-
-**How to apply:** Until the expose-or-remove decision lands, annotate the rows as "not yet exposed in the UI (engine support only, #262)". Resolve fully when the previous item is done.
-
-**Effort:** S
-**Priority:** P3
-**Depends on:** Triage expose-or-remove decision (previous item)
-
----
-
 ### Drop or wire the dead `summary` field in the triage JSON contract
 
 **What:** The triage system prompt requires a `summary` field (`sentinel/triage.py:91`, 120-char cap) and the parser extracts it (`triage.py:337`, trimmed to 240) into `TriageDecision.summary`, but no consumer exists anywhere — the engine reads only `decision`/`reason_code`/`triage_confidence` (`sentinel/engine.py:962-964`); the only appearance is a `LOGGER.debug` line. Tokens are spent generating a sentence that is discarded every run.
@@ -663,7 +622,7 @@ validation.
 
 **Effort:** S
 **Priority:** P3
-**Depends on:** Triage expose-or-remove decision (first item — pointless if triage is removed)
+**Depends on:** nothing — the expose-or-remove decision landed on *expose* (2026-09-22), so triage is now reachable from the UI and this is live for anyone who turns it on. Persisting the summary needs an audit-schema migration; dropping it from the prompt contract does not.
 
 ---
 
@@ -2035,19 +1994,6 @@ label pair ("Server URL" vs "Base URL").
 
 ## Config Entry Lifecycle
 
-### Migrate deprecated TargetSelectorData to TargetSelection before HA 2026.12
-
-**What:** `__init__.py:1441` instantiates `homeassistant.helpers.target.TargetSelectorData`, which HA Core deprecated with removal scheduled for 2026.12.0 ("Use TargetSelection instead"). Every startup logs a deprecation warning attributed to this integration, and the integration breaks outright on HA 2026.12.
-
-**Why:** Surfaced in the debug logs of issue #568 (2026-08-24) — the reporter's log opens with the warning, which HA explicitly asks users to file against this repo. Not fixed in the #568 ship because that fix was scoped to the stale-LLM-API options-form bug; the rename needs its own look at the `TargetSelection` API shape and a check for other `homeassistant.helpers.target` call sites.
-
-**How to apply:** Replace the `TargetSelectorData(raw_target)` construction (and the import at `__init__.py:48`) with `TargetSelection`, verifying the attribute surface the surrounding code reads still matches. Must land before supporting HA 2026.12.
-
-**Effort:** S
-**Priority:** P2
-
----
-
 ### image.py and sensor.py still register unwrapped STARTED listeners
 
 **What:** `hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_started)` at `image.py:42` and `sensor.py:64` are not wrapped in `entry.async_on_unload`. Both call `async_add_entities(...)` for an entry that may already have unloaded — the same leak class the deferred-start work just closed for the four engines.
@@ -2242,6 +2188,58 @@ label pair ("Server URL" vs "Base URL").
 
 
 ## Completed
+
+### Migrate deprecated TargetSelectorData to TargetSelection before HA 2026.12
+
+**What:** `__init__.py:1441` instantiates `homeassistant.helpers.target.TargetSelectorData`, which HA Core deprecated with removal scheduled for 2026.12.0 ("Use TargetSelection instead"). Every startup logs a deprecation warning attributed to this integration, and the integration breaks outright on HA 2026.12.
+
+**Why:** Surfaced in the debug logs of issue #568 (2026-08-24) — the reporter's log opens with the warning, which HA explicitly asks users to file against this repo. Not fixed in the #568 ship because that fix was scoped to the stale-LLM-API options-form bug; the rename needs its own look at the `TargetSelection` API shape and a check for other `homeassistant.helpers.target` call sites.
+
+**How to apply:** Replace the `TargetSelectorData(raw_target)` construction (and the import at `__init__.py:48`) with `TargetSelection`, verifying the attribute surface the surrounding code reads still matches. Must land before supporting HA 2026.12.
+
+**Effort:** S
+**Priority:** P2
+
+**Resolution:** Swapped as prescribed. `homeassistant.helpers.target.TargetSelection` is a plain superclass of the deprecated `TargetSelectorData` with an identical `__init__` — the only thing the subclass adds is a `has_any_selector` alias nothing here called — so the call site at `__init__.py` changed name only. The import is a `try`/`except ImportError` shim that falls back to the old name, because `hacs.json` still advertises a 2025.5.0 minimum and the rename is a recent core change; the shim can go when the floor is raised past it. Pinned by `tests/.../test_silent_config_failures.py`, which asserts the bound class is *not* the deprecated one and that no call site constructs it.
+
+**Completed:** unreleased (2026-09-22)
+
+---
+
+### Basic setup silently wipes Sentinel entity exclusions and camera entry links
+
+**What:** `async_step_basic_settings` does `data = _default_payload()` and its schema exposes only four fields, so re-running Basic setup resets `sentinel_rule_entity_exclusions` and `sentinel_camera_entry_links` to `{}`. The overwrite warning says settings will be overwritten with recommended defaults but does not name these two.
+
+**Why:** Pre-existing, but PR #544 changed the exposure: exclusions used to be an advanced-only JSON field, so the population that configured them and the population that runs Basic setup did not overlap. A friendly entity picker is exactly what a Basic-setup user will configure and then destroy, and the symptom — phantom alerts returning with no visible cause — is hard to attribute.
+
+**How to apply:** Carry `CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS` and `CONF_SENTINEL_CAMERA_ENTRY_LINKS` over from `current.data` in the basic path, or name them explicitly in the `sentinel_overwrite_warning` string.
+
+**Effort:** S
+**Priority:** P2
+
+**Resolution:** Took the carry-over half rather than the warning-only half: `async_step_basic_settings` now copies `CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS` and `CONF_SENTINEL_CAMERA_ENTRY_LINKS` out of `current.data` into the fresh default payload, deep enough that the persisted lists are not aliased to the subentry's. Everything else still resets, which is what Basic setup is for. `sentinel_overwrite_warning` (en + cs, and the Python fallback string) now says the two are kept, so the copy matches the behavior either way.
+
+**Completed:** unreleased (2026-09-22)
+
+---
+
+### Triage is unreachable: no UI field, not in resolver allowlist — expose or remove
+
+**What:** `sentinel_triage_enabled` (and `sentinel_triage_timeout_seconds`) has no config-flow field, no strings.json label, and is absent from `_apply_sentinel_options`' defaults dict in `core/subentry_resolver.py` — so it cannot be set from the UI and would be ignored even if injected into Sentinel subentry data (same allowlist-omission class as #480, sitting latent). The only live path is a legacy top-level entry option surviving through `resolve_runtime_options`' `{**entry.data, **entry.options}` base (`subentry_resolver.py:184` → `__init__.py:2723`). Default is `False`, so the entire `SentinelTriageService` (#262) is dormant on virtually every install.
+
+**Why:** Surfaced during PR #523 review (2026-07-31): the PR wires a response-language option into a service no user can enable. Either the feature earns a UI switch (Sentinel subentry field + resolver allowlist entry + strings/en/cs labels + docs) or it should be removed rather than shipped dark. Decide product-first: triage adds an LLM call per finding for suppress-only value that quiet hours + cooldowns already partially cover.
+
+**How to apply:** If exposing: add `CONF_SENTINEL_TRIAGE_ENABLED`/`CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS` to `_apply_sentinel_options` defaults, the Sentinel subentry schema (`flows/sentinel_subentry_flow.py`), and translations; add resolver plumbing tests (the #480 regression shape). If removing: delete `SentinelTriageService` wiring from `__init__.py`, the engine triage branch, and the docs rows.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** None
+
+**Resolution:** Exposed, not removed (user decision, 2026-09-22): the service is complete, wired into the engine, the audit record, and the redaction gate, and CLAUDE.md and docs/sentinel.md both describe it as pipeline layer 3, so removing it was the larger change. `CONF_SENTINEL_TRIAGE_ENABLED` and `CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS` were added to `_apply_sentinel_options`' defaults, `_default_payload()`, and the Sentinel subentry's Advanced schema (BooleanSelector + 1-120 s NumberSelector), with en/cs labels and data descriptions; the default stays `False` so no install changes behavior. Basic setup deliberately does not expose it. The resolver leg is pinned by a test in the #480 regression shape. Docs now name the UI path instead of presenting a bare option key; `docs/constants.md` already said UI-configurable and is now correct.
+
+**Completed:** unreleased (2026-09-22)
+
+---
 
 ### Baseline-deviation notifications guess the display unit from the entity_id
 

@@ -69,6 +69,8 @@ from ..const import (  # noqa: TID252
     CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     CONF_SENTINEL_RESPONSE_LANGUAGE,
     CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
+    CONF_SENTINEL_TRIAGE_ENABLED,
+    CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
     CRITICAL_PIN_MAX_LEN,
     CRITICAL_PIN_MIN_LEN,
     RECOMMENDED_EXPLAIN_ENABLED,
@@ -103,6 +105,8 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     RECOMMENDED_SENTINEL_RESPONSE_LANGUAGE,
     RECOMMENDED_SENTINEL_RULE_ENTITY_EXCLUSIONS,
+    RECOMMENDED_SENTINEL_TRIAGE_ENABLED,
+    RECOMMENDED_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
     SENTINEL_SEVERITIES,
     SUBENTRY_TYPE_SENTINEL,
 )
@@ -398,6 +402,10 @@ def _default_payload() -> dict[str, Any]:
             RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS
         ),
         CONF_SENTINEL_DISCOVERY_MAX_RECORDS: RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS,
+        CONF_SENTINEL_TRIAGE_ENABLED: RECOMMENDED_SENTINEL_TRIAGE_ENABLED,
+        CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS: (
+            RECOMMENDED_SENTINEL_TRIAGE_TIMEOUT_SECONDS
+        ),
         CONF_SENTINEL_BASELINE_ENABLED: RECOMMENDED_SENTINEL_BASELINE_ENABLED,
         CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES: (
             RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES
@@ -535,6 +543,24 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     )
                 ),
             ): NumberSelector(NumberSelectorConfig(min=10, max=1000, step=10)),
+            vol.Required(
+                CONF_SENTINEL_TRIAGE_ENABLED,
+                default=bool(
+                    payload.get(
+                        CONF_SENTINEL_TRIAGE_ENABLED,
+                        RECOMMENDED_SENTINEL_TRIAGE_ENABLED,
+                    )
+                ),
+            ): BooleanSelector(),
+            vol.Required(
+                CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
+                default=int(
+                    payload.get(
+                        CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
+                        RECOMMENDED_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
+                    )
+                ),
+            ): NumberSelector(NumberSelectorConfig(min=1, max=120, step=1)),
             vol.Required(
                 CONF_SENTINEL_BASELINE_ENABLED,
                 default=bool(
@@ -840,7 +866,8 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     "sentinel_overwrite_warning",
                     "⚠️ Sentinel is already configured. "
                     "Choosing **Basic setup** will overwrite your current "
-                    "settings with recommended defaults.",
+                    "settings with recommended defaults. Your entity "
+                    "exclusions and camera-to-entry links are kept.",
                 )
             return self.async_show_form(
                 step_id="setup_mode",
@@ -952,6 +979,23 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             )
 
         data = _default_payload()
+        # Basic setup resets everything else to recommended defaults, but these two
+        # are hand-curated maps that no default can reconstruct: the entity
+        # exclusions a user picked to silence phantom alerts, and the camera-to-entry
+        # links that bind a camera to its Sentinel entry. Wiping them brings the
+        # phantom alerts back with nothing in the UI to explain why, so carry them
+        # across (see the matching promise in ``sentinel_overwrite_warning``).
+        if current is not None:
+            carried_exclusions = current.data.get(CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS)
+            if isinstance(carried_exclusions, dict) and carried_exclusions:
+                data[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] = {
+                    str(rule): list(entities)
+                    for rule, entities in carried_exclusions.items()
+                }
+            carried_links = current.data.get(CONF_SENTINEL_CAMERA_ENTRY_LINKS)
+            if isinstance(carried_links, dict) and carried_links:
+                data[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = dict(carried_links)
+
         errors: dict[str, str] = {}
 
         notify_service = str(user_input.get(CONF_NOTIFY_SERVICE, "") or "").strip()
