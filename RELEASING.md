@@ -80,6 +80,16 @@ Use one when:
 Ask the reporter to enable beta versions for Home Generative Agent in HACS, then install the
 pre-release. (Confirm the exact HACS menu wording the first time you walk someone through it.)
 
+Two mechanics differ from a stable cut:
+
+- **Number it for the bundle it precedes**, with a semver pre-release suffix: the beta before the
+  `3.43.0` bundle is `3.43.0-beta.1`, a second one `3.43.0-beta.2`. It sorts below the bundle, so
+  a tester upgrades into the stable release when it lands rather than appearing to downgrade. Do
+  not spend a stable patch number on a build that never ships to everyone.
+- **Leave `## [Unreleased]` alone.** A beta does not consume the bundle's notes — those entries
+  still have to appear under the real release. Draw the GitHub release body from `[Unreleased]`
+  instead, leading with the fix being validated, and rename the heading only at the stable cut.
+
 ## Versions
 
 Semantic-ish, with the bundle giving the numbers meaning again:
