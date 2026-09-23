@@ -31,6 +31,7 @@ from ..const import (  # noqa: TID252
     CONF_GEMINI_API_KEY,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
     MODEL_CATEGORY_SPECS,
+    OPENAI_CHAT_COMPLETIONS_PATH,
     PROVIDER_TYPE_LABELS,
     RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
     SUBENTRY_TYPE_MODEL_PROVIDER,
@@ -290,7 +291,10 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
                         )
                     try:
                         await validate_openai_compatible_url(
-                            self.hass, settings["base_url"], api_key
+                            self.hass,
+                            settings["base_url"],
+                            api_key,
+                            capability_path=OPENAI_CHAT_COMPLETIONS_PATH,
                         )
                     except CannotConnectError:
                         errors["base"] = "cannot_connect"
