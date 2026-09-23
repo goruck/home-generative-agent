@@ -33,6 +33,7 @@ HTTP_STATUS_SERVICE_UNAVAILABLE = 503
 # implement the ``/v1/models`` catalog at all.
 OPENAI_AUDIO_SPEECH_PATH = "/audio/speech"
 OPENAI_AUDIO_TRANSCRIPTIONS_PATH = "/audio/transcriptions"
+OPENAI_CHAT_COMPLETIONS_PATH = "/chat/completions"
 
 # One remediation sentence for every surface that reports a missing database
 # (startup log, enroll_person service, upload endpoint); the repair-issue

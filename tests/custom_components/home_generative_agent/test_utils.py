@@ -165,11 +165,27 @@ HTTP_UNPROCESSABLE = 422
 HTTP_SERVER_ERROR = 503
 
 
+# What a real OpenAI-compatible server answers at /v1/models.
+CATALOG_BODY: Any = {"object": "list", "data": [{"id": "some-model"}]}
+# What a single-page app's catch-all answers there (Open WebUI, issue #653).
+HTML_BODY = "<!doctype html><html><body>Open WebUI</body></html>"
+
+
 class _FakeResponse:
     """Minimal httpx.Response stand-in."""
 
-    def __init__(self, status_code: int) -> None:
+    def __init__(self, status_code: int, body: Any = None) -> None:
         self.status_code = status_code
+        self._body = CATALOG_BODY if body is None else body
+
+    def json(self) -> Any:
+        """Parse like httpx does — a non-JSON body raises ValueError."""
+        if isinstance(self._body, str):
+            # httpx raises json.JSONDecodeError, which subclasses ValueError —
+            # the type the code under test catches. TypeError would not be hit.
+            msg = "Expecting value"
+            raise ValueError(msg)  # noqa: TRY004
+        return self._body
 
 
 class _FakeClient:
@@ -182,9 +198,11 @@ class _FakeClient:
         exc: Exception | None = None,
         post_status_code: int | None = None,
         post_exc: Exception | None = None,
+        body: Any = None,
     ) -> None:
         self.status_code = status_code
         self.exc = exc
+        self.body = body
         self.post_status_code = post_status_code
         self.post_exc = post_exc
         self.last_url: str | None = None
@@ -201,7 +219,7 @@ class _FakeClient:
         self.last_headers = dict(headers or {})
         if self.exc is not None:
             raise self.exc
-        return _FakeResponse(self.status_code)
+        return _FakeResponse(self.status_code, self.body)
 
     async def post(
         self,
@@ -578,6 +596,98 @@ async def test_no_capability_path_keeps_catalog_failure_final(
 
     with pytest.raises(CannotConnectError):
         await validate_openai_compatible_url(hass, "http://localhost:8004")
+
+    assert client.post_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# catalog-shape tests (issue #653: a single-page app's HTML page answered
+# /v1/models with a 200 and passed setup)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_html_200_is_not_a_catalog_and_is_rejected(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 200 serving a web page is not proof of an OpenAI API."""
+    client = _FakeClient(status_code=HTTP_OK, body=HTML_BODY)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    with pytest.raises(CannotConnectError):
+        await validate_openai_compatible_url(hass, "http://localhost:30202")
+
+
+@pytest.mark.asyncio
+async def test_html_200_falls_through_to_the_capability_probe(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Open WebUI's shape end to end: HTML 200, then 405 on the real route."""
+    client = _FakeClient(
+        status_code=HTTP_OK,
+        body=HTML_BODY,
+        post_status_code=HTTP_METHOD_NOT_ALLOWED,
+    )
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    with pytest.raises(CannotConnectError):
+        await validate_openai_compatible_url(
+            hass, "http://localhost:30202", capability_path="/chat/completions"
+        )
+
+    # The rejection is now earned by probing the route chat would really use,
+    # instead of being a false pass the user only discovers at runtime.
+    assert client.post_url == "http://localhost:30202/v1/chat/completions"
+
+
+@pytest.mark.asyncio
+async def test_odd_catalog_shape_is_saved_by_the_capability_probe(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A genuine server with an unusual catalog body is not rejected for it."""
+    client = _FakeClient(
+        status_code=HTTP_OK,
+        body={"models": ["a", "b"]},
+        post_status_code=HTTP_BAD_REQUEST,
+    )
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    await validate_openai_compatible_url(
+        hass, "http://localhost:8000", capability_path="/chat/completions"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"object": "list", "data": [{"id": "m"}]},
+        {"data": []},
+        [{"id": "m"}],
+    ],
+)
+async def test_real_catalog_shapes_pass_without_a_probe(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch, body: Any
+) -> None:
+    """The shapes real servers return are accepted on the catalog alone."""
+    client = _FakeClient(status_code=HTTP_OK, body=body)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+
+    await validate_openai_compatible_url(
+        hass, "http://localhost:8000", capability_path="/chat/completions"
+    )
 
     assert client.post_calls == 0
 

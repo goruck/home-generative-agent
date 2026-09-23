@@ -38,6 +38,7 @@ from ..const import (  # noqa: TID252
     OLLAMA_CATEGORY_URL_KEYS,
     OLLAMA_GPT_EFFORT,
     OLLAMA_OSS_TAG,
+    OPENAI_CHAT_COMPLETIONS_PATH,
 )
 from .fallback import (
     ainvoke_dropping_unsupported_params,
@@ -761,6 +762,32 @@ _ROUTE_ABSENT_STATUSES = frozenset(
 )
 
 
+def _is_model_catalog(resp: httpx.Response) -> bool:
+    """
+    Whether a 200 response is actually an OpenAI model catalog.
+
+    A status code alone proves only that something is listening. A single-page
+    app whose catch-all route serves ``index.html`` answers ``/v1/models`` with
+    a 200 and no API behind it (Open WebUI does this), which used to read as a
+    working endpoint and then failed on every runtime call. Shape checking is
+    deliberately loose — a bare list, or a dict carrying ``data`` or the
+    ``object: list`` marker, all count — because the caller falls back to
+    probing the real route when this says no, so a server with an unusual but
+    genuine catalog is not rejected on this evidence alone.
+    """
+    try:
+        payload = resp.json()
+    except ValueError:
+        return False
+    if isinstance(payload, list):
+        return True
+    if not isinstance(payload, dict):
+        return False
+    if isinstance(payload.get("data"), list):
+        return True
+    return payload.get("object") == "list"
+
+
 async def _probe_openai_compatible_route(
     hass: HomeAssistant,
     url: str,
@@ -838,12 +865,20 @@ async def validate_openai_compatible_url(
     if resp.status_code == HTTP_STATUS_UNAUTHORIZED:
         raise InvalidAuthError
     if resp.status_code < HTTP_STATUS_BAD_REQUEST:
-        return
-    LOGGER.debug(
-        "OpenAI-compatible model catalog probe failed (HTTP %s): %s",
-        resp.status_code,
-        url,
-    )
+        if _is_model_catalog(resp):
+            return
+        LOGGER.debug(
+            "OpenAI-compatible model catalog probe answered HTTP %s at %s but the "
+            "body is not a model catalog; treating it as absent",
+            resp.status_code,
+            url,
+        )
+    else:
+        LOGGER.debug(
+            "OpenAI-compatible model catalog probe failed (HTTP %s): %s",
+            resp.status_code,
+            url,
+        )
     if capability_path is None:
         raise CannotConnectError
     await _probe_openai_compatible_route(
@@ -862,7 +897,13 @@ async def openai_compatible_healthy(
         LOGGER.warning("OpenAI-compatible health check skipped: missing base URL.")
         return False
     try:
-        await validate_openai_compatible_url(hass, base_url, api_key, timeout_s)
+        await validate_openai_compatible_url(
+            hass,
+            base_url,
+            api_key,
+            timeout_s,
+            capability_path=OPENAI_CHAT_COMPLETIONS_PATH,
+        )
     except (CannotConnectError, InvalidAuthError) as err:
         LOGGER.warning("OpenAI-compatible health check failed (%s): %s", base_url, err)
         return False
