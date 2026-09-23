@@ -514,6 +514,57 @@ async def test_empty_response_fails_open_to_notify() -> None:
     assert result.decision == TRIAGE_NOTIFY
 
 
+@pytest.mark.parametrize(
+    "payload",
+    ["[]", "null", '"notify"', "42", "true"],
+)
+@pytest.mark.asyncio
+async def test_valid_json_that_is_not_an_object_fails_open(payload: str) -> None:
+    """
+    JSON that decodes to a non-mapping must fail open, not raise.
+
+    ``json.loads`` accepts all of these, so the decode succeeds and the old code
+    then called ``.get()`` on a list/None/str and raised ``AttributeError``.
+    That is neither ``JSONDecodeError`` nor ``ValueError``, so it escaped the
+    parser's handler *and* ``triage()``'s fail-open block, propagated through
+    ``_dispatch_item`` -> ``_run_once`` -> ``_timed_run`` -> ``_run_loop``
+    (none of which catch), and killed the engine task. ``start()`` then refused
+    to replace the non-``None`` task, so Sentinel stayed dead until the config
+    entry was reloaded -- from one bad model response.
+    """
+    finding = _finding()
+    snapshot = _snapshot()
+
+    class NonObjectLLM:
+        async def ainvoke(self, messages: list[Any]) -> Any:
+            return type("Result", (), {"content": payload})()
+
+    svc = SentinelTriageService(NonObjectLLM())
+    result = await svc.triage(finding, snapshot)
+
+    assert result.decision == TRIAGE_NOTIFY
+
+
+@pytest.mark.asyncio
+async def test_parse_failure_cannot_escape_the_fail_open_boundary() -> None:
+    """Any parser exception must be contained, not propagated to the caller."""
+    finding = _finding()
+    snapshot = _snapshot()
+
+    class OkLLM:
+        async def ainvoke(self, messages: list[Any]) -> Any:
+            return type("Result", (), {"content": '{"decision": "notify"}'})()
+
+    svc = SentinelTriageService(OkLLM())
+    with patch(
+        "custom_components.home_generative_agent.sentinel.triage._parse_response",
+        side_effect=AttributeError("boom"),
+    ):
+        result = await svc.triage(finding, snapshot)
+
+    assert result.decision == TRIAGE_NOTIFY
+
+
 @pytest.mark.asyncio
 async def test_markdown_wrapped_json_is_parsed_correctly() -> None:
     """JSON wrapped in markdown code fences must be parsed without error."""

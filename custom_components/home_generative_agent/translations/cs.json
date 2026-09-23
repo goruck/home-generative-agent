@@ -1,7 +1,7 @@
 {
   "common": {
     "feature_overwrite_warning": "⚠️ Funkce jsou již nakonfigurovány. Výběr **základního nastavení** přepíše vaše stávající přiřazení poskytovatelů doporučenými výchozími hodnotami.",
-    "sentinel_overwrite_warning": "⚠️ Sentinel je již nakonfigurován. Výběr **základního nastavení** přepíše vaše stávající nastavení doporučenými výchozími hodnotami.",
+    "sentinel_overwrite_warning": "⚠️ Sentinel je již nakonfigurován. Výběr **základního nastavení** přepíše vaše stávající nastavení doporučenými výchozími hodnotami. Vaše výjimky entit a propojení kamer se záznamy zůstanou zachovány.",
     "no_model_provider_notice": "Není nakonfigurován žádný poskytovatel modelů. Jakmile bude k dispozici, přiřadí se výchozí model.",
     "no_capable_model_provider_notice": "Žádný z vašich poskytovatelů modelů tuto funkci nepodporuje. Přidejte dalšího poskytovatele modelů podporovaného typu - poskytovatele lze přidat pro každou službu, kterou používáte, a každá funkce může používat jiného.",
     "supported_provider_types_label": "Zde podporováno:"
@@ -262,6 +262,8 @@
             "sentinel_discovery_enabled": "Povolit zjišťování (vyžaduje upozornění na anomálie)",
             "sentinel_discovery_interval_seconds": "Interval zjišťování (sekundy)",
             "sentinel_discovery_max_records": "Max. počet uchovávaných záznamů zjišťování",
+            "sentinel_triage_enabled": "Povolit LLM triáž nálezů",
+            "sentinel_triage_timeout_seconds": "Časový limit triáže (sekundy)",
             "sentinel_response_language": "Jazyk vysvětlení nálezu (volitelné)",
             "sentinel_baseline_enabled": "Povolit sběr základní úrovně (vyžaduje upozornění na anomálie)",
             "sentinel_baseline_update_interval_minutes": "Interval aktualizace základní úrovně (minuty)",
@@ -293,9 +295,12 @@
             "notify_service": "Sentinel oznamovací služba (volitelné)"
           },
           "data_description": {
+            "explain_enabled": "Nechá model formulovat znění každého upozornění místo pevného shrnutí daného pravidla. Mění to pouze to, jak se upozornění čte -- nikdy to, zda ho dostanete; o tom rozhoduje LLM triáž výše. Stojí to jedno volání modelu na každé skutečně odeslané upozornění a probíhá až po triáži, takže potlačený nález se sem nikdy nedostane. Upozornění na zabezpečení Home Assistant a sítě a upozornění na vypnutí alarmu si vždy ponechají své přesné znění a nejsou tím ovlivněna. Chcete-li toto znění v jiném jazyce, nastavte níže jazyk vysvětlení nálezu. Ve výchozím stavu vypnuto.",
             "sentinel_response_language": "Jazyk, ve kterém LLM generuje vysvětlení nálezu zobrazované v oznámeních, např. „Czech“. Ponechte prázdné pro angličtinu. Název/shrnutí discovery kandidátů a rozhodnutí/reason_code/shrnutí triáže tím nejsou ovlivněny -- ta jsou strojově zpracovávána a vždy zůstávají v angličtině.",
             "sentinel_rule_entity_exclusions_all": "Vyberte entity, které má Sentinel všude ignorovat -- např. šablonový zámek na dotykovém panelu, který jen zrcadlí stav jiné entity. Vyloučené entity se vyřadí z nálezů všech pravidel a už Sentinel neprobouzejí, takže skutečná anomálie, která se jich týká, se zachytí až při dalším cyklu (výchozí 5 minut). Nevylučujte kameru, zámek ani alarm, u kterých chcete okamžitá upozornění.",
-            "sentinel_rule_entity_exclusions": "Pro vyloučení entity jen z jednoho konkrétního pravidla (ne ze všech) a pro vzory se zástupnými znaky, např. camera.map_*, které výběr entit výše neumí uložit. Očekává objekt JSON, jehož klíče jsou typy anomálií a hodnoty seznamy ID entit; klíč \"*\" znamená všechna pravidla. Příklady najdete v dokumentaci Sentinelu. Většina lidí tohle nepotřebuje -- použijte výběr entit výše."
+            "sentinel_rule_entity_exclusions": "Pro vyloučení entity jen z jednoho konkrétního pravidla (ne ze všech) a pro vzory se zástupnými znaky, např. camera.map_*, které výběr entit výše neumí uložit. Očekává objekt JSON, jehož klíče jsou typy anomálií a hodnoty seznamy ID entit; klíč \"*\" znamená všechna pravidla. Příklady najdete v dokumentaci Sentinelu. Většina lidí tohle nepotřebuje -- použijte výběr entit výše.",
+            "sentinel_triage_enabled": "Provede jedno volání LLM navíc pro každý nález, které může potlačit málo hodnotná upozornění. Vyžaduje nakonfigurovaný chat model a úroveň autonomie Sentinelu 1 nebo vyšší -- při úrovni 0 nemá přepínač žádný účinek. Model může nález pouze potlačit nebo propustit -- nikdy jej nemění, nevytváří ani podle něj nejedná a při jakékoli chybě nebo vypršení limitu nález projde. Ve výchozím stavu vypnuto.",
+            "sentinel_triage_timeout_seconds": "Jak dlouho čekat na volání triáže, než nález projde beze změny."
           }
         }
       }

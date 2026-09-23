@@ -69,6 +69,8 @@ from ..const import (  # noqa: TID252
     CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     CONF_SENTINEL_RESPONSE_LANGUAGE,
     CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
+    CONF_SENTINEL_TRIAGE_ENABLED,
+    CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
     CRITICAL_PIN_MAX_LEN,
     CRITICAL_PIN_MIN_LEN,
     RECOMMENDED_EXPLAIN_ENABLED,
@@ -103,6 +105,8 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     RECOMMENDED_SENTINEL_RESPONSE_LANGUAGE,
     RECOMMENDED_SENTINEL_RULE_ENTITY_EXCLUSIONS,
+    RECOMMENDED_SENTINEL_TRIAGE_ENABLED,
+    RECOMMENDED_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
     SENTINEL_SEVERITIES,
     SUBENTRY_TYPE_SENTINEL,
 )
@@ -381,6 +385,66 @@ def _current_subentry(flow: ConfigSubentryFlow) -> ConfigSubentry | None:
     return None
 
 
+def _carry_basic_setup_survivors(
+    data: dict[str, Any], current: ConfigSubentry | None
+) -> None:
+    """
+    Copy the settings Basic setup must not reset out of *current* into *data*.
+
+    Basic setup rebuilds the payload from ``_default_payload()`` and exposes four
+    fields, so every unexposed setting silently returns to its recommended
+    default. That is the point for tunables, and wrong for two classes of value:
+
+    * hand-curated maps no default can reconstruct -- the entity exclusions a
+      user picked to silence phantom alerts, and the camera-to-entry links. The
+      symptom of losing them is phantom alerts returning with nothing in the UI
+      to explain why.
+    * the critical-action PIN gate. The recommended default for
+      ``sentinel_require_pin_for_level_increase`` is ``False`` and the Basic
+      form's PIN box is always blank, so a plain re-run reset ``require_pin``
+      to ``False`` and dropped the stored hash and salt --
+      and ``SentinelEngine._check_level_increase_pin`` gates the whole check on
+      ``require_pin``, so ``sentinel_set_autonomy_level`` then succeeded with no
+      PIN at all. ``async_step_settings`` already preserves the hash on the
+      advanced path; this keeps the two paths honest with each other. A PIN typed
+      into the Basic form still overwrites what is carried here, because the
+      caller applies it after this runs.
+
+    Both maps are rebuilt rather than assigned: the values are mutable lists that
+    would otherwise stay aliased to the previous subentry's stored data.
+    """
+    if current is None:
+        return
+
+    stored = dict(current.data)
+
+    # _exclusions_map normalizes and copies: non-dict input, non-list values and
+    # non-str members are dropped rather than persisted. Hand-edited storage is
+    # explicitly supported here, so a malformed map must not raise inside the flow.
+    exclusions = _exclusions_map(stored)
+    if exclusions:
+        data[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] = exclusions
+
+    links = stored.get(CONF_SENTINEL_CAMERA_ENTRY_LINKS)
+    if isinstance(links, dict):
+        carried_links = {
+            key: list(value)
+            for key, value in links.items()
+            if isinstance(key, str) and isinstance(value, list)
+        }
+        if carried_links:
+            data[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = carried_links
+
+    if stored.get(CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE):
+        data[CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE] = True
+        for key in (
+            CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
+            CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT,
+        ):
+            if stored.get(key):
+                data[key] = stored[key]
+
+
 def _default_payload() -> dict[str, Any]:
     """Return default Sentinel configuration payload."""
     return {
@@ -398,6 +462,10 @@ def _default_payload() -> dict[str, Any]:
             RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS
         ),
         CONF_SENTINEL_DISCOVERY_MAX_RECORDS: RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS,
+        CONF_SENTINEL_TRIAGE_ENABLED: RECOMMENDED_SENTINEL_TRIAGE_ENABLED,
+        CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS: (
+            RECOMMENDED_SENTINEL_TRIAGE_TIMEOUT_SECONDS
+        ),
         CONF_SENTINEL_BASELINE_ENABLED: RECOMMENDED_SENTINEL_BASELINE_ENABLED,
         CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES: (
             RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES
@@ -535,6 +603,24 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     )
                 ),
             ): NumberSelector(NumberSelectorConfig(min=10, max=1000, step=10)),
+            vol.Required(
+                CONF_SENTINEL_TRIAGE_ENABLED,
+                default=bool(
+                    payload.get(
+                        CONF_SENTINEL_TRIAGE_ENABLED,
+                        RECOMMENDED_SENTINEL_TRIAGE_ENABLED,
+                    )
+                ),
+            ): BooleanSelector(),
+            vol.Required(
+                CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
+                default=int(
+                    payload.get(
+                        CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
+                        RECOMMENDED_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
+                    )
+                ),
+            ): NumberSelector(NumberSelectorConfig(min=1, max=120, step=1)),
             vol.Required(
                 CONF_SENTINEL_BASELINE_ENABLED,
                 default=bool(
@@ -840,7 +926,8 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     "sentinel_overwrite_warning",
                     "⚠️ Sentinel is already configured. "
                     "Choosing **Basic setup** will overwrite your current "
-                    "settings with recommended defaults.",
+                    "settings with recommended defaults. Your entity "
+                    "exclusions and camera-to-entry links are kept.",
                 )
             return self.async_show_form(
                 step_id="setup_mode",
@@ -873,8 +960,12 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             payload.update(dict(current.data))
 
         mobile_opts = list_mobile_notify_services(self.hass)
-        # Basic setup always starts from defaults — no pre-existing notify service.
-        notify_value = ""
+        # Show the configured notify service rather than a blank box: the submit
+        # path drops CONF_NOTIFY_SERVICE when the field comes back empty, so a
+        # blank pre-fill silently turned off mobile push for anyone who ran Basic
+        # setup without touching the dropdown. Blanking it deliberately still
+        # clears it.
+        notify_value = str(payload.get(CONF_NOTIFY_SERVICE, "") or "").strip()
 
         schema: dict[Any, Any] = {
             vol.Required(
@@ -952,6 +1043,8 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             )
 
         data = _default_payload()
+        _carry_basic_setup_survivors(data, current)
+
         errors: dict[str, str] = {}
 
         notify_service = str(user_input.get(CONF_NOTIFY_SERVICE, "") or "").strip()

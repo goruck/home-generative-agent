@@ -190,6 +190,18 @@ class SentinelTriageService:
                 call_timeout_s=float(self._timeout_seconds),
                 health_stats=self._health_stats,
             )
+            elapsed_ms = int((time.monotonic() - start) * 1000)
+            self._log_limiter.recovered(
+                "llm_call",
+                "Triage LLM call recovered after %d failed attempt(s).",
+            )
+            # Parsing runs inside the try on purpose. It used to sit after the
+            # handlers, so anything it raised bypassed the fail-open contract
+            # and propagated through _dispatch_item, _run_once and _timed_run
+            # into _run_loop -- none of which catch -- ending the engine task.
+            # SentinelEngine.start() then refuses to replace a non-None task,
+            # so Sentinel stayed dead until the config entry was reloaded.
+            return _parse_response(result, elapsed_ms)
         except SentinelLLMDeferredError as err:
             LOGGER.debug("Triage deferred: %s", err)
             return TriageDecision(
@@ -227,13 +239,6 @@ class SentinelTriageService:
                 triage_confidence=None,
                 summary=f"Triage error: {err!s}",
             )
-
-        elapsed_ms = int((time.monotonic() - start) * 1000)
-        self._log_limiter.recovered(
-            "llm_call",
-            "Triage LLM call recovered after %d failed attempt(s).",
-        )
-        return _parse_response(result, elapsed_ms)
 
 
 # ---------------------------------------------------------------------------
@@ -320,12 +325,31 @@ def _parse_response(result: Any, elapsed_ms: int) -> TriageDecision:  # noqa: AR
         content = content.split("```")[1].lstrip("json").strip()
 
     try:
-        parsed: dict[str, Any] = json.loads(content)
+        parsed = json.loads(content)
     except (json.JSONDecodeError, ValueError):
         _PARSE_LOG_LIMITER.warning(
             "non_json",
             "Triage LLM returned non-JSON response (%d chars); failing open.",
             len(content),
+        )
+        return TriageDecision(
+            decision=TRIAGE_NOTIFY,
+            reason_code=TRIAGE_REASON_ERROR,
+            triage_confidence=None,
+            summary="Could not parse triage response.",
+        )
+
+    # `[]`, `null` and a bare `"notify"` are all valid JSON that json.loads
+    # accepts, so the decode above does not guarantee a mapping. Calling .get()
+    # on the result raised AttributeError, which is neither JSONDecodeError nor
+    # ValueError and so escaped both this handler and triage()'s fail-open
+    # block -- killing the Sentinel run loop for the rest of the process (see
+    # the module docstring's fail-open contract).
+    if not isinstance(parsed, dict):
+        _PARSE_LOG_LIMITER.warning(
+            "non_json",
+            "Triage LLM returned JSON %s rather than an object; failing open.",
+            type(parsed).__name__,
         )
         return TriageDecision(
             decision=TRIAGE_NOTIFY,
