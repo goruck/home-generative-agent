@@ -50,6 +50,7 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ### Documentation
 
+- The **Enable LLM explanations for sentinel findings** switch now has help text, which it never had. It sits in the same form as the new LLM triage switch and the two names read alike, so the text says which is which: triage decides *whether* an alert reaches you, explanations decide *how it is worded*. It also notes that explanations run only for alerts that are actually sent, and that the Home Assistant & network security and alarm-disarm alerts always keep their exact wording.
 - Documented how to give the agent internet search: the **Control Home Assistant** picker lists every LLM API Home Assistant knows about, not only Assist and MCP servers, so a search tool from [Tools for Assist](https://github.com/skye-harris/llm_intents) (Brave or self-hosted SearXNG) or a search MCP server can be selected there and pinned with Always-included tools. See [Internet search](docs/configuration.md#internet-search). ([#642](https://github.com/goruck/home-generative-agent/issues/642))
 
 ## [3.42.0] - 2026-09-14
