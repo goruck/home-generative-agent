@@ -403,7 +403,7 @@ def _carry_basic_setup_survivors(
       ``sentinel_require_pin_for_level_increase`` is ``False`` and the Basic
       form's PIN box is always blank, so a plain re-run reset ``require_pin``
       to ``False`` and dropped the stored hash and salt --
-      and ``SentinelEngine._check_level_increase_pin`` gates the whole check on
+      and ``SentinelEngine.set_autonomy_level`` gates the whole check on
       ``require_pin``, so ``sentinel_set_autonomy_level`` then succeeded with no
       PIN at all. ``async_step_settings`` already preserves the hash on the
       advanced path; this keeps the two paths honest with each other. A PIN typed
