@@ -3313,20 +3313,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         )
         face_recognition = False
 
-    # Five Sentinel rules key on a positive "Unknown Person" label that only
-    # the face pipeline writes, so without it they are permanently inert with
-    # nothing logged. Checked here rather than in the engine because the
-    # *effective* value is only known after the gallery downgrade above: an
-    # entry with face recognition on and no database is inert too.
-    async_check_unknown_person_rules(
-        hass,
-        entry.entry_id,
-        sentinel_enabled=bool(
-            options.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED)
-        ),
-        face_recognition_operative=bool(face_recognition),
-    )
-
     # Save runtime data.
     entry.runtime_data = HGAData(
         options=options,
@@ -4069,6 +4055,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         database_missing=db_uri is None and bool(providers),
     )
 
+    # Same placement, same reason: four Sentinel rule ids (five evaluators) key
+    # on a positive "Unknown Person" label that only the face pipeline writes,
+    # so without it they are permanently inert with nothing logged. Raised here
+    # rather than where `face_recognition` is computed so it can only ever be
+    # true of a loaded entry. The value passed is the *effective* one -- the
+    # gallery downgrade above already turned it off when there is no database,
+    # which leaves the rules just as inert -- and the video-analyzer mode is
+    # part of it because `recognize_faces` only ever runs from there.
+    async_check_unknown_person_rules(
+        hass,
+        entry.entry_id,
+        sentinel_enabled=bool(
+            options.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED)
+        ),
+        face_recognition_operative=bool(face_recognition),
+        # Mirrors the gate that actually starts the analyzer above, literal
+        # and defaultless included: the guard must agree with what runs, not
+        # with RECOMMENDED_VIDEO_ANALYZER_MODE, or it would claim the rules
+        # are inert on an install whose analyzer is running (unset reads as
+        # enabled there).
+        video_analysis_enabled=options.get(CONF_VIDEO_ANALYZER_MODE) != "disable",
+    )
+
     return True
 
 
@@ -4128,6 +4137,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
     # (a disable would otherwise leave it standing); the next successful
     # setup re-raises it if the database is still missing.
     async_clear_database_issue(hass, entry.entry_id)
+    # An unloaded entry runs no rules at all, so singling four out is wrong the
+    # same way; the next successful setup re-raises it if it still applies.
+    async_clear_unknown_person_issue(hass, entry.entry_id)
     return True
 
 

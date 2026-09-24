@@ -50,7 +50,11 @@ async def test_issue_raised_when_sentinel_on_and_face_recognition_off(
 ) -> None:
     """The silent-inert state is exactly Sentinel on + face recognition off."""
     async_check_unknown_person_rules(
-        hass, _ENTRY, sentinel_enabled=True, face_recognition_operative=False
+        hass,
+        _ENTRY,
+        sentinel_enabled=True,
+        face_recognition_operative=False,
+        video_analysis_enabled=True,
     )
 
     issue = _issue(hass)
@@ -64,7 +68,11 @@ async def test_issue_raised_when_sentinel_on_and_face_recognition_off(
 async def test_issue_names_every_inert_rule(hass: HomeAssistant) -> None:
     """A user who cannot read the code needs the rule names in the text."""
     async_check_unknown_person_rules(
-        hass, _ENTRY, sentinel_enabled=True, face_recognition_operative=False
+        hass,
+        _ENTRY,
+        sentinel_enabled=True,
+        face_recognition_operative=False,
+        video_analysis_enabled=True,
     )
 
     issue = _issue(hass)
@@ -93,7 +101,11 @@ async def test_no_issue_when_face_recognition_is_operative(
 ) -> None:
     """With the pipeline running the rules can fire; nothing to report."""
     async_check_unknown_person_rules(
-        hass, _ENTRY, sentinel_enabled=True, face_recognition_operative=True
+        hass,
+        _ENTRY,
+        sentinel_enabled=True,
+        face_recognition_operative=True,
+        video_analysis_enabled=True,
     )
     assert _issue(hass) is None
 
@@ -102,7 +114,11 @@ async def test_no_issue_when_face_recognition_is_operative(
 async def test_no_issue_when_sentinel_is_off(hass: HomeAssistant) -> None:
     """With Sentinel off no rule fires, so singling out five would be noise."""
     async_check_unknown_person_rules(
-        hass, _ENTRY, sentinel_enabled=False, face_recognition_operative=False
+        hass,
+        _ENTRY,
+        sentinel_enabled=False,
+        face_recognition_operative=False,
+        video_analysis_enabled=True,
     )
     assert _issue(hass) is None
 
@@ -113,12 +129,20 @@ async def test_issue_cleared_when_face_recognition_is_turned_on(
 ) -> None:
     """Enabling the pipeline must retract the notice on the next reload."""
     async_check_unknown_person_rules(
-        hass, _ENTRY, sentinel_enabled=True, face_recognition_operative=False
+        hass,
+        _ENTRY,
+        sentinel_enabled=True,
+        face_recognition_operative=False,
+        video_analysis_enabled=True,
     )
     assert _issue(hass) is not None
 
     async_check_unknown_person_rules(
-        hass, _ENTRY, sentinel_enabled=True, face_recognition_operative=True
+        hass,
+        _ENTRY,
+        sentinel_enabled=True,
+        face_recognition_operative=True,
+        video_analysis_enabled=True,
     )
     assert _issue(hass) is None
 
@@ -129,12 +153,20 @@ async def test_issue_cleared_when_sentinel_is_turned_off(
 ) -> None:
     """Turning Sentinel off also retracts it."""
     async_check_unknown_person_rules(
-        hass, _ENTRY, sentinel_enabled=True, face_recognition_operative=False
+        hass,
+        _ENTRY,
+        sentinel_enabled=True,
+        face_recognition_operative=False,
+        video_analysis_enabled=True,
     )
     assert _issue(hass) is not None
 
     async_check_unknown_person_rules(
-        hass, _ENTRY, sentinel_enabled=False, face_recognition_operative=False
+        hass,
+        _ENTRY,
+        sentinel_enabled=False,
+        face_recognition_operative=False,
+        video_analysis_enabled=True,
     )
     assert _issue(hass) is None
 
@@ -144,7 +176,11 @@ async def test_check_is_idempotent(hass: HomeAssistant) -> None:
     """Called on every setup and reload, so repeats must not accumulate."""
     for _ in range(3):
         async_check_unknown_person_rules(
-            hass, _ENTRY, sentinel_enabled=True, face_recognition_operative=False
+            hass,
+            _ENTRY,
+            sentinel_enabled=True,
+            face_recognition_operative=False,
+            video_analysis_enabled=True,
         )
 
     issues = [
@@ -159,7 +195,11 @@ async def test_check_is_idempotent(hass: HomeAssistant) -> None:
 async def test_clear_on_entry_removal(hass: HomeAssistant) -> None:
     """Nothing re-evaluates the issue after the entry is gone."""
     async_check_unknown_person_rules(
-        hass, _ENTRY, sentinel_enabled=True, face_recognition_operative=False
+        hass,
+        _ENTRY,
+        sentinel_enabled=True,
+        face_recognition_operative=False,
+        video_analysis_enabled=True,
     )
     assert _issue(hass) is not None
 
@@ -177,10 +217,18 @@ async def test_clear_is_safe_when_no_issue_exists(hass: HomeAssistant) -> None:
 async def test_issue_id_is_per_entry(hass: HomeAssistant) -> None:
     """Two config entries must not clobber each other's issue."""
     async_check_unknown_person_rules(
-        hass, "entry_one", sentinel_enabled=True, face_recognition_operative=False
+        hass,
+        "entry_one",
+        sentinel_enabled=True,
+        face_recognition_operative=False,
+        video_analysis_enabled=True,
     )
     async_check_unknown_person_rules(
-        hass, "entry_two", sentinel_enabled=True, face_recognition_operative=False
+        hass,
+        "entry_two",
+        sentinel_enabled=True,
+        face_recognition_operative=False,
+        video_analysis_enabled=True,
     )
 
     registry = ir.async_get(hass)
@@ -211,3 +259,72 @@ async def test_issue_id_is_per_entry(hass: HomeAssistant) -> None:
         )
         is not None
     )
+
+
+@pytest.mark.asyncio
+async def test_issue_raised_when_video_analyzer_is_disabled(
+    hass: HomeAssistant,
+) -> None:
+    """
+    Face recognition on + healthy gallery + analyzer off is still inert.
+
+    ``recognize_faces`` only ever runs from the video analyzer, whose
+    recommended mode is ``disable``, so this combination reaches the same
+    silent-inert state from a different direction -- and the option and the
+    gallery both look healthy, which is what made it easy to miss.
+    """
+    async_check_unknown_person_rules(
+        hass,
+        _ENTRY,
+        sentinel_enabled=True,
+        face_recognition_operative=True,
+        video_analysis_enabled=False,
+    )
+    assert _issue(hass) is not None
+
+
+@pytest.mark.asyncio
+async def test_issue_cleared_when_the_analyzer_is_turned_back_on(
+    hass: HomeAssistant,
+) -> None:
+    """Both halves of the predicate have to hold before the notice retracts."""
+    async_check_unknown_person_rules(
+        hass,
+        _ENTRY,
+        sentinel_enabled=True,
+        face_recognition_operative=True,
+        video_analysis_enabled=False,
+    )
+    assert _issue(hass) is not None
+
+    async_check_unknown_person_rules(
+        hass,
+        _ENTRY,
+        sentinel_enabled=True,
+        face_recognition_operative=True,
+        video_analysis_enabled=True,
+    )
+    assert _issue(hass) is None
+
+
+@pytest.mark.asyncio
+async def test_discovery_rule_ids_are_named_as_a_prefix(hass: HomeAssistant) -> None:
+    """
+    Discovery rule ids are named as a prefix, not a bare template id.
+
+    Approved discovery rules are minted per camera, so a bare template id
+    matches nothing the user can search for -- proposal_templates.py builds
+    ``unknown_person_camera_when_home_<camera>`` / ``..._any_camera``.
+    """
+    async_check_unknown_person_rules(
+        hass,
+        _ENTRY,
+        sentinel_enabled=True,
+        face_recognition_operative=False,
+        video_analysis_enabled=True,
+    )
+    issue = _issue(hass)
+    assert issue is not None
+    placeholders = issue.translation_placeholders
+    assert placeholders is not None
+    assert "starts with unknown_person_camera_when_home" in placeholders["rules"]

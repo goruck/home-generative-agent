@@ -57,7 +57,11 @@ INERT_WITHOUT_FACE_RECOGNITION: tuple[str, ...] = (
     "unknown_person_camera_no_home",
     "unknown_person_camera_night_home",
     "alarm_disarmed_during_external_threat",
-    "unknown_person_camera_when_home (approved discovery rule)",
+    # Approved discovery rules are minted per camera -- proposal_templates.py
+    # builds `unknown_person_camera_when_home_<camera>` or
+    # `..._any_camera` -- so the template id alone matches nothing in the
+    # user's rule list. Say "starting with" rather than send them hunting.
+    "any rule whose id starts with unknown_person_camera_when_home",
 )
 
 
@@ -73,6 +77,7 @@ def async_check_unknown_person_rules(
     *,
     sentinel_enabled: bool,
     face_recognition_operative: bool,
+    video_analysis_enabled: bool,
 ) -> None:
     """
     Raise or clear the repair issue for inert unknown-person rules.
@@ -82,11 +87,23 @@ def async_check_unknown_person_rules(
     existence check.
 
     Nothing is raised when Sentinel is off -- then *no* rule fires and saying
-    so about five of them would be noise rather than news.
+    so about four rule ids would be noise rather than news.
+
+    ``video_analysis_enabled`` is part of the predicate because the label is
+    written by ``recognize_faces``, which only runs from the video analyzer.
+    ``RECOMMENDED_VIDEO_ANALYZER_MODE`` is ``disable``, so face recognition can
+    be switched on, with a healthy gallery, and still never analyze a frame --
+    the same silent-inert state, reached from a different direction.
+
+    **Known gap:** an unreachable or misconfigured face service leaves the
+    rules inert too, and is not detected here -- ``recognize_faces`` logs a
+    warning and returns an empty list, so unlike the states above that one is
+    at least visible in the log. Tracked in TODOS.md.
     """
     issue_id = _issue_id(entry_id)
 
-    if not sentinel_enabled or face_recognition_operative:
+    inert = not (face_recognition_operative and video_analysis_enabled)
+    if not sentinel_enabled or not inert:
         ir.async_delete_issue(hass, DOMAIN, issue_id)
         return
 
