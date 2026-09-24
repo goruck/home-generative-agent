@@ -240,6 +240,10 @@ from .core.database_guard import (
     async_sync_database_issue,
 )
 from .core.db_utils import parse_postgres_uri
+from .core.face_guard import (
+    async_check_unknown_person_rules,
+    async_clear_unknown_person_issue,
+)
 from .core.fallback import (
     CircuitBreaker,
     FallbackChatModel,
@@ -3309,6 +3313,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         )
         face_recognition = False
 
+    # Five Sentinel rules key on a positive "Unknown Person" label that only
+    # the face pipeline writes, so without it they are permanently inert with
+    # nothing logged. Checked here rather than in the engine because the
+    # *effective* value is only known after the gallery downgrade above: an
+    # entry with face recognition on and no database is inert too.
+    async_check_unknown_person_rules(
+        hass,
+        entry.entry_id,
+        sentinel_enabled=bool(
+            options.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED)
+        ),
+        face_recognition_operative=bool(face_recognition),
+    )
+
     # Save runtime data.
     entry.runtime_data = HGAData(
         options=options,
@@ -4117,11 +4135,12 @@ async def async_remove_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> None
     """
     Clear every per-entry repair issue when the entry is deleted for good.
 
-    Both issues are keyed by entry_id, so a remove-and-re-add (new entry_id)
+    Every one is keyed by entry_id, so a remove-and-re-add (new entry_id)
     would otherwise leave the old ones standing until a restart.
     """
     async_clear_database_issue(hass, entry.entry_id)
     async_clear_pin_pipeline_issue(hass, entry.entry_id)
+    async_clear_unknown_person_issue(hass, entry.entry_id)
 
 
 async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:  # noqa: C901, PLR0912, PLR0915
