@@ -1334,17 +1334,22 @@ async def gather_store_puts_in_chunks(
     if not tasks:
         return
     n = len(tasks)
-    for i in range(0, n, chunk_size):
-        try:
-            results = await asyncio.gather(
-                *tasks[i : i + chunk_size], return_exceptions=True
-            )
-        except BaseException:
-            # The gather itself was cancelled; it cleans up its own chunk.
-            _close_pending_coroutines(tasks[i + chunk_size :])
-            raise
-        failure = next((r for r in results if isinstance(r, BaseException)), None)
-        if failure is not None:
-            _close_pending_coroutines(tasks[i + chunk_size :])
-            raise failure
-        await asyncio.sleep(sleep_s)
+    i = 0
+    try:
+        for i in range(0, n, chunk_size):
+            # A cancelled gather cleans up its own chunk.
+            await _run_chunk(tasks[i : i + chunk_size])
+            # A cancel that lands here, between chunks, must still close
+            # the chunks never scheduled (the except below covers it).
+            await asyncio.sleep(sleep_s)
+    except BaseException:
+        _close_pending_coroutines(tasks[i + chunk_size :])
+        raise
+
+
+async def _run_chunk(chunk: list[Any]) -> None:
+    """Await one chunk together and re-raise its first failure."""
+    results = await asyncio.gather(*chunk, return_exceptions=True)
+    failure = next((r for r in results if isinstance(r, BaseException)), None)
+    if failure is not None:
+        raise failure

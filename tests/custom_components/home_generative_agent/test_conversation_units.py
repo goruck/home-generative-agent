@@ -441,9 +441,47 @@ async def test_run_tool_index_background_cancel_is_not_a_failure() -> None:
     assert rd.tool_index_failed is False
     assert rd.tool_index_ready is False
     assert rd.tool_indexing_in_progress is False
-    assert rd.tool_index_task is None
     assert rd.tool_content_hashes == {}
     dispatch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_index_tools_does_not_schedule_a_write_onto_a_closed_pool() -> None:
+    """A turn suspended in discovery across an unload must not hand off."""
+    entity = _index_entity()
+    rd = _index_runtime_data(tool_index_ready=False, tool_content_hashes={})
+    rd.pool = MagicMock(closed=True)
+
+    async def fake_provider_discovery(
+        _llm_context: Any,
+        _runtime_data: Any,
+        _api_ids: Any,
+        index_tasks: list[Any],
+        new_hashes: dict[str, str],
+        seen_keys: set[str],
+        discovered_api_ids: set[str],
+    ) -> None:
+        index_tasks.append(MagicMock())
+        new_hashes["assist::HassTurnOn"] = "h1"
+        seen_keys.add("assist::HassTurnOn")
+        discovered_api_ids.add("assist")
+
+    with (
+        patch.object(
+            entity,
+            "_async_discover_provider_tools",
+            new=AsyncMock(side_effect=fake_provider_discovery),
+        ),
+        patch.object(entity, "_async_discover_local_tools", new=AsyncMock()),
+        patch.object(entity, "_async_evict_stale_tool_index_rows", new=AsyncMock()),
+        patch(f"{_CONV}.llm.async_get_apis", return_value=[]),
+        patch(f"{_CONV}.async_dispatcher_send"),
+    ):
+        await entity._async_index_tools(MagicMock(), rd)
+
+    entity.hass.async_create_task.assert_not_called()
+    assert rd.tool_indexing_in_progress is False
+    assert rd.tool_index_failed is False
 
 
 # ---------------------------------------------------------------------------
@@ -740,6 +778,7 @@ def _index_runtime_data(**overrides: Any) -> Any:
         tool_index_failed=False,
         tool_content_hashes={},
         store=MagicMock(),
+        pool=MagicMock(closed=False),
     )
     for key, value in overrides.items():
         setattr(rd, key, value)

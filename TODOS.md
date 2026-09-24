@@ -699,6 +699,17 @@ validation.
 
 ---
 
+### Tool index writes that the unload still cannot stop: the inline delta and a failed setup
+
+**What:** The unload now cancels the background index write and the store's batch worker before the pool closes (see the Completed entry "Tool index background task outlives a config-entry reload"). Two writers remain outside that: the inline delta write (`_async_write_tool_index_delta`, awaited inside a conversation turn, which platform unload does not cancel), and a setup that fails after the conversation platform scheduled the startup build (Home Assistant then runs the on-unload callbacks, not `async_unload_entry`, so nothing cancels the task or closes the pool). Both end in `PoolClosed` on the old generation: the inline path logs a warning and does not latch `tool_index_failed`; the failed-setup path can keep embedding on the dead generation while the retry builds its own.
+
+**Why:** Surfaced by the Codex and Claude passes on the tool-index race PR; left out of that fix to keep it small. Neither is a reload-time regression: the inline path is rare (a per-turn top-up racing an options change) and the failed-setup path needs setup to fail after the platform forwarded.
+
+**How to apply:** Register the cancel as an on-unload callback at the point the task is created (covers the failed-setup path), and make the inline delta write shield-and-await or check `pool.closed` before each chunk.
+
+**Effort:** S
+**Priority:** P3
+
 ### Radio checks the pinned Home Assistant version cannot observe
 
 **What:** Two radio checks from step 6 are weaker than the plan wanted. ZHA permit-join is not readable at all (zigpy 2.1.0's `ControllerApplication.permit()` keeps no record of the join window, and the frontend's `zha/devices/permit` websocket command fires no event), so `zigbee_permit_join_open` covers Zigbee2MQTT only. `zwave_inclusion_active` is poll-only because the Z-Wave JS integration exposes no inclusion entity, so a window shorter than the detection interval is usually missed.

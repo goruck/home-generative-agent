@@ -754,9 +754,9 @@ async def _run_tool_index_background(
     """
     Batch tool indexing into the store and update hashes on success.
 
-    Cancelled by the entry unload before the pool closes; a cancel leaves
-    every flag as it was (the index is neither ready nor failed, and the
-    next load indexes again), so it is not reported as a failure.
+    Cancelled by the entry unload before the pool closes, and by an
+    embedding-provider switch; a cancel leaves the index neither ready nor
+    failed, so the next pass indexes again.
     """
     try:
         if index_tasks:
@@ -780,8 +780,6 @@ async def _run_tool_index_background(
         async_dispatcher_send(hass, SIGNAL_TOOL_INDEX_UPDATED, "failed", 0)
     finally:
         rd.tool_indexing_in_progress = False
-        if rd.tool_index_task is asyncio.current_task():
-            rd.tool_index_task = None
 
 
 async def async_setup_entry(
@@ -1846,6 +1844,11 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     await self._async_write_tool_index_delta(
                         runtime_data, index_tasks, new_hashes
                     )
+                elif runtime_data.pool is not None and runtime_data.pool.closed:
+                    # The entry unloaded while this turn was in discovery:
+                    # the write would only die on the closed pool.
+                    _LOGGER.debug("Tool index write skipped: the entry unloaded.")
+                    runtime_data.tool_indexing_in_progress = False
                 else:
                     runtime_data.tool_index_task = self.hass.async_create_task(
                         _run_tool_index_background(
