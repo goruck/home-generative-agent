@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -4132,6 +4133,18 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
         await _teardown("baseline_updater.stop", rd.baseline_updater.stop)
     if rd.notifier is not None:
         await _teardown("notifier.stop", rd.notifier.stop)
+
+    async def _cancel_tool_index() -> None:
+        # The index write runs on the pool closed next; a reload that raced
+        # it used to end in PoolClosed, logged as a failed index.
+        task = rd.tool_index_task
+        if task is None or task.done():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    await _teardown("tool_index.cancel", _cancel_tool_index)
     if rd.pool is not None:
         await _teardown("pool.close", rd.pool.close)
     # The OpenAI http client is NOT closed here — it is closed by the on-unload

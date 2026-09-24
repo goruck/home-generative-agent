@@ -405,6 +405,47 @@ async def test_run_tool_index_background_success_clears_flags() -> None:
     assert rd.tool_content_hashes == {"key": "hash"}
 
 
+@pytest.mark.asyncio
+async def test_run_tool_index_background_cancel_is_not_a_failure() -> None:
+    """The unload cancels the write before the pool closes: no failed flag."""
+    rd = MagicMock()
+    rd.tool_index_ready = False
+    rd.tool_indexing_in_progress = True
+    rd.tool_index_failed = False
+    rd.tool_content_hashes = {}
+    hass = MagicMock()
+    started = asyncio.Event()
+
+    async def _hang(_tasks: Any) -> None:
+        started.set()
+        await asyncio.sleep(3600)
+
+    with (
+        patch(
+            "custom_components.home_generative_agent.conversation.gather_store_puts_in_chunks",
+            new=_hang,
+        ),
+        patch(f"{_CONV}.async_dispatcher_send") as dispatch,
+    ):
+        task = asyncio.create_task(
+            _run_tool_index_background(
+                index_tasks=[AsyncMock()], tool_hashes={"k": "h"}, rd=rd, hass=hass
+            )
+        )
+        rd.tool_index_task = task
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert rd.tool_index_failed is False
+    assert rd.tool_index_ready is False
+    assert rd.tool_indexing_in_progress is False
+    assert rd.tool_index_task is None
+    assert rd.tool_content_hashes == {}
+    dispatch.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # STT hallucination filter helpers
 # ---------------------------------------------------------------------------
@@ -686,7 +727,9 @@ def _index_entity() -> Any:
     entity.hass = MagicMock()
     # Close coroutines handed to async_create_task so un-run background
     # indexing never triggers "coroutine was never awaited" warnings.
-    entity.hass.async_create_task = MagicMock(side_effect=lambda coro: coro.close())
+    entity.hass.async_create_task = MagicMock(
+        side_effect=lambda coro, **_kw: coro.close()
+    )
     return entity
 
 
