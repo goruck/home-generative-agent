@@ -11,6 +11,8 @@ the health sensor to say so. The guard turns that silence into a repair issue.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -314,3 +316,48 @@ async def test_discovery_rule_ids_are_named_as_a_prefix(hass: HomeAssistant) -> 
     placeholders = issue.translation_placeholders
     assert placeholders is not None
     assert "starts with unknown_person_camera_when_home" in placeholders["rules"]
+
+
+def test_no_variant_claims_baseline_is_both_off_and_unaffected() -> None:
+    """
+    No notice may promise detection that the state it describes has disabled.
+
+    This exact claim has now been wrong three times. First the single
+    description said baseline anomalies were "unaffected" while the notice also
+    fired when there was no database -- and baseline needs the pool, so on the
+    very install being warned about it promised detection that was off (Codex
+    caught it). Adding a caveat fixed that. Splitting one description into three
+    then moved the caveat into the no-gallery *cause* and left the unqualified
+    claim in the shared tail, so that one notice said both. The claim is gone
+    from the shared text; this keeps it gone.
+    """
+    for name in ("strings.json", "translations/en.json", "translations/cs.json"):
+        path = (
+            Path(__file__).parents[3]
+            / "custom_components"
+            / "home_generative_agent"
+            / name
+        )
+        issues = json.loads(path.read_text(encoding="utf-8"))["issues"]
+        for key, payload in issues.items():
+            if not key.startswith("unknown_person_rules_inert"):
+                continue
+            description = payload["description"]
+            says_off = (
+                "Baseline anomaly detection is off" in description
+                or "je vypnutá i detekce anomálií" in description
+            )
+            says_fine = (
+                "baseline anomalies and the" in description
+                or "anomálie vůči základní úrovni i audit" in description
+            )
+            assert not (says_off and says_fine), (
+                f"{name}:{key} says baseline is both off and unaffected"
+            )
+            # The no-gallery notice fires precisely when the pool is absent, so
+            # it must never be the one making the unqualified claim.
+            if key.endswith("no_gallery"):
+                assert not says_fine, (
+                    f"{name}:{key} promises baseline detection, but this notice "
+                    "fires when there is no database and baseline needs the pool"
+                )
