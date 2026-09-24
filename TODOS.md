@@ -1836,6 +1836,29 @@ label pair ("Server URL" vs "Base URL").
 
 ## Model Providers
 
+### Migrate to langchain-google-genai 4.x (consolidated google-genai SDK)
+
+**What:** `manifest.json` pins `langchain-google-genai==3.1.0`; 4.x is current. 4.0.0 swapped the legacy `google-ai-generativelanguage` SDK for the consolidated `google-genai` SDK, which is where new capability lands, so staying a major behind gets more expensive the longer it runs. Moved here from [#584](https://github.com/goruck/home-generative-agent/issues/584) (2026-09-24) because it is internal maintenance with no reporter or contributor attached — the issue carries the full write-up and the links.
+
+**Why it is not urgent:** 3.1.0 is not blocking Gemini 3. `_is_gemini_3_or_later()` matches on the `"gemini-3"` substring, so `gemini-3.5-flash-lite` (the current default since v3.33.1) gets the `thought_signature` Gemini 3 requires on multi-turn function calls. The 404 that prompted [#575](https://github.com/goruck/home-generative-agent/issues/575) ends with "We recommend you to use the Interactions API", which reads like a deadline and is not one: Google's GA announcement says legacy `generateContent` "remains fully supported and will continue to receive new mainline Gemini models for the foreseeable future", with no published deprecation timeline. What the Interactions API adds — server-side conversation state, managed agents, background execution — this integration already implements itself through LangGraph and Postgres checkpoints, so adopting it would mean handing Google state we already own.
+
+**What makes it non-trivial:**
+
+- **Structured-output default changed** from implicit function calling to `"json_schema"` native structured outputs. `method="function_calling"` restores the old behaviour, but this lands directly on the Gemini schema work in #527/#536 (the `anyOf`/`required` sanitizer and `_ensure_array_items()`), which exists precisely because of how declarations are serialized. Those paths need retesting, not just re-running.
+- **gRPC removed entirely — REST only.** This changes the exception surface: the #575 traceback arrived through `google.api_core.grpc_helpers_async`, so anything matching those types (`core/fallback.py` retry classification, the startup health checks in `__init__.py`) needs re-verifying against the REST equivalents.
+- **Latency.** Users in the langchain-google 4.0.0 discussion report 50–90% increases pending transitive `google-auth` / `google-genai` updates. Measure before shipping to anyone.
+- `ChatGoogleGenerativeAI` now also supersedes `ChatVertexAI` via `vertexai=True`. Unused here, but the class's behaviour is broader than what the test suite exercises.
+- `agent/token_counter.py` calls `v1beta/models/{model}:countTokens` over REST directly, independent of the SDK. Confirm it still behaves under 4.x, and whether the SDK now offers a counter worth using instead.
+- `gemini-embedding-001` is fine (shutdown no earlier than May 2028). `gemini-embedding-2-preview` exists and is multimodal, but its embeddings are **not** comparable to `-001`, so adopting it means re-embedding the whole vector store. Out of scope; noted so it is not discovered mid-migration.
+
+**How to apply:** Its own branch and its own review round — never bundled into a Gemini bugfix, which is why it was split out of #583 in the first place. Acceptance: tool calling, structured output, embeddings and the Gemini schema sanitizers verified against a **live key**, not only unit tests; fallback-chain retry classification confirmed against the REST exception types; latency measured before and after. Mind that `configurable_fields` reconstructs the model via `__init__` on every call (see the Gemini temperature item in `## Completed`), so any 4.x change to `__init__` signatures or non-Optional fields surfaces there first.
+
+**Effort:** L
+**Priority:** P2
+**Depends on:** None
+
+---
+
 ### An unset embedding provider still means "use Ollama" downstream
 
 **What:** `resolve_runtime_options` (`core/subentry_resolver.py`) leaves `CONF_EMBEDDING_MODEL_PROVIDER` unset when no configured provider can serve embeddings. The consumer disagrees about what that means: `__init__.py:2143` reads it as `options.get(CONF_EMBEDDING_MODEL_PROVIDER, RECOMMENDED_EMBEDDING_MODEL_PROVIDER)` with `RECOMMENDED_EMBEDDING_MODEL_PROVIDER = "ollama"` (`const.py:668`), and the dispatch below it ends in a bare `else: embedding_model = ollama_embeddings`. So "no capable provider" and "provider we do not recognise" both arrive at Ollama at `RECOMMENDED_OLLAMA_URL`.
