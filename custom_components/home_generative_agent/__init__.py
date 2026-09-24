@@ -240,6 +240,10 @@ from .core.database_guard import (
     async_sync_database_issue,
 )
 from .core.db_utils import parse_postgres_uri
+from .core.face_guard import (
+    async_check_unknown_person_rules,
+    async_clear_unknown_person_issue,
+)
 from .core.fallback import (
     CircuitBreaker,
     FallbackChatModel,
@@ -4051,6 +4055,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         database_missing=db_uri is None and bool(providers),
     )
 
+    # Same placement, same reason: four Sentinel rule ids (five evaluators) key
+    # on a positive "Unknown Person" label that only the face pipeline writes,
+    # so without it they are permanently inert with nothing logged. Raised here
+    # rather than where `face_recognition` is computed so it can only ever be
+    # true of a loaded entry. It receives the raw option, the gallery and the
+    # analyzer mode separately so the notice can name the state the install is
+    # actually in; the analyzer counts because `recognize_faces` only ever runs
+    # from there.
+    async_check_unknown_person_rules(
+        hass,
+        entry.entry_id,
+        sentinel_enabled=bool(
+            options.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED)
+        ),
+        # The three facts separately, not the collapsed `face_recognition`: the
+        # notice has to tell a user who switched face recognition ON that the
+        # database is missing, rather than tell them to switch it on.
+        face_recognition_configured=bool(
+            options.get(CONF_FACE_RECOGNITION, RECOMMENDED_FACE_RECOGNITION)
+        ),
+        person_gallery_available=person_gallery is not None,
+        # Mirrors the gate that actually starts the analyzer above, literal
+        # and defaultless included: the guard must agree with what runs, not
+        # with RECOMMENDED_VIDEO_ANALYZER_MODE, or it would claim the rules
+        # are inert on an install whose analyzer is running (unset reads as
+        # enabled there).
+        video_analysis_enabled=options.get(CONF_VIDEO_ANALYZER_MODE) != "disable",
+    )
+
     return True
 
 
@@ -4110,6 +4143,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
     # (a disable would otherwise leave it standing); the next successful
     # setup re-raises it if the database is still missing.
     async_clear_database_issue(hass, entry.entry_id)
+    # An unloaded entry runs no rules at all, so singling four out is wrong the
+    # same way; the next successful setup re-raises it if it still applies.
+    async_clear_unknown_person_issue(hass, entry.entry_id)
     return True
 
 
@@ -4117,11 +4153,12 @@ async def async_remove_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> None
     """
     Clear every per-entry repair issue when the entry is deleted for good.
 
-    Both issues are keyed by entry_id, so a remove-and-re-add (new entry_id)
+    Every one is keyed by entry_id, so a remove-and-re-add (new entry_id)
     would otherwise leave the old ones standing until a restart.
     """
     async_clear_database_issue(hass, entry.entry_id)
     async_clear_pin_pipeline_issue(hass, entry.entry_id)
+    async_clear_unknown_person_issue(hass, entry.entry_id)
 
 
 async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:  # noqa: C901, PLR0912, PLR0915
