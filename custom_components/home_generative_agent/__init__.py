@@ -4059,17 +4059,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     # on a positive "Unknown Person" label that only the face pipeline writes,
     # so without it they are permanently inert with nothing logged. Raised here
     # rather than where `face_recognition` is computed so it can only ever be
-    # true of a loaded entry. The value passed is the *effective* one -- the
-    # gallery downgrade above already turned it off when there is no database,
-    # which leaves the rules just as inert -- and the video-analyzer mode is
-    # part of it because `recognize_faces` only ever runs from there.
+    # true of a loaded entry. It receives the raw option, the gallery and the
+    # analyzer mode separately so the notice can name the state the install is
+    # actually in; the analyzer counts because `recognize_faces` only ever runs
+    # from there.
     async_check_unknown_person_rules(
         hass,
         entry.entry_id,
         sentinel_enabled=bool(
             options.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED)
         ),
-        face_recognition_operative=bool(face_recognition),
+        # The three facts separately, not the collapsed `face_recognition`: the
+        # notice has to tell a user who switched face recognition ON that the
+        # database is missing, rather than tell them to switch it on.
+        face_recognition_configured=bool(
+            options.get(CONF_FACE_RECOGNITION, RECOMMENDED_FACE_RECOGNITION)
+        ),
+        person_gallery_available=person_gallery is not None,
         # Mirrors the gate that actually starts the analyzer above, literal
         # and defaultless included: the guard must agree with what runs, not
         # with RECOMMENDED_VIDEO_ANALYZER_MODE, or it would claim the rules

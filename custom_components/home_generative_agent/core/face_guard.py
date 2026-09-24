@@ -43,7 +43,16 @@ from ..const import DOMAIN  # noqa: TID252
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
+# One issue id, three translation keys. A repair's description renders in the
+# *viewing* user's frontend language, so a cause sentence composed in Python --
+# or fetched with async_common_translation, which follows the *server* locale --
+# could land in a different language than the text around it. A distinct
+# translation_key per cause keeps the whole notice in one language and lets each
+# one lead with the remedy that actually applies.
 ISSUE_UNKNOWN_PERSON_RULES_INERT = "unknown_person_rules_inert"
+TRANSLATION_KEY_NO_FACE = "unknown_person_rules_inert_no_face"
+TRANSLATION_KEY_NO_GALLERY = "unknown_person_rules_inert_no_gallery"
+TRANSLATION_KEY_NO_ANALYZER = "unknown_person_rules_inert_no_analyzer"
 
 # The rules whose only trigger is a positive "Unknown Person" label, named here
 # rather than derived from the engine's rule list: the issue text has to name
@@ -71,12 +80,13 @@ def _issue_id(entry_id: str) -> str:
 
 
 @callback
-def async_check_unknown_person_rules(
+def async_check_unknown_person_rules(  # noqa: PLR0913
     hass: HomeAssistant,
     entry_id: str,
     *,
     sentinel_enabled: bool,
-    face_recognition_operative: bool,
+    face_recognition_configured: bool,
+    person_gallery_available: bool,
     video_analysis_enabled: bool,
 ) -> None:
     """
@@ -86,34 +96,50 @@ def async_check_unknown_person_rules(
     exist is a no-op in the issue registry, so the clear paths need no
     existence check.
 
-    Nothing is raised when Sentinel is off -- then *no* rule fires and saying
-    so about four rule ids would be noise rather than news.
+    Takes the three facts separately rather than one "operative" flag so the
+    notice can name the state the install is actually in. ``async_setup_entry``
+    collapses the first two (it downgrades ``face_recognition`` to ``False``
+    when the gallery is unavailable), and a user who switched face recognition
+    on needs to be told about the missing database, not told to switch it on.
 
-    ``video_analysis_enabled`` is part of the predicate because the label is
-    written by ``recognize_faces``, which only runs from the video analyzer.
-    ``RECOMMENDED_VIDEO_ANALYZER_MODE`` is ``disable``, so face recognition can
-    be switched on, with a healthy gallery, and still never analyze a frame --
-    the same silent-inert state, reached from a different direction.
+    Precedence when several apply: no face recognition, then no gallery, then
+    no analyzer -- most fundamental first, since fixing an earlier one is a
+    precondition for the later ones mattering.
 
-    **Known gap:** an unreachable or misconfigured face service leaves the
-    rules inert too, and is not detected here -- ``recognize_faces`` logs a
-    warning and returns an empty list, so unlike the states above that one is
-    at least visible in the log. Tracked in TODOS.md.
+    Nothing is raised when Sentinel is off -- then *no* rule fires and singling
+    out four rule ids would be noise rather than news.
+
+    **Known gap:** an unreachable or misconfigured face service leaves the rules
+    inert too, and is not detected here -- ``recognize_faces`` logs a warning
+    and returns an empty list, so unlike the states above that one is at least
+    visible in the log. Tracked in TODOS.md.
     """
     issue_id = _issue_id(entry_id)
 
-    inert = not (face_recognition_operative and video_analysis_enabled)
-    if not sentinel_enabled or not inert:
+    if not sentinel_enabled:
         ir.async_delete_issue(hass, DOMAIN, issue_id)
         return
 
+    if not face_recognition_configured:
+        translation_key = TRANSLATION_KEY_NO_FACE
+    elif not person_gallery_available:
+        translation_key = TRANSLATION_KEY_NO_GALLERY
+    elif not video_analysis_enabled:
+        translation_key = TRANSLATION_KEY_NO_ANALYZER
+    else:
+        ir.async_delete_issue(hass, DOMAIN, issue_id)
+        return
+
+    # The issue id is stable across causes, so a change of cause replaces the
+    # notice in place instead of stacking a second one; create_issue overwrites
+    # an existing id.
     ir.async_create_issue(
         hass,
         DOMAIN,
         issue_id,
         is_fixable=False,
         severity=ir.IssueSeverity.WARNING,
-        translation_key=ISSUE_UNKNOWN_PERSON_RULES_INERT,
+        translation_key=translation_key,
         translation_placeholders={
             "rules": "\n".join(f"- {name}" for name in INERT_WITHOUT_FACE_RECOGNITION),
         },
