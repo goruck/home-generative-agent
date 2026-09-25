@@ -197,6 +197,19 @@ def client_known_for(client: Mapping[str, Any], now: datetime, age: timedelta) -
     return dt_util.as_utc(now) - dt_util.as_utc(first_seen) >= age
 
 
+# The push offers Trust device only when the finding names one device: one
+# tap trusts every id the finding carries and a push shows 220 characters.
+TRUST_ONE_ACTION = "Tap Trust device if you recognize it"
+TRUST_SEVERAL_ACTION = (
+    "Trust the ones you recognize with the Sentinel trust device service"
+)
+
+
+def trust_action(count: int, single: str = TRUST_ONE_ACTION) -> str:
+    """Return the suggested trust action for a finding naming *count* devices."""
+    return single if count == 1 else TRUST_SEVERAL_ACTION
+
+
 def noun(count: int, singular: str, plural_form: str | None = None) -> str:
     """Return the singular or plural noun for *count* without the number."""
     return singular if count == 1 else (plural_form or f"{singular}s")

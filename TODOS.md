@@ -660,19 +660,6 @@ validation.
 
 ---
 
-### The Trust device button trusts every device in a multi-device finding
-
-**What:** `radio_new_device_joined` and `network_unknown_device_joined` aggregate every new device into one finding, and the push's **Trust device** button (`notify/actions.py` `_outcome_for_trust`) trusts every id in `device_ids` at once. The summary lists at most 10 names (`listed()`) and the mobile push is cut at 220 characters (`MAX_MOBILE_MESSAGE_CHARS`), so one tap can trust a device the user never saw named. Seen in the field on 2026-09-19: one tap trusted a visitor's laptop together with an unidentified `[mac]` client. `network_guest_client_present` already offers the button only for a single-device finding (`notifier._TRUST_ONE_DEVICE_TYPES`); the two shipped rules were left as they are because changing them alters released behavior.
-
-**Why:** Trust is permanent and silences both client rules for that device. Surfaced by the Codex pass on PR #646.
-
-**How to apply:** Decide between (a) the single-device gate for all three types, (b) one finding per device for the join rules (needs a per-identity cooldown so siblings are not starved), or (c) a confirm step that lists what will be trusted. Whatever is chosen, the handler should refuse ids the delivered message did not name.
-
-**Effort:** M
-**Priority:** P2
-
----
-
 ### `network_guest_client_present`: per-type daily floor and sub-daily MAC rotation
 
 **What:** Two accepted limits of the guest client rule. (1) Its 24 h cooldown floor is per type (`suppression.should_suppress` step 5), so after an alert about guest A, a different untrusted guest B that connects and leaves within the day is not reported by this rule. (2) A client is judged only once its inventory row is a day old (`FIRST_DAY_HOLDOFF`), so a device that rotates its MAC more often than daily (Windows "change daily", a deliberate attacker) never qualifies.
@@ -2081,6 +2068,21 @@ This is the same allowlist-omission class as #480 and as the triage options fixe
 ---
 
 ## Completed
+
+### The Trust device button trusts every device in a multi-device finding
+
+**What:** `radio_new_device_joined` and `network_unknown_device_joined` aggregate every new device into one finding, and the push's **Trust device** button (`notify/actions.py` `_outcome_for_trust`) trusts every id in `device_ids` at once. The summary lists at most 10 names (`listed()`) and the mobile push is cut at 220 characters (`MAX_MOBILE_MESSAGE_CHARS`), so one tap can trust a device the user never saw named. Seen in the field on 2026-09-19: one tap trusted a visitor's laptop together with an unidentified `[mac]` client. `network_guest_client_present` already offers the button only for a single-device finding (`notifier._TRUST_ONE_DEVICE_TYPES`); the two shipped rules were left as they are because changing them alters released behavior.
+
+**Why:** Trust is permanent and silences both client rules for that device. Surfaced by the Codex pass on PR #646.
+
+**How to apply:** Decide between (a) the single-device gate for all three types, (b) one finding per device for the join rules (needs a per-identity cooldown so siblings are not starved), or (c) a confirm step that lists what will be trusted. Whatever is chosen, the handler should refuse ids the delivered message did not name.
+
+**Effort:** M
+**Priority:** P2
+
+---
+
+**Resolution:** Option (a), refined: `_offers_trust` in `sentinel/notifier.py` requires exactly one `device_ids` entry for every trust type, and a trust finding naming several devices gets NO primary button (Ask Agent cannot trust anything, so the fallback was dropped for these types). The three rules pick their suggested action from `network_common.trust_action(count)`, so a multi-device summary points at `sentinel_trust_network_device`. `_outcome_for_trust` refuses a tap naming several ids (`several_devices`), which covers a notification built before this change. Options (b) and (c) were rejected: (b) multiplies pushes on a router reload and needs a per-identity cooldown; (c) adds a second tap to every trust and still hits the 220-character cap.
 
 ### Tool index background task outlives a config-entry reload and fails on the closed pool
 

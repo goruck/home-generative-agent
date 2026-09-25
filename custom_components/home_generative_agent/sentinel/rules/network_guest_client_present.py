@@ -25,6 +25,7 @@ from .network_common import (
     make_finding,
     nobody_home_for_sure,
     plural,
+    trust_action,
 )
 from .network_unknown_device_joined import describe_client
 
@@ -126,10 +127,8 @@ class NetworkGuestClientPresentRule:
             return []
         count = len(guests)
         names = [_describe(c) for c in guests]
-        trust_action = (
-            "Tap Trust device if it belongs to a guest you expect"
-            if count == 1
-            else "Trust the ones you recognize with the Sentinel trust device service"
+        trust_hint = trust_action(
+            count, "Tap Trust device if it belongs to a guest you expect"
         )
         return [
             make_finding(
@@ -155,7 +154,7 @@ class NetworkGuestClientPresentRule:
                         "If you do not recognize it, change the guest Wi-Fi "
                         "password in your router app"
                     ),
-                    trust_action,
+                    trust_hint,
                     "Turn the guest network off when no guests are staying",
                 ],
                 triggering_entities=sorted(

@@ -113,7 +113,13 @@ _BATCH_FLUSH_DELAY_SECS = 30
 # Per-finding cooldown: suppress repeated notifications for the same anomaly.
 _FINDING_COOLDOWN_SECS = 1800  # 30 minutes
 
-# Findings whose primary button records their devices as trusted.
+# Findings whose primary button records their devices as trusted. Each
+# aggregates every device it found into one finding, and one tap trusts every
+# id the finding carries while the push shows 220 characters: the button is
+# offered only when the finding names exactly one device (a field test
+# trusted an unidentified client together with the laptop the owner meant).
+# With several devices the primary slot stays empty rather than falling back
+# to Ask Agent, which cannot trust anything; the summary names the service.
 _TRUST_DEVICE_TYPES = frozenset(
     {
         "radio_new_device_joined",
@@ -122,19 +128,15 @@ _TRUST_DEVICE_TYPES = frozenset(
     }
 )
 
-# Of those, the types that aggregate standing clients: one tap trusts every
-# device the finding carries, and the push shows 220 characters, so the button
-# is offered only when the finding names exactly one device.
-_TRUST_ONE_DEVICE_TYPES = frozenset({"network_guest_client_present"})
+
+def trust_device_count(finding: AnomalyFinding) -> int:
+    """Return how many inventory devices a trust finding names."""
+    return len(finding.evidence.get("device_ids") or [])
 
 
 def _offers_trust(finding: AnomalyFinding) -> bool:
     """Return True when the finding's primary button is Trust device."""
-    if finding.type not in _TRUST_DEVICE_TYPES:
-        return False
-    if finding.type in _TRUST_ONE_DEVICE_TYPES:
-        return len(finding.evidence.get("device_ids") or []) == 1
-    return True
+    return finding.type in _TRUST_DEVICE_TYPES and trust_device_count(finding) == 1
 
 
 _SNOOZE_VERBS = frozenset(
@@ -647,6 +649,9 @@ def _build_actions(finding: AnomalyFinding) -> list[dict[str, Any]]:
                 "title": "Trust device",
             }
         )
+    elif finding.type in _TRUST_DEVICE_TYPES:
+        # Several devices: no primary button (see _TRUST_DEVICE_TYPES).
+        pass
     elif finding.suggested_actions:
         if finding.is_sensitive:
             actions.append(

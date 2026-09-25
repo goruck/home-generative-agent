@@ -17,6 +17,7 @@ from .network_common import (
     make_finding,
     noun,
     radio,
+    trust_action,
 )
 
 if TYPE_CHECKING:
@@ -91,7 +92,7 @@ class RadioNewDeviceJoinedRule:
                         "and check who can reach your Zigbee, Z-Wave, or Bluetooth "
                         "setup"
                     ),
-                    "Tap Trust device if you recognize it",
+                    trust_action(count),
                 ],
             )
         ]

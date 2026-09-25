@@ -5,6 +5,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from custom_components.home_generative_agent.sentinel.rules.network_common import (
+    TRUST_ONE_ACTION,
+    TRUST_SEVERAL_ACTION,
+)
 from custom_components.home_generative_agent.sentinel.rules.radio_coordinator_update_pending import (
     RadioCoordinatorUpdatePendingRule,
 )
@@ -160,7 +164,11 @@ def test_new_device_summary_identity_and_actions() -> None:
     assert finding.evidence["device_keys"] == ["zigbee:b", "zwave:c"]
     assert finding.evidence["device_ids"] == ["b", "c"]
     assert not finding.triggering_entities
-    assert any("Trust device" in action for action in finding.suggested_actions)
+    # Two devices: the push offers no Trust button, so the action names the
+    # service; one device keeps the tap.
+    assert finding.suggested_actions[-1] == TRUST_SEVERAL_ACTION
+    alone = _only(rule.evaluate(_snapshot(devices=devices, new_devices=["zigbee:b"])))
+    assert alone.suggested_actions[-1] == TRUST_ONE_ACTION
     # Display fields do not change the identity; the device set does.
     renamed = [_device("a"), _device("b", name="Renamed"), _device("c", "zwave")]
     again = _only(
