@@ -93,15 +93,6 @@ def client_counter_id(key: str, figure: str) -> str:
     return f"{CLIENT_COUNTER_PREFIX}{key}.{figure}"
 
 
-def client_counter_key(counter_id: str) -> tuple[str, str] | None:
-    """Return ``(client key, figure)`` for a per-client counter id, else None."""
-    if not counter_id.startswith(CLIENT_COUNTER_PREFIX):
-        return None
-    rest = counter_id[len(CLIENT_COUNTER_PREFIX) :]
-    key, sep, figure = rest.partition(".")
-    return (key, figure) if sep and key and figure else None
-
-
 _CAP_RADIO_PREFIX = "network.radio."
 _CAP_POSTURE_PREFIX = "network.posture."
 _CAP_HA_PREFIX = "network.ha_security."

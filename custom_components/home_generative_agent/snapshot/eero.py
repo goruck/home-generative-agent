@@ -26,7 +26,10 @@ adapter reads that object, following the plan's rules for the tier
   ``connected_guest_clients_count`` properties and the ``clients`` list; on
   each ``EeroClient`` ``mac``, ``ip``, ``hostname``, ``name``,
   ``manufacturer``, ``connection_type``, ``wireless``, ``connected``,
-  ``last_active``, ``is_guest``, and ``device_type``. Only the networks the
+  ``last_active``, ``is_guest``, ``device_type``, and the figures ``usage_up``,
+  ``usage_down`` (one poll's Mbps), ``signal`` (dBm), ``data_usage_day``
+  (today's download and upload bytes; only present when the integration's
+  Activity option requests it for clients), and ``blocked_day``. Only the networks the
   entry is configured for (the ``networks`` list beside the coordinator)
   are read, as the integration's own platforms do.
 
@@ -435,7 +438,7 @@ def _publish_client_counters(
     result: AdapterResult, clients: Iterable[NetworkClient]
 ) -> None:
     """
-    Publish each connected client's figures as ``network.client.<key>.*``.
+    Publish each connected client's traffic as ``network.client.<key>.*``.
 
     These feed the baseline step (the engine hands the section's counters to
     the baseline updater), keyed by the pseudonymized client key so the
@@ -456,13 +459,10 @@ def _publish_client_counters(
         result.notes.append(DATA_USAGE_NOTE)
 
 
-_COUNTER_FIGURES: Final[tuple[str, ...]] = (
-    "usage_up_mbps",
-    "usage_down_mbps",
-    "data_up_day_bytes",
-    "data_down_day_bytes",
-    "blocked_day",
-)
+# Only what a rule reads is stored as a baseline: the two traffic figures.
+# The rates (one poll's Mbps) and the blocked count stay on the client for
+# display and the audit tool.
+_COUNTER_FIGURES: Final[tuple[str, ...]] = ("data_up_day_bytes", "data_down_day_bytes")
 
 
 def _clients_blocker(

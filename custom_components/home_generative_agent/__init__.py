@@ -454,14 +454,17 @@ SET_AUTONOMY_LEVEL_SCHEMA = vol.Schema(
 
 SENTINEL_GET_BASELINES_SCHEMA = vol.Schema({})
 
-_ENTITY_ID_RE = r"^[a-z_]+\.[a-z0-9_-]+$"
+# An entity id, or a network counter id (``network.client.<key>.<figure>``)
+# from the baseline step, which the reset must reach as well.
+_ENTITY_ID_RE = r"^(?:[a-z_]+\.[a-z0-9_-]+|network\.[a-z0-9_.-]+)$"
 
 SENTINEL_RESET_BASELINE_SCHEMA = vol.Schema(
     {
         vol.Optional("entity_id"): vol.All(
             cv.string,
             vol.Match(
-                _ENTITY_ID_RE, msg="entity_id must match domain.object_id pattern"
+                _ENTITY_ID_RE,
+                msg="entity_id must match domain.object_id or a network.* counter",
             ),
         ),
     }

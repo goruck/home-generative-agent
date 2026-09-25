@@ -131,7 +131,11 @@ from .rules.ha_sensitive_entity_exposed_without_pin import (
 )
 from .rules.ha_trusted_networks_bypass_login import HaTrustedNetworksBypassLoginRule
 from .rules.ha_webhook_automation_public import HaWebhookAutomationPublicRule
-from .rules.network_client_usage_anomaly import NetworkClientUsageAnomalyRule
+from .rules.network_client_usage_anomaly import (
+    NetworkClientUsageAnomalyRule,
+    hour_metrics,
+    usage_coverage,
+)
 from .rules.network_common import NETWORK_RULE_TYPES
 from .rules.network_guest_client_present import NetworkGuestClientPresentRule
 from .rules.network_public_ip_changed import NetworkPublicIpChangedRule
@@ -223,6 +227,14 @@ _FINAL_SUPPRESSION_REASONS: frozenset[str] = frozenset(
 # Change rules that compare against the engine's posture memory, mapped to
 # the memory keys they read: the value and the entity it was read from (see
 # snapshot/upnp.py), held back together.
+# The counter-baseline read runs on the detection path: bounded so a slow
+# database never holds the cycle (the rule is then listed as not run).
+COUNTER_BASELINE_FETCH_TIMEOUT_S = 5.0
+COUNTER_BASELINES_PARTIAL_NOTE = (
+    "Usage baselines cover {covered} of {reporting} devices reporting today's "
+    "traffic; the others need more samples before they are checked."
+)
+
 _POSTURE_MEMORY_RULES: dict[str, tuple[str, ...]] = {
     NetworkPublicIpChangedRule.rule_id: ("public_ip_key", "public_ip_entity_id"),
     NetworkUpnpPortMappingAddedRule.rule_id: (
@@ -504,6 +516,13 @@ class SentinelEngine:
             rule.rule_id: timedelta(minutes=rule.cooldown_minutes)
             for rule in self._rules
             if rule.cooldown_minutes > 0
+        }
+        # Per-entity cooldown floors: a rule that reports one finding per
+        # device keeps each device quiet on its own, not the whole type.
+        self._rule_entity_cooldown_floors: dict[str, timedelta] = {
+            rule.rule_id: timedelta(minutes=minutes)
+            for rule in self._rules
+            if (minutes := getattr(rule, "entity_cooldown_minutes", 0)) > 0
         }
         # Event-driven triggering — unsubscribe callbacks.
         self._event_unsubscribers: list[Callable[[], None]] = []
@@ -1063,36 +1082,49 @@ class SentinelEngine:
         self, snapshot: FullStateSnapshot, *, record: bool
     ) -> None:
         """
-        Store the network counters as baselines and inject their statistics.
+        Offer the counters to the baseline updater and inject their statistics.
 
-        The updater stores the counters at its own interval; the baselines
-        come back as ``counter_baselines`` with the ``network.counter_baselines``
-        capability, so a rule that needs them is listed as not run, with the
-        reason, until there are enough samples. Either half failing leaves
-        the section as built: a baseline problem is not a reason to skip the
-        rest of the cycle.
+        The offer is a memory hand-off (the updater writes at its own
+        interval; the detection cycle never waits on the database for it).
+        The fetch is bounded to the two hour buckets the usage rule reads
+        and to a short timeout. The ``network.counter_baselines`` capability
+        is granted only when at least one connected client reporting today's
+        traffic has a baseline to compare against, and the rest are counted
+        in a note, so the audit never reads "no findings" over devices whose
+        baselines do not exist yet. Either half failing leaves the section
+        as built.
         """
         section = snapshot.get("network")
         if self._baseline_updater is None or not section:
             return
         counters = section.get("counters") or {}
         if record and counters:
-            try:
-                await self._baseline_updater.async_record_counters(counters)
-            except Exception:  # noqa: BLE001 - the pool, the store
-                self._log_limiter.warning(
-                    "counter_baselines_record",
-                    "Sentinel could not store the network counters as baselines.",
-                )
+            self._baseline_updater.offer_counters(counters)
+        if not any(
+            c.get("connected") and c.get("data_up_day_bytes") is not None
+            for c in section.get("clients") or []
+        ):
+            return
+        now = dt_util.utcnow()
         try:
-            baselines = await self._baseline_updater.async_fetch_counter_baselines()
-        except Exception:  # noqa: BLE001
+            baselines = await asyncio.wait_for(
+                self._baseline_updater.async_fetch_counter_baselines(hour_metrics(now)),
+                timeout=COUNTER_BASELINE_FETCH_TIMEOUT_S,
+            )
+        except (TimeoutError, Exception):  # noqa: BLE001 - the pool, the store
             self._log_limiter.warning(
                 "counter_baselines_fetch",
                 "Sentinel could not read the network counter baselines.",
             )
             return
-        if not baselines:
+        covered, reporting = usage_coverage(section, baselines, now)
+        if reporting and covered < reporting:
+            section.setdefault("notes", []).append(
+                COUNTER_BASELINES_PARTIAL_NOTE.format(
+                    covered=covered, reporting=reporting
+                )
+            )
+        if not covered:
             return
         section["counter_baselines"] = baselines
         section["capabilities"] = sorted(
@@ -1694,6 +1726,10 @@ class SentinelEngine:
         # Posture rules (standing conditions such as a stale token) declare a
         # cooldown floor so they do not re-alert every type-cooldown.
         cooldown_type = max(cooldown_type, self._rule_cooldown_floor(finding.type))
+        cooldown_entity = max(
+            cooldown_entity,
+            self._rule_entity_cooldown_floors.get(finding.type, timedelta(0)),
+        )
 
         # Build suppression kwargs from options.
         suppress_kwargs = _build_suppress_kwargs(self._options, snapshot)

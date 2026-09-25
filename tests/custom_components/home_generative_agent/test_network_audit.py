@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 import yaml
+from homeassistant.util import dt as dt_util
 
 import custom_components.home_generative_agent as hga_component
 from custom_components.home_generative_agent.agent.tools import audit_home_security
@@ -956,13 +957,17 @@ def test_report_markdown_keeps_a_finding_whose_severity_it_does_not_know() -> No
 class _FakeUpdater:
     def __init__(self, baselines: dict[str, dict[str, float]]) -> None:
         self.baselines = baselines
-        self.recorded: list[dict[str, float]] = []
+        self.offered: list[dict[str, float]] = []
+        self.fetched_metrics: list[list[str]] = []
 
-    async def async_record_counters(self, counters: Any) -> bool:
-        self.recorded.append(dict(counters))
-        return True
+    def offer_counters(self, counters: Any) -> int:
+        self.offered.append(dict(counters))
+        return len(counters)
 
-    async def async_fetch_counter_baselines(self) -> dict[str, dict[str, float]]:
+    async def async_fetch_counter_baselines(
+        self, metrics: Any
+    ) -> dict[str, dict[str, float]]:
+        self.fetched_metrics.append(list(metrics))
         return self.baselines
 
     def start(self) -> None:
@@ -972,19 +977,26 @@ class _FakeUpdater:
         return None
 
 
-def _usage_snapshot() -> FullStateSnapshot:
+def _usage_client(key: str, name: str, up: int) -> dict[str, Any]:
+    return {
+        "key": key,
+        "connected": True,
+        "name": name,
+        "data_up_day_bytes": up,
+        "data_down_day_bytes": 100_000_000,
+    }
+
+
+def _usage_snapshot(*clients: dict[str, Any]) -> FullStateSnapshot:
     snapshot = _snapshot()
     section = cast("Any", snapshot)["network"]
-    section["clients"] = [
-        {
-            "key": "3fa2c1b0",
-            "connected": True,
-            "name": "Living room TV",
-            "data_up_day_bytes": 3_200_000_000,
-            "data_down_day_bytes": 100_000_000,
-        }
+    section["clients"] = list(clients) or [
+        _usage_client("3fa2c1b0", "Living room TV", 3_200_000_000)
     ]
-    section["counters"] = {"network.client.3fa2c1b0.data_up_day_bytes": 3.2e9}
+    section["counters"] = {
+        f"network.client.{c['key']}.data_up_day_bytes": float(c["data_up_day_bytes"])
+        for c in section["clients"]
+    }
     section["capabilities"] = sorted(
         {*section["capabilities"], CAP_CLIENTS, CAP_CLIENT_DATA_DAY}
     )
@@ -993,14 +1005,16 @@ def _usage_snapshot() -> FullStateSnapshot:
     return snapshot
 
 
+def _usual_up(key: str, value: float) -> dict[str, dict[str, float]]:
+    hour = dt_util.utcnow().hour
+    return {f"network.client.{key}.data_up_day_bytes": {f"hourly_avg_{hour}": value}}
+
+
 @pytest.mark.asyncio
-async def test_audit_injects_counter_baselines_without_recording(
+async def test_audit_injects_counter_baselines_without_offering(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    hour = NOW.hour
-    updater = _FakeUpdater(
-        {"network.client.3fa2c1b0.data_up_day_bytes": {f"hourly_avg_{hour}": 8e8}}
-    )
+    updater = _FakeUpdater(_usual_up("3fa2c1b0", 8e8))
     engine, _, _, _ = _engine(monkeypatch, _usage_snapshot(), baseline_updater=updater)
     report = await engine.async_audit_network()
     assert report["status"] == "ok"
@@ -1011,19 +1025,108 @@ async def test_audit_injects_counter_baselines_without_recording(
     ]
     assert len(usage) == 1
     assert "Living room TV" in usage[0]["summary"]
-    # The on-demand audit never stores a sample.
-    assert updater.recorded == []
+    # The on-demand audit never hands a sample over; the fetch is bounded to
+    # the two hour buckets the rule reads.
+    assert updater.offered == []
+    hour = dt_util.utcnow().hour
+    assert updater.fetched_metrics == [
+        [f"hourly_avg_{hour}", f"hourly_avg_{(hour + 1) % 24}"]
+    ]
 
 
 @pytest.mark.asyncio
-async def test_cycle_records_counters_and_lists_the_rule_as_waiting_without_baselines(
+async def test_cycle_offers_counters_and_lists_the_rule_as_waiting_without_baselines(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     updater = _FakeUpdater({})
     engine, _, _, _ = _engine(monkeypatch, _usage_snapshot(), baseline_updater=updater)
     await engine._run_once()
-    assert updater.recorded == [{"network.client.3fa2c1b0.data_up_day_bytes": 3.2e9}]
+    assert updater.offered == [{"network.client.3fa2c1b0.data_up_day_bytes": 3.2e9}]
     inactive = engine.run_stats["inactive_rules"]
     assert inactive["network_client_usage_anomaly"] == [CAP_COUNTER_BASELINES]
     assert "baseline collection" in capability_reason(CAP_COUNTER_BASELINES)
     assert "Data Usage (Day)" in capability_reason(CAP_CLIENT_DATA_DAY)
+
+
+@pytest.mark.asyncio
+async def test_counter_baselines_capability_needs_a_covered_device_and_notes_the_rest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A baseline for some other counter is not coverage for the usage check.
+    other = {"network.client_count": {f"hourly_avg_{dt_util.utcnow().hour}": 38.0}}
+    snapshot = _usage_snapshot(
+        _usage_client("a", "TV", 3_200_000_000), _usage_client("b", "Phone", 1)
+    )
+    engine, _, _, _ = _engine(
+        monkeypatch, snapshot, baseline_updater=_FakeUpdater(other)
+    )
+    report = await engine.async_audit_network()
+    assert CAP_COUNTER_BASELINES not in report["capabilities"]
+    assert "network_client_usage_anomaly" in report["checks_not_run"]
+    assert any("cover 0 of 2 devices" in n for n in report["notes"])
+    # One covered device grants the capability; the other is still noted.
+    engine, _, _, _ = _engine(
+        monkeypatch, snapshot, baseline_updater=_FakeUpdater(_usual_up("a", 8e8))
+    )
+    report = await engine.async_audit_network()
+    assert CAP_COUNTER_BASELINES in report["capabilities"]
+    assert any("cover 1 of 2 devices" in n for n in report["notes"])
+
+
+@pytest.mark.asyncio
+async def test_a_slow_or_failing_baseline_read_leaves_the_rule_not_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Hanging(_FakeUpdater):
+        async def async_fetch_counter_baselines(self, metrics: Any) -> Any:
+            msg = "pool closed"
+            raise RuntimeError(msg)
+
+    engine, _, _, _ = _engine(
+        monkeypatch, _usage_snapshot(), baseline_updater=_Hanging({})
+    )
+    report = await engine.async_audit_network()
+    assert report["status"] == "ok"
+    assert CAP_COUNTER_BASELINES not in report["capabilities"]
+
+
+@pytest.mark.asyncio
+async def test_usage_findings_cool_down_per_device_not_per_rule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A benign alert on one device must not hide another device's for a day."""
+    baselines = {**_usual_up("a", 8e8), **_usual_up("b", 8e8), **_usual_up("c", 8e8)}
+    two = _usage_snapshot(
+        _usage_client("a", "TV", 3_200_000_000),
+        _usage_client("b", "NAS", 4_000_000_000),
+    )
+    engine, notifier, _, _ = _engine(
+        monkeypatch, two, baseline_updater=_FakeUpdater(baselines)
+    )
+    await engine._run_once()
+    delivered = [f.evidence["client_key"] for f in notifier.calls]
+    assert delivered == ["a", "b"]
+    # Same devices, next cycle: each is on its own daily cooldown.
+    await engine._run_once()
+    assert len(notifier.calls) == 2
+    # A third device reported later is not held by the first two.
+    three = _usage_snapshot(
+        _usage_client("a", "TV", 3_300_000_000),
+        _usage_client("b", "NAS", 4_100_000_000),
+        _usage_client("c", "Cam", 5_000_000_000),
+    )
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.sentinel.engine."
+        "async_build_full_state_snapshot",
+        _build_returning(three),
+    )
+    await engine._run_once()
+    assert [f.evidence["client_key"] for f in notifier.calls] == ["a", "b", "c"]
+
+
+def _build_returning(snapshot: FullStateSnapshot) -> Any:
+    async def _fake_build(_hass: Any, *, network: Any = None) -> FullStateSnapshot:
+        del network
+        return snapshot
+
+    return _fake_build

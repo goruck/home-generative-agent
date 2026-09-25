@@ -352,10 +352,8 @@ def test_adapter_publishes_clients_and_posture() -> None:
     }
     # No client carries today's traffic: the Activity option is not on.
     assert result.notes == [DATA_USAGE_NOTE]
-    assert result.counters == {
-        f"network.client.{KEY_A}.usage_up_mbps": 0.0,
-        f"network.client.{KEY_A}.usage_down_mbps": 0.0,
-    }
+    # Only today's traffic is baselined; without it there is no counter.
+    assert result.counters == {}
 
 
 def test_adapter_reads_the_client_figures_as_counters() -> None:
@@ -385,12 +383,11 @@ def test_adapter_reads_the_client_figures_as_counters() -> None:
     assert clients[KEY_A]["data_up_day_bytes"] == 250_000_000
     assert clients[KEY_A]["blocked_day"] == 4
     assert clients[KEY_B]["data_up_day_bytes"] == 20
+    # The rates and the blocked count stay on the client; only the two
+    # traffic figures become counters (what the usage rule reads).
     assert result.counters == {
-        f"network.client.{KEY_A}.usage_up_mbps": 1.5,
-        f"network.client.{KEY_A}.usage_down_mbps": 12.25,
         f"network.client.{KEY_A}.data_up_day_bytes": 250_000_000.0,
         f"network.client.{KEY_A}.data_down_day_bytes": 3_000_000_000.0,
-        f"network.client.{KEY_A}.blocked_day": 4.0,
     }
     assert DATA_USAGE_NOTE not in result.notes
     section = merge_adapter_results([result])

@@ -55,7 +55,7 @@ from .models import AnomalyFinding, Severity, build_anomaly_id, hashable_evidenc
 from .power_units import is_power_unit, watts_per_unit
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
     from datetime import datetime
 
     from homeassistant.core import HomeAssistant
@@ -259,12 +259,23 @@ FROM sentinel_baselines
 WHERE sample_count >= %s
 """
 
-# The network counters only (ids under NETWORK_COUNTER_PREFIX).
+# The network counters only (ids under NETWORK_COUNTER_PREFIX), and only
+# the metrics the caller reads: the rule compares two hour buckets, not the
+# 25 rows a counter carries.
 _FETCH_COUNTERS_SQL = """
 SELECT entity_id, metric, value
 FROM sentinel_baselines
-WHERE entity_id LIKE %s AND sample_count >= %s
+WHERE entity_id LIKE %s AND metric = ANY(%s) AND sample_count >= %s
 """
+
+# Counter rows of clients that left: a row not refreshed for this long
+# belongs to a key the router no longer reports (a visitor, a rotated
+# address), and nothing else would ever delete it.
+_PRUNE_COUNTERS_SQL = """
+DELETE FROM sentinel_baselines
+WHERE entity_id LIKE %s AND updated_at < NOW() - make_interval(days => %s)
+"""
+COUNTER_ROW_RETENTION_DAYS = 30
 
 # Rich fetch for the sentinel_get_baselines service — returns all columns.
 _FETCH_FULL_SQL = """
@@ -338,6 +349,7 @@ SELECT
     COUNT(*) FILTER (WHERE metric = %s AND sample_count < %s)  AS rules_waiting,
     MAX(updated_at)                                                     AS latest_update
 FROM sentinel_baselines
+WHERE entity_id NOT LIKE 'network.%%'
 """
 
 
@@ -373,10 +385,10 @@ class SentinelBaselineUpdater:
         # (Welford's accumulator for variance).  Populated on async_initialize()
         # from DB values and updated on every _update_baselines() call.
         self._dow_state: dict[str, tuple[float, float, int]] = {}
-        # When the network counters were last stored (see
-        # ``async_record_counters``): the engine offers them every cycle, the
-        # updater keeps them to its own interval.
-        self._last_counter_write: datetime | None = None
+        # The network counters the engine offered most recently (see
+        # ``offer_counters``); written by the run loop at its own interval.
+        self._offered_counters: dict[str, float] = {}
+        self._last_counter_prune: datetime | None = None
 
     # ---------------------------------------------------------------------- #
     # Lifecycle
@@ -519,6 +531,7 @@ class SentinelBaselineUpdater:
 
                 snapshot = await async_build_full_state_snapshot(self._hass)
                 await self._update_baselines(snapshot)
+                await self._write_offered_counters()
             except (ValueError, TypeError, KeyError, asyncio.CancelledError):
                 raise
             except Exception:
@@ -536,35 +549,16 @@ class SentinelBaselineUpdater:
     # Baseline writes
     # ---------------------------------------------------------------------- #
 
-    async def async_record_counters(self, counters: Mapping[str, Any]) -> bool:
+    def offer_counters(self, counters: Mapping[str, Any]) -> int:
         """
-        Store the network section's counters as baseline samples.
+        Take the network section's counters for the next baseline write.
 
-        The engine offers the counters every detection cycle; they are kept
-        to the updater's own interval so a counter accumulates samples at
-        the same pace as an entity. Only ``network.`` ids are accepted (the
-        per-client ones carry a pseudonymized key, never an address), and
-        none of them raises the per-entity establishment or drift notices:
-        dozens of clients would each announce themselves. Returns True when
-        samples were written.
+        The engine offers them every detection cycle; nothing is written
+        here (the detection cycle must not wait on the database), the run
+        loop stores the latest offer at its own interval next to the
+        entities. Only ``network.`` ids are kept (the per-client ones carry a
+        pseudonymized key, never an address). Returns how many were kept.
         """
-        if self._stopped:
-            return False
-        interval = timedelta(
-            minutes=max(
-                1,
-                _coerce_int(
-                    self._options.get(CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES),
-                    default=RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
-                ),
-            )
-        )
-        now = dt_util.utcnow()
-        if (
-            self._last_counter_write is not None
-            and now - self._last_counter_write < interval
-        ):
-            return False
         values: dict[str, float] = {}
         for counter_id, raw in counters.items():
             if not str(counter_id).startswith(NETWORK_COUNTER_PREFIX):
@@ -574,11 +568,37 @@ class SentinelBaselineUpdater:
             value = float(raw)
             if math.isfinite(value):
                 values[str(counter_id)] = value
-        if not values:
-            return False
-        self._last_counter_write = now
-        await self._write_samples(values, None)
-        return True
+        self._offered_counters = values
+        return len(values)
+
+    async def _write_offered_counters(self) -> None:
+        """
+        Store the counters offered since the last write, then prune the old.
+
+        No establishment or drift notice (dozens of clients would each
+        announce themselves) and no day-of-week rows: the usage rule reads
+        the hourly profile, and the weekly rows would be 336 more per
+        counter for nothing. Rows of clients that left expire after
+        ``COUNTER_ROW_RETENTION_DAYS`` (once a day).
+        """
+        values = self._offered_counters
+        if values:
+            await self._write_samples(values, None, weekly=False)
+        now = dt_util.utcnow()
+        if self._last_counter_prune is not None and (
+            now - self._last_counter_prune < timedelta(days=1)
+        ):
+            return
+        self._last_counter_prune = now
+        try:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    _PRUNE_COUNTERS_SQL,
+                    (f"{NETWORK_COUNTER_PREFIX}%", COUNTER_ROW_RETENTION_DAYS),
+                )
+                await conn.commit()
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("Counter baseline prune failed; will retry tomorrow.")
 
     async def _update_baselines(self, snapshot: FullStateSnapshot) -> None:
         """Upsert rolling stats for all numeric entities in *snapshot*."""
@@ -604,13 +624,18 @@ class SentinelBaselineUpdater:
         await self._write_samples(entity_values, snapshot)
 
     async def _write_samples(  # noqa: PLR0912, PLR0915
-        self, entity_values: dict[str, float], snapshot: FullStateSnapshot | None
+        self,
+        entity_values: dict[str, float],
+        snapshot: FullStateSnapshot | None,
+        *,
+        weekly: bool = True,
     ) -> None:
         """
         Upsert rolling, hourly, and day-of-week stats for *entity_values*.
 
         *snapshot* supplies the names for the establishment and drift
         notices; None (the network counters) means no notice is raised.
+        *weekly* False skips the day-of-week rows.
         """
         now = dt_util.utcnow()
         # Use local time for DOW bucket assignment so that weekday patterns align with
@@ -634,7 +659,7 @@ class SentinelBaselineUpdater:
             self._options.get(CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT),
             default=RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
         )
-        weekly_patterns = bool(
+        weekly_patterns = weekly and bool(
             self._options.get(
                 CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS,
                 RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS,
@@ -1189,14 +1214,18 @@ class SentinelBaselineUpdater:
         return result
 
     async def async_fetch_counter_baselines(
-        self, min_samples: int | None = None
+        self, metrics: Sequence[str], min_samples: int | None = None
     ) -> dict[str, dict[str, float]]:
         """
         Return ``{counter id: {metric: value}}`` for the network counters.
 
-        A separate, prefix-bounded query: the engine calls it every cycle,
-        and the all-entities fetch is only paid when dynamic rules need it.
+        Bounded to the ids under ``NETWORK_COUNTER_PREFIX`` and to *metrics*:
+        the engine calls it every cycle for the two hour buckets the usage
+        rule reads, and the all-entities fetch is only paid when dynamic
+        rules need it.
         """
+        if not metrics:
+            return {}
         if min_samples is None:
             min_samples = _coerce_int(
                 self._options.get(CONF_SENTINEL_BASELINE_MIN_SAMPLES),
@@ -1205,7 +1234,8 @@ class SentinelBaselineUpdater:
         try:
             async with self._pool.connection() as conn, conn.cursor() as cur:
                 await cur.execute(
-                    _FETCH_COUNTERS_SQL, (f"{NETWORK_COUNTER_PREFIX}%", min_samples)
+                    _FETCH_COUNTERS_SQL,
+                    (f"{NETWORK_COUNTER_PREFIX}%", list(metrics), min_samples),
                 )
                 rows = await cur.fetchall()
         except Exception:  # noqa: BLE001

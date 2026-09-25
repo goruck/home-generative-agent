@@ -4,17 +4,17 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from custom_components.home_generative_agent.sentinel.baseline import (
     METRIC_HOURLY_PREFIX,
 )
 from custom_components.home_generative_agent.sentinel.rules.network_client_usage_anomaly import (
+    USAGE_ENTITY_COOLDOWN_MINUTES,
     NetworkClientUsageAnomalyRule,
+    hour_metrics,
     human_bytes,
-)
-from custom_components.home_generative_agent.sentinel.rules.network_common import (
-    POSTURE_COOLDOWN_MINUTES,
+    usage_coverage,
 )
 from custom_components.home_generative_agent.snapshot.network import (
     CAP_CLIENT_DATA_DAY,
@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 
 NOW = datetime(2026, 9, 25, 14, 30, tzinfo=UTC)
 HOUR = f"{METRIC_HOURLY_PREFIX}14"
+NEXT_HOUR = f"{METRIC_HOURLY_PREFIX}15"
 MB = 1_000_000
 
 
@@ -91,8 +92,10 @@ def _snapshot(
     )
 
 
-def _usual(key: str, figure: str, value: float) -> dict[str, dict[str, float]]:
-    return {client_counter_id(key, figure): {HOUR: value}}
+def _usual(
+    key: str, figure: str, value: float, metric: str = HOUR
+) -> dict[str, dict[str, float]]:
+    return {client_counter_id(key, figure): {metric: value}}
 
 
 def _only(findings: list[AnomalyFinding]) -> AnomalyFinding:
@@ -100,13 +103,26 @@ def _only(findings: list[AnomalyFinding]) -> AnomalyFinding:
     return findings[0]
 
 
-def test_rule_declares_its_capabilities_and_the_daily_floor() -> None:
+def test_rule_declares_its_capabilities_and_a_per_device_daily_cooldown() -> None:
     assert NetworkClientUsageAnomalyRule.requires == {
         CAP_CLIENTS,
         CAP_CLIENT_DATA_DAY,
         CAP_COUNTER_BASELINES,
     }
-    assert NetworkClientUsageAnomalyRule.cooldown_minutes == POSTURE_COOLDOWN_MINUTES
+    # Per device, not per type: one device's alert never hides another's.
+    assert NetworkClientUsageAnomalyRule.cooldown_minutes == 0
+    assert NetworkClientUsageAnomalyRule.entity_cooldown_minutes == (
+        USAGE_ENTITY_COOLDOWN_MINUTES
+    )
+
+
+def test_hour_metrics_are_this_hour_and_the_next_in_utc() -> None:
+    assert hour_metrics(NOW) == (HOUR, NEXT_HOUR)
+    late = datetime(2026, 9, 25, 23, 50, tzinfo=UTC)
+    assert hour_metrics(late) == (
+        f"{METRIC_HOURLY_PREFIX}23",
+        f"{METRIC_HOURLY_PREFIX}0",
+    )
 
 
 def test_upload_far_above_usual_is_medium_with_figures() -> None:
@@ -118,22 +134,20 @@ def test_upload_far_above_usual_is_medium_with_figures() -> None:
     assert finding.type == "network_client_usage_anomaly"
     assert finding.severity == "medium"
     assert finding.is_sensitive
-    assert finding.evidence["client_keys"] == ["a"]
-    assert finding.evidence["directions"] == ["a:upload"]
-    assert finding.evidence["figures"] == [
-        {
-            "key": "a",
-            "direction": "upload",
-            "today_bytes": 3_200 * MB,
-            "usual_bytes": 800 * MB,
-        }
-    ]
+    assert finding.evidence["client_key"] == "a"
+    assert finding.evidence["direction"] == "upload"
+    assert finding.evidence["today_bytes"] == 3_200 * MB
+    assert finding.evidence["usual_bytes"] == 800 * MB
     assert finding.evidence["summary"] == (
-        "A device on the network has moved far more data than usual for this "
-        "hour: TV a (wireless) has uploaded 3.2 GB so far today, about 4.0x its "
-        "usual 800 MB."
+        "TV a (wireless) has uploaded 3.2 GB so far today, about 4.0x its usual "
+        "800 MB by this hour."
     )
-    assert finding.triggering_entities == ["device_tracker.a"]
+    # The per-device pseudo entity carries the daily cooldown; the tracker
+    # lets exclusions and snoozes address the device.
+    assert finding.triggering_entities == [
+        "network.client.a.upload",
+        "device_tracker.a",
+    ]
     assert all("." not in a for a in finding.suggested_actions)
 
 
@@ -171,38 +185,56 @@ def test_a_device_that_usually_moves_nothing_by_now() -> None:
         [_client("a", up=600 * MB)], _usual("a", "data_up_day_bytes", 0.0)
     )
     finding = _only(rule.evaluate(snapshot))
-    assert "when it usually has moved nothing by now" in finding.evidence["summary"]
+    assert (
+        "when it usually has moved nothing by this hour"
+        in (finding.evidence["summary"])
+    )
 
 
-def test_no_baseline_for_this_hour_no_figure_or_offline_means_no_finding() -> None:
+def test_usual_is_the_larger_of_this_hour_and_the_next() -> None:
+    # A nightly backup that always lands at :50 is never in this hour's
+    # samples (taken at :00, :15, :30, :45) but is in the next hour's.
     rule = NetworkClientUsageAnomalyRule()
-    other_hour = {client_counter_id("a", "data_up_day_bytes"): {"hourly_avg_3": 1.0}}
+    baselines = {
+        client_counter_id("a", "data_up_day_bytes"): {HOUR: 0.0, NEXT_HOUR: 1_100 * MB}
+    }
+    assert rule.evaluate(_snapshot([_client("a", up=1_000 * MB)], baselines)) == []
+    finding = _only(rule.evaluate(_snapshot([_client("a", up=5_000 * MB)], baselines)))
+    assert finding.evidence["usual_bytes"] == 1_100 * MB
+    # The next hour alone is enough too (the current one not yet sampled).
+    only_next = _usual("a", "data_up_day_bytes", 800 * MB, NEXT_HOUR)
+    assert len(rule.evaluate(_snapshot([_client("a", up=3_200 * MB)], only_next))) == 1
+
+
+def test_no_baseline_for_these_hours_no_figure_or_offline_means_no_finding() -> None:
+    rule = NetworkClientUsageAnomalyRule()
+    other_hour = _usual("a", "data_up_day_bytes", 1.0, "hourly_avg_3")
     assert rule.evaluate(_snapshot([_client("a", up=3_200 * MB)], other_hour)) == []
     assert rule.evaluate(_snapshot([_client("a", up=3_200 * MB)], {})) == []
     usual = _usual("a", "data_up_day_bytes", 800 * MB)
     assert rule.evaluate(_snapshot([_client("a")], usual)) == []
     offline = _client("a", up=3_200 * MB, connected=False)
     assert rule.evaluate(_snapshot([offline], usual)) == []
-    garbled = {client_counter_id("a", "data_up_day_bytes"): {HOUR: float("nan")}}
+    garbled = _usual("a", "data_up_day_bytes", float("nan"))
     assert rule.evaluate(_snapshot([_client("a", up=3_200 * MB)], garbled)) == []
 
 
-def test_identity_is_the_client_and_direction_set_not_the_figures() -> None:
+def test_identity_is_the_device_and_direction_not_the_figures() -> None:
     rule = NetworkClientUsageAnomalyRule()
     usual = _usual("a", "data_up_day_bytes", 800 * MB)
     first = _only(rule.evaluate(_snapshot([_client("a", up=3_200 * MB)], usual)))
     later = _only(rule.evaluate(_snapshot([_client("a", up=4_800 * MB)], usual)))
     assert first.anomaly_id == later.anomaly_id
+    # Upload and download are two findings, each with its own identity.
     both = {**usual, **_usual("a", "data_down_day_bytes", 100 * MB)}
-    two = _only(
-        rule.evaluate(_snapshot([_client("a", up=3_200 * MB, down=2_000 * MB)], both))
-    )
-    assert two.anomaly_id != first.anomaly_id
-    assert two.evidence["directions"] == ["a:download", "a:upload"]
-    assert two.evidence["client_keys"] == ["a"]
+    two = rule.evaluate(_snapshot([_client("a", up=3_200 * MB, down=2_000 * MB)], both))
+    assert [f.evidence["direction"] for f in two] == ["upload", "download"]
+    assert two[0].anomaly_id == first.anomaly_id
+    assert two[1].anomaly_id != first.anomaly_id
+    assert two[1].triggering_entities[0] == "network.client.a.download"
 
 
-def test_several_devices_in_one_finding_and_exclusions() -> None:
+def test_one_finding_per_device_and_exclusions() -> None:
     calls: list[tuple[str, str]] = []
 
     def excluded(entity_id: str, rule_id: str) -> bool:
@@ -220,12 +252,31 @@ def test_several_devices_in_one_finding_and_exclusions() -> None:
         _client("b", up=3_200 * MB),
         _client("c", down=3_200 * MB),
     ]
-    finding = _only(rule.evaluate(_snapshot(clients, baselines)))
-    assert finding.evidence["client_keys"] == ["a", "c"]
+    findings = rule.evaluate(_snapshot(clients, baselines))
+    assert [f.evidence["client_key"] for f in findings] == ["a", "c"]
+    assert [f.severity for f in findings] == ["medium", "low"]
     assert ("device_tracker.b", "network_client_usage_anomaly") in calls
-    assert finding.evidence["summary"].startswith(
-        "Devices on the network have moved far more data than usual for this hour: "
-    )
+
+
+def test_usage_coverage_counts_devices_with_a_readable_baseline() -> None:
+    section = cast(
+        "Any",
+        _snapshot(
+            [
+                _client("a", up=1),
+                _client("b", up=1),
+                _client("c", up=1, connected=False),
+                _client("d"),  # no traffic figure
+            ],
+            None,
+        ),
+    )["network"]
+    baselines = {
+        **_usual("a", "data_up_day_bytes", 5.0),
+        **_usual("b", "data_down_day_bytes", 5.0, "hourly_avg_3"),
+    }
+    assert usage_coverage(section, baselines, NOW) == (1, 2)
+    assert usage_coverage(section, {}, NOW) == (0, 2)
 
 
 def test_human_bytes() -> None:

@@ -22,18 +22,16 @@ from custom_components.home_generative_agent.snapshot.network import (
 )
 
 from .network_common import (
-    POSTURE_COOLDOWN_MINUTES,
     client_excluded,
     clients,
-    listed,
     make_finding,
     network_section,
-    noun,
 )
 from .network_unknown_device_joined import describe_client
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Iterable, Mapping
+    from datetime import datetime
     from typing import Any
 
     from custom_components.home_generative_agent.sentinel.models import (
@@ -42,13 +40,80 @@ if TYPE_CHECKING:
     )
     from custom_components.home_generative_agent.snapshot.schema import (
         FullStateSnapshot,
+        NetworkSnapshot,
     )
 
 # (direction word, client figure) for the two counters the rule compares.
-_DIRECTIONS: tuple[tuple[str, str], ...] = (
+DIRECTIONS: tuple[tuple[str, str], ...] = (
     ("upload", "data_up_day_bytes"),
     ("download", "data_down_day_bytes"),
 )
+# Minutes a device stays reported before it is judged again (the figure only
+# grows until midnight); per device and direction, not per rule type, so one
+# device's alert never hides another's.
+USAGE_ENTITY_COOLDOWN_MINUTES = 24 * 60
+
+
+def hour_metrics(now: datetime) -> tuple[str, str]:
+    """
+    Return the two hourly metrics "usual by now" is read from.
+
+    The updater keys the hourly profile by UTC hour. The current bucket
+    holds samples taken earlier in past hours like this one, so a transfer
+    that always lands late in the hour (a nightly backup at :50) would never
+    be in it; the next bucket is, and the figure only grows within a day, so
+    the larger of the two is "what this device had usually moved by the end
+    of this hour".
+    """
+    hour = dt_util.as_utc(now).hour
+    return (
+        f"{METRIC_HOURLY_PREFIX}{hour}",
+        f"{METRIC_HOURLY_PREFIX}{(hour + 1) % 24}",
+    )
+
+
+def usual_by_now(
+    baselines: Mapping[str, Mapping[str, float]],
+    key: str,
+    figure: str,
+    metrics: Iterable[str],
+) -> float | None:
+    """Return the baseline figure for *key*'s *figure*, or None without one."""
+    stats = baselines.get(client_counter_id(key, figure)) or {}
+    values = [
+        float(v)
+        for m in metrics
+        if (v := stats.get(m)) is not None and math.isfinite(float(v)) and v >= 0
+    ]
+    return max(values) if values else None
+
+
+def usage_coverage(
+    section: NetworkSnapshot,
+    baselines: Mapping[str, Mapping[str, float]],
+    now: datetime,
+) -> tuple[int, int]:
+    """
+    Return ``(covered, reporting)`` connected clients that report today's traffic.
+
+    *reporting* is how many there are, *covered* how many of them have a
+    baseline the rule can read now. The engine publishes the rule's
+    capability only when at least one is covered, and notes the rest, so
+    "no findings" is never said over devices whose baselines do not exist
+    yet.
+    """
+    metrics = hour_metrics(now)
+    reporting = covered = 0
+    for client in section.get("clients") or []:
+        if not client.get("connected") or client.get("data_up_day_bytes") is None:
+            continue
+        reporting += 1
+        if any(
+            usual_by_now(baselines, str(client["key"]), figure, metrics) is not None
+            for _direction, figure in DIRECTIONS
+        ):
+            covered += 1
+    return covered, reporting
 
 
 def human_bytes(count: float) -> str:
@@ -70,20 +135,25 @@ class NetworkClientUsageAnomalyRule:
     eero reports each client's cumulative download and upload for the day.
     The baseline updater keeps an hourly profile of those figures per client
     (``network.client.<key>.data_*_day_bytes``, keyed by the pseudonymized
-    key), so "usual" means what this device had typically moved by this
-    hour. A device is reported when it exceeds that by the threshold
-    percentage AND by at least the byte floor: an idle device going from
-    3 MB to 30 MB is a multiple but not news, a TV going from 800 MB to
-    3 GB is. Upload is medium (a device sending a lot is the shape of a
-    compromise), download low.
+    key), so "usual" means what this device had typically moved by the end
+    of this hour (see ``hour_metrics``). A device is reported when it
+    exceeds that by the threshold percentage AND by at least the byte
+    floor: an idle device going from 3 MB to 30 MB is a multiple but not
+    news, a TV going from 800 MB to 3 GB is. Upload is medium (a device
+    sending a lot is the shape of a compromise), download low.
 
-    One aggregated finding per run, at most once a day (the standing-
-    condition cooldown floor): the figures only grow until midnight.
+    One finding per device and direction, each with its own identity and
+    a one-day cooldown on that identity (``entity_cooldown_minutes``, keyed
+    by a per-device pseudo entity), rather than one aggregated finding
+    under the rule-type floor: a benign download alert on one device must
+    not hide an upload alert on another for a day, and a device that goes
+    from downloading to uploading is a new finding.
     """
 
     rule_id = "network_client_usage_anomaly"
     requires = frozenset({CAP_CLIENTS, CAP_CLIENT_DATA_DAY, CAP_COUNTER_BASELINES})
-    cooldown_minutes = POSTURE_COOLDOWN_MINUTES
+    cooldown_minutes = 0
+    entity_cooldown_minutes = USAGE_ENTITY_COOLDOWN_MINUTES
 
     def __init__(
         self,
@@ -104,7 +174,7 @@ class NetworkClientUsageAnomalyRule:
         current = client.get(figure)
         if isinstance(current, bool) or not isinstance(current, (int, float)):
             return None
-        if usual is None or not math.isfinite(usual) or usual < 0:
+        if usual is None or not math.isfinite(float(current)):
             return None
         if float(current) - usual < self._min_excess:
             return None
@@ -113,74 +183,61 @@ class NetworkClientUsageAnomalyRule:
         return float(current), usual
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
-        """Return one finding naming every client far above its usual today."""
+        """Return one finding per client and direction far above its usual."""
         section = network_section(snapshot)
         if section is None:
             return []
         baselines = section.get("counter_baselines") or {}
         now = dt_util.parse_datetime(snapshot["generated_at"]) or dt_util.utcnow()
-        # The updater keys the hourly profile by UTC hour.
-        hour_metric = f"{METRIC_HOURLY_PREFIX}{dt_util.as_utc(now).hour}"
-        hits: list[tuple[dict[str, Any], str, float, float]] = []
+        metrics = hour_metrics(now)
+        findings: list[AnomalyFinding] = []
         for client in clients(snapshot):
             if not client.get("connected") or client_excluded(
                 client, self.rule_id, self._is_entity_excluded
             ):
                 continue
-            for direction, figure in _DIRECTIONS:
-                stats = baselines.get(client_counter_id(str(client["key"]), figure))
-                usual = (stats or {}).get(hour_metric)
+            key = str(client["key"])
+            for direction, figure in DIRECTIONS:
+                usual = usual_by_now(baselines, key, figure, metrics)
                 excess = self._excess(client, figure, usual)
                 if excess is not None:
-                    hits.append((client, direction, *excess))
-        if not hits:
-            return []
-        severity: Severity = (
-            "medium" if any(d == "upload" for _c, d, _cur, _u in hits) else "low"
+                    findings.append(self._finding(client, direction, *excess))
+        return findings
+
+    def _finding(
+        self, client: Mapping[str, Any], direction: str, current: float, usual: float
+    ) -> AnomalyFinding:
+        key = str(client["key"])
+        severity: Severity = "medium" if direction == "upload" else "low"
+        return make_finding(
+            self.rule_id,
+            severity=severity,
+            evidence={"client_key": key, "direction": direction},
+            display={
+                "name": describe_client(client),
+                "today_bytes": int(current),
+                "usual_bytes": int(usual),
+            },
+            summary=f"{self._describe(client, direction, current, usual)}.",
+            suggested_actions=[
+                (
+                    "If you do not expect this, check what the device is doing "
+                    "and block it in your router app"
+                ),
+                "Open the device's insights in the eero app to see where it went",
+            ],
+            # The per-device pseudo entity carries the daily cooldown; the
+            # tracker, when there is one, lets per-rule exclusions and
+            # snoozes address the device the way the other client rules do.
+            triggering_entities=[
+                client_counter_id(key, direction),
+                *(
+                    [str(client["tracker_entity_id"])]
+                    if client.get("tracker_entity_id")
+                    else []
+                ),
+            ],
         )
-        names = [self._describe(*hit) for hit in hits]
-        count = len({c["key"] for c, *_rest in hits})
-        return [
-            make_finding(
-                self.rule_id,
-                severity=severity,
-                evidence={
-                    "client_keys": sorted({c["key"] for c, *_rest in hits}),
-                    "directions": sorted(f"{c['key']}:{d}" for c, d, *_r in hits),
-                },
-                display={
-                    "names": names,
-                    "figures": [
-                        {
-                            "key": c["key"],
-                            "direction": d,
-                            "today_bytes": int(cur),
-                            "usual_bytes": int(usual),
-                        }
-                        for c, d, cur, usual in hits
-                    ],
-                },
-                summary=(
-                    f"{noun(count, 'A device', 'Devices')} on the network "
-                    f"{'has' if count == 1 else 'have'} moved far more data than "
-                    f"usual for this hour: {listed(names)}."
-                ),
-                suggested_actions=[
-                    (
-                        "If you do not expect this, check what the device is doing "
-                        "and block it in your router app"
-                    ),
-                    "Open the device's insights in the eero app to see where it went",
-                ],
-                triggering_entities=sorted(
-                    {
-                        str(c["tracker_entity_id"])
-                        for c, *_rest in hits
-                        if c.get("tracker_entity_id")
-                    }
-                ),
-            )
-        ]
 
     @staticmethod
     def _describe(
@@ -190,11 +247,11 @@ class NetworkClientUsageAnomalyRule:
         if usual <= 0:
             return (
                 f"{describe_client(client)} has {verb} {human_bytes(current)} so far "
-                "today, when it usually has moved nothing by now"
+                "today, when it usually has moved nothing by this hour"
             )
         ratio = current / usual
         times = f"{ratio:.1f}" if ratio < 10 else f"{ratio:.0f}"  # noqa: PLR2004
         return (
             f"{describe_client(client)} has {verb} {human_bytes(current)} so far "
-            f"today, about {times}x its usual {human_bytes(usual)}"
+            f"today, about {times}x its usual {human_bytes(usual)} by this hour"
         )

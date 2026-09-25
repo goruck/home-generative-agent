@@ -199,7 +199,7 @@ _CAPABILITY_REASONS: tuple[tuple[str, str], ...] = (
         CAP_COUNTER_BASELINES,
         (
             "needs baseline collection turned on in the Sentinel settings and a "
-            "few days of samples for the network counters"
+            "few days of samples for a device's traffic at this hour"
         ),
     ),
     (
