@@ -51,7 +51,10 @@ from custom_components.home_generative_agent.const import (
     SNOOZE_PERMANENT,
 )
 from custom_components.home_generative_agent.core.utils import extract_final
-from custom_components.home_generative_agent.sentinel.models import enrolled_people
+from custom_components.home_generative_agent.sentinel.models import (
+    enrolled_people,
+    trust_device_ids,
+)
 from custom_components.home_generative_agent.sentinel.notifier_messages import (
     notif_msg,
 )
@@ -113,7 +116,13 @@ _BATCH_FLUSH_DELAY_SECS = 30
 # Per-finding cooldown: suppress repeated notifications for the same anomaly.
 _FINDING_COOLDOWN_SECS = 1800  # 30 minutes
 
-# Findings whose primary button records their devices as trusted.
+# Findings whose primary button records their devices as trusted. Each
+# aggregates every device it found into one finding, and one tap trusts every
+# id the finding carries while the push shows 220 characters: the button is
+# offered only when the finding names exactly one device (a field test
+# trusted an unidentified client together with the laptop the owner meant).
+# With several devices the primary slot stays empty rather than falling back
+# to Ask Agent, which cannot trust anything; the summary names the service.
 _TRUST_DEVICE_TYPES = frozenset(
     {
         "radio_new_device_joined",
@@ -122,19 +131,22 @@ _TRUST_DEVICE_TYPES = frozenset(
     }
 )
 
-# Of those, the types that aggregate standing clients: one tap trusts every
-# device the finding carries, and the push shows 220 characters, so the button
-# is offered only when the finding names exactly one device.
-_TRUST_ONE_DEVICE_TYPES = frozenset({"network_guest_client_present"})
-
 
 def _offers_trust(finding: AnomalyFinding) -> bool:
     """Return True when the finding's primary button is Trust device."""
-    if finding.type not in _TRUST_DEVICE_TYPES:
-        return False
-    if finding.type in _TRUST_ONE_DEVICE_TYPES:
-        return len(finding.evidence.get("device_ids") or []) == 1
-    return True
+    return finding.type in _TRUST_DEVICE_TYPES and len(trust_device_ids(finding)) == 1
+
+
+def _trust_hint(finding: AnomalyFinding, hass: HomeAssistant | None) -> str | None:
+    """
+    Return the "trust them with the service" line for a multi-device finding.
+
+    The suggested actions are never rendered into a notification (they only
+    pick the button), so the pointer has to be part of the body.
+    """
+    if finding.type in _TRUST_DEVICE_TYPES and len(trust_device_ids(finding)) > 1:
+        return notif_msg(hass, "trust_several")
+    return None
 
 
 _SNOOZE_VERBS = frozenset(
@@ -647,7 +659,10 @@ def _build_actions(finding: AnomalyFinding) -> list[dict[str, Any]]:
                 "title": "Trust device",
             }
         )
-    elif finding.suggested_actions:
+    elif finding.suggested_actions and finding.type not in _TRUST_DEVICE_TYPES:
+        # A trust finding naming several devices gets no primary button at
+        # all (see _TRUST_DEVICE_TYPES); every other sensitive finding may
+        # be handed to the agent.
         if finding.is_sensitive:
             actions.append(
                 {
@@ -1277,7 +1292,12 @@ def _deterministic_mobile_message(finding: AnomalyFinding) -> str | None:
     if finding.type == "appliance_power_duration":
         return _appliance_power_duration_mobile_message(finding)
     if (summary := _network_summary(finding)) is not None:
-        return summary[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
+        hint = _trust_hint(finding, None)
+        if hint is None:
+            return summary[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
+        # The names come first and are cut; the pointer must survive the cut.
+        room = MAX_MOBILE_MESSAGE_CHARS - len(hint) - 1
+        return f"{summary[:room].rstrip()} {hint}"
     formatter = _TEMPLATE_MOBILE_FORMATTERS.get(
         str(finding.evidence.get("template_id") or "")
     )
@@ -1372,7 +1392,9 @@ def _persistent_message(
     # the summary names the token, port, or account, and a paraphrase built
     # from attacker-influenced evidence could drop or reshape it.
     if (summary := _network_summary(finding)) is not None:
-        return escape_markdown(summary)
+        hint = _trust_hint(finding, hass)
+        text = escape_markdown(summary)
+        return f"{text}\n\n{escape_markdown(hint)}" if hint else text
     if explanation:
         text = _normalize_text(explanation)
         if text:

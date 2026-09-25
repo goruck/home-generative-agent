@@ -6,6 +6,10 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from custom_components.home_generative_agent.sentinel.rules.network_common import (
+    TRUST_ONE_ACTION,
+    TRUST_SEVERAL_ACTION,
+)
 from custom_components.home_generative_agent.sentinel.rules.network_unknown_device_joined import (
     NetworkUnknownDeviceJoinedRule,
     describe_client,
@@ -181,7 +185,10 @@ def test_identity_display_and_actions() -> None:
         "Device b (Apple, wireless, 192.168.1.23)."
     )
     assert first.is_sensitive
-    assert first.suggested_actions[-1] == "Tap Trust device if you recognize it"
+    # Two devices: no Trust button; the notifier appends the service hint.
+    assert first.suggested_actions[-1] == TRUST_SEVERAL_ACTION
+    alone = _only(rule.evaluate(_snapshot([_client("a")], ["a"])))
+    assert alone.suggested_actions[-1] == TRUST_ONE_ACTION
     assert all("." not in action for action in first.suggested_actions)
     assert first.triggering_entities == ["device_tracker.a", "device_tracker.b"]
 

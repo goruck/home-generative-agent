@@ -857,6 +857,51 @@ def _trust_setup() -> tuple[ActionHandler, _TrustInventory, DummyAuditStore]:
 
 
 @pytest.mark.asyncio
+async def test_trust_action_refuses_a_finding_that_names_several_devices() -> None:
+    # The button is offered for one device only; a tap naming several can
+    # only come from a notification built before that rule.
+    handler, inventory, audit = _trust_setup()
+    handler.register_finding(
+        AnomalyFinding(
+            anomaly_id="new-2",
+            type="network_unknown_device_joined",
+            severity="medium",
+            confidence=0.9,
+            triggering_entities=[],
+            evidence={"device_ids": ["router:a", "router:b"], "summary": "x"},
+            suggested_actions=[],
+            is_sensitive=True,
+        )
+    )
+    await handler.handle_action(f"{ACTION_PREFIX}trust_new-2", {}, user_id="admin")
+    assert inventory.calls == []
+    assert audit.updates[0]["outcome"] == {
+        "status": "several_devices",
+        "device_count": 2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_trust_action_on_a_finding_with_no_devices_trusts_nothing() -> None:
+    handler, inventory, audit = _trust_setup()
+    handler.register_finding(
+        AnomalyFinding(
+            anomaly_id="new-3",
+            type="radio_new_device_joined",
+            severity="low",
+            confidence=0.9,
+            triggering_entities=[],
+            evidence={"device_ids": [None, 7], "summary": "x"},
+            suggested_actions=[],
+            is_sensitive=True,
+        )
+    )
+    await handler.handle_action(f"{ACTION_PREFIX}trust_new-3", {}, user_id="admin")
+    assert inventory.calls == []
+    assert audit.updates[0]["outcome"] == {"status": "no_devices", "device_count": 0}
+
+
+@pytest.mark.asyncio
 async def test_trust_action_marks_devices_trusted_for_admin() -> None:
     handler, inventory, audit = _trust_setup()
     await handler.handle_action(f"{ACTION_PREFIX}trust_new-1", {}, user_id="admin")

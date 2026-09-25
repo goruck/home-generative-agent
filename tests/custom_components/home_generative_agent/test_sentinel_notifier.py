@@ -37,6 +37,7 @@ from custom_components.home_generative_agent.sentinel.notifier import (
     _friendly_type,
     _is_power_class_evidence,
     _mobile_message,
+    _persistent_message,
     _redact_if_sensitive,
 )
 from custom_components.home_generative_agent.sentinel.suppression import (
@@ -2662,26 +2663,75 @@ def test_build_actions_trust_device_is_primary_for_new_radio_devices() -> None:
     assert len(actions) == 4
 
 
-def test_guest_client_trust_button_only_when_one_device_is_named() -> None:
+@pytest.mark.parametrize(
+    "finding_type",
+    [
+        "radio_new_device_joined",
+        "network_unknown_device_joined",
+        "network_guest_client_present",
+    ],
+)
+def test_trust_button_only_when_one_device_is_named(finding_type: str) -> None:
     """One tap trusts every device in the finding; the push shows 220 chars."""
 
-    def guest_finding(device_ids: list[str]) -> AnomalyFinding:
+    def trust_finding(device_ids: list[str]) -> AnomalyFinding:
         return AnomalyFinding(
-            anomaly_id="g1",
-            type="network_guest_client_present",
+            anomaly_id="t1",
+            type=finding_type,
             severity="medium",
             confidence=0.9,
             triggering_entities=[],
-            evidence={"device_ids": device_ids, "summary": "Guest devices."},
-            suggested_actions=["Change the guest Wi-Fi password"],
+            evidence={"device_ids": device_ids, "summary": "New devices."},
+            suggested_actions=["Block it in your router app"],
             is_sensitive=True,
         )
 
-    one = _build_actions(guest_finding(["router:a"]))
-    assert one[0] == {"action": f"{ACTION_PREFIX}trust_g1", "title": "Trust device"}
-    several = _build_actions(guest_finding(["router:a", "router:b"]))
-    assert all("trust" not in a["action"] for a in several)
-    assert several[0]["title"] == "Ask Agent"
+    one = _build_actions(trust_finding(["router:a"]))
+    assert one[0] == {"action": f"{ACTION_PREFIX}trust_t1", "title": "Trust device"}
+    assert len(one) == 4
+    # Several devices: no primary button at all. Ask Agent cannot trust
+    # anything, so falling back to it would only mislead.
+    several = _build_actions(trust_finding(["router:a", "router:b"]))
+    assert [a["title"] for a in several] == [
+        "False Alarm",
+        "Snooze 24 h",
+        "Snooze Always",
+    ]
+    assert _build_actions(trust_finding([]))[0]["title"] == "False Alarm"
+    # A non-string id does not count: the button and the tap agree.
+    assert _build_actions(trust_finding(["router:a", None]))[0]["title"] == (  # type: ignore[list-item]
+        "Trust device"
+    )
+
+
+def test_multi_device_trust_finding_body_points_at_the_service() -> None:
+    """The suggested action is never rendered; the pointer must be in the body."""
+    names = ", ".join(f"Device number {i} (Apple, wireless)" for i in range(9))
+    finding = AnomalyFinding(
+        anomaly_id="t2",
+        type="network_unknown_device_joined",
+        severity="medium",
+        confidence=0.9,
+        triggering_entities=[],
+        evidence={
+            "device_ids": ["router:a", "router:b"],
+            "summary": f"New devices on the network: {names}.",
+        },
+        suggested_actions=["Block it in your router app"],
+        is_sensitive=True,
+    )
+    hint = "Trust the ones you recognize with the Sentinel trust device service."
+    mobile = _mobile_message(None, finding, "", None)
+    assert mobile.endswith(hint)
+    assert len(mobile) <= MAX_MOBILE_MESSAGE_CHARS
+    assert mobile.startswith("New devices on the network: Device number 0")
+    persistent = _persistent_message(None, finding, None)
+    assert persistent.endswith("\n\n" + hint)
+    assert "Device number 8" in persistent
+    # One device: the button does the job, no hint.
+    finding.evidence["device_ids"] = ["router:a"]
+    assert hint not in _mobile_message(None, finding, "", None)
+    assert hint not in _persistent_message(None, finding, None)
 
 
 @pytest.mark.asyncio

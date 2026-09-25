@@ -512,7 +512,8 @@ A new `sentinel/network_inventory.py` store, shaped like `RuleRegistry`
 - **Services:** `sentinel_get_network_inventory`,
   `sentinel_trust_network_device`, `sentinel_untrust_network_device`,
   `sentinel_reset_network_inventory`. The notifier gains a "Trust device"
-  action button for unknown-device findings. Trusting a device is an
+  action button for unknown-device findings that name one device (a finding
+  naming several points at the service instead). Trusting a device is an
   inventory write, not network actuation, so it is allowed in phase 1.
 
 ## Sentinel Rules

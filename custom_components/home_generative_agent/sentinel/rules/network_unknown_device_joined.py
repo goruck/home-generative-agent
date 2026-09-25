@@ -31,6 +31,7 @@ from .network_common import (
     make_finding,
     new_clients,
     noun,
+    trust_action,
 )
 
 if TYPE_CHECKING:
@@ -165,7 +166,7 @@ class NetworkUnknownDeviceJoinedRule:
                         "If you do not recognize it, block it in your router app "
                         "and change your Wi-Fi password"
                     ),
-                    "Tap Trust device if you recognize it",
+                    trust_action(count),
                 ],
                 triggering_entities=sorted(
                     str(c["tracker_entity_id"])

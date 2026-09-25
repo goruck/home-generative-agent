@@ -15,6 +15,7 @@ from custom_components.home_generative_agent.const import (
     DOMAIN,
 )
 from custom_components.home_generative_agent.core.utils import extract_final
+from custom_components.home_generative_agent.sentinel.models import trust_device_ids
 from custom_components.home_generative_agent.sentinel.suppression import (
     SuppressionManager,
     record_cooldown_feedback,
@@ -144,11 +145,24 @@ class ActionHandler:
                 finding.anomaly_id,
             )
             return {"status": "not_admin"}
-        device_ids = [
-            str(d)
-            for d in finding.evidence.get("device_ids") or []
-            if isinstance(d, str)
-        ]
+        device_ids = trust_device_ids(finding)
+        if len(device_ids) != 1:
+            # The button is only offered for a single device; a tap that
+            # names several can only come from a notification built before
+            # that rule, and must not trust a device the push never showed.
+            # No device at all is nothing to trust either.
+            if device_ids:
+                LOGGER.warning(
+                    "Trust device ignored for %s: the finding names %d devices, "
+                    "and one tap may trust only one. Use the "
+                    "sentinel_trust_network_device service.",
+                    finding.anomaly_id,
+                    len(device_ids),
+                )
+            return {
+                "status": "several_devices" if device_ids else "no_devices",
+                "device_count": len(device_ids),
+            }
         try:
             trusted = await inventory.async_set_trusted(device_ids, trusted=True)
         except HomeAssistantError:

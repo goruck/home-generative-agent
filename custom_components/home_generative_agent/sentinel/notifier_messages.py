@@ -103,6 +103,9 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "Sentinel: {count} alert{plural} in the last 24 h ({sev_summary})."
         ),
         "audit_report_title": "Security audit report",
+        "trust_several": (
+            "Trust the ones you recognize with the Sentinel trust device service."
+        ),
         "audit_report_not_run": "Checks that could not run",
         "audit_report_notes": "Notes",
         "audit_report_other": "Other",
@@ -195,6 +198,9 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "Sentinel: {count} upozornění za posledních 24 h ({sev_summary})."
         ),
         "audit_report_title": "Zpráva z bezpečnostního auditu",
+        "trust_several": (
+            "Ta, která znáte, označte jako důvěryhodná službou Sentinel trust device."
+        ),
         "audit_report_not_run": "Kontroly, které nebylo možné provést",
         "audit_report_notes": "Poznámky",
         "audit_report_other": "Ostatní",

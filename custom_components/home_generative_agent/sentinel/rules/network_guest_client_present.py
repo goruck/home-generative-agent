@@ -25,6 +25,7 @@ from .network_common import (
     make_finding,
     nobody_home_for_sure,
     plural,
+    trust_action,
 )
 from .network_unknown_device_joined import describe_client
 
@@ -78,9 +79,10 @@ class NetworkGuestClientPresentRule:
     is NOT skipped, only marked: the name is whatever the device advertises,
     so skipping would let anyone hide by naming a device after a trusted one.
 
-    The Trust device button is offered for a single device only (see
-    ``notifier._TRUST_ONE_DEVICE_TYPES``): the push shows at most 220
-    characters, and one tap must never trust a device it did not name.
+    The Trust device button is offered for a single device only, as for
+    every trust finding (see ``notifier._TRUST_DEVICE_TYPES``): the push
+    shows at most 220 characters, and one tap must never trust a device it
+    did not name.
 
     The condition lasts for hours, so the rule carries the one-day cooldown
     floor of the posture rules. Two accepted limits follow from that and from
@@ -126,10 +128,8 @@ class NetworkGuestClientPresentRule:
             return []
         count = len(guests)
         names = [_describe(c) for c in guests]
-        trust_action = (
-            "Tap Trust device if it belongs to a guest you expect"
-            if count == 1
-            else "Trust the ones you recognize with the Sentinel trust device service"
+        trust_hint = trust_action(
+            count, "Tap Trust device if it belongs to a guest you expect"
         )
         return [
             make_finding(
@@ -155,7 +155,7 @@ class NetworkGuestClientPresentRule:
                         "If you do not recognize it, change the guest Wi-Fi "
                         "password in your router app"
                     ),
-                    trust_action,
+                    trust_hint,
                     "Turn the guest network off when no guests are staying",
                 ],
                 triggering_entities=sorted(
