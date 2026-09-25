@@ -405,6 +405,85 @@ async def test_run_tool_index_background_success_clears_flags() -> None:
     assert rd.tool_content_hashes == {"key": "hash"}
 
 
+@pytest.mark.asyncio
+async def test_run_tool_index_background_cancel_is_not_a_failure() -> None:
+    """The unload cancels the write before the pool closes: no failed flag."""
+    rd = MagicMock()
+    rd.tool_index_ready = False
+    rd.tool_indexing_in_progress = True
+    rd.tool_index_failed = False
+    rd.tool_content_hashes = {}
+    hass = MagicMock()
+    started = asyncio.Event()
+
+    async def _hang(_tasks: Any) -> None:
+        started.set()
+        await asyncio.sleep(3600)
+
+    with (
+        patch(
+            "custom_components.home_generative_agent.conversation.gather_store_puts_in_chunks",
+            new=_hang,
+        ),
+        patch(f"{_CONV}.async_dispatcher_send") as dispatch,
+    ):
+        task = asyncio.create_task(
+            _run_tool_index_background(
+                index_tasks=[AsyncMock()], tool_hashes={"k": "h"}, rd=rd, hass=hass
+            )
+        )
+        rd.tool_index_task = task
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert rd.tool_index_failed is False
+    assert rd.tool_index_ready is False
+    assert rd.tool_indexing_in_progress is False
+    assert rd.tool_content_hashes == {}
+    dispatch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_index_tools_does_not_schedule_a_write_onto_a_closed_pool() -> None:
+    """A turn suspended in discovery across an unload must not hand off."""
+    entity = _index_entity()
+    rd = _index_runtime_data(tool_index_ready=False, tool_content_hashes={})
+    rd.pool = MagicMock(closed=True)
+
+    async def fake_provider_discovery(
+        _llm_context: Any,
+        _runtime_data: Any,
+        _api_ids: Any,
+        index_tasks: list[Any],
+        new_hashes: dict[str, str],
+        seen_keys: set[str],
+        discovered_api_ids: set[str],
+    ) -> None:
+        index_tasks.append(MagicMock())
+        new_hashes["assist::HassTurnOn"] = "h1"
+        seen_keys.add("assist::HassTurnOn")
+        discovered_api_ids.add("assist")
+
+    with (
+        patch.object(
+            entity,
+            "_async_discover_provider_tools",
+            new=AsyncMock(side_effect=fake_provider_discovery),
+        ),
+        patch.object(entity, "_async_discover_local_tools", new=AsyncMock()),
+        patch.object(entity, "_async_evict_stale_tool_index_rows", new=AsyncMock()),
+        patch(f"{_CONV}.llm.async_get_apis", return_value=[]),
+        patch(f"{_CONV}.async_dispatcher_send"),
+    ):
+        await entity._async_index_tools(MagicMock(), rd)
+
+    entity.hass.async_create_task.assert_not_called()
+    assert rd.tool_indexing_in_progress is False
+    assert rd.tool_index_failed is False
+
+
 # ---------------------------------------------------------------------------
 # STT hallucination filter helpers
 # ---------------------------------------------------------------------------
@@ -686,7 +765,9 @@ def _index_entity() -> Any:
     entity.hass = MagicMock()
     # Close coroutines handed to async_create_task so un-run background
     # indexing never triggers "coroutine was never awaited" warnings.
-    entity.hass.async_create_task = MagicMock(side_effect=lambda coro: coro.close())
+    entity.hass.async_create_task = MagicMock(
+        side_effect=lambda coro, **_kw: coro.close()
+    )
     return entity
 
 
@@ -697,6 +778,7 @@ def _index_runtime_data(**overrides: Any) -> Any:
         tool_index_failed=False,
         tool_content_hashes={},
         store=MagicMock(),
+        pool=MagicMock(closed=False),
     )
     for key, value in overrides.items():
         setattr(rd, key, value)

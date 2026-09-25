@@ -699,18 +699,16 @@ validation.
 
 ---
 
-### Tool index background task outlives a config-entry reload and fails on the closed pool
+### Tool index writes that the unload still cannot stop: the inline delta and a failed setup
 
-**What:** `conversation.py` schedules `_run_tool_index_background` with a bare `hass.async_create_task` (around line 1839). It is neither tracked on the entry nor cancelled on unload, so a reload (any options change, such as toggling a Sentinel setting) closes the PostgreSQL pool while the task is still writing, and the log shows `Global tool index background task failed` with `psycopg_pool.PoolClosed: the pool 'pool-N' is already closed`. Seen three times on the maintainer's box on 2026-09-21 (19:31–19:36 local) while Sentinel options were being changed; the next load re-indexed cleanly. The failure also sets `tool_index_failed` on the OLD runtime data and fires `SIGNAL_TOOL_INDEX_UPDATED("failed")`, which the new entry's sensor may briefly show.
+**What:** The unload now cancels the background index write and the store's batch worker before the pool closes (see the Completed entry "Tool index background task outlives a config-entry reload"). Two writers remain outside that: the inline delta write (`_async_write_tool_index_delta`, awaited inside a conversation turn, which platform unload does not cancel), and a setup that fails after the conversation platform scheduled the startup build (Home Assistant then runs the on-unload callbacks, not `async_unload_entry`, so nothing cancels the task or closes the pool). Both end in `PoolClosed` on the old generation: the inline path logs a warning and does not latch `tool_index_failed`; the failed-setup path can keep embedding on the dead generation while the retry builds its own.
 
-**Why:** Same class as the lifecycle leaks fixed in PR #560: a task started from a turn is not owned by the entry that started it. Harmless today (self-heals on the next load, the index only gains rows), but it logs an ERROR with a traceback on every reload that races an index write, which users will report.
+**Why:** Surfaced by the Codex and Claude passes on the tool-index race PR; left out of that fix to keep it small. Neither is a reload-time regression: the inline path is rare (a per-turn top-up racing an options change) and the failed-setup path needs setup to fail after the platform forwarded.
 
-**How to apply:** Create it with `entry.async_create_background_task` (or track it in `HGAData` and cancel + await it in `async_unload_entry` before the pool closes), and treat `PoolClosed` / `CancelledError` during unload as expected, without setting `tool_index_failed`.
+**How to apply:** Register the cancel as an on-unload callback at the point the task is created (covers the failed-setup path), and make the inline delta write shield-and-await or check `pool.closed` before each chunk.
 
 **Effort:** S
-**Priority:** P2
-
----
+**Priority:** P3
 
 ### Radio checks the pinned Home Assistant version cannot observe
 
@@ -2083,6 +2081,21 @@ This is the same allowlist-omission class as #480 and as the triage options fixe
 ---
 
 ## Completed
+
+### Tool index background task outlives a config-entry reload and fails on the closed pool
+
+**What:** `conversation.py` schedules `_run_tool_index_background` with a bare `hass.async_create_task` (around line 1839). It is neither tracked on the entry nor cancelled on unload, so a reload (any options change, such as toggling a Sentinel setting) closes the PostgreSQL pool while the task is still writing, and the log shows `Global tool index background task failed` with `psycopg_pool.PoolClosed: the pool 'pool-N' is already closed`. Seen three times on the maintainer's box on 2026-09-21 (19:31–19:36 local) while Sentinel options were being changed; the next load re-indexed cleanly. The failure also sets `tool_index_failed` on the OLD runtime data and fires `SIGNAL_TOOL_INDEX_UPDATED("failed")`, which the new entry's sensor may briefly show.
+
+**Why:** Same class as the lifecycle leaks fixed in PR #560: a task started from a turn is not owned by the entry that started it. Harmless today (self-heals on the next load, the index only gains rows), but it logs an ERROR with a traceback on every reload that races an index write, which users will report.
+
+**How to apply:** Create it with `entry.async_create_background_task` (or track it in `HGAData` and cancel + await it in `async_unload_entry` before the pool closes), and treat `PoolClosed` / `CancelledError` during unload as expected, without setting `tool_index_failed`.
+
+**Effort:** S
+**Priority:** P2
+
+---
+
+**Resolution:** `HGAData.tool_index_task` holds the background write; `async_unload_entry` cancels and awaits it in a contained teardown step immediately before `pool.close`; `_run_tool_index_background` re-raises `CancelledError` without setting `tool_index_failed` or dispatching the failed signal, and clears the task reference. Regression tests: unload ordering (`test_entry_lifecycle_containment.py`) and the runner on cancel (`test_conversation_units.py`).
 
 ### Gemini 3 models are sent temperature 0.2, which Google advises against
 

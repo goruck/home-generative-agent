@@ -18,6 +18,7 @@ Three leaks in one area, all follow-ups from the deferred-start ship:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -302,6 +303,82 @@ async def test_a_raising_teardown_step_does_not_abort_the_unload(
     await entry._async_process_on_unload(hass)
     await hass.async_block_till_done()
     assert client.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_unload_cancels_the_tool_index_write_before_the_pool_closes(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """
+    The index write is cancelled and awaited before the pool closes.
+
+    A reload used to close the pool under the background index write, which
+    died with PoolClosed and was logged as a failed index on every options
+    change that raced it.
+    """
+    entry, _sentinel, _discovery, _client = await _setup_with_deferred_sentinel_start(
+        hass, monkeypatch
+    )
+    order: list[str] = []
+    started = asyncio.Event()
+
+    async def _index_write() -> None:
+        started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            order.append("index cancelled")
+            raise
+
+    class _RecordingPool:
+        async def close(self) -> None:
+            order.append("pool closed")
+
+    async def _batch_worker() -> None:
+        # langgraph's store runs each put batch in a worker of its own.
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            order.append("store worker cancelled")
+            raise
+
+    rd = entry.runtime_data
+    rd.pool = _RecordingPool()
+    rd.tool_index_task = hass.async_create_task(_index_write())
+    rd.store = MagicMock(_task=hass.async_create_task(_batch_worker()))
+    await started.wait()
+
+    with caplog.at_level(logging.ERROR):
+        assert await cast("Any", hga_component).async_unload_entry(hass, entry)
+
+    assert order == ["index cancelled", "store worker cancelled", "pool closed"]
+    assert rd.tool_index_task is None
+    assert rd.store._task.done()
+    assert "tool_index" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_unload_with_no_index_write_in_flight_is_a_noop(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    entry, _sentinel, _discovery, _client = await _setup_with_deferred_sentinel_start(
+        hass, monkeypatch
+    )
+
+    async def _finished() -> None:
+        return None
+
+    rd = entry.runtime_data
+    rd.tool_index_task = hass.async_create_task(_finished())
+    await hass.async_block_till_done()
+    assert rd.tool_index_task.done()
+    rd.store = MagicMock(_task=None)
+
+    with caplog.at_level(logging.ERROR):
+        assert await cast("Any", hga_component).async_unload_entry(hass, entry)
+
+    assert rd.tool_index_task is None
+    assert "tool_index" not in caplog.text
 
 
 @pytest.mark.asyncio

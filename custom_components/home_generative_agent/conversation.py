@@ -751,7 +751,13 @@ async def _run_tool_index_background(
     rd: HGAData,
     hass: HomeAssistant,
 ) -> None:
-    """Batch tool indexing into the store and update hashes on success."""
+    """
+    Batch tool indexing into the store and update hashes on success.
+
+    Cancelled by the entry unload before the pool closes, and by an
+    embedding-provider switch; a cancel leaves the index neither ready nor
+    failed, so the next pass indexes again.
+    """
     try:
         if index_tasks:
             await gather_store_puts_in_chunks(index_tasks)
@@ -765,6 +771,9 @@ async def _run_tool_index_background(
         async_dispatcher_send(
             hass, SIGNAL_TOOL_INDEX_UPDATED, "ready", len(rd.tool_content_hashes)
         )
+    except asyncio.CancelledError:
+        _LOGGER.debug("Tool index write cancelled by the entry unload.")
+        raise
     except Exception:
         _LOGGER.exception("Global tool index background task failed")
         rd.tool_index_failed = True
@@ -1835,14 +1844,20 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     await self._async_write_tool_index_delta(
                         runtime_data, index_tasks, new_hashes
                     )
+                elif runtime_data.pool is not None and runtime_data.pool.closed:
+                    # The entry unloaded while this turn was in discovery:
+                    # the write would only die on the closed pool.
+                    _LOGGER.debug("Tool index write skipped: the entry unloaded.")
+                    runtime_data.tool_indexing_in_progress = False
                 else:
-                    self.hass.async_create_task(
+                    runtime_data.tool_index_task = self.hass.async_create_task(
                         _run_tool_index_background(
                             index_tasks=index_tasks,
                             tool_hashes=new_hashes,
                             rd=runtime_data,
                             hass=self.hass,
-                        )
+                        ),
+                        name="hga_tool_index",
                     )
                     handed_off = True
             elif inline_delta:

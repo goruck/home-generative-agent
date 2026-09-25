@@ -2363,6 +2363,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 runtime_data.tool_content_hashes.clear()
                 runtime_data.tool_index_ready = False
                 runtime_data.tool_index_failed = False
+                # A build in flight embedded with the previous provider: let
+                # it finish and it would declare that index ready.
+                task = runtime_data.tool_index_task
+                if task is not None and not task.done():
+                    task.cancel()
                 LOGGER.warning(
                     "Tool index marked stale after embedding provider switch "
                     "from %s to %s; it will be rebuilt on the next indexing pass.",
@@ -4087,6 +4092,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     return True
 
 
+async def _cancel_and_wait(task: object) -> None:
+    """
+    Cancel *task* and wait for it to finish; a no-op for None or a done task.
+
+    ``asyncio.wait`` rather than ``await task``: the latter would raise the
+    task's CancelledError here, and suppressing it would also swallow a
+    cancellation of the unload itself (Home Assistant shutdown, a reload
+    cancelled), which must keep propagating.
+    """
+    if not isinstance(task, asyncio.Task) or task.done():
+        return
+    task.cancel()
+    await asyncio.wait([task])
+
+
 async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     """Unload the config entry."""
     # Platforms come down FIRST, and a refusal aborts before anything is torn
@@ -4132,6 +4152,19 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
         await _teardown("baseline_updater.stop", rd.baseline_updater.stop)
     if rd.notifier is not None:
         await _teardown("notifier.stop", rd.notifier.stop)
+
+    async def _cancel_tool_index() -> None:
+        # The index write runs on the pool closed next; a reload that raced
+        # it used to end in PoolClosed, logged as a failed index. Two tasks
+        # are involved: the runner that awaits the store, and the store's
+        # own batch worker (langgraph's AsyncBatchedBaseStore queues each
+        # put and runs the embed + INSERT batch in a task of its own), which
+        # cancelling the runner alone would leave writing.
+        await _cancel_and_wait(rd.tool_index_task)
+        rd.tool_index_task = None
+        await _cancel_and_wait(getattr(rd.store, "_task", None))
+
+    await _teardown("tool_index.cancel", _cancel_tool_index)
     if rd.pool is not None:
         await _teardown("pool.close", rd.pool.close)
     # The OpenAI http client is NOT closed here — it is closed by the on-unload

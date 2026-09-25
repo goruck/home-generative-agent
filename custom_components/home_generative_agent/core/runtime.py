@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    import asyncio
+
     import httpx
     from homeassistant.config_entries import ConfigEntry
     from psycopg import AsyncConnection
@@ -89,6 +91,11 @@ class HGAData:
     tool_index_ready: bool = False
     tool_indexing_in_progress: bool = False
     tool_index_failed: bool = False
+    # The background write of the tool index, when one is in flight. Held so
+    # the unload can cancel and await it BEFORE the pool closes: a reload
+    # (any options change) otherwise closes the pool under the write and the
+    # task dies with PoolClosed, logged as a failed index.
+    tool_index_task: asyncio.Task[None] | None = None
 
 
 type HGAConfigEntry = ConfigEntry[HGAData]
