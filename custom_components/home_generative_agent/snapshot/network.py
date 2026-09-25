@@ -78,6 +78,30 @@ CAP_NEW_CLIENTS = "network.new_clients"
 # merge (``_publish_guest_flag``), which also names the connected clients no
 # such source covers, so they are a stated gap rather than a silent pass.
 CAP_GUEST_CLIENTS = "network.clients.is_guest"
+# Connected clients carry today's traffic (eero's Activity option for
+# clients); published by the merge, like the guest flag.
+CAP_CLIENT_DATA_DAY = "network.clients.data_usage_day"
+# The engine injected baseline statistics for the section's counters
+# (``counter_baselines``); a rule that compares against them requires it.
+CAP_COUNTER_BASELINES = "network.counter_baselines"
+# Per-client counters: ``network.client.<key>.<figure>``.
+CLIENT_COUNTER_PREFIX = "network.client."
+
+
+def client_counter_id(key: str, figure: str) -> str:
+    """Return the counter id for one figure of the client with *key*."""
+    return f"{CLIENT_COUNTER_PREFIX}{key}.{figure}"
+
+
+def client_counter_key(counter_id: str) -> tuple[str, str] | None:
+    """Return ``(client key, figure)`` for a per-client counter id, else None."""
+    if not counter_id.startswith(CLIENT_COUNTER_PREFIX):
+        return None
+    rest = counter_id[len(CLIENT_COUNTER_PREFIX) :]
+    key, sep, figure = rest.partition(".")
+    return (key, figure) if sep and key and figure else None
+
+
 _CAP_RADIO_PREFIX = "network.radio."
 _CAP_POSTURE_PREFIX = "network.posture."
 _CAP_HA_PREFIX = "network.ha_security."
@@ -376,6 +400,11 @@ def merge_adapter_results(results: Iterable[AdapterResult]) -> NetworkSnapshot: 
         notes.extend(result.notes)
     if clients is not None:
         _publish_guest_flag(clients.values(), sources, notes)
+        if any(
+            c.get("connected") and c.get("data_up_day_bytes") is not None
+            for c in clients.values()
+        ):
+            sources[CAP_CLIENT_DATA_DAY] = sources[CAP_CLIENTS]
         counters[COUNTER_CLIENT_COUNT] = float(
             sum(1 for c in clients.values() if c.get("connected"))
         )

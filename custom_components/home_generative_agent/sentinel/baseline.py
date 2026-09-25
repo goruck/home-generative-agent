@@ -55,6 +55,9 @@ from .models import AnomalyFinding, Severity, build_anomaly_id, hashable_evidenc
 from .power_units import is_power_unit, watts_per_unit
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+    from datetime import datetime
+
     from homeassistant.core import HomeAssistant
     from psycopg import AsyncConnection
     from psycopg.rows import DictRow
@@ -131,6 +134,10 @@ BASELINE_UNAVAILABLE = "unavailable"
 
 # Rolling metric name written for the global time-window average.
 METRIC_ROLLING_AVG = "rolling_avg"
+# Ids of the network section's counters (``snapshot["network"]["counters"]``),
+# stored next to entity ids; they never collide with an entity id, which
+# always carries a Home Assistant domain before its dot.
+NETWORK_COUNTER_PREFIX = "network."
 # Global hourly metric keyed by hour-of-day (e.g. "hourly_avg_14").
 METRIC_HOURLY_PREFIX = "hourly_avg_"
 # DOW (day-of-week) metric prefixes — per (DOW, hour) slot.
@@ -252,6 +259,13 @@ FROM sentinel_baselines
 WHERE sample_count >= %s
 """
 
+# The network counters only (ids under NETWORK_COUNTER_PREFIX).
+_FETCH_COUNTERS_SQL = """
+SELECT entity_id, metric, value
+FROM sentinel_baselines
+WHERE entity_id LIKE %s AND sample_count >= %s
+"""
+
 # Rich fetch for the sentinel_get_baselines service — returns all columns.
 _FETCH_FULL_SQL = """
 SELECT entity_id, metric, value, sample_count, updated_at
@@ -359,6 +373,10 @@ class SentinelBaselineUpdater:
         # (Welford's accumulator for variance).  Populated on async_initialize()
         # from DB values and updated on every _update_baselines() call.
         self._dow_state: dict[str, tuple[float, float, int]] = {}
+        # When the network counters were last stored (see
+        # ``async_record_counters``): the engine offers them every cycle, the
+        # updater keeps them to its own interval.
+        self._last_counter_write: datetime | None = None
 
     # ---------------------------------------------------------------------- #
     # Lifecycle
@@ -518,8 +536,82 @@ class SentinelBaselineUpdater:
     # Baseline writes
     # ---------------------------------------------------------------------- #
 
-    async def _update_baselines(self, snapshot: FullStateSnapshot) -> None:  # noqa: PLR0912, PLR0915
+    async def async_record_counters(self, counters: Mapping[str, Any]) -> bool:
+        """
+        Store the network section's counters as baseline samples.
+
+        The engine offers the counters every detection cycle; they are kept
+        to the updater's own interval so a counter accumulates samples at
+        the same pace as an entity. Only ``network.`` ids are accepted (the
+        per-client ones carry a pseudonymized key, never an address), and
+        none of them raises the per-entity establishment or drift notices:
+        dozens of clients would each announce themselves. Returns True when
+        samples were written.
+        """
+        if self._stopped:
+            return False
+        interval = timedelta(
+            minutes=max(
+                1,
+                _coerce_int(
+                    self._options.get(CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES),
+                    default=RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
+                ),
+            )
+        )
+        now = dt_util.utcnow()
+        if (
+            self._last_counter_write is not None
+            and now - self._last_counter_write < interval
+        ):
+            return False
+        values: dict[str, float] = {}
+        for counter_id, raw in counters.items():
+            if not str(counter_id).startswith(NETWORK_COUNTER_PREFIX):
+                continue
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                continue
+            value = float(raw)
+            if math.isfinite(value):
+                values[str(counter_id)] = value
+        if not values:
+            return False
+        self._last_counter_write = now
+        await self._write_samples(values, None)
+        return True
+
+    async def _update_baselines(self, snapshot: FullStateSnapshot) -> None:
         """Upsert rolling stats for all numeric entities in *snapshot*."""
+        # Collect numeric entities and their current values.
+        entity_values: dict[str, float] = {}
+        for entity in snapshot.get("entities", []):
+            entity_id = entity.get("entity_id", "")
+            if not entity_id:
+                continue
+            try:
+                value = float(str(entity.get("state", "")))
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(value):
+                # A single 'nan'/'inf' state string would poison the rolling
+                # averages permanently (NaN never compares, so downstream
+                # threshold checks stop suppressing and rendering crashes).
+                continue
+            entity_values[entity_id] = value
+
+        if not entity_values:
+            return
+        await self._write_samples(entity_values, snapshot)
+
+    async def _write_samples(  # noqa: PLR0912, PLR0915
+        self, entity_values: dict[str, float], snapshot: FullStateSnapshot | None
+    ) -> None:
+        """
+        Upsert rolling, hourly, and day-of-week stats for *entity_values*.
+
+        *snapshot* supplies the names for the establishment and drift
+        notices; None (the network counters) means no notice is raised.
+        """
         now = dt_util.utcnow()
         # Use local time for DOW bucket assignment so that weekday patterns align with
         # the user's actual schedule.  UTC-based bucketing would produce cross-timezone
@@ -548,26 +640,6 @@ class SentinelBaselineUpdater:
                 RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS,
             )
         )
-
-        # Collect numeric entities and their current values.
-        entity_values: dict[str, float] = {}
-        for entity in snapshot.get("entities", []):
-            entity_id = entity.get("entity_id", "")
-            if not entity_id:
-                continue
-            try:
-                value = float(str(entity.get("state", "")))
-            except (TypeError, ValueError):
-                continue
-            if not math.isfinite(value):
-                # A single 'nan'/'inf' state string would poison the rolling
-                # averages permanently (NaN never compares, so downstream
-                # threshold checks stop suppressing and rendering crashes).
-                continue
-            entity_values[entity_id] = value
-
-        if not entity_values:
-            return
 
         try:
             async with self._pool.connection() as conn, conn.cursor() as cur:
@@ -686,13 +758,14 @@ class SentinelBaselineUpdater:
                         continue
                     if count >= min_samples:
                         self._established.add(entity_id)
-                        await self._fire_establishment_notification(
-                            entity_id, entity_values[entity_id], snapshot
-                        )
+                        if snapshot is not None:
+                            await self._fire_establishment_notification(
+                                entity_id, entity_values[entity_id], snapshot
+                            )
             # Fire drift notifications after commit (outside the conn context).
             # Only fire for established entities — skip entities still in build-up.
             for entity_id, value in entity_values.items():
-                if entity_id not in self._established:
+                if entity_id not in self._established or snapshot is None:
                     continue
                 ref_val = refs.get(entity_id)
                 if ref_val is None:
@@ -1109,8 +1182,50 @@ class SentinelBaselineUpdater:
         result = []
         for row in rows:
             eid = row.get("entity_id") if isinstance(row, dict) else row[0]
-            if eid:
+            # The network counters are not entities: discovery could propose
+            # nothing over them, and their ids would only clutter its prompt.
+            if eid and not str(eid).startswith(NETWORK_COUNTER_PREFIX):
                 result.append(str(eid))
+        return result
+
+    async def async_fetch_counter_baselines(
+        self, min_samples: int | None = None
+    ) -> dict[str, dict[str, float]]:
+        """
+        Return ``{counter id: {metric: value}}`` for the network counters.
+
+        A separate, prefix-bounded query: the engine calls it every cycle,
+        and the all-entities fetch is only paid when dynamic rules need it.
+        """
+        if min_samples is None:
+            min_samples = _coerce_int(
+                self._options.get(CONF_SENTINEL_BASELINE_MIN_SAMPLES),
+                default=RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES,
+            )
+        try:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    _FETCH_COUNTERS_SQL, (f"{NETWORK_COUNTER_PREFIX}%", min_samples)
+                )
+                rows = await cur.fetchall()
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("Counter baseline fetch failed; returning none.")
+            return {}
+        result: dict[str, dict[str, float]] = {}
+        for row in rows:
+            if isinstance(row, dict):
+                entity_id, metric, value = (
+                    row.get("entity_id", ""),
+                    row.get("metric", ""),
+                    row.get("value"),
+                )
+            else:
+                entity_id, metric, value = row[0], row[1], row[2]
+            if not entity_id or not metric or value is None:
+                continue
+            number = float(value)
+            if math.isfinite(number):
+                result.setdefault(str(entity_id), {})[str(metric)] = number
         return result
 
 

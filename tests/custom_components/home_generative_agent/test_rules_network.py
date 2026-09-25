@@ -41,6 +41,9 @@ from custom_components.home_generative_agent.sentinel.rules.ha_trusted_networks_
 from custom_components.home_generative_agent.sentinel.rules.ha_webhook_automation_public import (
     HaWebhookAutomationPublicRule,
 )
+from custom_components.home_generative_agent.sentinel.rules.network_client_usage_anomaly import (
+    NetworkClientUsageAnomalyRule,
+)
 from custom_components.home_generative_agent.sentinel.rules.network_common import (
     NETWORK_RULE_TYPES,
     POSTURE_COOLDOWN_MINUTES,
@@ -120,6 +123,7 @@ ALL_RULES = [
     RadioNewDeviceJoinedRule(),
     NetworkUnknownDeviceJoinedRule(),
     NetworkGuestClientPresentRule(),
+    NetworkClientUsageAnomalyRule(),
     NetworkGuestNetworkIdleRule(),
     NetworkWpa3DisabledRule(),
     NetworkProtectionDisabledRule(),

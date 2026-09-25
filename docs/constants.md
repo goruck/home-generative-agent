@@ -419,6 +419,8 @@ This document covers the named constants that affect integration behaviour, orga
 | Constant | File | Value | Purpose |
 |---|---|---|---|
 | `SENTINEL_POSTURE_RULE_COOLDOWN_MINUTES` | `const.py` | `1440` (24 h) | Cooldown floor for posture rules (standing conditions such as a stale token or an exposed add-on port); the engine uses the larger of this and `sentinel_cooldown_minutes` |
+| `SENTINEL_NETWORK_USAGE_THRESHOLD_PCT` | `const.py` | `300.0` | `network_client_usage_anomaly`: how far above its hourly baseline a device's traffic today must be |
+| `SENTINEL_NETWORK_USAGE_MIN_EXCESS_BYTES` | `const.py` | `262144000` (250 MB) | `network_client_usage_anomaly`: the byte floor the excess must also clear, so an idle device's few megabytes never read as a multiple |
 | `MAX_SEEN_IPS` | `sentinel/auth_inventory.py` | `20` | Pseudonymized addresses kept per token in the auth inventory |
 | `SEEN_IP_REFRESH` | `sentinel/auth_inventory.py` | `1 h` | How often an address's `last_seen` stamp is refreshed, so steady use does not rewrite the store every cycle |
 | `MAX_LABEL_CHARS` | `snapshot/network.py` | `64` | Cap on labels copied from untrusted sources (mDNS names, add-on titles, token client names) into evidence and notifications |

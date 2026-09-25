@@ -26,6 +26,7 @@ from custom_components.home_generative_agent.sentinel.baseline import (
     METRIC_DOW_STD_PREFIX,
     METRIC_HOURLY_PREFIX,
     METRIC_ROLLING_AVG,
+    NETWORK_COUNTER_PREFIX,
     SentinelBaselineUpdater,
     evaluate_baseline_deviation,
     evaluate_time_of_day_anomaly,
@@ -2619,3 +2620,115 @@ async def test_dow_restore_filters_poisoned_rows() -> None:
     healthy = updater._dow_state.get(f"sensor.healthy:{dow}:{hour}")
     assert healthy is not None
     assert healthy[0] == pytest.approx(42.0)
+
+
+# ---------------------------------------------------------------------------
+# Network counters (docs/network-security-plan.md, baseline extension)
+# ---------------------------------------------------------------------------
+
+
+def _recording_pool() -> tuple[MagicMock, list[tuple[Any, ...]], list[str]]:
+    """Return a pool double that records INSERT params and SELECT SQL."""
+    upserts: list[tuple[Any, ...]] = []
+    selects: list[str] = []
+    cur = MagicMock()
+
+    async def _execute(sql: str, params: tuple[Any, ...]) -> None:
+        if "INSERT INTO" in sql:
+            upserts.append(params)
+        elif "SELECT" in sql:
+            selects.append(sql)
+
+    cur.execute = _execute
+    cur.fetchall = AsyncMock(return_value=[])
+    cur.fetchone = AsyncMock(return_value=None)
+    cur.__aenter__ = AsyncMock(return_value=cur)
+    cur.__aexit__ = AsyncMock(return_value=False)
+    conn = MagicMock()
+    conn.cursor = MagicMock(return_value=cur)
+    conn.commit = AsyncMock()
+    conn.__aenter__ = AsyncMock(return_value=conn)
+    conn.__aexit__ = AsyncMock(return_value=False)
+    pool = MagicMock()
+    pool.connection = MagicMock(return_value=conn)
+    return pool, upserts, selects
+
+
+@pytest.mark.asyncio
+async def test_record_counters_stores_network_ids_only_and_never_notifies() -> None:
+    pool, upserts, _selects = _recording_pool()
+    hass = MagicMock()
+    hass.services.async_call = AsyncMock()
+    updater = SentinelBaselineUpdater(hass, pool, {"sentinel_baseline_min_samples": 1})
+    counters = {
+        "network.client.3fa2c1b0.data_up_day_bytes": 250_000_000,
+        "network.client_count": 38.0,
+        "sensor.not_a_counter": 5.0,  # an entity id: not this path's business
+        "network.client.bad.usage_up_mbps": float("inf"),
+        "network.client.bool.blocked_day": True,
+    }
+    assert await updater.async_record_counters(counters) is True
+    ids = {p[0] for p in upserts}
+    assert ids == {
+        "network.client.3fa2c1b0.data_up_day_bytes",
+        "network.client_count",
+    }
+    # rolling + hourly per counter, nothing else.
+    assert len(upserts) == 4
+    hass.services.async_call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_record_counters_keeps_to_the_update_interval() -> None:
+    pool, upserts, _selects = _recording_pool()
+    updater = SentinelBaselineUpdater(
+        MagicMock(), pool, {"sentinel_baseline_update_interval_minutes": 15}
+    )
+    counters = {"network.client_count": 38.0}
+    assert await updater.async_record_counters(counters) is True
+    # Offered again five minutes later (the engine's cadence): skipped.
+    assert await updater.async_record_counters(counters) is False
+    assert len(upserts) == 2
+    updater._last_counter_write = datetime.now(tz=UTC) - timedelta(minutes=16)
+    assert await updater.async_record_counters(counters) is True
+    assert len(upserts) == 4
+    # Nothing to store is not a write.
+    updater._last_counter_write = None
+    assert await updater.async_record_counters({"sensor.x": 1.0}) is False
+    await updater.stop()
+    assert await updater.async_record_counters(counters) is False
+
+
+@pytest.mark.asyncio
+async def test_ready_entity_ids_leave_the_network_counters_out() -> None:
+    pool, _upserts, _selects = _recording_pool()
+    conn = pool.connection.return_value
+    cur = conn.cursor.return_value
+    cur.fetchall = AsyncMock(
+        return_value=[
+            {"entity_id": "sensor.washer_power"},
+            {"entity_id": f"{NETWORK_COUNTER_PREFIX}client.3fa2c1b0.data_up_day_bytes"},
+        ]
+    )
+    updater = SentinelBaselineUpdater(MagicMock(), pool, {})
+    assert await updater.async_fetch_ready_entity_ids() == ["sensor.washer_power"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_counter_baselines_is_prefix_bounded_and_finite() -> None:
+    pool, _upserts, selects = _recording_pool()
+    cur = pool.connection.return_value.cursor.return_value
+    cur.fetchall = AsyncMock(
+        return_value=[
+            ("network.client.a.data_up_day_bytes", "hourly_avg_14", 800.0),
+            ("network.client.a.data_up_day_bytes", "rolling_avg", float("nan")),
+            ("network.client_count", "rolling_avg", 38.0),
+            ("network.client.b.blocked_day", "hourly_avg_3", None),
+        ]
+    )
+    updater = SentinelBaselineUpdater(MagicMock(), pool, {})
+    assert await updater.async_fetch_counter_baselines() == {
+        "network.client.a.data_up_day_bytes": {"hourly_avg_14": 800.0},
+        "network.client_count": {"rolling_avg": 38.0},
+    }
+    assert any("LIKE" in sql for sql in selects)

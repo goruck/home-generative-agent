@@ -380,6 +380,12 @@ RECOMMENDED_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN: int = 5
 # ``network_guest_network_idle`` fires.
 CONF_SENTINEL_NETWORK_GUEST_IDLE_DAYS = "sentinel_network_guest_idle_days"
 RECOMMENDED_SENTINEL_NETWORK_GUEST_IDLE_DAYS: int = 7
+# ``network_client_usage_anomaly``: a connected client is reported when its
+# traffic so far today exceeds its baseline for this hour by this much AND by
+# at least this many bytes (a floor, so an idle device's few megabytes never
+# read as a multiple).
+SENTINEL_NETWORK_USAGE_THRESHOLD_PCT: float = 300.0
+SENTINEL_NETWORK_USAGE_MIN_EXCESS_BYTES: int = 250 * 1024 * 1024
 # Whether ``audit_home_security`` hands the conversation model the findings'
 # details (summaries with device, add-on, token, and automation names). Off:
 # the model gets a deterministic digest (counts, finding types, fixed titles,

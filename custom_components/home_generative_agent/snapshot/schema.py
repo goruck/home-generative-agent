@@ -94,8 +94,15 @@ class NetworkClient(TypedDict):
     ha_device_id: NotRequired[str | None]
     ha_integration: NotRequired[str | None]
     tracker_entity_id: NotRequired[str | None]
-    signal: NotRequired[float | None]
-    usage_day_bytes: NotRequired[int | None]
+    # Per-client figures the eero runtime read supplies (all optional): the
+    # link's signal, the instantaneous rates from the last poll, today's
+    # cumulative traffic (needs the integration's Activity option for
+    # clients), and today's blocked requests (eero Plus).
+    signal_dbm: NotRequired[int | None]
+    usage_up_mbps: NotRequired[float | None]
+    usage_down_mbps: NotRequired[float | None]
+    data_up_day_bytes: NotRequired[int | None]
+    data_down_day_bytes: NotRequired[int | None]
     blocked_day: NotRequired[int | None]
     is_guest: NotRequired[bool | None]
     vlan: NotRequired[int | None]
@@ -224,6 +231,9 @@ class NetworkSnapshot(TypedDict):
     posture: NetworkPosture
     ha_security: HaSecurityPosture
     counters: dict[str, float]
+    # Baseline statistics for the counters above, injected by the engine
+    # from the baseline store: ``{counter id: {metric: value}}``.
+    counter_baselines: NotRequired[dict[str, dict[str, float]]]
     radio: NotRequired[RadioSnapshot]
     # Client keys not known to the device inventory before this run.
     new_clients: NotRequired[list[str]]
@@ -291,6 +301,7 @@ SNAPSHOT_SCHEMA = vol.Schema(
             vol.Required("posture"): dict,
             vol.Required("ha_security"): dict,
             vol.Required("counters"): dict,
+            vol.Optional("counter_baselines"): dict,
             vol.Optional("radio"): dict,
             vol.Optional("new_clients"): [str],
             vol.Optional("notes"): [str],

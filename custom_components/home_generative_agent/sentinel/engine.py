@@ -84,6 +84,7 @@ from custom_components.home_generative_agent.snapshot.builder import (
 )
 from custom_components.home_generative_agent.snapshot.network import (
     CAP_CLIENTS,
+    CAP_COUNTER_BASELINES,
     NetworkBuildContext,
     async_collect_auth_observation,
     radio_cap,
@@ -130,6 +131,7 @@ from .rules.ha_sensitive_entity_exposed_without_pin import (
 )
 from .rules.ha_trusted_networks_bypass_login import HaTrustedNetworksBypassLoginRule
 from .rules.ha_webhook_automation_public import HaWebhookAutomationPublicRule
+from .rules.network_client_usage_anomaly import NetworkClientUsageAnomalyRule
 from .rules.network_common import NETWORK_RULE_TYPES
 from .rules.network_guest_client_present import NetworkGuestClientPresentRule
 from .rules.network_public_ip_changed import NetworkPublicIpChangedRule
@@ -482,6 +484,9 @@ class SentinelEngine:
                     is_entity_excluded=self._entity_excluded_for_type,
                 ),
                 NetworkGuestClientPresentRule(
+                    is_entity_excluded=self._entity_excluded_for_type
+                ),
+                NetworkClientUsageAnomalyRule(
                     is_entity_excluded=self._entity_excluded_for_type
                 ),
                 ZwaveInsecureSecurityClassRule(),
@@ -1054,6 +1059,47 @@ class SentinelEngine:
             blocking=False,
         )
 
+    async def _attach_counter_baselines(
+        self, snapshot: FullStateSnapshot, *, record: bool
+    ) -> None:
+        """
+        Store the network counters as baselines and inject their statistics.
+
+        The updater stores the counters at its own interval; the baselines
+        come back as ``counter_baselines`` with the ``network.counter_baselines``
+        capability, so a rule that needs them is listed as not run, with the
+        reason, until there are enough samples. Either half failing leaves
+        the section as built: a baseline problem is not a reason to skip the
+        rest of the cycle.
+        """
+        section = snapshot.get("network")
+        if self._baseline_updater is None or not section:
+            return
+        counters = section.get("counters") or {}
+        if record and counters:
+            try:
+                await self._baseline_updater.async_record_counters(counters)
+            except Exception:  # noqa: BLE001 - the pool, the store
+                self._log_limiter.warning(
+                    "counter_baselines_record",
+                    "Sentinel could not store the network counters as baselines.",
+                )
+        try:
+            baselines = await self._baseline_updater.async_fetch_counter_baselines()
+        except Exception:  # noqa: BLE001
+            self._log_limiter.warning(
+                "counter_baselines_fetch",
+                "Sentinel could not read the network counter baselines.",
+            )
+            return
+        if not baselines:
+            return
+        section["counter_baselines"] = baselines
+        section["capabilities"] = sorted(
+            {*section["capabilities"], CAP_COUNTER_BASELINES}
+        )
+        section["sources"][CAP_COUNTER_BASELINES] = "baseline"
+
     def _evaluate_gated_rules(
         self, snapshot: FullStateSnapshot, rules: Iterable[StaticRule]
     ) -> GatedEvaluation:
@@ -1137,6 +1183,9 @@ class SentinelEngine:
         snapshot = await async_build_full_state_snapshot(
             self._hass, network=network_context
         )
+        # Read-only: the audit compares against the baselines but never
+        # stores a sample (it can be called any number of times).
+        await self._attach_counter_baselines(snapshot, record=False)
         evaluation = self._evaluate_gated_rules(
             snapshot, (r for r in self._rules if r.rule_id in NETWORK_RULE_TYPES)
         )
@@ -1244,6 +1293,7 @@ class SentinelEngine:
         # the last known set.  Register grace for any person whose state changed.
         self._update_presence_grace(snapshot, now)
 
+        await self._attach_counter_baselines(snapshot, record=True)
         evaluation = self._evaluate_gated_rules(snapshot, self._rules)
         all_findings: list[AnomalyFinding] = evaluation.findings
         capabilities = evaluation.capabilities

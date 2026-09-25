@@ -58,6 +58,7 @@ NETWORK_RULE_TYPES: frozenset[str] = frozenset(
         "radio_new_device_joined",
         "network_unknown_device_joined",
         "network_guest_client_present",
+        "network_client_usage_anomaly",
         "network_guest_network_idle",
         "network_wpa3_disabled",
         "network_protection_disabled",

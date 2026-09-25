@@ -50,7 +50,9 @@ from custom_components.home_generative_agent.sentinel.suppression import (
     SuppressionState,
 )
 from custom_components.home_generative_agent.snapshot.network import (
+    CAP_CLIENT_DATA_DAY,
     CAP_CLIENTS,
+    CAP_COUNTER_BASELINES,
     CAP_NEW_CLIENTS,
     NetworkBuildContext,
     ha_cap,
@@ -173,6 +175,7 @@ def _engine(
     snapshot: FullStateSnapshot,
     *,
     options: dict[str, Any] | None = None,
+    baseline_updater: Any = None,
 ) -> tuple[SentinelEngine, DummyNotifier, DummyAudit, list[NetworkBuildContext]]:
     contexts: list[NetworkBuildContext] = []
 
@@ -209,6 +212,7 @@ def _engine(
         notifier=cast("SentinelNotifier", notifier),
         audit_store=cast("AuditStore", audit),
         explainer=None,
+        baseline_updater=baseline_updater,
     )
     return engine, notifier, audit, contexts
 
@@ -942,3 +946,84 @@ def test_report_markdown_keeps_a_finding_whose_severity_it_does_not_know() -> No
     assert "**Other**\n- **Failed login attempts.** Someone failed to log in." in text
     # Text from the home cannot open a new Markdown block.
     assert "- Gateway seen # Not a heading" in text
+
+
+# ---------------------------------------------------------------------------
+# Network counters and their baselines (plan step 10)
+# ---------------------------------------------------------------------------
+
+
+class _FakeUpdater:
+    def __init__(self, baselines: dict[str, dict[str, float]]) -> None:
+        self.baselines = baselines
+        self.recorded: list[dict[str, float]] = []
+
+    async def async_record_counters(self, counters: Any) -> bool:
+        self.recorded.append(dict(counters))
+        return True
+
+    async def async_fetch_counter_baselines(self) -> dict[str, dict[str, float]]:
+        return self.baselines
+
+    def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+
+def _usage_snapshot() -> FullStateSnapshot:
+    snapshot = _snapshot()
+    section = cast("Any", snapshot)["network"]
+    section["clients"] = [
+        {
+            "key": "3fa2c1b0",
+            "connected": True,
+            "name": "Living room TV",
+            "data_up_day_bytes": 3_200_000_000,
+            "data_down_day_bytes": 100_000_000,
+        }
+    ]
+    section["counters"] = {"network.client.3fa2c1b0.data_up_day_bytes": 3.2e9}
+    section["capabilities"] = sorted(
+        {*section["capabilities"], CAP_CLIENTS, CAP_CLIENT_DATA_DAY}
+    )
+    section["sources"][CAP_CLIENTS] = "eero_runtime"
+    section["sources"][CAP_CLIENT_DATA_DAY] = "eero_runtime"
+    return snapshot
+
+
+@pytest.mark.asyncio
+async def test_audit_injects_counter_baselines_without_recording(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hour = NOW.hour
+    updater = _FakeUpdater(
+        {"network.client.3fa2c1b0.data_up_day_bytes": {f"hourly_avg_{hour}": 8e8}}
+    )
+    engine, _, _, _ = _engine(monkeypatch, _usage_snapshot(), baseline_updater=updater)
+    report = await engine.async_audit_network()
+    assert report["status"] == "ok"
+    assert CAP_COUNTER_BASELINES in report["capabilities"]
+    assert "network_client_usage_anomaly" in report["checks_run"]
+    usage = [
+        f for f in report["findings"] if f["type"] == "network_client_usage_anomaly"
+    ]
+    assert len(usage) == 1
+    assert "Living room TV" in usage[0]["summary"]
+    # The on-demand audit never stores a sample.
+    assert updater.recorded == []
+
+
+@pytest.mark.asyncio
+async def test_cycle_records_counters_and_lists_the_rule_as_waiting_without_baselines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    updater = _FakeUpdater({})
+    engine, _, _, _ = _engine(monkeypatch, _usage_snapshot(), baseline_updater=updater)
+    await engine._run_once()
+    assert updater.recorded == [{"network.client.3fa2c1b0.data_up_day_bytes": 3.2e9}]
+    inactive = engine.run_stats["inactive_rules"]
+    assert inactive["network_client_usage_anomaly"] == [CAP_COUNTER_BASELINES]
+    assert "baseline collection" in capability_reason(CAP_COUNTER_BASELINES)
+    assert "Data Usage (Day)" in capability_reason(CAP_CLIENT_DATA_DAY)
