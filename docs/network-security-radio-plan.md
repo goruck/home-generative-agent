@@ -57,8 +57,11 @@ like `AuthInventory`.
   - `sentinel_reset_network_inventory` (admin only, logged with the caller,
     like the auth reset).
 - **Trust button.** `radio_new_device_joined` pushes carry a "Trust device"
-  action. The handler trusts the devices named in the finding. It ignores
-  the tap when the mobile-app event's user is not an admin.
+  action when the finding names one device; a finding naming several has
+  no primary button and its body points at the trust service (one tap must
+  never trust a device the 220-character push did not show). The handler
+  trusts the one device named in the finding, refuses a tap naming several,
+  and ignores the tap when the mobile-app event's user is not an admin.
 - Deleting the Sentinel subentry deletes the store, next to the auth
   inventory and salt.
 

@@ -185,7 +185,7 @@ def test_identity_display_and_actions() -> None:
         "Device b (Apple, wireless, 192.168.1.23)."
     )
     assert first.is_sensitive
-    # Two devices: no Trust button, the summary points at the service.
+    # Two devices: no Trust button; the notifier appends the service hint.
     assert first.suggested_actions[-1] == TRUST_SEVERAL_ACTION
     alone = _only(rule.evaluate(_snapshot([_client("a")], ["a"])))
     assert alone.suggested_actions[-1] == TRUST_ONE_ACTION

@@ -79,9 +79,10 @@ class NetworkGuestClientPresentRule:
     is NOT skipped, only marked: the name is whatever the device advertises,
     so skipping would let anyone hide by naming a device after a trusted one.
 
-    The Trust device button is offered for a single device only (see
-    ``notifier._TRUST_ONE_DEVICE_TYPES``): the push shows at most 220
-    characters, and one tap must never trust a device it did not name.
+    The Trust device button is offered for a single device only, as for
+    every trust finding (see ``notifier._TRUST_DEVICE_TYPES``): the push
+    shows at most 220 characters, and one tap must never trust a device it
+    did not name.
 
     The condition lasts for hours, so the rule carries the one-day cooldown
     floor of the posture rules. Two accepted limits follow from that and from

@@ -285,3 +285,16 @@ class CompoundFinding:
 
 # Convenience union type used in the engine pipeline.
 type Finding = AnomalyFinding | CompoundFinding
+
+
+def trust_device_ids(finding: AnomalyFinding) -> list[str]:
+    """
+    Return the inventory ids a trust finding names, strings only.
+
+    One predicate for both halves of the Trust device rule: the notifier
+    offers the button only when this has exactly one entry, and the action
+    handler trusts only then.
+    """
+    return [
+        str(d) for d in finding.evidence.get("device_ids") or [] if isinstance(d, str)
+    ]

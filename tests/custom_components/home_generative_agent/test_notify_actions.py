@@ -882,6 +882,26 @@ async def test_trust_action_refuses_a_finding_that_names_several_devices() -> No
 
 
 @pytest.mark.asyncio
+async def test_trust_action_on_a_finding_with_no_devices_trusts_nothing() -> None:
+    handler, inventory, audit = _trust_setup()
+    handler.register_finding(
+        AnomalyFinding(
+            anomaly_id="new-3",
+            type="radio_new_device_joined",
+            severity="low",
+            confidence=0.9,
+            triggering_entities=[],
+            evidence={"device_ids": [None, 7], "summary": "x"},
+            suggested_actions=[],
+            is_sensitive=True,
+        )
+    )
+    await handler.handle_action(f"{ACTION_PREFIX}trust_new-3", {}, user_id="admin")
+    assert inventory.calls == []
+    assert audit.updates[0]["outcome"] == {"status": "no_devices", "device_count": 0}
+
+
+@pytest.mark.asyncio
 async def test_trust_action_marks_devices_trusted_for_admin() -> None:
     handler, inventory, audit = _trust_setup()
     await handler.handle_action(f"{ACTION_PREFIX}trust_new-1", {}, user_id="admin")
