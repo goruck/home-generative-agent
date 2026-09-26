@@ -96,6 +96,8 @@ from .automation_pin import find_critical_automation_calls
 from .automation_targets import (
     describe_missing_targets,
     find_missing_automation_targets,
+    normalize_notify_service,
+    service_exists,
 )
 from .camera_activity import get_camera_last_events_from_states
 from .helpers import (
@@ -107,6 +109,7 @@ from .helpers import (
     register_pending_action,
     resolve_critical_action_policy,
     sanitize_tool_args,
+    sanitize_tool_text,
 )
 from .pin_messages import pin_msg
 
@@ -716,9 +719,27 @@ async def add_automation(  # noqa: D417
         return "Configuration not found. Please check your setup."
 
     hass = config["configurable"]["hass"]
-    mobile_push_service = config["configurable"]["options"].get(CONF_NOTIFY_SERVICE)
+    raw_push_service = config["configurable"]["options"].get(CONF_NOTIFY_SERVICE)
+    mobile_push_service = (
+        normalize_notify_service(str(raw_push_service)) if raw_push_service else None
+    )
 
     if time_pattern and message:
+        # The blueprint calls the push service through a template, which the
+        # existence check below cannot read, so check the configured value
+        # here: a phone that was renamed would otherwise install a camera
+        # automation whose push silently fails.
+        if mobile_push_service and not service_exists(hass, mobile_push_service):
+            return (
+                "Automation not added: the mobile push service configured for "
+                f"this integration, '{sanitize_tool_text(mobile_push_service)}', "
+                "is not a Home Assistant service, so the camera automation's "
+                "notification could never be delivered. This is a configuration "
+                "problem, not something to retry: tell the user to pick a "
+                "current notify service in this integration's options (the "
+                "camera analysis or Sentinel notification setting) and to ask "
+                "again afterwards."
+            )
         automation_data = {
             "alias": message,
             "description": f"Created with blueprint {AUTOMATION_TOOL_BLUEPRINT_NAME}.",
@@ -760,8 +781,8 @@ async def add_automation(  # noqa: D417
     if missing:
         LOGGER.info(
             "add_automation refused '%s': %s",
-            ha_automation_config.get("alias", "<unnamed>"),
-            "; ".join(item.describe() for item in missing),
+            sanitize_tool_text(str(ha_automation_config.get("alias", "<unnamed>"))),
+            ", ".join(item.name or item.kind for item in missing),
         )
         return describe_missing_targets(missing)
 
