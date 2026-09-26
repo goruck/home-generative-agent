@@ -22,10 +22,12 @@ from custom_components.home_generative_agent.sentinel.baseline import (
     BASELINE_FRESH,
     BASELINE_STALE,
     BASELINE_UNAVAILABLE,
+    COUNTER_ROW_RETENTION_DAYS,
     METRIC_DOW_AVG_PREFIX,
     METRIC_DOW_STD_PREFIX,
     METRIC_HOURLY_PREFIX,
     METRIC_ROLLING_AVG,
+    NETWORK_COUNTER_PREFIX,
     SentinelBaselineUpdater,
     evaluate_baseline_deviation,
     evaluate_time_of_day_anomaly,
@@ -2619,3 +2621,191 @@ async def test_dow_restore_filters_poisoned_rows() -> None:
     healthy = updater._dow_state.get(f"sensor.healthy:{dow}:{hour}")
     assert healthy is not None
     assert healthy[0] == pytest.approx(42.0)
+
+
+# ---------------------------------------------------------------------------
+# Network counters (docs/network-security-plan.md, baseline extension)
+# ---------------------------------------------------------------------------
+
+
+def _recording_pool() -> tuple[MagicMock, list[tuple[Any, ...]], list[str]]:
+    """Return a pool double that records INSERT params and SELECT SQL."""
+    upserts: list[tuple[Any, ...]] = []
+    selects: list[str] = []
+    cur = MagicMock()
+
+    async def _execute(sql: str, params: tuple[Any, ...]) -> None:
+        if "INSERT INTO" in sql:
+            upserts.append(params)
+        elif "SELECT" in sql:
+            selects.append(sql)
+
+    cur.execute = _execute
+    cur.fetchall = AsyncMock(return_value=[])
+    cur.fetchone = AsyncMock(return_value=None)
+    cur.__aenter__ = AsyncMock(return_value=cur)
+    cur.__aexit__ = AsyncMock(return_value=False)
+    conn = MagicMock()
+    conn.cursor = MagicMock(return_value=cur)
+    conn.commit = AsyncMock()
+    conn.__aenter__ = AsyncMock(return_value=conn)
+    conn.__aexit__ = AsyncMock(return_value=False)
+    pool = MagicMock()
+    pool.connection = MagicMock(return_value=conn)
+    return pool, upserts, selects
+
+
+@pytest.mark.asyncio
+async def test_offered_counters_are_written_by_the_loop_without_notices_or_dow() -> (
+    None
+):
+    pool, upserts, _selects = _recording_pool()
+    hass = MagicMock()
+    hass.services.async_call = AsyncMock()
+    updater = SentinelBaselineUpdater(
+        hass,
+        pool,
+        {
+            "sentinel_baseline_min_samples": 1,
+            CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS: True,
+        },
+    )
+    kept = updater.offer_counters(
+        {
+            "network.client.3fa2c1b0.data_up_day_bytes": 250_000_000,
+            "network.client_count": 38.0,
+            "sensor.not_a_counter": 5.0,  # an entity id: not this path's business
+            "network.client.bad.usage_up_mbps": float("inf"),
+            "network.client.bool.blocked_day": True,
+        }
+    )
+    assert kept == 2
+    # The offer itself touches no database; the loop's write does.
+    assert upserts == []
+    await updater._write_offered_counters()
+    ids = {p[0] for p in upserts}
+    assert ids == {
+        "network.client.3fa2c1b0.data_up_day_bytes",
+        "network.client_count",
+    }
+    # rolling + hourly per counter, and no day-of-week rows even though
+    # weekly patterns are on.
+    assert len(upserts) == 4
+    assert all(not str(p[1]).startswith("hourly_stddev_") for p in upserts)
+    hass.services.async_call.assert_not_called()
+    # A later offer replaces the earlier one; nothing offered writes nothing.
+    updater.offer_counters({"network.client_count": 39.0})
+    await updater._write_offered_counters()
+    assert len(upserts) == 6
+    assert updater.offer_counters({"sensor.x": 1.0}) == 0
+    await updater._write_offered_counters()
+    assert len(upserts) == 6
+
+
+@pytest.mark.asyncio
+async def test_counter_rows_of_departed_clients_are_pruned_once_a_day() -> None:
+    pool, _upserts, _selects = _recording_pool()
+    cur = pool.connection.return_value.cursor.return_value
+    deletes: list[tuple[Any, ...]] = []
+    original = cur.execute
+
+    async def _execute(sql: str, params: tuple[Any, ...] = ()) -> None:
+        if "DELETE" in sql:
+            deletes.append(params)
+            return
+        await original(sql, params)
+
+    cur.execute = _execute
+    updater = SentinelBaselineUpdater(MagicMock(), pool, {})
+    await updater._write_offered_counters()
+    await updater._write_offered_counters()
+    assert deletes == [("network.%", COUNTER_ROW_RETENTION_DAYS)]
+    updater._last_counter_prune = datetime.now(tz=UTC) - timedelta(days=2)
+    await updater._write_offered_counters()
+    assert len(deletes) == 2
+
+
+@pytest.mark.asyncio
+async def test_ready_entity_ids_leave_the_network_counters_out() -> None:
+    pool, _upserts, _selects = _recording_pool()
+    conn = pool.connection.return_value
+    cur = conn.cursor.return_value
+    cur.fetchall = AsyncMock(
+        return_value=[
+            {"entity_id": "sensor.washer_power"},
+            {"entity_id": f"{NETWORK_COUNTER_PREFIX}client.3fa2c1b0.data_up_day_bytes"},
+        ]
+    )
+    updater = SentinelBaselineUpdater(MagicMock(), pool, {})
+    assert await updater.async_fetch_ready_entity_ids() == ["sensor.washer_power"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_counter_baselines_is_bounded_to_the_prefix_and_metrics() -> None:
+    pool, _upserts, selects = _recording_pool()
+    cur = pool.connection.return_value.cursor.return_value
+    params: list[tuple[Any, ...]] = []
+    original = cur.execute
+
+    async def _execute(sql: str, p: tuple[Any, ...] = ()) -> None:
+        params.append(p)
+        await original(sql, p)
+
+    cur.execute = _execute
+    cur.fetchall = AsyncMock(
+        return_value=[
+            ("network.client.a.data_up_day_bytes", "hourly_avg_14", 800.0),
+            ("network.client.a.data_up_day_bytes", "hourly_avg_15", float("nan")),
+            ("network.client_count", "hourly_avg_14", 38.0),
+            ("network.client.b.data_down_day_bytes", "hourly_avg_15", None),
+        ]
+    )
+    updater = SentinelBaselineUpdater(MagicMock(), pool, {})
+    result = await updater.async_fetch_counter_baselines(
+        ["hourly_avg_14", "hourly_avg_15"]
+    )
+    assert result == {
+        "network.client.a.data_up_day_bytes": {"hourly_avg_14": 800.0},
+        "network.client_count": {"hourly_avg_14": 38.0},
+    }
+    assert any("LIKE" in sql and "ANY" in sql for sql in selects)
+    assert params[-1][:2] == ("network.%", ["hourly_avg_14", "hourly_avg_15"])
+    assert await updater.async_fetch_counter_baselines([]) == {}
+
+
+def test_health_stats_leave_the_network_counters_out() -> None:
+    from custom_components.home_generative_agent.sentinel.baseline import (  # noqa: PLC0415
+        _FETCH_STATS_SQL,
+    )
+
+    assert "NOT LIKE 'network.%%'" in _FETCH_STATS_SQL
+
+
+@pytest.mark.asyncio
+async def test_router_integration_sensors_are_not_baselined_as_entities() -> None:
+    """Eero makes a rate, signal, and traffic sensor per client: counters cover them."""
+    pool, upserts, _selects = _recording_pool()
+    cur = pool.connection.return_value.cursor.return_value
+    deletes: list[tuple[Any, ...]] = []
+    original = cur.execute
+
+    async def _execute(sql: str, params: tuple[Any, ...] = ()) -> None:
+        if "DELETE" in sql:
+            deletes.append(params)
+            return
+        await original(sql, params)
+
+    cur.execute = _execute
+    updater = SentinelBaselineUpdater(MagicMock(), pool, {})
+    eero = _entity(
+        "sensor.family_room_tv_wireless_kro_family_room_tv_data_usage_day", "3e9"
+    )
+    eero["platform"] = "eero"
+    plain = _entity("sensor.temperature", "22.5")
+    plain["platform"] = "shelly"
+    await updater._update_baselines(_snapshot([eero, plain]))
+    assert {p[0] for p in upserts} == {"sensor.temperature"}
+    # The rows it wrote before this rule are removed, once per process.
+    assert deletes == [([eero["entity_id"]],)]
+    await updater._update_baselines(_snapshot([eero, plain]))
+    assert len(deletes) == 1

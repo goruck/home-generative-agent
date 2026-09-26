@@ -22,7 +22,9 @@ from custom_components.home_generative_agent.const import (
     NETWORK_AUDIT_TOOL_DIGEST_COVERAGE_NOTE,
 )
 from custom_components.home_generative_agent.snapshot.network import (
+    CAP_CLIENT_DATA_DAY,
     CAP_CLIENTS,
+    CAP_COUNTER_BASELINES,
     CAP_GUEST_CLIENTS,
     CAP_NEW_CLIENTS,
     ha_cap,
@@ -183,6 +185,21 @@ _CAPABILITY_REASONS: tuple[tuple[str, str], ...] = (
         (
             "needs a router integration that reports the guest network and its "
             "connected guests, and a previous Sentinel run to measure from"
+        ),
+    ),
+    (
+        CAP_CLIENT_DATA_DAY,
+        (
+            "needs per-device traffic from the router integration; with eero, "
+            "select Data Usage (Day) for clients under Activity in the "
+            "integration's options"
+        ),
+    ),
+    (
+        CAP_COUNTER_BASELINES,
+        (
+            "needs baseline collection turned on in the Sentinel settings and a "
+            "few days of samples for a device's traffic at this hour"
         ),
     ),
     (

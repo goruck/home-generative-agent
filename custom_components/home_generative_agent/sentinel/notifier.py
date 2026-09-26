@@ -826,6 +826,7 @@ _KNOWN_TYPE_LABEL_KEYS = {
     "radio_new_device_joined": "type_radio_new_device_joined",
     "network_unknown_device_joined": "type_network_unknown_device_joined",
     "network_guest_client_present": "type_network_guest_client_present",
+    "network_client_usage_anomaly": "type_network_client_usage_anomaly",
     "network_guest_network_idle": "type_network_guest_network_idle",
     "network_wpa3_disabled": "type_network_wpa3_disabled",
     "network_protection_disabled": "type_network_protection_disabled",

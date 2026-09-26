@@ -20,6 +20,7 @@ from custom_components.home_generative_agent.sentinel.pseudonymizer import (
 from custom_components.home_generative_agent.snapshot import network as network_mod
 from custom_components.home_generative_agent.snapshot.eero import (
     CLIENT_ATTRS,
+    DATA_USAGE_NOTE,
     FORBIDDEN_ATTRS,
     NETWORK_ATTRS,
     NO_PLUS_NOTE,
@@ -31,6 +32,7 @@ from custom_components.home_generative_agent.snapshot.eero import (
     eero_runtime_adapter,
 )
 from custom_components.home_generative_agent.snapshot.network import (
+    CAP_CLIENT_DATA_DAY,
     CAP_CLIENTS,
     CAP_GUEST_CLIENTS,
     CAP_NEW_CLIENTS,
@@ -97,6 +99,11 @@ class FakeClient:
         self.last_active = kw.get("last_active")
         self.is_guest = kw.get("is_guest")
         self.device_type = kw.get("device_type")
+        self.usage_up = kw.get("usage_up", 0)
+        self.usage_down = kw.get("usage_down", 0)
+        self.signal = kw.get("signal", (None, None))
+        self.data_usage_day = kw.get("data_usage_day", (None, None))
+        self.blocked_day = kw.get("blocked_day")
 
 
 class FakeNetwork:
@@ -343,7 +350,78 @@ def test_adapter_publishes_clients_and_posture() -> None:
         "ad_blocking_enabled": False,
         "guest_client_count": 0,
     }
-    assert result.notes == []
+    # No client carries today's traffic: the Activity option is not on.
+    assert result.notes == [DATA_USAGE_NOTE]
+    # Only today's traffic is baselined; without it there is no counter.
+    assert result.counters == {}
+
+
+def test_adapter_reads_the_client_figures_as_counters() -> None:
+    network = FakeNetwork(
+        clients=[
+            FakeClient(
+                mac=MAC_A,
+                connected=True,
+                usage_up=1.5,
+                usage_down=12.25,
+                signal=(-58, "dBm"),
+                data_usage_day=(3_000_000_000, 250_000_000),
+                blocked_day=4,
+            ),
+            # Offline: its figures are kept on the client but not counted.
+            FakeClient(
+                mac=MAC_B, connected=False, data_usage_day=(10, 20), blocked_day=1
+            ),
+        ]
+    )
+    result = eero_runtime_adapter(_inputs(network), RouterInputs(), _context())
+    clients = {c["key"]: c for c in _plain(result.clients)}
+    assert clients[KEY_A]["usage_up_mbps"] == 1.5
+    assert clients[KEY_A]["usage_down_mbps"] == 12.25
+    assert clients[KEY_A]["signal_dbm"] == -58
+    assert clients[KEY_A]["data_down_day_bytes"] == 3_000_000_000
+    assert clients[KEY_A]["data_up_day_bytes"] == 250_000_000
+    assert clients[KEY_A]["blocked_day"] == 4
+    assert clients[KEY_B]["data_up_day_bytes"] == 20
+    # The rates and the blocked count stay on the client; only the two
+    # traffic figures become counters (what the usage rule reads).
+    assert result.counters == {
+        f"network.client.{KEY_A}.data_up_day_bytes": 250_000_000.0,
+        f"network.client.{KEY_A}.data_down_day_bytes": 3_000_000_000.0,
+    }
+    assert DATA_USAGE_NOTE not in result.notes
+    section = merge_adapter_results([result])
+    assert CAP_CLIENT_DATA_DAY in section["capabilities"]
+    assert section["sources"][CAP_CLIENT_DATA_DAY] == "eero_runtime"
+
+
+def test_client_figures_of_the_wrong_shape_read_as_absent() -> None:
+    network = FakeNetwork(
+        clients=[
+            FakeClient(
+                mac=MAC_A,
+                connected=True,
+                usage_up=float("nan"),
+                usage_down=-3,
+                signal=(-58, "%"),
+                data_usage_day=(None, "lots"),
+                blocked_day=True,
+            )
+        ]
+    )
+    result = eero_runtime_adapter(_inputs(network), RouterInputs(), _context())
+    client = _plain(result.clients)[0]
+    for figure in (
+        "usage_up_mbps",
+        "usage_down_mbps",
+        "signal_dbm",
+        "data_up_day_bytes",
+        "data_down_day_bytes",
+        "blocked_day",
+    ):
+        assert figure not in client, figure
+    assert result.counters == {}
+    assert CAP_CLIENT_DATA_DAY not in merge_adapter_results([result])["capabilities"]
 
 
 def test_adapter_judges_several_networks_together_only_when_all_report() -> None:

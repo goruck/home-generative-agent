@@ -353,6 +353,23 @@ class ClientRead:
     tracker_entity_id: str | None = None
     is_guest: bool | None = None
     vlan: int | None = None
+    signal_dbm: int | None = None
+    usage_up_mbps: float | None = None
+    usage_down_mbps: float | None = None
+    data_up_day_bytes: int | None = None
+    data_down_day_bytes: int | None = None
+    blocked_day: int | None = None
+
+
+# ``ClientRead`` figures copied onto the client when the source read them.
+_CLIENT_FIGURES: tuple[str, ...] = (
+    "signal_dbm",
+    "usage_up_mbps",
+    "usage_down_mbps",
+    "data_up_day_bytes",
+    "data_down_day_bytes",
+    "blocked_day",
+)
 
 
 def build_client(
@@ -392,6 +409,10 @@ def build_client(
         client["is_guest"] = read.is_guest
     if isinstance(read.vlan, int) and not isinstance(read.vlan, bool):
         client["vlan"] = read.vlan
+    for figure in _CLIENT_FIGURES:
+        value = getattr(read, figure)
+        if value is not None:
+            client[figure] = value  # type: ignore[literal-required]
     return client
 
 

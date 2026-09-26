@@ -26,7 +26,10 @@ adapter reads that object, following the plan's rules for the tier
   ``connected_guest_clients_count`` properties and the ``clients`` list; on
   each ``EeroClient`` ``mac``, ``ip``, ``hostname``, ``name``,
   ``manufacturer``, ``connection_type``, ``wireless``, ``connected``,
-  ``last_active``, ``is_guest``, and ``device_type``. Only the networks the
+  ``last_active``, ``is_guest``, ``device_type``, and the figures ``usage_up``,
+  ``usage_down`` (one poll's Mbps), ``signal`` (dBm), ``data_usage_day``
+  (today's download and upload bytes; only present when the integration's
+  Activity option requests it for clients), and ``blocked_day``. Only the networks the
   entry is configured for (the ``networks`` list beside the coordinator)
   are read, as the integration's own platforms do.
 
@@ -52,13 +55,14 @@ key.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Final
 
 from homeassistant.config_entries import ConfigEntryState
 
-from .network import AdapterResult, log_input_failure
+from .network import AdapterResult, client_counter_id, log_input_failure
 from .router import (
     EERO_ANY_ON,
     EERO_DOMAIN,
@@ -72,6 +76,8 @@ from .router import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
+
     from homeassistant.core import HomeAssistant
 
     from .network import NetworkBuildContext
@@ -109,6 +115,14 @@ CLIENT_ATTRS: Final[tuple[str, ...]] = (
     "last_active",
     "is_guest",
     "device_type",
+    # Figures for the baseline step: instantaneous rates and the link signal
+    # come with every poll; today's traffic and blocked count only when the
+    # integration's Activity option requests them for clients.
+    "usage_up",
+    "usage_down",
+    "signal",
+    "data_usage_day",
+    "blocked_day",
 )
 # Attributes of the eero objects that must never be read: credentials and
 # keys the integration exposes for its own entities. Kept next to the
@@ -143,6 +157,11 @@ PLUS_UNKNOWN_NOTE: Final = (
     "Whether eero Plus is active could not be read, so the dynamic DNS, "
     "advanced security, and ad-blocking settings are audited only where eero's "
     "own switches report them."
+)
+DATA_USAGE_NOTE: Final = (
+    "Per-device data usage is not read: in the eero integration's options, "
+    "under Activity, select Data Usage (Day) for clients so each device's "
+    "daily traffic can be baselined."
 )
 NO_PLUS_NOTE: Final = (
     "eero Plus is not active on this account, so the dynamic DNS, advanced "
@@ -243,7 +262,50 @@ def _read_client(client: Any, network_name: str | None) -> ClientRead | None:
             last_active.isoformat() if isinstance(last_active, datetime) else None
         ),
         is_guest=values["is_guest"] if isinstance(values["is_guest"], bool) else None,
+        **_client_figures(values),
     )
+
+
+def _finite(value: Any) -> float | None:
+    """Return *value* as a finite non-negative float, else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) and number >= 0 else None
+
+
+def _count(value: Any) -> int | None:
+    """Return *value* as a non-negative int, else None."""
+    number = _finite(value)
+    return int(number) if number is not None and float(number).is_integer() else None
+
+
+def _client_figures(values: Mapping[str, Any]) -> dict[str, Any]:
+    """
+    Return the numeric figures of a client read, each None when unreadable.
+
+    ``data_usage_day`` is eero's ``(download, upload)`` byte tuple and
+    ``signal`` its ``(level, unit)`` tuple; a shape that differs from the
+    pinned integration reads as absent rather than as a wrong number.
+    """
+    usage = values["data_usage_day"]
+    down = up = None
+    if isinstance(usage, tuple) and len(usage) == 2:  # noqa: PLR2004
+        down, up = _count(usage[0]), _count(usage[1])
+    signal = values["signal"]
+    level = None
+    if isinstance(signal, tuple) and len(signal) == 2:  # noqa: PLR2004
+        raw, unit = signal
+        if isinstance(raw, int) and not isinstance(raw, bool) and unit == "dBm":
+            level = raw
+    return {
+        "usage_up_mbps": _finite(values["usage_up"]),
+        "usage_down_mbps": _finite(values["usage_down"]),
+        "data_up_day_bytes": up,
+        "data_down_day_bytes": down,
+        "blocked_day": _count(values["blocked_day"]),
+        "signal_dbm": level,
+    }
 
 
 def _read_network(network: Any) -> EeroNetworkRead | None:
@@ -368,7 +430,39 @@ def eero_runtime_adapter(
     # list so the router source bootstraps rather than trusting the first
     # client that appears later.
     result.clients = list(clients.values())
+    _publish_client_counters(result, clients.values())
     return result
+
+
+def _publish_client_counters(
+    result: AdapterResult, clients: Iterable[NetworkClient]
+) -> None:
+    """
+    Publish each connected client's traffic as ``network.client.<key>.*``.
+
+    These feed the baseline step (the engine hands the section's counters to
+    the baseline updater), keyed by the pseudonymized client key so the
+    stored rows carry no address. Today's traffic needs the integration's
+    Activity option; when no connected client carries it the note says so,
+    since the usage check would otherwise be listed as not run with no hint.
+    """
+    connected = [c for c in clients if c.get("connected")]
+    with_usage = 0
+    for client in connected:
+        for figure in _COUNTER_FIGURES:
+            value = client.get(figure)
+            if value is not None:
+                result.counters[client_counter_id(client["key"], figure)] = float(value)
+        if client.get("data_up_day_bytes") is not None:
+            with_usage += 1
+    if connected and not with_usage:
+        result.notes.append(DATA_USAGE_NOTE)
+
+
+# Only what a rule reads is stored as a baseline: the two traffic figures.
+# The rates (one poll's Mbps) and the blocked count stay on the client for
+# display and the audit tool.
+_COUNTER_FIGURES: Final[tuple[str, ...]] = ("data_up_day_bytes", "data_down_day_bytes")
 
 
 def _clients_blocker(
