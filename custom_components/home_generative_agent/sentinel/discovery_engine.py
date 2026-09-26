@@ -396,8 +396,9 @@ class SentinelDiscoveryEngine:
             ready_ids = await self._baseline_updater.async_fetch_ready_entity_ids()
             snapshot["derived"]["baseline_ready_entities"] = ready_ids
 
-        # The reducer keeps no network section today; the gate holds once the
-        # plan's discovery templates add one (network-security-plan.md).
+        # The reducer's network section carries pseudonymized client keys
+        # and boolean router settings only; the gate catches any address a
+        # future field could bring (network-security-plan.md, step 8).
         reduced_snapshot = redact_network_identifiers(
             reduce_snapshot_for_discovery(snapshot)
         )

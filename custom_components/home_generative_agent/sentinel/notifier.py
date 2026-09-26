@@ -62,6 +62,9 @@ from custom_components.home_generative_agent.sentinel.power_units import (
     is_energy_unit,
     is_power_unit,
 )
+from custom_components.home_generative_agent.sentinel.proposal_templates import (
+    NETWORK_TEMPLATES,
+)
 from custom_components.home_generative_agent.sentinel.rules.network_common import (
     NETWORK_RULE_TYPES,
 )
@@ -827,6 +830,10 @@ _KNOWN_TYPE_LABEL_KEYS = {
     "network_unknown_device_joined": "type_network_unknown_device_joined",
     "network_guest_client_present": "type_network_guest_client_present",
     "network_client_usage_anomaly": "type_network_client_usage_anomaly",
+    # Discovery templates over the network section (keyed by template_id).
+    "network_client_present_when": "type_network_client_present_when",
+    "network_client_absent_when": "type_network_client_absent_when",
+    "network_posture_equals": "type_network_posture_equals",
     "network_guest_network_idle": "type_network_guest_network_idle",
     "network_wpa3_disabled": "type_network_wpa3_disabled",
     "network_protection_disabled": "type_network_protection_disabled",
@@ -1235,7 +1242,9 @@ _TEMPLATE_MOBILE_FORMATTERS: dict[
 _SECURITY_MESSAGE_TYPES = frozenset(
     {"alarm_disarmed_during_external_threat"} | NETWORK_RULE_TYPES
 )
-_SECURITY_MESSAGE_TEMPLATE_IDS = frozenset({"alarm_disarmed_open_entry"})
+_SECURITY_MESSAGE_TEMPLATE_IDS = frozenset(
+    {"alarm_disarmed_open_entry", *NETWORK_TEMPLATES}
+)
 
 
 # Characters that start Markdown links, images, emphasis, code, raw HTML, or
@@ -1259,7 +1268,8 @@ def _network_summary(finding: AnomalyFinding) -> str | None:
     entity, so the generic fallback would name nothing. None for every other
     finding type or when the summary is empty.
     """
-    if finding.type not in NETWORK_RULE_TYPES:
+    template_id = str(finding.evidence.get("template_id") or "")
+    if finding.type not in NETWORK_RULE_TYPES and template_id not in NETWORK_TEMPLATES:
         return None
     summary = str(finding.evidence.get("summary") or "").strip()
     return summary or None

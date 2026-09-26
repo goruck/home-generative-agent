@@ -20,6 +20,10 @@ from .evidence_paths import (
     NOT_ANYONE_HOME_TEXT_PATTERN,
     PresenceSignal,
     has_derived_path,
+    network_absent_signal,
+    network_client_keys,
+    network_posture_expected,
+    network_posture_keys,
     night_signal,
     presence_signal,
 )
@@ -55,7 +59,19 @@ SUPPORTED_TEMPLATES = {
     "sensor_threshold_condition",
     "entity_staleness",
     "multiple_entries_open_count",
+    # Network security plan, step 10: rules over the router section.
+    "network_client_present_when",
+    "network_client_absent_when",
+    "network_posture_equals",
 }
+
+NETWORK_TEMPLATES: frozenset[str] = frozenset(
+    {
+        "network_client_present_when",
+        "network_client_absent_when",
+        "network_posture_equals",
+    }
+)
 
 # The anyone_home boolean-expression and away/home term patterns live in
 # evidence_paths.py (issue #524) — one copy shared with the semantic keys.
@@ -427,6 +443,12 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
         "presence": presence,
         "has_night": has_night,
     }
+
+    network = _normalize_network_candidate(
+        candidate, evidence_paths, text, presence=presence, has_night=has_night
+    )
+    if network is not None:
+        return NormalizationResult(normalized=network)
 
     if (
         alarm_id
@@ -1892,6 +1914,66 @@ def _is_cyclical_load(entity_id: str) -> bool:
 
 def _contains_any(text: str, words: tuple[str, ...]) -> bool:
     return any(word in text for word in words)
+
+
+def _normalize_network_candidate(
+    candidate: dict[str, Any],
+    evidence_paths: list[str],
+    text: str,
+    *,
+    presence: str,
+    has_night: bool,
+) -> NormalizedRule | None:
+    """
+    Map a candidate that cites the network section to a network template.
+
+    A client path becomes ``network_client_present_when`` or
+    ``network_client_absent_when`` (the prose decides: "missing", "not
+    connected", "offline" mean absent), carrying the occupancy and night
+    context the candidate cites. A posture path becomes
+    ``network_posture_equals`` with the value the prose names, or the value
+    that opens the network for that setting when it does not. The path and
+    prose readers live in ``evidence_paths`` so the semantic keys resolve
+    them the same way. None for a candidate without a network path.
+    """
+    client_keys = network_client_keys(evidence_paths)
+    posture_keys = network_posture_keys(evidence_paths)
+    confidence = float(candidate.get("confidence_hint", 0.7))
+    if client_keys:
+        key = client_keys[0]
+        absent = network_absent_signal(text)
+        template_id = (
+            "network_client_absent_when" if absent else "network_client_present_when"
+        )
+        return NormalizedRule(
+            rule_id=_candidate_rule_id(candidate, default=f"{template_id}_{key}"),
+            template_id=template_id,
+            params={
+                "client_key": key,
+                "require_away": presence == "away",
+                "require_home": presence == "home",
+                "require_night": has_night,
+            },
+            severity="low" if absent else "medium",
+            confidence=confidence,
+            is_sensitive=True,
+            suggested_actions=["check_device"],
+        )
+    if posture_keys:
+        key = posture_keys[0]
+        return NormalizedRule(
+            rule_id=_candidate_rule_id(candidate, default=f"network_posture_{key}"),
+            template_id="network_posture_equals",
+            params={
+                "posture_key": key,
+                "expected": network_posture_expected(key, text),
+            },
+            severity="medium",
+            confidence=confidence,
+            is_sensitive=True,
+            suggested_actions=["check_router"],
+        )
+    return None
 
 
 def _candidate_rule_id(candidate: dict[str, Any], *, default: str) -> str:

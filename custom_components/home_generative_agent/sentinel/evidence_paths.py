@@ -210,3 +210,94 @@ def night_signal(evidence_paths: object, text: str) -> bool:
     if NOT_IS_NIGHT_PATH in paths:
         return False
     return "night" in text
+
+
+# ---------------------------------------------------------------------------
+# Network section paths (network security plan, step 10)
+# ---------------------------------------------------------------------------
+# ``network.clients[key=3fa2c1b0].connected`` cites a router client by its
+# pseudonymized key; ``network.posture.upnp_enabled`` cites a router setting.
+# The normalizer and the semantic keys resolve both through here so a
+# candidate and its activated rule always agree.
+NETWORK_CLIENT_PATH_RE: Final = re.compile(
+    r"network\.clients\[\s*(?:key\s*=\s*)?['\"`]*([0-9a-f]{8,16})['\"`]*\s*\]"
+)
+NETWORK_POSTURE_PATH_RE: Final = re.compile(r"network\.posture\.([a-z0-9_]+)")
+# The settings a rule may watch, each with the value worth an alert when the
+# prose does not say: a setting that opens the network (UPnP, guest Wi-Fi,
+# dynamic DNS, IPv6) turning on, a protection (WPA3, threat blocking, ad
+# blocking) turning off.
+NETWORK_POSTURE_ALERT_VALUE: Final[dict[str, bool]] = {
+    "upnp_enabled": True,
+    "guest_network_enabled": True,
+    "ddns_enabled": True,
+    "ipv6_enabled": True,
+    "wpa3_enabled": False,
+    "malware_blocking_enabled": False,
+    "ad_blocking_enabled": False,
+}
+_NETWORK_ABSENT_TERMS: Final = (
+    "absent",
+    "missing",
+    "not connected",
+    "disconnected",
+    "offline",
+    "gone",
+    "not on the network",
+    "left the network",
+    "drops off",
+    "dropped off",
+)
+_NETWORK_OFF_RE: Final = re.compile(
+    r"\b(?:turned off|switched off|disabled|is off|off)\b"
+)
+_NETWORK_ON_RE: Final = re.compile(
+    r"\b(?:turned on|switched on|enabled|is on|active|on)\b"
+)
+
+
+def network_client_keys(evidence_paths: object) -> list[str]:
+    """Return the client keys the evidence paths cite, in order, deduplicated."""
+    keys: list[str] = []
+    if not isinstance(evidence_paths, list):
+        return keys
+    for path in evidence_paths:
+        if not isinstance(path, str):
+            continue
+        for match in NETWORK_CLIENT_PATH_RE.finditer(path.lower()):
+            if match.group(1) not in keys:
+                keys.append(match.group(1))
+    return keys
+
+
+def network_posture_keys(evidence_paths: object) -> list[str]:
+    """Return the watched router settings the evidence paths cite."""
+    keys: list[str] = []
+    if not isinstance(evidence_paths, list):
+        return keys
+    for path in evidence_paths:
+        if not isinstance(path, str):
+            continue
+        for match in NETWORK_POSTURE_PATH_RE.finditer(path.lower()):
+            key = match.group(1)
+            if key in NETWORK_POSTURE_ALERT_VALUE and key not in keys:
+                keys.append(key)
+    return keys
+
+
+def network_absent_signal(text: str) -> bool:
+    """Return True when the prose describes a device that is missing."""
+    lowered = text.lower()
+    return any(term in lowered for term in _NETWORK_ABSENT_TERMS)
+
+
+def network_posture_expected(key: str, text: str) -> bool:
+    """Return the setting value the candidate wants an alert on."""
+    lowered = text.lower()
+    off = bool(_NETWORK_OFF_RE.search(lowered))
+    on = bool(_NETWORK_ON_RE.search(lowered))
+    if off and not on:
+        return False
+    if on and not off:
+        return True
+    return NETWORK_POSTURE_ALERT_VALUE[key]
