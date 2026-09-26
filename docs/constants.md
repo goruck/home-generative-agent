@@ -420,6 +420,9 @@ This document covers the named constants that affect integration behaviour, orga
 |---|---|---|---|
 | `SENTINEL_POSTURE_RULE_COOLDOWN_MINUTES` | `const.py` | `1440` (24 h) | Cooldown floor for posture rules (standing conditions such as a stale token or an exposed add-on port); the engine uses the larger of this and `sentinel_cooldown_minutes` |
 | `SENTINEL_NETWORK_USAGE_THRESHOLD_PCT` | `const.py` | `300.0` | `network_client_usage_anomaly`: how far above its hourly baseline a device's traffic today must be |
+| `USAGE_ENTITY_COOLDOWN_MINUTES` | `sentinel/rules/network_client_usage_anomaly.py` | `1440` (24 h) | Per-device cooldown floor of `network_client_usage_anomaly`, keyed on the pseudo entity `network.client.<key>.<direction>`, so one device's alert never hides another's |
+| `FIRST_DAY_HOLDOFF` | `sentinel/rules/network_guest_client_present.py` | `1 day` | Age a client's inventory row must reach before `network_guest_client_present` judges it; the first day belongs to `network_unknown_device_joined` |
+| `MAX_LISTED_ITEMS` | `sentinel/rules/network_common.py` | `10` | Devices named in one aggregated network finding's summary before "and N more" |
 | `SENTINEL_NETWORK_USAGE_MIN_EXCESS_BYTES` | `const.py` | `262144000` (250 MB) | `network_client_usage_anomaly`: the byte floor the excess must also clear, so an idle device's few megabytes never read as a multiple |
 | `MAX_SEEN_IPS` | `sentinel/auth_inventory.py` | `20` | Pseudonymized addresses kept per token in the auth inventory |
 | `SEEN_IP_REFRESH` | `sentinel/auth_inventory.py` | `1 h` | How often an address's `last_seen` stamp is refreshed, so steady use does not rewrite the store every cycle |
@@ -435,6 +438,9 @@ This document covers the named constants that affect integration behaviour, orga
 | `FORBIDDEN_ATTRS` | `snapshot/eero.py` | `password, guest_network_password, thread_master_key, …` | eero object attributes the adapter must never read; asserted disjoint from the allowlists |
 | `EERO_INTEGRATION_VERSION` | `snapshot/eero.py` | `1.8.1` | The eero integration version whose objects the runtime adapter was written against |
 | `COUNTER_CLIENT_COUNT`, `COUNTER_THREATS_DAY` | `snapshot/router.py` | `network.client_count`, `network.threats_day` | Baseline-input counters: connected router clients, and threats the router blocked today |
+| `ROUTER_ROW_RETENTION` | `sentinel/network_inventory.py` | `30 days` | How long a router client's inventory row is kept after its last sighting before it goes, so one router integration reloading never turns its clients into new devices |
+| `COUNTER_ROW_RETENTION_DAYS` | `sentinel/baseline.py` | `30` | Days after its last update a `network.*` counter baseline row is kept before the updater prunes it |
+| `_MAX_NETWORK_CLIENTS` | `snapshot/discovery_reducer.py` | `40` | Router clients the discovery model is shown (connected first, then by name); when the reduced snapshot still exceeds its character budget the whole client list is the first thing dropped |
 | `POSTURE_MEMORY_KEYS` | `snapshot/upnp.py` | `public_ip_key, public_ip_entity_id, upnp_port_mapping_count, upnp_port_mapping_entity_id` | Posture values the Sentinel engine remembers between runs (in the device inventory file) for `network_public_ip_changed` and `network_upnp_port_mapping_added`, each with the sensor it was read from |
 
 ---
