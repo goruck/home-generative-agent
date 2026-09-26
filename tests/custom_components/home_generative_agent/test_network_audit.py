@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 import yaml
-from homeassistant.util import dt as dt_util
 
 import custom_components.home_generative_agent as hga_component
 from custom_components.home_generative_agent.agent.tools import audit_home_security
@@ -1006,8 +1005,11 @@ def _usage_snapshot(*clients: dict[str, Any]) -> FullStateSnapshot:
 
 
 def _usual_up(key: str, value: float) -> dict[str, dict[str, float]]:
-    hour = dt_util.utcnow().hour
-    return {f"network.client.{key}.data_up_day_bytes": {f"hourly_avg_{hour}": value}}
+    # Keyed by the snapshot's hour: the engine and the rule both read the
+    # buckets for generated_at, never the wall clock.
+    return {
+        f"network.client.{key}.data_up_day_bytes": {f"hourly_avg_{NOW.hour}": value}
+    }
 
 
 @pytest.mark.asyncio
@@ -1028,9 +1030,8 @@ async def test_audit_injects_counter_baselines_without_offering(
     # The on-demand audit never hands a sample over; the fetch is bounded to
     # the two hour buckets the rule reads.
     assert updater.offered == []
-    hour = dt_util.utcnow().hour
     assert updater.fetched_metrics == [
-        [f"hourly_avg_{hour}", f"hourly_avg_{(hour + 1) % 24}"]
+        [f"hourly_avg_{NOW.hour}", f"hourly_avg_{(NOW.hour + 1) % 24}"]
     ]
 
 
@@ -1053,7 +1054,7 @@ async def test_counter_baselines_capability_needs_a_covered_device_and_notes_the
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A baseline for some other counter is not coverage for the usage check.
-    other = {"network.client_count": {f"hourly_avg_{dt_util.utcnow().hour}": 38.0}}
+    other = {"network.client_count": {f"hourly_avg_{NOW.hour}": 38.0}}
     snapshot = _usage_snapshot(
         _usage_client("a", "TV", 3_200_000_000), _usage_client("b", "Phone", 1)
     )

@@ -1105,7 +1105,9 @@ class SentinelEngine:
             for c in section.get("clients") or []
         ):
             return
-        now = dt_util.utcnow()
+        # The snapshot's own time, so the buckets fetched here are the ones
+        # the rule reads from the same snapshot.
+        now = dt_util.parse_datetime(snapshot["generated_at"]) or dt_util.utcnow()
         try:
             baselines = await asyncio.wait_for(
                 self._baseline_updater.async_fetch_counter_baselines(hour_metrics(now)),
