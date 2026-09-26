@@ -80,6 +80,7 @@ from ..core.prompt_cache import (  # noqa: TID252
     build_system_message,
 )
 from ..core.utils import extract_final  # noqa: TID252
+from .automation_targets import AUTOMATION_REFUSAL_PREFIX
 from .helpers import (
     active_llm_api_ids,
     base_tool_name,
@@ -142,6 +143,11 @@ class State(MessagesState):
     selected_tools: list[dict[str, Any]]
     tool_routing_map: dict[str, str]
     action_rounds: NotRequired[int]
+    # Tool rounds in which every call was an add_automation refusal: nothing
+    # ran, the model was told what to correct. Counted apart from
+    # action_rounds so a correction never costs the round the corrected call
+    # needs, capped so a model that keeps guessing still stops.
+    correction_rounds: NotRequired[int]
     # Memories retrieved for the user message this turn serves, memoized so
     # every model call of the turn (tool call → answer) sees the same block
     # and pays for one embedding, not one per call. Reset per turn by the
@@ -1060,6 +1066,49 @@ def _retrieval_query(messages: Sequence[BaseMessage]) -> str:
 
 
 _MAX_ACTION_ROUNDS = 3
+
+# Extra rounds granted for correcting a refused automation. A refusal is not
+# an action: the tool ran nothing and handed back the names to fix, so the
+# retry it asks for must not be the round the guard cuts off. Two covers a
+# wrong entity fixed in one pass and a wrong service in the next.
+_MAX_CORRECTION_ROUNDS = 2
+
+
+def _is_automation_refusal(msg: BaseMessage) -> bool:
+    """Return True for the tool message of a refused add_automation call."""
+    return (
+        isinstance(msg, ToolMessage)
+        and base_tool_name(msg.name or "") == "add_automation"
+        and isinstance(msg.content, str)
+        and msg.content.startswith(AUTOMATION_REFUSAL_PREFIX)
+    )
+
+
+def _next_round_counters(
+    state: State, tool_responses: Sequence[BaseMessage]
+) -> dict[str, int]:
+    """
+    Return the round counters after a tool round.
+
+    A round in which every tool call was a refused add_automation is a
+    correction round while the correction budget lasts; any other round,
+    including a refusal once that budget is spent, is an action round.
+    """
+    action_rounds = state.get("action_rounds", 0)
+    correction_rounds = state.get("correction_rounds", 0)
+    if (
+        tool_responses
+        and all(_is_automation_refusal(msg) for msg in tool_responses)
+        and correction_rounds < _MAX_CORRECTION_ROUNDS
+    ):
+        return {
+            "action_rounds": action_rounds,
+            "correction_rounds": correction_rounds + 1,
+        }
+    return {
+        "action_rounds": action_rounds + 1,
+        "correction_rounds": correction_rounds,
+    }
 
 
 def _message_text(msg: BaseMessage) -> str:
@@ -2315,6 +2364,7 @@ async def _retrieve_tools(  # noqa: PLR0915
         "selected_tools": selected_tools,
         "tool_routing_map": routing_map,
         "action_rounds": 0,
+        "correction_rounds": 0,
     }
 
 
@@ -3080,7 +3130,7 @@ async def _call_tools(
 
     return {
         "messages": tool_responses,
-        "action_rounds": state.get("action_rounds", 0) + 1,
+        **_next_round_counters(state, tool_responses),
     }
 
 
@@ -3097,19 +3147,26 @@ def _should_continue(
     return "summarize_and_remove_messages"
 
 
-async def _tool_loop_guard(state: State) -> dict[str, Any]:  # noqa: ARG001
-    """Emit a friendly message when the action-round limit is reached."""
-    return {
-        "messages": [
-            AIMessage(
-                content=(
-                    "I wasn't able to complete this request after several "
-                    "tool-use attempts. Please try rephrasing your query or "
-                    "breaking it into smaller steps."
-                )
-            )
-        ]
-    }
+async def _tool_loop_guard(state: State) -> dict[str, Any]:
+    """
+    Emit a friendly message when the action-round limit is reached.
+
+    When the round before the cut-off was a refused automation, the refusal
+    text is the one thing the user can act on, so it is repeated rather than
+    lost behind the generic apology.
+    """
+    content = (
+        "I wasn't able to complete this request after several tool-use "
+        "attempts. Please try rephrasing your query or breaking it into "
+        "smaller steps."
+    )
+    last_tool = next(
+        (m for m in reversed(state["messages"]) if isinstance(m, ToolMessage)),
+        None,
+    )
+    if last_tool is not None and _is_automation_refusal(last_tool):
+        content += f"\n\nThe last problem was:\n{last_tool.content}"
+    return {"messages": [AIMessage(content=content)]}
 
 
 # Define a new graph

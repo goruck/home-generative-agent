@@ -1038,6 +1038,15 @@ TOOL_CALL_ERROR_SYSTEM_MESSAGE = """
 
 Always call tools again with your mistakes corrected. Do not repeat mistakes.
 """
+# Stable-prefix line naming the configured mobile push service, so an
+# automation that notifies the user's phone is written with the real service
+# on the first try instead of hunting for it with lookups the model has no
+# tool for (the Assist context lists entities, never notify services).
+AUTOMATION_PUSH_SERVICE_PROMPT = """
+
+The user's mobile push notification service is {service}. Use it for any
+automation that notifies the user's phone.
+"""
 TOOL_CALL_ERROR_TEMPLATE = """
 Error: {error}
 

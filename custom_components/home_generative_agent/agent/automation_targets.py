@@ -134,6 +134,10 @@ _FUZZY_CUTOFF = 0.6
 _GENERIC_SERVICES = frozenset({"turn_on", "turn_off", "toggle", "reload", "trigger"})
 _GENERIC_SERVICE_DOMAINS = frozenset({"automation", "script"})
 
+# Every refusal this module (or the blueprint guard) returns starts with
+# this, so the graph can tell a refused automation from an executed action.
+AUTOMATION_REFUSAL_PREFIX = "Automation not added"
+
 # Report kinds. "automation" is a whole-config finding with no name.
 KIND_ENTITY = "entity"
 KIND_SERVICE = "service"
@@ -721,7 +725,7 @@ def describe_missing_targets(missing: Sequence[MissingAutomationTarget]) -> str:
     if len(missing) > len(shown):
         lines.append(f"- … and {len(missing) - len(shown)} more.")
     return (
-        "Automation not added: it refers to entities or services that do not "
-        "exist in Home Assistant, so it would never run. Correct these and call "
-        "the tool again with the full automation:\n" + "\n".join(lines)
+        f"{AUTOMATION_REFUSAL_PREFIX}: it refers to entities or services that do "
+        "not exist in Home Assistant, so it would never run. Correct these and "
+        "call the tool again with the full automation:\n" + "\n".join(lines)
     )

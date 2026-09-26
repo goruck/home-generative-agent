@@ -94,6 +94,7 @@ from ..sentinel.notifier_messages import notif_msg  # noqa: TID252
 from ..sentinel.redaction import redact_network_identifiers  # noqa: TID252
 from .automation_pin import find_critical_automation_calls
 from .automation_targets import (
+    AUTOMATION_REFUSAL_PREFIX,
     describe_missing_targets,
     find_missing_automation_targets,
     normalize_notify_service,
@@ -731,7 +732,7 @@ async def add_automation(  # noqa: D417
         # automation whose push silently fails.
         if mobile_push_service and not service_exists(hass, mobile_push_service):
             return (
-                "Automation not added: the mobile push service configured for "
+                f"{AUTOMATION_REFUSAL_PREFIX}: the mobile push service configured for "
                 f"this integration, '{sanitize_tool_text(mobile_push_service)}', "
                 "is not a Home Assistant service, so the camera automation's "
                 "notification could never be delivered. This is a configuration "

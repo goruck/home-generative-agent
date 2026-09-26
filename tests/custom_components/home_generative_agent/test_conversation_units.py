@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
 from custom_components.home_generative_agent.const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
+    CONF_NOTIFY_SERVICE,
     CONF_TOOL_EXCLUSIONS,
 )
 from custom_components.home_generative_agent.core.utils import (
@@ -1864,6 +1865,29 @@ def test_render_system_prompt_audit_instruction_follows_sentinel_availability(
         {"sentinel_network_enabled": False}, sentinel=object()
     )._async_render_system_prompt(MagicMock(), None, llm_api, has_tools=True)
     assert "audit_home_security" not in stable
+
+
+def test_render_system_prompt_names_the_push_service_when_tools_exist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stable prefix names the configured mobile push service, prefix or not."""
+    monkeypatch.setattr(f"{_CONV}.template.Template", _EchoTemplate)
+    llm_api = cast("Any", types.SimpleNamespace(api_prompt="EXPOSED"))
+
+    stable, _ = _render_entity(
+        {CONF_NOTIFY_SERVICE: "mobile_app_lindos_iphone"}
+    )._async_render_system_prompt(MagicMock(), None, llm_api, has_tools=True)
+    assert "notify.mobile_app_lindos_iphone" in stable
+
+    stable, _ = _render_entity(
+        {CONF_NOTIFY_SERVICE: "notify.mobile_app_lindos_iphone"}
+    )._async_render_system_prompt(MagicMock(), None, llm_api, has_tools=False)
+    assert "mobile_app_lindos_iphone" not in stable
+
+    stable, _ = _render_entity({})._async_render_system_prompt(
+        MagicMock(), None, llm_api, has_tools=True
+    )
+    assert "push notification service" not in stable
 
 
 def test_render_system_prompt_moves_date_time_out_of_the_stable_prefix(
