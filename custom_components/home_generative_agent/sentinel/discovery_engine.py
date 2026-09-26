@@ -45,7 +45,11 @@ from .discovery_semantic import (
     rule_semantic_key,
     sanitize_environmental_candidate,
 )
-from .evidence_paths import is_derived_path
+from .evidence_paths import (
+    is_derived_path,
+    network_client_keys,
+    network_posture_keys,
+)
 from .logging_utils import RepeatingLogLimiter
 from .redaction import redact_network_identifiers
 from .rules.network_common import NETWORK_RULE_TYPES
@@ -585,6 +589,9 @@ class SentinelDiscoveryEngine:
         )
         candidates = [item for item in raw_candidates if isinstance(item, dict)]
         self._discovery_cycle_stats["candidates_generated"] = len(candidates)
+        candidates, unknown_network = _drop_unknown_network_citations(
+            candidates, reduced_snapshot
+        )
         filtered, filtered_candidates = self._filter_novel_candidates(
             candidates,
             filter_keys,
@@ -595,6 +602,7 @@ class SentinelDiscoveryEngine:
             # (issue #571).
             _battery_level_entity_ids(self._hass, snapshot),
         )
+        filtered_candidates = [*unknown_network, *filtered_candidates]
         self._discovery_cycle_stats["candidates_novel"] = len(filtered)
         self._discovery_cycle_stats["candidates_deduplicated"] = len(
             filtered_candidates
@@ -903,6 +911,42 @@ def _candidate_identity_keys(candidate: dict[str, Any]) -> set[str]:
         blob = f"battery-device\x00{device_token}".encode()
         keys.add("ident|sha256=" + hashlib.sha256(blob).hexdigest()[:16])
     return keys
+
+
+def _drop_unknown_network_citations(
+    candidates: list[dict[str, Any]], reduced_snapshot: Mapping[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    Drop candidates citing a client key or setting the model was not shown.
+
+    A hallucinated key would become a rule that never fires (or, for the
+    absent template, one that could fire on nothing); the reduced snapshot
+    is the only source of keys the model had, so a citation outside it is
+    refused at ingestion with its own reason.
+    """
+    network = reduced_snapshot.get("network") or {}
+    known_keys = {
+        str(c.get("key"))
+        for c in network.get("clients") or []
+        if isinstance(c, Mapping) and c.get("key")
+    }
+    known_posture = set((network.get("posture") or {}).keys())
+    kept: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for candidate in candidates:
+        paths = candidate.get("evidence_paths")
+        unknown = [k for k in network_client_keys(paths) if k not in known_keys]
+        unknown += [k for k in network_posture_keys(paths) if k not in known_posture]
+        if unknown:
+            dropped.append(
+                {
+                    "candidate_id": str(candidate.get("candidate_id", "")),
+                    "dedupe_reason": "unknown_network_key",
+                }
+            )
+            continue
+        kept.append(candidate)
+    return kept, dropped
 
 
 def _entity_ids_from_evidence_paths(evidence_paths: object) -> set[str]:

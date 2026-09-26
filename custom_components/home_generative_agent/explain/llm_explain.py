@@ -170,7 +170,7 @@ _KNOWN_TYPE_LABELS = {
     "network_client_usage_anomaly": "A device moved far more data than usual",
     "network_client_present_when": "A device is on the network when it should not be",
     "network_client_absent_when": "A device is missing from the network",
-    "network_posture_equals": "A router setting changed",
+    "network_posture_equals": "A router setting is at a value you watch for",
     "network_guest_network_idle": "Guest Wi-Fi left on unused",
     "network_wpa3_disabled": "WPA3 is off",
     "network_protection_disabled": "Router threat blocking is off",

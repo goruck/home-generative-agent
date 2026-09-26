@@ -14,8 +14,9 @@ from typing import Any
 # asymmetric pair keys a candidate home=1 while its activated rule keys
 # home=0, breaking dedup in both directions; issue #524).
 from .evidence_paths import (
+    NETWORK_POSTURE_ALERT_VALUE,
     canonicalize_evidence_path,
-    network_absent_signal,
+    network_client_direction,
     network_client_keys,
     network_posture_expected,
     network_posture_keys,
@@ -580,7 +581,9 @@ def candidate_semantic_key(  # noqa: C901, PLR0912, PLR0915
     # normalizer ignores would break the key mirror.
     slug_text = str(candidate.get("candidate_id", "")).lower()
     entity_ids = _extract_entity_ids(evidence_paths)
-    network_key = _network_candidate_key(evidence_paths, text)
+    network_key = _network_candidate_key(
+        evidence_paths, text, str(candidate.get("pattern", ""))
+    )
     if network_key is not None:
         return network_key
     camera_ids = sorted(_extract_camera_ids(evidence_paths))
@@ -868,7 +871,9 @@ def _network_posture_key(posture_key: str, expected: bool) -> str:  # noqa: FBT0
     )
 
 
-def _network_candidate_key(evidence_paths: list[str], text: str) -> str | None:
+def _network_candidate_key(
+    evidence_paths: list[str], text: str, pattern: str
+) -> str | None:
     """
     Return the key for a candidate that cites the network section, else None.
 
@@ -879,7 +884,9 @@ def _network_candidate_key(evidence_paths: list[str], text: str) -> str | None:
     """
     client_keys = network_client_keys(evidence_paths)
     if client_keys:
-        predicate = "absent" if network_absent_signal(text) else "present"
+        # Only accepted candidates need to mirror the normalizer; an
+        # ambiguous one keys as "present" and is refused there anyway.
+        predicate = network_client_direction(pattern, text) or "present"
         night = "1" if night_signal(evidence_paths, text) else "any"
         home = {"away": "0", "home": "1", "any": "any"}[
             presence_signal(evidence_paths, text)
@@ -891,7 +898,10 @@ def _network_candidate_key(evidence_paths: list[str], text: str) -> str | None:
     posture_keys = network_posture_keys(evidence_paths)
     if posture_keys:
         key = posture_keys[0]
-        return _network_posture_key(key, network_posture_expected(key, text))
+        expected = network_posture_expected(key, text)
+        if expected is None:
+            expected = NETWORK_POSTURE_ALERT_VALUE[key]
+        return _network_posture_key(key, expected)
     return None
 
 

@@ -53,17 +53,6 @@ _MAX_SUMMARY_CHARS = 80
 _MAX_BASELINE_ENTITIES = 30
 # Router clients shown to the discovery model (connected first, then by name).
 _MAX_NETWORK_CLIENTS = 40
-# Posture facts the model may reason about: the boolean router settings.
-# Never the entity twins, the public-IP key, or the change bookkeeping.
-_NETWORK_POSTURE_KEYS = (
-    "upnp_enabled",
-    "wpa3_enabled",
-    "guest_network_enabled",
-    "ipv6_enabled",
-    "malware_blocking_enabled",
-    "ad_blocking_enabled",
-    "ddns_enabled",
-)
 # Character budget for the serialised snapshot JSON (≈5 k tokens at 4 chars/token).
 # A second-pass strip is applied when this threshold is exceeded.
 _TOKEN_BUDGET_CHARS = 20_000
@@ -302,14 +291,20 @@ def _reduce_network(snapshot: FullStateSnapshot) -> dict[str, Any] | None:
     Compress the network section for the discovery model.
 
     Clients carry their pseudonymized ``key``, the name Home Assistant shows
-    (never the DHCP hostname, IP, or MAC), whether they are connected, and
-    the guest flag; posture carries the boolean router settings. The model
+    (never the DHCP hostname, IP, or MAC, and never a name that carries one),
+    whether they are connected, and the guest flag; posture carries the
+    boolean router settings the rules may watch (one source:
+    ``NETWORK_POSTURE_ALERT_VALUE``). The model
     cites a client as ``network.clients[key=<key>].connected`` and a setting
     as ``network.posture.<key>``. Absent (None) when the snapshot has no
     network section or it has neither clients nor posture.
     """
+    from custom_components.home_generative_agent.sentinel.evidence_paths import (  # noqa: PLC0415
+        NETWORK_POSTURE_ALERT_VALUE,
+    )
     from custom_components.home_generative_agent.sentinel.redaction import (  # noqa: PLC0415
         client_display_name,
+        label_carries_address,
     )
 
     section = snapshot.get("network")
@@ -320,11 +315,15 @@ def _reduce_network(snapshot: FullStateSnapshot) -> dict[str, Any] | None:
         key = client.get("key")
         if not isinstance(key, str) or not key:
             continue
+        # A router names an unresolved client by its MAC, and Home
+        # Assistant slugs a MAC into some device names: such a name is not
+        # shown to the model, the manufacturer-plus-key display name is.
+        name = str(client.get("name") or "")
+        if not name or label_carries_address(name):
+            name = client_display_name(client)
         entry: dict[str, Any] = {
             "key": key,
-            "name": str(client.get("name") or client_display_name(client))[
-                :_MAX_SUMMARY_CHARS
-            ],
+            "name": name[:_MAX_SUMMARY_CHARS],
             "connected": bool(client.get("connected")),
         }
         is_guest = client.get("is_guest")
@@ -337,7 +336,7 @@ def _reduce_network(snapshot: FullStateSnapshot) -> dict[str, Any] | None:
     posture_in: Mapping[str, Any] = section.get("posture") or {}
     posture = {
         k: v
-        for k in _NETWORK_POSTURE_KEYS
+        for k in NETWORK_POSTURE_ALERT_VALUE
         if isinstance((v := posture_in.get(k)), bool)
     }
     if not clients and not posture:

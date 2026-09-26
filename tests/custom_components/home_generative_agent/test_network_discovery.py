@@ -140,6 +140,30 @@ def test_reducer_adds_a_pseudonymized_network_section() -> None:
         assert secret not in text
 
 
+def test_reducer_never_shows_a_name_that_carries_an_address() -> None:
+    from custom_components.home_generative_agent.sentinel.redaction import (  # noqa: PLC0415
+        label_carries_address,
+    )
+
+    assert label_carries_address("7a_66_f6_e1_1c_56_wireless")
+    assert label_carries_address("shellyplug_s_3494547a1b2c")
+    assert label_carries_address("Printer 192.168.1.9")
+    assert not label_carries_address("Living room TV")
+    assert not label_carries_address("Bambu 3D Printer")
+    snapshot = _snapshot(
+        clients=[
+            _client(name="7a_66_f6_e1_1c_56_wireless", manufacturer=None),
+            _client(
+                "b1b1b1b1", name="shellyplug_s_3494547a1b2c", manufacturer="Shelly"
+            ),
+        ]
+    )
+    names = [
+        c["name"] for c in reduce_snapshot_for_discovery(snapshot)["network"]["clients"]
+    ]
+    assert names == [f"device {KEY}", "Shelly b1b1b1b1"]
+
+
 def test_reducer_leaves_the_section_out_without_network_facts() -> None:
     assert "network" not in reduce_snapshot_for_discovery(_snapshot(network=False))
     assert "network" not in reduce_snapshot_for_discovery(_snapshot(clients=[]))
@@ -211,23 +235,30 @@ def test_client_absent_at_night_normalizes() -> None:
 
 
 def test_posture_normalizes_with_the_value_the_prose_names() -> None:
-    upnp = explain_normalize_candidate(
-        _candidate(["network.posture.upnp_enabled"], "Alert when UPnP is turned on")
+    guest_on = explain_normalize_candidate(
+        _candidate(
+            ["network.posture.guest_network_enabled"],
+            "Alert when the guest Wi-Fi is turned on",
+        )
     ).normalized
-    assert upnp is not None
-    assert upnp.template_id == "network_posture_equals"
-    assert upnp.params == {"posture_key": "upnp_enabled", "expected": True}
-    wpa3 = explain_normalize_candidate(
-        _candidate(["network.posture.wpa3_enabled"], "WPA3 protection was disabled")
+    assert guest_on is not None
+    assert guest_on.template_id == "network_posture_equals"
+    assert guest_on.params == {"posture_key": "guest_network_enabled", "expected": True}
+    # "off on the router": the preposition is not a state.
+    ads_off = explain_normalize_candidate(
+        _candidate(
+            ["network.posture.ad_blocking_enabled"],
+            "Alert when ad blocking is turned off on the router",
+        )
     ).normalized
-    assert wpa3 is not None
-    assert wpa3.params == {"posture_key": "wpa3_enabled", "expected": False}
+    assert ads_off is not None
+    assert ads_off.params == {"posture_key": "ad_blocking_enabled", "expected": False}
     # No value in the prose: the value that opens the network.
-    guest = explain_normalize_candidate(
-        _candidate(["network.posture.guest_network_enabled"], "Guest network change")
+    ipv6 = explain_normalize_candidate(
+        _candidate(["network.posture.ipv6_enabled"], "IPv6 setting change")
     ).normalized
-    assert guest is not None
-    assert guest.params["expected"] is True
+    assert ipv6 is not None
+    assert ipv6.params["expected"] is True
     # A setting the rules do not watch is not a network candidate.
     assert (
         explain_normalize_candidate(
@@ -235,6 +266,81 @@ def test_posture_normalizes_with_the_value_the_prose_names() -> None:
         ).normalized
         is None
     )
+
+
+def test_refusals_carry_their_reason() -> None:
+    # A pair a built-in rule already reports would double-alert.
+    covered = explain_normalize_candidate(
+        _candidate(["network.posture.upnp_enabled"], "Alert when UPnP is turned on")
+    )
+    assert covered.normalized is None
+    assert covered.reason_code == "covered_by_builtin_rule"
+    assert covered.details == {
+        "rule_id": "network_upnp_enabled",
+        "posture_key": "upnp_enabled",
+        "expected": True,
+    }
+    # Both values in the prose.
+    both = explain_normalize_candidate(
+        _candidate(
+            ["network.posture.guest_network_enabled"],
+            "Guest Wi-Fi turned on or turned off",
+        )
+    )
+    assert both.normalized is None
+    assert both.reason_code == "network_posture_ambiguous"
+    # A lock candidate that also cites a setting: the lock condition would
+    # silently vanish from a posture rule, so it is refused instead.
+    compound = explain_normalize_candidate(
+        _candidate(
+            [
+                "entities[entity_id=lock.front_door].state",
+                "not derived.anyone_home",
+                "network.posture.upnp_enabled",
+            ],
+            "Front door unlocked while away with UPnP on",
+        )
+    )
+    assert compound.normalized is None
+    assert compound.reason_code == "network_compound_condition"
+    # A client and a setting together, likewise.
+    mixed = explain_normalize_candidate(
+        _candidate(
+            [f"network.clients[key={KEY}].connected", "network.posture.upnp_enabled"],
+            "TV connected while UPnP is on",
+        )
+    )
+    assert mixed.reason_code == "network_compound_condition"
+    # Prose arguing both directions about clients.
+    two_ways = explain_normalize_candidate(
+        _candidate(
+            [f"network.clients[key={KEY}].connected"],
+            "Alert when the TV is connected while the security camera is offline",
+        )
+    )
+    assert two_ways.normalized is None
+    assert two_ways.reason_code == "network_direction_ambiguous"
+
+
+def test_the_pattern_field_decides_the_direction_before_the_prose() -> None:
+    absent = explain_normalize_candidate(
+        _candidate(
+            [f"network.clients[key={KEY}].connected"],
+            "Alert when the TV is connected while the security camera is offline",
+            pattern="network_client_absent_when",
+        )
+    ).normalized
+    assert absent is not None
+    assert absent.template_id == "network_client_absent_when"
+    present = explain_normalize_candidate(
+        _candidate(
+            [f"network.clients[key={KEY}].connected"],
+            "Phone connected at night when it is normally gone by then",
+            pattern="network_client_present_when",
+        )
+    ).normalized
+    assert present is not None
+    assert present.template_id == "network_client_present_when"
 
 
 # ---------------------------------------------------------------------------
@@ -270,27 +376,42 @@ def test_client_present_when_fires_only_in_context() -> None:
     assert evaluate_dynamic_rules(offline, [rule]) == []
 
 
-def test_client_absent_when_fires_for_offline_or_vanished_clients() -> None:
-    rule = _rule(
-        "network_client_absent_when", client_key=KEY, require_night=True, name="Cam"
-    )
+def test_client_absent_when_needs_the_router_to_list_the_client_as_offline() -> None:
+    rule = explain_normalize_candidate(
+        _candidate(
+            [f"network.clients[key={KEY}].connected", "derived.is_night"],
+            "The security camera is missing from the network at night",
+        )
+    ).normalized
+    assert rule is not None
+    rule_dict = rule.as_dict()
     night_offline = _snapshot(clients=[_client(connected=False)], is_night=True)
-    (finding,) = evaluate_dynamic_rules(night_offline, [rule])
+    (finding,) = evaluate_dynamic_rules(night_offline, [rule_dict])
     assert finding.evidence["summary"] == (
         "Living room TV (Sony, 192.168.1.23) is not on the network at night."
     )
-    # Gone from the router's list entirely: still absent, named from the rule.
+    assert finding.severity == "low"
+    # Not listed at all this run (a withheld source): unknown, not absent.
     night_gone = _snapshot(clients=[_client("other000")], is_night=True)
-    (finding,) = evaluate_dynamic_rules(night_gone, [rule])
-    assert finding.evidence["summary"] == "Cam is not on the network at night."
-    assert finding.triggering_entities == []
+    assert evaluate_dynamic_rules(night_gone, [rule_dict]) == []
     # Daytime, or no router data this run: nothing.
-    assert (
-        evaluate_dynamic_rules(_snapshot(clients=[_client(connected=False)]), [rule])
-        == []
-    )
+    day = _snapshot(clients=[_client(connected=False)])
+    assert evaluate_dynamic_rules(day, [rule_dict]) == []
     no_router = _snapshot(network=False, is_night=True)
-    assert evaluate_dynamic_rules(no_router, [rule]) == []
+    assert evaluate_dynamic_rules(no_router, [rule_dict]) == []
+    no_clients_cap = _snapshot(clients=None, is_night=True)
+    assert evaluate_dynamic_rules(no_clients_cap, [rule_dict]) == []
+
+
+def test_finding_identity_ignores_context_flips() -> None:
+    rule = _rule("network_client_present_when", client_key=KEY)
+    day = _snapshot(clients=[_client()], anyone_home=True, is_night=False)
+    night = _snapshot(clients=[_client()], anyone_home=False, is_night=True)
+    (first,) = evaluate_dynamic_rules(day, [rule])
+    (later,) = evaluate_dynamic_rules(night, [rule])
+    assert first.anomaly_id == later.anomaly_id
+    assert "anyone_home" not in first.evidence
+    assert "is_night" not in first.evidence
 
 
 def test_posture_equals_fires_on_the_watched_value() -> None:
@@ -324,7 +445,9 @@ def test_candidate_and_activated_rule_share_a_semantic_key() -> None:
         f"v1|subject=network_client|predicate=present|night=any|home=0|scope=any|"
         f"entities={KEY}"
     )
-    posture = _candidate(["network.posture.wpa3_enabled"], "WPA3 turned off")
+    posture = _candidate(
+        ["network.posture.guest_network_enabled"], "Guest Wi-Fi turned on"
+    )
     posture_rule = explain_normalize_candidate(posture).normalized
     assert posture_rule is not None
     assert candidate_semantic_key(posture) == rule_semantic_key(posture_rule.as_dict())
@@ -359,3 +482,39 @@ def test_network_template_findings_use_their_summary_and_are_security_copy() -> 
     assert _network_summary(finding) == finding.evidence["summary"]
     assert is_security_copy(finding)
     assert cast("Any", finding).evidence["template_id"] in NETWORK_TEMPLATES
+
+
+def test_engine_drops_candidates_citing_keys_the_model_was_not_shown() -> None:
+    from custom_components.home_generative_agent.sentinel.discovery_engine import (  # noqa: PLC0415
+        _drop_unknown_network_citations,
+    )
+
+    reduced = {
+        "network": {
+            "clients": [{"key": KEY, "name": "TV", "connected": True}],
+            "posture": {"upnp_enabled": True},
+        }
+    }
+    known = _candidate([f"network.clients[key={KEY}].connected"], "TV connected")
+    ghost = _candidate(
+        ["network.clients[key=deadbeef].connected"], "Ghost", candidate_id="ghost"
+    )
+    setting = _candidate(["network.posture.wpa3_enabled"], "WPA3", candidate_id="w")
+    kept, dropped = _drop_unknown_network_citations([known, ghost, setting], reduced)
+    assert kept == [known]
+    assert dropped == [
+        {"candidate_id": "ghost", "dedupe_reason": "unknown_network_key"},
+        {"candidate_id": "w", "dedupe_reason": "unknown_network_key"},
+    ]
+    # No network section shown: every network citation is unknown.
+    assert _drop_unknown_network_citations([known], {})[0] == []
+
+
+def test_card_marks_a_static_posture_rule_as_covering_the_candidate() -> None:
+    import custom_components.home_generative_agent as hga_component  # noqa: PLC0415
+
+    covered = cast("Any", hga_component)._covered_builtin_rule_for_candidate
+    candidate = _candidate(["network.posture.ddns_enabled"], "Dynamic DNS enabled")
+    assert covered(candidate) == ("network_ddns_enabled", [])
+    other = _candidate(["network.posture.guest_network_enabled"], "Guest Wi-Fi on")
+    assert covered(other) is None

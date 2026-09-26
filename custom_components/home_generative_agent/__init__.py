@@ -299,6 +299,12 @@ from .sentinel.discovery_semantic import (
 from .sentinel.discovery_store import DiscoveryStore
 from .sentinel.dynamic_rules import evaluate_dynamic_rule
 from .sentinel.engine import SentinelEngine
+from .sentinel.evidence_paths import (
+    NETWORK_POSTURE_ALERT_VALUE,
+    NETWORK_POSTURE_STATIC_RULES,
+    network_posture_expected,
+    network_posture_keys,
+)
 from .sentinel.network_audit import empty_report as empty_network_audit_report
 from .sentinel.network_inventory import NetworkInventory
 from .sentinel.notifier import SentinelNotifier
@@ -556,6 +562,13 @@ def _covered_builtin_rule_for_candidate(
         item for item in candidate.get("evidence_paths", []) if isinstance(item, str)
     ]
     camera_entity = _camera_entity_from_paths(evidence_paths)
+    for posture_key in network_posture_keys(evidence_paths):
+        expected = network_posture_expected(posture_key, text)
+        if expected is None:
+            expected = NETWORK_POSTURE_ALERT_VALUE[posture_key]
+        covered = NETWORK_POSTURE_STATIC_RULES.get((posture_key, expected))
+        if covered is not None:
+            return covered, []
     if (
         camera_entity is not None
         and "vehicle" in text

@@ -80,7 +80,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "A device is on the network when it should not be"
         ),
         "type_network_client_absent_when": "A device is missing from the network",
-        "type_network_posture_equals": "A router setting changed",
+        "type_network_posture_equals": "A router setting is at a value you watch for",
         "type_network_guest_network_idle": "Guest Wi-Fi left on unused",
         "type_network_wpa3_disabled": "WPA3 is off",
         "type_network_protection_disabled": "Router threat blocking is off",
@@ -175,7 +175,9 @@ _MESSAGES: dict[str, dict[str, str]] = {
         ),
         "type_network_client_present_when": "Zařízení je v síti, když by nemělo být",
         "type_network_client_absent_when": "Zařízení v síti chybí",
-        "type_network_posture_equals": "Nastavení routeru se změnilo",
+        "type_network_posture_equals": (
+            "Nastavení routeru má hodnotu, kterou sledujete"
+        ),
         "type_network_guest_network_idle": "Hostovská Wi-Fi zapnutá bez využití",
         "type_network_wpa3_disabled": "WPA3 je vypnuto",
         "type_network_protection_disabled": "Blokování hrozeb na routeru je vypnuto",

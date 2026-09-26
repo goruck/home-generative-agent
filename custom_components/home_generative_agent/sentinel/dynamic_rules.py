@@ -1087,16 +1087,21 @@ def _eval_network_client_when(
     snapshot: FullStateSnapshot, rule: dict[str, Any], *, present: bool
 ) -> list[AnomalyFinding]:
     """
-    Report a router client connected (or missing) under the rule's conditions.
+    Report a router client connected (or not) under the rule's conditions.
 
     ``network_client_present_when`` reports the client when it is connected
     and the context holds (a device that should not be there while nobody
-    is home); ``network_client_absent_when`` reports it when it is not
-    connected, or no longer reported at all, and the context holds (a
-    device that should be there). The client is addressed by its
-    pseudonymized key, so the rule survives a rename and never stores an
-    address; the summary names it as the other client alerts do.
+    is home); ``network_client_absent_when`` reports it when the router
+    lists it as not connected and the context holds (a device that should
+    be there). A client the run does not list at all is unknown, not
+    absent: a source withheld this run (a failed poll) must not read as a
+    device that left. The client is addressed by its pseudonymized key, so
+    the rule survives a rename and never stores an address.
     """
+    from custom_components.home_generative_agent.snapshot.network import (  # noqa: PLC0415
+        CAP_CLIENTS,
+    )
+
     from .rules.network_unknown_device_joined import describe_client  # noqa: PLC0415
 
     params = _rule_params(rule)
@@ -1104,38 +1109,27 @@ def _eval_network_client_when(
     if not isinstance(key, str) or not key:
         return []
     section = snapshot.get("network") or {}
-    clients = section.get("clients") or []
-    if not clients and "network.clients" not in (section.get("capabilities") or []):
-        # No router data this run: neither presence nor absence is known.
+    if CAP_CLIENTS not in (section.get("capabilities") or []):
         return []
     if not _network_context_matches(snapshot, params):
         return []
-    client = next((c for c in clients if c.get("key") == key), None)
-    connected = bool(client and client.get("connected"))
-    if connected != present:
-        return []
-    name = (
-        describe_client(client)
-        if client is not None
-        else str(params.get("name") or f"device {key}")
+    client = next(
+        (c for c in section.get("clients") or [] if c.get("key") == key), None
     )
+    if client is None or bool(client.get("connected")) != present:
+        return []
     context = _network_context_phrase(params)
-    if present:
-        summary = (
-            f"{name} is connected to the network{' ' + context if context else ''}."
-        )
-    else:
-        summary = f"{name} is not on the network{' ' + context if context else ''}."
+    tail = f" {context}" if context else ""
+    verb = "is connected to the network" if present else "is not on the network"
     evidence = {
         "rule_id": rule.get("rule_id"),
         "template_id": rule.get("template_id"),
         "client_key": key,
-        "connected": connected,
-        "anyone_home": bool(snapshot["derived"].get("anyone_home")),
-        "is_night": bool(snapshot["derived"].get("is_night")),
-        "summary": summary,
+        # No occupancy or night flag here: the identity must not change
+        # when the context flips while the condition itself stands.
+        "summary": f"{describe_client(client)} {verb}{tail}.",
     }
-    tracker = client.get("tracker_entity_id") if client else None
+    tracker = client.get("tracker_entity_id")
     return [_build_finding(rule, [str(tracker)] if tracker else [], evidence)]
 
 
