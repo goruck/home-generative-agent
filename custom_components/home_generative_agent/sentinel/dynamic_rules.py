@@ -193,6 +193,15 @@ def evaluate_dynamic_rules(  # noqa: PLR0913
         "entity_staleness": lambda rule: _eval_entity_staleness(
             snapshot, rule, entity_map
         ),
+        "network_client_present_when": lambda rule: _eval_network_client_when(
+            snapshot, rule, present=True
+        ),
+        "network_client_absent_when": lambda rule: _eval_network_client_when(
+            snapshot, rule, present=False
+        ),
+        "network_posture_equals": lambda rule: _eval_network_posture_equals(
+            snapshot, rule
+        ),
         "multiple_entries_open_count": lambda rule: _eval_multiple_entries_open_count(
             snapshot, rule, entity_map
         ),
@@ -1049,6 +1058,106 @@ def _eval_multiple_entries_open_count(
         "anyone_home": anyone_home,
     }
     return [_build_finding(rule, triggering, evidence)]
+
+
+def _network_context_matches(
+    snapshot: FullStateSnapshot, params: Mapping[str, Any]
+) -> bool:
+    """Return whether the rule's occupancy / night conditions hold now."""
+    derived = snapshot["derived"]
+    if params.get("require_away") and derived.get("anyone_home"):
+        return False
+    if params.get("require_home") and not derived.get("anyone_home"):
+        return False
+    return not (params.get("require_night") and not derived.get("is_night"))
+
+
+def _network_context_phrase(params: Mapping[str, Any]) -> str:
+    parts = []
+    if params.get("require_away"):
+        parts.append("while nobody is home")
+    elif params.get("require_home"):
+        parts.append("while someone is home")
+    if params.get("require_night"):
+        parts.append("at night")
+    return " ".join(parts)
+
+
+def _eval_network_client_when(
+    snapshot: FullStateSnapshot, rule: dict[str, Any], *, present: bool
+) -> list[AnomalyFinding]:
+    """
+    Report a router client connected (or not) under the rule's conditions.
+
+    ``network_client_present_when`` reports the client when it is connected
+    and the context holds (a device that should not be there while nobody
+    is home); ``network_client_absent_when`` reports it when the router
+    lists it as not connected and the context holds (a device that should
+    be there). A client the run does not list at all is unknown, not
+    absent: a source withheld this run (a failed poll) must not read as a
+    device that left. The client is addressed by its pseudonymized key, so
+    the rule survives a rename and never stores an address.
+    """
+    from custom_components.home_generative_agent.snapshot.network import (  # noqa: PLC0415
+        CAP_CLIENTS,
+    )
+
+    from .rules.network_unknown_device_joined import describe_client  # noqa: PLC0415
+
+    params = _rule_params(rule)
+    key = params.get("client_key")
+    if not isinstance(key, str) or not key:
+        return []
+    section = snapshot.get("network") or {}
+    if CAP_CLIENTS not in (section.get("capabilities") or []):
+        return []
+    if not _network_context_matches(snapshot, params):
+        return []
+    client = next(
+        (c for c in section.get("clients") or [] if c.get("key") == key), None
+    )
+    if client is None or bool(client.get("connected")) != present:
+        return []
+    context = _network_context_phrase(params)
+    tail = f" {context}" if context else ""
+    verb = "is connected to the network" if present else "is not on the network"
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "client_key": key,
+        # No occupancy or night flag here: the identity must not change
+        # when the context flips while the condition itself stands.
+        "summary": f"{describe_client(client)} {verb}{tail}.",
+    }
+    tracker = client.get("tracker_entity_id")
+    return [_build_finding(rule, [str(tracker)] if tracker else [], evidence)]
+
+
+def _eval_network_posture_equals(
+    snapshot: FullStateSnapshot, rule: dict[str, Any]
+) -> list[AnomalyFinding]:
+    """Report a router setting at the value the rule watches for."""
+    params = _rule_params(rule)
+    key = params.get("posture_key")
+    expected = params.get("expected")
+    if not isinstance(key, str) or not key or not isinstance(expected, bool):
+        return []
+    section = snapshot.get("network") or {}
+    posture = section.get("posture") or {}
+    value = posture.get(key)
+    if not isinstance(value, bool) or value != expected:
+        return []
+    label = key.removesuffix("_enabled").replace("_", " ")
+    state = "on" if value else "off"
+    evidence = {
+        "rule_id": rule.get("rule_id"),
+        "template_id": rule.get("template_id"),
+        "posture_key": key,
+        "value": value,
+        "summary": f"The router's {label} setting is {state}.",
+    }
+    twin = posture.get(f"{key}_entity_id")
+    return [_build_finding(rule, [str(twin)] if twin else [], evidence)]
 
 
 def _build_finding(

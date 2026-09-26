@@ -45,8 +45,13 @@ from .discovery_semantic import (
     rule_semantic_key,
     sanitize_environmental_candidate,
 )
-from .evidence_paths import is_derived_path
+from .evidence_paths import (
+    is_derived_path,
+    network_client_keys,
+    network_posture_keys,
+)
 from .logging_utils import RepeatingLogLimiter
+from .proposal_templates import explain_normalize_candidate
 from .redaction import redact_network_identifiers
 from .rules.network_common import NETWORK_RULE_TYPES
 
@@ -118,11 +123,37 @@ def _is_cumulative_energy_entity(entity_id: str) -> bool:
 
     These sensors can never produce meaningful rolling-average baseline
     proposals — the ever-growing value drifts away from any fixed baseline.
-    Mirrors proposal_templates._is_cumulative_energy_sensor; kept local to
-    avoid coupling the discovery pipeline to the normalization module.
+    Mirrors proposal_templates._is_cumulative_energy_sensor. Used only for
+    the monitoring-gap hint; dropping a candidate is decided by the
+    normalizer itself (_is_unpromotable_cumulative_energy), so the two
+    cannot disagree on which candidates are unpromotable.
     """
     local = entity_id.split(".", 1)[-1] if "." in entity_id else entity_id
     return local.endswith("_energy") or local == "energy"
+
+
+def _is_unpromotable_cumulative_energy(candidate: dict[str, Any]) -> bool:
+    """
+    Return True when normalization would reject a cumulative energy counter.
+
+    A statistical candidate over a kWh counter (the value only ever grows)
+    can never become a rule, so letting it through only mints an
+    "unsupported" draft the user has to reject by hand. The monitoring-gap
+    hint already omits these counters, but the model still finds them in the
+    snapshot. Ask the normalizer itself rather than re-deriving its routing
+    here: a THRESHOLD candidate on the same counter is a valid rule and must
+    pass. The normalizer assumes string evidence paths, so a candidate with
+    junk elements is left to the existing gates rather than crashing the
+    discovery cycle.
+    """
+    evidence_paths = candidate.get("evidence_paths")
+    if not isinstance(evidence_paths, list) or not all(
+        isinstance(p, str) for p in evidence_paths
+    ):
+        return False
+    return (
+        explain_normalize_candidate(candidate).reason_code == "cumulative_energy_sensor"
+    )
 
 
 def _is_battery_level_entity(hass: HomeAssistant, entity_id: str) -> bool:
@@ -396,8 +427,9 @@ class SentinelDiscoveryEngine:
             ready_ids = await self._baseline_updater.async_fetch_ready_entity_ids()
             snapshot["derived"]["baseline_ready_entities"] = ready_ids
 
-        # The reducer keeps no network section today; the gate holds once the
-        # plan's discovery templates add one (network-security-plan.md).
+        # The reducer's network section carries pseudonymized client keys
+        # and boolean router settings only; the gate catches any address a
+        # future field could bring (network-security-plan.md, step 8).
         reduced_snapshot = redact_network_identifiers(
             reduce_snapshot_for_discovery(snapshot)
         )
@@ -584,6 +616,9 @@ class SentinelDiscoveryEngine:
         )
         candidates = [item for item in raw_candidates if isinstance(item, dict)]
         self._discovery_cycle_stats["candidates_generated"] = len(candidates)
+        candidates, unknown_network = _drop_unknown_network_citations(
+            candidates, reduced_snapshot
+        )
         filtered, filtered_candidates = self._filter_novel_candidates(
             candidates,
             filter_keys,
@@ -594,6 +629,7 @@ class SentinelDiscoveryEngine:
             # (issue #571).
             _battery_level_entity_ids(self._hass, snapshot),
         )
+        filtered_candidates = [*unknown_network, *filtered_candidates]
         self._discovery_cycle_stats["candidates_novel"] = len(filtered)
         self._discovery_cycle_stats["candidates_deduplicated"] = len(
             filtered_candidates
@@ -705,7 +741,7 @@ class SentinelDiscoveryEngine:
 
         return active_rule_ids, hint_keys, filter_keys
 
-    def _filter_novel_candidates(
+    def _filter_novel_candidates(  # noqa: PLR0912
         self,
         candidates: list[dict[str, Any]],
         existing_keys: set[str],
@@ -792,6 +828,18 @@ class SentinelDiscoveryEngine:
             # matching on either one alone loses the re-proposals that
             # kept the other stable (review of #573).
             identity_keys = {key} if key else _candidate_identity_keys(candidate)
+
+            # Runs after the sanitizer and backfill (it judges the candidate
+            # promote would normalize) and before dedup (a dropped candidate
+            # must not claim a batch key).
+            if _is_unpromotable_cumulative_energy(candidate):
+                dropped.append(
+                    {
+                        "candidate_id": str(candidate.get("candidate_id", "")),
+                        "dedupe_reason": "cumulative_energy_sensor",
+                    }
+                )
+                continue
 
             dedupe_reason: str | None = None
             matched = identity_keys & existing_keys
@@ -902,6 +950,42 @@ def _candidate_identity_keys(candidate: dict[str, Any]) -> set[str]:
         blob = f"battery-device\x00{device_token}".encode()
         keys.add("ident|sha256=" + hashlib.sha256(blob).hexdigest()[:16])
     return keys
+
+
+def _drop_unknown_network_citations(
+    candidates: list[dict[str, Any]], reduced_snapshot: Mapping[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    Drop candidates citing a client key or setting the model was not shown.
+
+    A hallucinated key would become a rule that never fires (or, for the
+    absent template, one that could fire on nothing); the reduced snapshot
+    is the only source of keys the model had, so a citation outside it is
+    refused at ingestion with its own reason.
+    """
+    network = reduced_snapshot.get("network") or {}
+    known_keys = {
+        str(c.get("key"))
+        for c in network.get("clients") or []
+        if isinstance(c, Mapping) and c.get("key")
+    }
+    known_posture = set((network.get("posture") or {}).keys())
+    kept: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for candidate in candidates:
+        paths = candidate.get("evidence_paths")
+        unknown = [k for k in network_client_keys(paths) if k not in known_keys]
+        unknown += [k for k in network_posture_keys(paths) if k not in known_posture]
+        if unknown:
+            dropped.append(
+                {
+                    "candidate_id": str(candidate.get("candidate_id", "")),
+                    "dedupe_reason": "unknown_network_key",
+                }
+            )
+            continue
+        kept.append(candidate)
+    return kept, dropped
 
 
 def _entity_ids_from_evidence_paths(evidence_paths: object) -> set[str]:

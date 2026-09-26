@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from .schema import FullStateSnapshot
 
 _ALLOWED_DOMAINS = {
@@ -49,6 +51,8 @@ _MAX_CAMERA_ACTIVITY = 20
 _MAX_SUMMARY_CHARS = 80
 # Cap how many baseline-ready entity IDs appear in derived context.
 _MAX_BASELINE_ENTITIES = 30
+# Router clients shown to the discovery model (connected first, then by name).
+_MAX_NETWORK_CLIENTS = 40
 # Character budget for the serialised snapshot JSON (≈5 k tokens at 4 chars/token).
 # A second-pass strip is applied when this threshold is exceeded.
 _TOKEN_BUDGET_CHARS = 20_000
@@ -282,6 +286,69 @@ def _reduce_derived(
     return derived
 
 
+def _reduce_network(snapshot: FullStateSnapshot) -> dict[str, Any] | None:
+    """
+    Compress the network section for the discovery model.
+
+    Clients carry their pseudonymized ``key``, the name Home Assistant shows
+    (never the DHCP hostname, IP, or MAC, and never a name that carries one),
+    whether they are connected, and the guest flag; posture carries the
+    boolean router settings the rules may watch (one source:
+    ``NETWORK_POSTURE_ALERT_VALUE``). The model
+    cites a client as ``network.clients[key=<key>].connected`` and a setting
+    as ``network.posture.<key>``. Absent (None) when the snapshot has no
+    network section or it has neither clients nor posture.
+    """
+    from custom_components.home_generative_agent.sentinel.evidence_paths import (  # noqa: PLC0415
+        NETWORK_POSTURE_ALERT_VALUE,
+    )
+    from custom_components.home_generative_agent.sentinel.redaction import (  # noqa: PLC0415
+        client_display_name,
+        label_carries_address,
+    )
+
+    section = snapshot.get("network")
+    if not section:
+        return None
+    clients: list[dict[str, Any]] = []
+    for client in section.get("clients") or []:
+        key = client.get("key")
+        if not isinstance(key, str) or not key:
+            continue
+        # A router names an unresolved client by its MAC, and Home
+        # Assistant slugs a MAC into some device names: such a name is not
+        # shown to the model, the manufacturer-plus-key display name is.
+        name = str(client.get("name") or "")
+        if not name or label_carries_address(name):
+            name = client_display_name(client)
+        entry: dict[str, Any] = {
+            "key": key,
+            "name": name[:_MAX_SUMMARY_CHARS],
+            "connected": bool(client.get("connected")),
+        }
+        is_guest = client.get("is_guest")
+        if isinstance(is_guest, bool):
+            entry["is_guest"] = is_guest
+        if client.get("trusted") is False:
+            entry["trusted"] = False
+        clients.append(entry)
+    clients.sort(key=lambda c: (not c["connected"], c["name"].lower(), c["key"]))
+    posture_in: Mapping[str, Any] = section.get("posture") or {}
+    posture = {
+        k: v
+        for k in NETWORK_POSTURE_ALERT_VALUE
+        if isinstance((v := posture_in.get(k)), bool)
+    }
+    if not clients and not posture:
+        return None
+    result: dict[str, Any] = {}
+    if clients:
+        result["clients"] = clients[:_MAX_NETWORK_CLIENTS]
+    if posture:
+        result["posture"] = posture
+    return result
+
+
 def _char_count(result: dict[str, Any]) -> int:
     """Return the compact JSON serialisation length of *result*."""
     return len(json.dumps(result, default=str, separators=(",", ":")))
@@ -321,7 +388,20 @@ def _apply_budget_trim(result: dict[str, Any]) -> dict[str, Any]:
         if isinstance(people, list) and len(people) > _MAX_RECOGNIZED_PEOPLE:
             cam["recognized_people"] = people[:_MAX_RECOGNIZED_PEOPLE]
 
+    if _char_count(result) <= _TOKEN_BUDGET_CHARS:
+        return result
+
+    _drop_network_clients(result)
     return result
+
+
+def _drop_network_clients(result: dict[str, Any]) -> None:
+    """Drop the router clients (the posture facts are a few booleans)."""
+    network = result.get("network")
+    if isinstance(network, dict) and "clients" in network:
+        del network["clients"]
+        if not network:
+            del result["network"]
 
 
 def reduce_snapshot_for_discovery(snapshot: FullStateSnapshot) -> dict[str, Any]:
@@ -353,6 +433,9 @@ def reduce_snapshot_for_discovery(snapshot: FullStateSnapshot) -> dict[str, Any]
         "camera_activity": reduced_camera_activity,
         "derived": derived,
     }
+    network = _reduce_network(snapshot)
+    if network is not None:
+        result["network"] = network
 
     # Phase 6: Second-pass trim if character budget exceeded
     return _apply_budget_trim(result)

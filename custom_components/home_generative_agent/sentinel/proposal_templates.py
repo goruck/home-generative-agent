@@ -16,10 +16,16 @@ from .evidence_paths import (
     ANYONE_HOME_PATH,
     ANYONE_HOME_TRUE_PATTERN,
     AWAY_TERMS_PATTERN,
+    NETWORK_POSTURE_STATIC_RULES,
     NOT_ANYONE_HOME_PATH,
     NOT_ANYONE_HOME_TEXT_PATTERN,
     PresenceSignal,
     has_derived_path,
+    is_derived_path,
+    network_client_direction,
+    network_client_keys,
+    network_posture_expected,
+    network_posture_keys,
     night_signal,
     presence_signal,
 )
@@ -55,7 +61,19 @@ SUPPORTED_TEMPLATES = {
     "sensor_threshold_condition",
     "entity_staleness",
     "multiple_entries_open_count",
+    # Network security plan, step 10: rules over the router section.
+    "network_client_present_when",
+    "network_client_absent_when",
+    "network_posture_equals",
 }
+
+NETWORK_TEMPLATES: frozenset[str] = frozenset(
+    {
+        "network_client_present_when",
+        "network_client_absent_when",
+        "network_posture_equals",
+    }
+)
 
 # The anyone_home boolean-expression and away/home term patterns live in
 # evidence_paths.py (issue #524) — one copy shared with the semantic keys.
@@ -427,6 +445,12 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
         "presence": presence,
         "has_night": has_night,
     }
+
+    network = _normalize_network_candidate(
+        candidate, evidence_paths, text, presence=presence, has_night=has_night
+    )
+    if network is not None:
+        return network
 
     if (
         alarm_id
@@ -1892,6 +1916,111 @@ def _is_cyclical_load(entity_id: str) -> bool:
 
 def _contains_any(text: str, words: tuple[str, ...]) -> bool:
     return any(word in text for word in words)
+
+
+def _cites_entity(evidence_paths: list[str]) -> bool:
+    """Return True when any evidence path addresses a Home Assistant entity."""
+    for path in evidence_paths:
+        if not isinstance(path, str):
+            continue
+        lowered = path.strip().lower()
+        if lowered.startswith("network.") or is_derived_path(path):
+            continue
+        if "entities[" in lowered or "entity_id" in lowered:
+            return True
+        if _DOT_NOTATION_ENTITY_PATTERN.match(lowered.strip(_EVIDENCE_QUOTE_CHARS)):
+            return True
+    return False
+
+
+def _normalize_network_candidate(  # noqa: PLR0911
+    candidate: dict[str, Any],
+    evidence_paths: list[str],
+    text: str,
+    *,
+    presence: str,
+    has_night: bool,
+) -> NormalizationResult | None:
+    """
+    Map a candidate that cites the network section to a network template.
+
+    A client path becomes ``network_client_present_when`` or
+    ``network_client_absent_when`` (the ``pattern`` field decides, then the
+    prose), carrying the occupancy and night context the candidate cites. A
+    posture path becomes ``network_posture_equals`` with the value the prose
+    names, or the value that opens the network for that setting. The path
+    and prose readers live in ``evidence_paths`` so the semantic keys resolve
+    them the same way. None for a candidate without a network path.
+
+    Refused rather than guessed: a candidate that also cites an entity (the
+    entity condition would silently vanish from the approved rule), one
+    that cites both a client and a setting, prose arguing both directions
+    or both values, and a setting-and-value pair a built-in rule already
+    reports (it would double-alert next to it).
+    """
+    client_keys = network_client_keys(evidence_paths)
+    posture_keys = network_posture_keys(evidence_paths)
+    if not client_keys and not posture_keys:
+        return None
+    if _cites_entity(evidence_paths) or (client_keys and posture_keys):
+        return NormalizationResult(
+            normalized=None,
+            reason_code="network_compound_condition",
+            details={"client_keys": client_keys, "posture_keys": posture_keys},
+        )
+    confidence = float(candidate.get("confidence_hint", 0.7))
+    if client_keys:
+        key = client_keys[0]
+        direction = network_client_direction(str(candidate.get("pattern", "")), text)
+        if direction is None:
+            return NormalizationResult(
+                normalized=None,
+                reason_code="network_direction_ambiguous",
+                details={"client_key": key},
+            )
+        template_id = f"network_client_{direction}_when"
+        return NormalizationResult(
+            normalized=NormalizedRule(
+                rule_id=_candidate_rule_id(candidate, default=f"{template_id}_{key}"),
+                template_id=template_id,
+                params={
+                    "client_key": key,
+                    "require_away": presence == "away",
+                    "require_home": presence == "home",
+                    "require_night": has_night,
+                },
+                severity="low" if direction == "absent" else "medium",
+                confidence=confidence,
+                is_sensitive=True,
+                suggested_actions=["check_device"],
+            )
+        )
+    key = posture_keys[0]
+    expected = network_posture_expected(key, text)
+    if expected is None:
+        return NormalizationResult(
+            normalized=None,
+            reason_code="network_posture_ambiguous",
+            details={"posture_key": key},
+        )
+    covered = NETWORK_POSTURE_STATIC_RULES.get((key, expected))
+    if covered is not None:
+        return NormalizationResult(
+            normalized=None,
+            reason_code="covered_by_builtin_rule",
+            details={"rule_id": covered, "posture_key": key, "expected": expected},
+        )
+    return NormalizationResult(
+        normalized=NormalizedRule(
+            rule_id=_candidate_rule_id(candidate, default=f"network_posture_{key}"),
+            template_id="network_posture_equals",
+            params={"posture_key": key, "expected": expected},
+            severity="medium",
+            confidence=confidence,
+            is_sensitive=True,
+            suggested_actions=["check_router"],
+        )
+    )
 
 
 def _candidate_rule_id(candidate: dict[str, Any], *, default: str) -> str:

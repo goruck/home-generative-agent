@@ -257,3 +257,31 @@ def redact_network_identifiers(value: Any) -> Any:
     ``str()`` and redacted. The input is never mutated.
     """
     return _Walker().walk(value)
+
+
+# A MAC written the way Home Assistant slugs it into an entity id or a
+# router names an unresolved client (``7a_66_f6_e1_1c_56``), and a bare
+# 12/16-hex run inside a name (``shellyplug_s_3494547a1b2c``). The text
+# redactor keeps ``_``-bounded runs on purpose (they are entity ids the
+# model must be able to cite), so a LABEL needs its own, stricter check.
+_LABEL_MAC_RE: Final = re.compile(
+    r"(?<![0-9a-f])[0-9a-f]{2}(?:_[0-9a-f]{2}){5,7}(?![0-9a-f])"
+    r"|(?<![0-9a-f])[0-9a-f]{12}(?:[0-9a-f]{4})?(?![0-9a-f])",
+    re.IGNORECASE,
+)
+
+
+def label_carries_address(text: str) -> bool:
+    """
+    Return True when a display label carries a MAC or IP in any spelling.
+
+    Used where a label is about to be shown as a NAME (the snapshot, the
+    device inventory, the discovery model's view): such a label is dropped
+    in favour of the manufacturer-plus-key display name rather than
+    tokenized, so no address rides along under the guise of a name.
+    """
+    if not text:
+        return False
+    if str(redact_network_identifiers(text)) != text:
+        return True
+    return _LABEL_MAC_RE.search(text) is not None

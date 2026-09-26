@@ -39,7 +39,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
 from custom_components.home_generative_agent.sentinel.redaction import (
-    redact_network_identifiers,
+    label_carries_address,
 )
 
 from .network import (
@@ -321,8 +321,7 @@ def _label(value: Any) -> str | None:
     text = sanitize_label(value)
     if not text:
         return None
-    redacted = str(redact_network_identifiers(text))
-    return text if redacted == text else None
+    return None if label_carries_address(text) else text
 
 
 def _first_label(*values: Any) -> str | None:

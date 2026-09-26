@@ -13,7 +13,16 @@ from typing import Any
 # for the drift hazard the mirrors created (issue #518 review noted an
 # asymmetric pair keys a candidate home=1 while its activated rule keys
 # home=0, breaking dedup in both directions; issue #524).
-from .evidence_paths import canonicalize_evidence_path, night_signal, presence_signal
+from .evidence_paths import (
+    NETWORK_POSTURE_ALERT_VALUE,
+    canonicalize_evidence_path,
+    network_client_direction,
+    network_client_keys,
+    network_posture_expected,
+    network_posture_keys,
+    night_signal,
+    presence_signal,
+)
 
 _SEMANTIC_KEY_CONTEXT_RE = re.compile(r"\|(?:template|night|home|scope)=[^|]+")
 # Quote characters the discovery LLM sometimes wraps around entity IDs in
@@ -557,7 +566,7 @@ def _battery_sensor_entity_ids(entity_ids: list[str]) -> list[str]:
     return []
 
 
-def candidate_semantic_key(  # noqa: PLR0912, PLR0915
+def candidate_semantic_key(  # noqa: C901, PLR0912, PLR0915
     candidate: dict[str, Any],
 ) -> str | None:
     """Build a stable semantic key for a discovery candidate."""
@@ -572,6 +581,11 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
     # normalizer ignores would break the key mirror.
     slug_text = str(candidate.get("candidate_id", "")).lower()
     entity_ids = _extract_entity_ids(evidence_paths)
+    network_key = _network_candidate_key(
+        evidence_paths, text, str(candidate.get("pattern", ""))
+    )
+    if network_key is not None:
+        return network_key
     camera_ids = sorted(_extract_camera_ids(evidence_paths))
     lock_ids = sorted(
         entity_id for entity_id in entity_ids if entity_id.startswith("lock.")
@@ -849,12 +863,77 @@ def candidate_semantic_key(  # noqa: PLR0912, PLR0915
     )
 
 
+def _network_posture_key(posture_key: str, expected: bool) -> str:  # noqa: FBT001
+    state = "on" if expected else "off"
+    return (
+        f"v1|subject=network_posture|predicate={posture_key}_{state}|night=any|"
+        f"home=any|scope=any|entities="
+    )
+
+
+def _network_candidate_key(
+    evidence_paths: list[str], text: str, pattern: str
+) -> str | None:
+    """
+    Return the key for a candidate that cites the network section, else None.
+
+    Mirrors ``proposal_templates._normalize_network_candidate`` through the
+    shared readers in ``evidence_paths``: a client path keys on the client's
+    pseudonymized key with the cited occupancy and night context, a posture
+    path on the setting and the value the candidate wants an alert on.
+    """
+    client_keys = network_client_keys(evidence_paths)
+    if client_keys:
+        # Only accepted candidates need to mirror the normalizer; an
+        # ambiguous one keys as "present" and is refused there anyway.
+        predicate = network_client_direction(pattern, text) or "present"
+        night = "1" if night_signal(evidence_paths, text) else "any"
+        home = {"away": "0", "home": "1", "any": "any"}[
+            presence_signal(evidence_paths, text)
+        ]
+        return (
+            f"v1|subject=network_client|predicate={predicate}|night={night}|"
+            f"home={home}|scope=any|entities={client_keys[0]}"
+        )
+    posture_keys = network_posture_keys(evidence_paths)
+    if posture_keys:
+        key = posture_keys[0]
+        expected = network_posture_expected(key, text)
+        if expected is None:
+            expected = NETWORK_POSTURE_ALERT_VALUE[key]
+        return _network_posture_key(key, expected)
+    return None
+
+
 def rule_semantic_key(  # noqa: C901, PLR0911, PLR0912, PLR0915
     rule: dict[str, Any],
 ) -> str | None:
     """Build a stable semantic key for an active/generated rule."""
     template_id = str(rule.get("template_id", ""))
     params = rule.get("params", {}) or {}
+    if template_id in {"network_client_present_when", "network_client_absent_when"}:
+        client_key = str(params.get("client_key", ""))
+        if not client_key:
+            return None
+        predicate = "present" if template_id.endswith("present_when") else "absent"
+        home = (
+            "0"
+            if params.get("require_away")
+            else "1"
+            if params.get("require_home")
+            else "any"
+        )
+        night = "1" if params.get("require_night") else "any"
+        return (
+            f"v1|subject=network_client|predicate={predicate}|night={night}|"
+            f"home={home}|scope=any|entities={client_key}"
+        )
+    if template_id == "network_posture_equals":
+        posture_key = str(params.get("posture_key", ""))
+        expected = params.get("expected")
+        if not posture_key or not isinstance(expected, bool):
+            return None
+        return _network_posture_key(posture_key, expected)
     if template_id == "unlocked_lock_when_home":
         lock_id = str(params.get("lock_entity_id", ""))
         if not lock_id:

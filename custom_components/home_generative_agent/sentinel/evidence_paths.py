@@ -210,3 +210,147 @@ def night_signal(evidence_paths: object, text: str) -> bool:
     if NOT_IS_NIGHT_PATH in paths:
         return False
     return "night" in text
+
+
+# ---------------------------------------------------------------------------
+# Network section paths (network security plan, step 10)
+# ---------------------------------------------------------------------------
+# ``network.clients[key=3fa2c1b0].connected`` cites a router client by its
+# pseudonymized key; ``network.posture.upnp_enabled`` cites a router setting.
+# The normalizer and the semantic keys resolve both through here so a
+# candidate and its activated rule always agree.
+NETWORK_CLIENT_PATH_RE: Final = re.compile(
+    r"network\.clients\[\s*(?:key\s*=\s*)?['\"`]*([0-9a-f]{8,16})['\"`]*\s*\]"
+)
+NETWORK_POSTURE_PATH_RE: Final = re.compile(r"network\.posture\.([a-z0-9_]+)")
+# The settings a rule may watch, each with the value worth an alert when the
+# prose does not say: a setting that opens the network (UPnP, guest Wi-Fi,
+# dynamic DNS, IPv6) turning on, a protection (WPA3, threat blocking, ad
+# blocking) turning off.
+NETWORK_POSTURE_ALERT_VALUE: Final[dict[str, bool]] = {
+    "upnp_enabled": True,
+    "guest_network_enabled": True,
+    "ddns_enabled": True,
+    "ipv6_enabled": True,
+    "wpa3_enabled": False,
+    "malware_blocking_enabled": False,
+    "ad_blocking_enabled": False,
+}
+# Wording that says a device is missing / present. The candidate's
+# ``pattern`` field is read first (the prompt names the template there); the
+# prose decides only when the pattern does not, and both directions in the
+# prose is ambiguous rather than a guess.
+_NETWORK_ABSENT_TERMS: Final = (
+    "absent",
+    "missing",
+    "not connected",
+    "disconnected",
+    "offline",
+    "not on the network",
+    "left the network",
+    "drops off",
+    "dropped off",
+    "goes away",
+)
+_NETWORK_PRESENT_TERMS: Final = (
+    "is connected",
+    "connected to",
+    "connects",
+    "joins",
+    "joined",
+    "appears",
+    "shows up",
+    "is on the network",
+    "present on",
+)
+# Explicit state words only: a bare "on"/"off" is a preposition as often
+# as a state ("turned off on the router"), and "active" says nothing.
+_NETWORK_OFF_RE: Final = re.compile(
+    r"\b(?:turned off|switched off|disabled|is off|goes off|gets disabled)\b"
+)
+_NETWORK_ON_RE: Final = re.compile(
+    r"\b(?:turned on|switched on|enabled|is on|goes on|gets enabled)\b"
+)
+# (setting, watched value) pairs a built-in rule already reports; a
+# proposal for one of these would double-alert next to the static rule.
+NETWORK_POSTURE_STATIC_RULES: Final[dict[tuple[str, bool], str]] = {
+    ("upnp_enabled", True): "network_upnp_enabled",
+    ("ddns_enabled", True): "network_ddns_enabled",
+    ("wpa3_enabled", False): "network_wpa3_disabled",
+    ("malware_blocking_enabled", False): "network_protection_disabled",
+}
+
+NetworkDirection = Literal["present", "absent"]
+
+
+def network_client_keys(evidence_paths: object) -> list[str]:
+    """Return the client keys the evidence paths cite, in order, deduplicated."""
+    keys: list[str] = []
+    if not isinstance(evidence_paths, list):
+        return keys
+    for path in evidence_paths:
+        if not isinstance(path, str):
+            continue
+        for match in NETWORK_CLIENT_PATH_RE.finditer(path.lower()):
+            if match.group(1) not in keys:
+                keys.append(match.group(1))
+    return keys
+
+
+def network_posture_keys(evidence_paths: object) -> list[str]:
+    """Return the watched router settings the evidence paths cite."""
+    keys: list[str] = []
+    if not isinstance(evidence_paths, list):
+        return keys
+    for path in evidence_paths:
+        if not isinstance(path, str):
+            continue
+        for match in NETWORK_POSTURE_PATH_RE.finditer(path.lower()):
+            key = match.group(1)
+            if key in NETWORK_POSTURE_ALERT_VALUE and key not in keys:
+                keys.append(key)
+    return keys
+
+
+def network_client_direction(pattern: str, prose: str) -> NetworkDirection | None:
+    """
+    Return whether a client candidate is about presence or absence.
+
+    The ``pattern`` field wins when it names the template; otherwise the
+    prose, and prose that argues both ways (a device connected while another
+    is offline) is None: not a rule that can be written from it.
+    """
+    lowered_pattern = pattern.lower()
+    if "absent" in lowered_pattern and "present" not in lowered_pattern:
+        return "absent"
+    if "present" in lowered_pattern and "absent" not in lowered_pattern:
+        return "present"
+    lowered = prose.lower()
+    absent = any(term in lowered for term in _NETWORK_ABSENT_TERMS)
+    present = any(term in lowered for term in _NETWORK_PRESENT_TERMS)
+    if absent and not present:
+        return "absent"
+    if present and not absent:
+        return "present"
+    if not absent and not present:
+        return "present"
+    return None
+
+
+def network_posture_expected(key: str, text: str) -> bool | None:
+    """
+    Return the setting value the candidate wants an alert on.
+
+    An explicit on or off in the prose wins; nothing explicit means the
+    value that opens the network for that setting; both is None (ambiguous).
+    """
+    lowered = text.lower()
+    off = bool(_NETWORK_OFF_RE.search(lowered))
+    on = bool(_NETWORK_ON_RE.search(lowered))
+    if off and on:
+        return None
+    if off:
+        return False
+    if on:
+        return True
+    return NETWORK_POSTURE_ALERT_VALUE[key]

@@ -76,6 +76,11 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "type_network_unknown_device_joined": "New device on the network",
         "type_network_guest_client_present": "Untrusted device on the guest Wi-Fi",
         "type_network_client_usage_anomaly": "A device moved far more data than usual",
+        "type_network_client_present_when": (
+            "A device is on the network when it should not be"
+        ),
+        "type_network_client_absent_when": "A device is missing from the network",
+        "type_network_posture_equals": "A router setting is at a value you watch for",
         "type_network_guest_network_idle": "Guest Wi-Fi left on unused",
         "type_network_wpa3_disabled": "WPA3 is off",
         "type_network_protection_disabled": "Router threat blocking is off",
@@ -167,6 +172,11 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "type_network_guest_client_present": "Neověřené zařízení na hostovské Wi-Fi",
         "type_network_client_usage_anomaly": (
             "Zařízení přeneslo mnohem více dat než obvykle"
+        ),
+        "type_network_client_present_when": "Zařízení je v síti, když by nemělo být",
+        "type_network_client_absent_when": "Zařízení v síti chybí",
+        "type_network_posture_equals": (
+            "Nastavení routeru má hodnotu, kterou sledujete"
         ),
         "type_network_guest_network_idle": "Hostovská Wi-Fi zapnutá bez využití",
         "type_network_wpa3_disabled": "WPA3 je vypnuto",
