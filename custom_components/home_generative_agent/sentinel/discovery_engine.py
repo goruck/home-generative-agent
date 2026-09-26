@@ -123,8 +123,10 @@ def _is_cumulative_energy_entity(entity_id: str) -> bool:
 
     These sensors can never produce meaningful rolling-average baseline
     proposals — the ever-growing value drifts away from any fixed baseline.
-    Mirrors proposal_templates._is_cumulative_energy_sensor; kept local to
-    avoid coupling the discovery pipeline to the normalization module.
+    Mirrors proposal_templates._is_cumulative_energy_sensor. Used only for
+    the monitoring-gap hint; dropping a candidate is decided by the
+    normalizer itself (_is_unpromotable_cumulative_energy), so the two
+    cannot disagree on which candidates are unpromotable.
     """
     local = entity_id.split(".", 1)[-1] if "." in entity_id else entity_id
     return local.endswith("_energy") or local == "energy"
