@@ -137,6 +137,8 @@ actions:
     action: notify.notify
 ```
 
+Before an automation is written, every entity ID and service it names is checked against Home Assistant. The agent sees device names, not entity IDs, so a guessed ID such as `binary_sensor.sink_moisture_sensor` or a remembered service such as `notify.mobile_app` is refused with the real one (and the mobile push service you configured) instead of installing an automation that never runs.
+
 ![Periodic automation](./assets/cat_automation.png)
 
 ### Query entity history

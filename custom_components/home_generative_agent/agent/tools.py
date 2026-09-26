@@ -93,6 +93,10 @@ from ..sentinel.notifier import escape_markdown  # noqa: TID252
 from ..sentinel.notifier_messages import notif_msg  # noqa: TID252
 from ..sentinel.redaction import redact_network_identifiers  # noqa: TID252
 from .automation_pin import find_critical_automation_calls
+from .automation_targets import (
+    describe_missing_targets,
+    find_missing_automation_targets,
+)
 from .camera_activity import get_camera_last_events_from_states
 from .helpers import (
     ConfigurableData,
@@ -693,6 +697,12 @@ async def add_automation(  # noqa: D417
     If using the blueprint you MUST provide the arguments "time_pattern" and "message"
     and DO NOT provide the argument "automation_yaml".
 
+    Entity IDs and service names must be real. Entity IDs are not the names
+    shown in the home overview: use ones you have seen in a tool result, or
+    the corrections this tool returns. Mobile push goes through the
+    notify.mobile_app_* service configured for this integration; if you do not
+    know it, the tool tells you when you get it wrong.
+
     Args:
         automation_yaml: A Home Assistant automation in valid YAML format.
             ONLY provide if NOT using the camera image analysis blueprint.
@@ -739,6 +749,21 @@ async def add_automation(  # noqa: D417
         )
     except (HomeAssistantError, MultipleInvalid) as err:
         return f"Invalid automation configuration {err}"
+
+    # Schema validation passes an automation whose trigger names an entity
+    # that does not exist or whose action calls a service that does not, and
+    # such an automation installs and then silently never runs. Refuse it and
+    # hand the model the closest real names so its retry is deterministic.
+    missing = find_missing_automation_targets(
+        hass, validated_config, notify_service=mobile_push_service
+    )
+    if missing:
+        LOGGER.info(
+            "add_automation refused '%s': %s",
+            ha_automation_config.get("alias", "<unnamed>"),
+            "; ".join(item.describe() for item in missing),
+        )
+        return describe_missing_targets(missing)
 
     pin_challenge = _maybe_require_pin_for_automation(
         cfg=cast("ConfigurableData", config["configurable"]),
