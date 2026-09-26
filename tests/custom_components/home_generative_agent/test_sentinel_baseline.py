@@ -2779,3 +2779,33 @@ def test_health_stats_leave_the_network_counters_out() -> None:
     )
 
     assert "NOT LIKE 'network.%%'" in _FETCH_STATS_SQL
+
+
+@pytest.mark.asyncio
+async def test_router_integration_sensors_are_not_baselined_as_entities() -> None:
+    """Eero makes a rate, signal, and traffic sensor per client: counters cover them."""
+    pool, upserts, _selects = _recording_pool()
+    cur = pool.connection.return_value.cursor.return_value
+    deletes: list[tuple[Any, ...]] = []
+    original = cur.execute
+
+    async def _execute(sql: str, params: tuple[Any, ...] = ()) -> None:
+        if "DELETE" in sql:
+            deletes.append(params)
+            return
+        await original(sql, params)
+
+    cur.execute = _execute
+    updater = SentinelBaselineUpdater(MagicMock(), pool, {})
+    eero = _entity(
+        "sensor.family_room_tv_wireless_kro_family_room_tv_data_usage_day", "3e9"
+    )
+    eero["platform"] = "eero"
+    plain = _entity("sensor.temperature", "22.5")
+    plain["platform"] = "shelly"
+    await updater._update_baselines(_snapshot([eero, plain]))
+    assert {p[0] for p in upserts} == {"sensor.temperature"}
+    # The rows it wrote before this rule are removed, once per process.
+    assert deletes == [([eero["entity_id"]],)]
+    await updater._update_baselines(_snapshot([eero, plain]))
+    assert len(deletes) == 1

@@ -50,6 +50,9 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
     RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS,
 )
+from custom_components.home_generative_agent.snapshot.network import (
+    ROUTER_PLATFORMS,
+)
 
 from .models import AnomalyFinding, Severity, build_anomaly_id, hashable_evidence
 from .power_units import is_power_unit, watts_per_unit
@@ -307,6 +310,10 @@ _DELETE_ALL_SQL = """
 DELETE FROM sentinel_baselines
 """
 
+_DELETE_ENTITIES_SQL = """
+DELETE FROM sentinel_baselines WHERE entity_id = ANY(%s)
+"""
+
 # DOW index for fast per-(entity, metric) lookups added in async_initialize().
 _CREATE_DOW_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_sentinel_baselines_entity_metric
@@ -389,6 +396,9 @@ class SentinelBaselineUpdater:
         # ``offer_counters``); written by the run loop at its own interval.
         self._offered_counters: dict[str, float] = {}
         self._last_counter_prune: datetime | None = None
+        # Rows of router-integration sensors (skipped since the network
+        # counters took their place) have been deleted this process.
+        self._router_rows_pruned = False
 
     # ---------------------------------------------------------------------- #
     # Lifecycle
@@ -604,9 +614,19 @@ class SentinelBaselineUpdater:
         """Upsert rolling stats for all numeric entities in *snapshot*."""
         # Collect numeric entities and their current values.
         entity_values: dict[str, float] = {}
+        router_entities: list[str] = []
         for entity in snapshot.get("entities", []):
             entity_id = entity.get("entity_id", "")
             if not entity_id:
+                continue
+            if entity.get("platform") in ROUTER_PLATFORMS:
+                # A router integration's sensors are per-client figures
+                # (eero creates a rate, signal, and traffic sensor for every
+                # client it tracks): dozens of entities that would each earn
+                # an establishment notice and drift on every poll, and whose
+                # ids can carry a MAC. Their figures reach the baselines as
+                # the network section's counters instead.
+                router_entities.append(str(entity_id))
                 continue
             try:
                 value = float(str(entity.get("state", "")))
@@ -619,9 +639,27 @@ class SentinelBaselineUpdater:
                 continue
             entity_values[entity_id] = value
 
+        if router_entities and not self._router_rows_pruned:
+            await self._prune_entity_rows(router_entities)
         if not entity_values:
             return
         await self._write_samples(entity_values, snapshot)
+
+    async def _prune_entity_rows(self, entity_ids: list[str]) -> None:
+        """
+        Delete the rows of entities the updater no longer samples, once.
+
+        Rows written before the router sensors were skipped would otherwise
+        sit stale forever and count as such on the health sensor.
+        """
+        try:
+            async with self._pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(_DELETE_ENTITIES_SQL, (entity_ids,))
+                await conn.commit()
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("Could not prune router sensor baseline rows; retrying later.")
+            return
+        self._router_rows_pruned = True
 
     async def _write_samples(  # noqa: PLR0912, PLR0915
         self,
