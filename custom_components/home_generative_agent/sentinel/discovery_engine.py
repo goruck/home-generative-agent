@@ -51,6 +51,7 @@ from .evidence_paths import (
     network_posture_keys,
 )
 from .logging_utils import RepeatingLogLimiter
+from .proposal_templates import explain_normalize_candidate
 from .redaction import redact_network_identifiers
 from .rules.network_common import NETWORK_RULE_TYPES
 
@@ -127,6 +128,30 @@ def _is_cumulative_energy_entity(entity_id: str) -> bool:
     """
     local = entity_id.split(".", 1)[-1] if "." in entity_id else entity_id
     return local.endswith("_energy") or local == "energy"
+
+
+def _is_unpromotable_cumulative_energy(candidate: dict[str, Any]) -> bool:
+    """
+    Return True when normalization would reject a cumulative energy counter.
+
+    A statistical candidate over a kWh counter (the value only ever grows)
+    can never become a rule, so letting it through only mints an
+    "unsupported" draft the user has to reject by hand. The monitoring-gap
+    hint already omits these counters, but the model still finds them in the
+    snapshot. Ask the normalizer itself rather than re-deriving its routing
+    here: a THRESHOLD candidate on the same counter is a valid rule and must
+    pass. The normalizer assumes string evidence paths, so a candidate with
+    junk elements is left to the existing gates rather than crashing the
+    discovery cycle.
+    """
+    evidence_paths = candidate.get("evidence_paths")
+    if not isinstance(evidence_paths, list) or not all(
+        isinstance(p, str) for p in evidence_paths
+    ):
+        return False
+    return (
+        explain_normalize_candidate(candidate).reason_code == "cumulative_energy_sensor"
+    )
 
 
 def _is_battery_level_entity(hass: HomeAssistant, entity_id: str) -> bool:
@@ -714,7 +739,7 @@ class SentinelDiscoveryEngine:
 
         return active_rule_ids, hint_keys, filter_keys
 
-    def _filter_novel_candidates(
+    def _filter_novel_candidates(  # noqa: PLR0912
         self,
         candidates: list[dict[str, Any]],
         existing_keys: set[str],
@@ -801,6 +826,18 @@ class SentinelDiscoveryEngine:
             # matching on either one alone loses the re-proposals that
             # kept the other stable (review of #573).
             identity_keys = {key} if key else _candidate_identity_keys(candidate)
+
+            # Runs after the sanitizer and backfill (it judges the candidate
+            # promote would normalize) and before dedup (a dropped candidate
+            # must not claim a batch key).
+            if _is_unpromotable_cumulative_energy(candidate):
+                dropped.append(
+                    {
+                        "candidate_id": str(candidate.get("candidate_id", "")),
+                        "dedupe_reason": "cumulative_energy_sensor",
+                    }
+                )
+                continue
 
             dedupe_reason: str | None = None
             matched = identity_keys & existing_keys

@@ -2454,3 +2454,81 @@ async def test_promoted_environmental_rule_dedupes_reproposal(
     dropped = payload["filtered_candidates"][0]
     assert dropped["dedupe_reason"] == "existing_semantic_key"
     assert dropped["semantic_key"] == pending_candidate_key
+
+
+def _energy_engine() -> SentinelDiscoveryEngine:
+    return SentinelDiscoveryEngine(
+        hass=cast("HomeAssistant", object()),
+        options={},
+        model=None,
+        store=cast("DiscoveryStore", _DummyStore()),
+    )
+
+
+def test_filter_novel_candidates_drops_cumulative_energy_baseline() -> None:
+    """A baseline candidate on a kWh counter never becomes a rule — drop it."""
+    # The field candidate that reached the proposal queue as "unsupported".
+    candidate = {
+        "candidate_id": "candidate_washing_machine_energy_baseline_deviation",
+        "title": "Washing Machine Energy Consumption Baseline Deviation",
+        "summary": (
+            "Detects when the washing machine's cumulative energy consumption "
+            "rate deviates from expected patterns, potentially indicating a "
+            "stuck cycle or mechanical fault."
+        ),
+        "evidence_paths": [
+            (
+                "entities[entity_ids contains "
+                "sensor.washing_machine_switch_0_energy].state"
+            ),
+            "derived.baseline_ready_entities",
+        ],
+        "pattern": "baseline_deviation",
+        "confidence_hint": 0.65,
+        "suggested_type": "statistical_anomaly",
+    }
+    filtered, dropped = _energy_engine()._filter_novel_candidates([candidate], set())
+    assert filtered == []
+    assert dropped == [
+        {
+            "candidate_id": "candidate_washing_machine_energy_baseline_deviation",
+            "dedupe_reason": "cumulative_energy_sensor",
+        }
+    ]
+
+
+def test_filter_novel_candidates_keeps_cumulative_energy_threshold() -> None:
+    """A numeric threshold on the same counter is a valid rule and must pass."""
+    candidate = {
+        "candidate_id": "washing_machine_energy_high",
+        "title": "Washing machine energy above 5 kWh",
+        "summary": "Washing machine energy exceeds 5 kWh.",
+        "evidence_paths": [
+            "entities[entity_id=sensor.washing_machine_switch_0_energy].state",
+        ],
+        "pattern": "sensor_threshold_condition",
+        "confidence_hint": 0.7,
+        "suggested_type": "statistical_anomaly",
+    }
+    filtered, dropped = _energy_engine()._filter_novel_candidates([candidate], set())
+    assert [c["candidate_id"] for c in filtered] == ["washing_machine_energy_high"]
+    assert dropped == []
+
+
+def test_filter_novel_candidates_keeps_baseline_citing_power_and_energy() -> None:
+    """The normalizer picks the power sensor when both are cited — keep it."""
+    candidate = {
+        "candidate_id": "washing_machine_power_baseline",
+        "title": "Washing machine power baseline deviation",
+        "summary": "Washing machine power deviates from its baseline.",
+        "evidence_paths": [
+            "entities[entity_id=sensor.washing_machine_switch_0_energy].state",
+            "entities[entity_id=sensor.washing_machine_switch_0_power].state",
+        ],
+        "pattern": "baseline_deviation",
+        "confidence_hint": 0.65,
+        "suggested_type": "statistical_anomaly",
+    }
+    filtered, dropped = _energy_engine()._filter_novel_candidates([candidate], set())
+    assert [c["candidate_id"] for c in filtered] == ["washing_machine_power_baseline"]
+    assert dropped == []
