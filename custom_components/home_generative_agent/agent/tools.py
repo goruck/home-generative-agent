@@ -703,9 +703,12 @@ async def add_automation(  # noqa: D417
 
     Entity IDs and service names must be real. Entity IDs are not the names
     shown in the home overview: use ones you have seen in a tool result, or
-    the corrections this tool returns. Mobile push goes through the
-    notify.mobile_app_* service configured for this integration; if you do not
-    know it, the tool tells you when you get it wrong.
+    the corrections this tool returns. State triggers compare raw states:
+    binary sensors, switches and lights are "on" or "off" (never labels like
+    Wet, Open or Detected) and people are "home" or "not_home". Mobile push
+    goes through the notify.mobile_app_* service configured for this
+    integration; if you do not know it, the tool tells you when you get it
+    wrong.
 
     Args:
         automation_yaml: A Home Assistant automation in valid YAML format.

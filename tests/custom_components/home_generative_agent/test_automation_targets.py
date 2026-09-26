@@ -170,7 +170,7 @@ condition:
   - condition: or
     conditions:
       - condition: state
-        entity_id: [person.me, binary_sensor.missing_condition]
+        entity_id: [person.me, sensor.missing_condition]
         state: home
 action:
   - condition: state
@@ -220,7 +220,7 @@ action:
         "zone.missing_zone",
         "input_datetime.missing_alarm",
         "input_datetime.missing_after",
-        "binary_sensor.missing_condition",
+        "sensor.missing_condition",
         "light.missing_action_condition",
         "light.missing_choose",
         "light.missing_target",
@@ -1442,6 +1442,102 @@ async def test_deep_opaque_payload_is_refused_by_the_service_walk(
     missing = find_missing_automation_targets(hass, config)
 
     assert [m.kind for m in missing] == [KIND_AUTOMATION]
+
+
+@pytest.mark.asyncio
+async def test_display_label_states_are_refused_with_the_raw_state(
+    hass: HomeAssistant,
+) -> None:
+    """`to: wet` on a moisture sensor installs and never fires; refuse it."""
+    hass.states.async_set("person.lindo", "home", {"friendly_name": "Lindo"})
+    config = await _validated(
+        hass,
+        f"""
+alias: Wet Area Alert
+trigger:
+  - platform: state
+    entity_id: {REAL_MOISTURE}
+    to: wet
+  - platform: state
+    entity_id: person.lindo
+    from: home
+    to: away
+condition:
+  - condition: or
+    conditions:
+      - condition: state
+        entity_id: light.hall
+        state: [dimmed, "on"]
+action:
+  - wait_for_trigger:
+      - trigger: state
+        entity_id: {REAL_MOISTURE}
+        to: Dry
+  - action: light.turn_on
+    target:
+      entity_id: light.hall
+""",
+    )
+
+    missing = find_missing_automation_targets(hass, config, notify_service=PHONE)
+
+    assert [(m.kind, m.name) for m in missing] == [
+        ("state", f"{REAL_MOISTURE} = wet"),
+        ("state", "person.lindo = away"),
+        ("state", "light.hall = dimmed"),
+        ("state", f"{REAL_MOISTURE} = Dry"),
+    ]
+    assert "reports 'on' or 'off'" in missing[0].detail
+    assert 'Use "not_home"' in missing[1].detail
+    text = describe_missing_targets(missing)
+    assert f"- State '{REAL_MOISTURE} = wet' can never be 'wet'" in text
+
+
+@pytest.mark.asyncio
+async def test_raw_states_attributes_and_other_domains_pass(
+    hass: HomeAssistant,
+) -> None:
+    """on/off, unknown, attribute triggers and non-binary domains are not judged."""
+    hass.states.async_set("person.lindo", "home", {"friendly_name": "Lindo"})
+    hass.states.async_set("cover.garage", "closed", {"friendly_name": "Garage"})
+    config = await _validated(
+        hass,
+        f"""
+alias: Fine
+trigger:
+  - platform: state
+    entity_id: {REAL_MOISTURE}
+    from: "off"
+    to: "on"
+  - platform: state
+    entity_id: {REAL_MOISTURE}
+    attribute: battery_level
+    to: low
+  - platform: state
+    entity_id: person.lindo
+    to: not_home
+  - platform: state
+    entity_id: cover.garage
+    to: open
+  - platform: state
+    entity_id: light.hall
+    to: unavailable
+  - platform: state
+    entity_id: light.hall
+    to: "{{{{ states('input_text.x') }}}}"
+condition:
+  - condition: state
+    entity_id: light.hall
+    state: "on"
+    enabled: false
+action:
+  - action: light.turn_on
+    target:
+      entity_id: light.hall
+""",
+    )
+
+    assert find_missing_automation_targets(hass, config, notify_service=PHONE) == []
 
 
 def test_tools_module_wires_the_check() -> None:

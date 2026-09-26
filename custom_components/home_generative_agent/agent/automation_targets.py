@@ -27,7 +27,10 @@ the closest real thing so the model's retry is deterministic:
   to call;
 * for a missing ``notify.*`` service, the mobile push service configured for
   this integration, then every ``notify.mobile_app_*`` service;
-* for any other missing service, the services its domain does offer.
+* for any other missing service, the services its domain does offer;
+* for a state trigger or condition on a value the entity can never report
+  (``to: wet`` on a binary sensor, ``to: away`` on a person), the raw
+  states it does report.
 
 Suggestions draw only from entities exposed to Assist: the model can only
 guess a name it was shown, and naming a hidden entity's real id would turn a
@@ -142,6 +145,31 @@ AUTOMATION_REFUSAL_PREFIX = "Automation not added"
 KIND_ENTITY = "entity"
 KIND_SERVICE = "service"
 KIND_AUTOMATION = "automation"
+KIND_STATE = "state"
+
+# Domains whose entities only ever report these raw states. A state trigger
+# or condition compares the raw state, so `to: wet` on a binary sensor (its
+# display label) never matches and the automation never runs.
+_ON_OFF_DOMAINS = frozenset(
+    {
+        "automation",
+        "binary_sensor",
+        "fan",
+        "humidifier",
+        "input_boolean",
+        "light",
+        "siren",
+        "switch",
+    }
+)
+_ON_OFF_STATES = frozenset({"on", "off", "unknown", "unavailable"})
+
+# A person or tracker is `home` or `not_home` (or a zone name), never `away`.
+_PRESENCE_DOMAINS = frozenset({"person", "device_tracker"})
+_PRESENCE_MISSPELLINGS = {"away": "not_home", "not home": "not_home", "present": "home"}
+
+# Keys of a state trigger / condition that hold the compared state.
+_STATE_VALUE_KEYS = ("to", "from", "not_to", "not_from", "state")
 
 
 @dataclass(frozen=True)
@@ -156,6 +184,8 @@ class MissingAutomationTarget:
         """Return one line the model can act on."""
         if self.kind == KIND_AUTOMATION:
             return f"The automation {self.detail}"
+        if self.kind == KIND_STATE:
+            return f"State '{self.name}' {self.detail}"
         return f"{self.kind.capitalize()} '{self.name}' {self.detail}"
 
 
@@ -687,6 +717,11 @@ def find_missing_automation_targets(
     except _TooDeepError:
         return _too_deep()
 
+    try:
+        found.extend(find_impossible_states(validated_config))
+    except _TooDeepError:
+        return _too_deep()
+
     seen_services: set[str] = set()
     try:
         services = list(_walk_services(_without_disabled(actions)))
@@ -718,6 +753,95 @@ def find_missing_automation_targets(
     return found
 
 
+def _state_values(node: Mapping[str, Any]) -> list[str]:
+    """Return the raw states a state trigger or condition compares against."""
+    values: list[str] = []
+    for key in _STATE_VALUE_KEYS:
+        raw = node.get(key)
+        items = raw if isinstance(raw, (list, tuple)) else [raw]
+        values.extend(
+            item.strip()
+            for item in items
+            if isinstance(item, str) and item.strip() and not _is_template(item)
+        )
+    return values
+
+
+def _is_state_node(node: Mapping[str, Any]) -> bool:
+    """Return True for a `state` trigger or a `state` condition."""
+    kind = node.get("platform") or node.get("trigger") or node.get("condition")
+    return kind == "state" and "attribute" not in node
+
+
+def _walk_state_nodes(node: Any, depth: int = 0) -> Iterator[Mapping[str, Any]]:
+    """Yield every enabled state trigger/condition anywhere in the config."""
+    if depth > _MAX_STEP_DEPTH:
+        raise _TooDeepError
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            yield from _walk_state_nodes(item, depth)
+        return
+    if not isinstance(node, dict) or _is_disabled(node):
+        return
+    if _is_state_node(node):
+        yield node
+    for key, value in node.items():
+        if key not in _OPAQUE_KEYS:
+            yield from _walk_state_nodes(value, depth + 1)
+
+
+def _impossible_state(entity_id: str, value: str) -> str | None:
+    """Return the correction when an entity can never report ``value``."""
+    domain = entity_id.partition(".")[0]
+    lowered = value.lower()
+    if domain in _ON_OFF_DOMAINS and lowered not in _ON_OFF_STATES:
+        return (
+            f"can never be '{value}': a {domain} reports 'on' or 'off', and "
+            "labels like Wet, Open, Detected or Dimmed are only how the state "
+            'is displayed. Compare against "on" or "off".'
+        )
+    if domain in _PRESENCE_DOMAINS and lowered in _PRESENCE_MISSPELLINGS:
+        return (
+            f"can never be '{value}': a {domain} reports 'home' or 'not_home' "
+            f'(or a zone name). Use "{_PRESENCE_MISSPELLINGS[lowered]}".'
+        )
+    return None
+
+
+def find_impossible_states(
+    validated_config: Mapping[str, Any],
+) -> list[MissingAutomationTarget]:
+    """
+    Return the state triggers and conditions that can never match.
+
+    Home Assistant compares the entity's raw state string, so a trigger
+    written from a display label (``to: wet`` for a moisture sensor) passes
+    validation, installs, and never fires. This is the same silent failure
+    as a missing entity, caught the same way.
+    """
+    found: list[MissingAutomationTarget] = []
+    seen: set[tuple[str, str]] = set()
+    for node in _walk_state_nodes(_ordered_sections(validated_config)):
+        values = _state_values(node)
+        if not values:
+            continue
+        for entity_id in _entity_candidates(node.get(_ENTITY_ID_KEY)):
+            for value in values:
+                if (entity_id, value) in seen:
+                    continue
+                seen.add((entity_id, value))
+                detail = _impossible_state(entity_id, value)
+                if detail is not None:
+                    found.append(
+                        MissingAutomationTarget(
+                            kind=KIND_STATE,
+                            name=f"{entity_id} = {value}",
+                            detail=detail,
+                        )
+                    )
+    return found
+
+
 def describe_missing_targets(missing: Sequence[MissingAutomationTarget]) -> str:
     """Return the tool response for an automation that names missing targets."""
     shown = missing[:_MAX_REPORTED]
@@ -725,7 +849,7 @@ def describe_missing_targets(missing: Sequence[MissingAutomationTarget]) -> str:
     if len(missing) > len(shown):
         lines.append(f"- … and {len(missing) - len(shown)} more.")
     return (
-        f"{AUTOMATION_REFUSAL_PREFIX}: it refers to entities or services that do "
-        "not exist in Home Assistant, so it would never run. Correct these and "
-        "call the tool again with the full automation:\n" + "\n".join(lines)
+        f"{AUTOMATION_REFUSAL_PREFIX}: it refers to entities, services or states "
+        "that do not exist in Home Assistant, so it would never run. Correct "
+        "these and call the tool again with the full automation:\n" + "\n".join(lines)
     )
