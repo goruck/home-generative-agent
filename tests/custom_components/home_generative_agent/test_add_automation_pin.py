@@ -140,6 +140,11 @@ def _stub_validation(monkeypatch: pytest.MonkeyPatch) -> None:
         return dict(kwargs["config"])
 
     monkeypatch.setattr(tools_module, "_async_validate_config_item", _validate)
+    # The existence check needs a real state machine and entity registry;
+    # it has its own tests in test_automation_targets.py.
+    monkeypatch.setattr(
+        tools_module, "find_missing_automation_targets", lambda *_a, **_k: []
+    )
 
 
 def _written(tmp_path: Path) -> list[dict[str, Any]]:

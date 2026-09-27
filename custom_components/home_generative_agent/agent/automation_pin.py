@@ -119,6 +119,7 @@ _INDIRECTION_DOMAINS = frozenset(
         "button",
         "conversation",
         "input_button",
+        "pyscript",
         "python_script",
         "rest_command",
         "script",
@@ -196,8 +197,10 @@ def _walk_steps(
         raise _TooDeepError
 
     if isinstance(node, (list, tuple)):
+        # Lists are free: a nesting level is a dict, so the cap counts
+        # containers the way an author sees them, not YAML punctuation.
         for item in node:
-            yield from _walk_steps(item, depth + 1)
+            yield from _walk_steps(item, depth)
         return
     if not isinstance(node, dict):
         return

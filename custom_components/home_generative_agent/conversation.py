@@ -39,6 +39,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
+from .agent.automation_targets import normalize_notify_service
 from .agent.graph import workflow
 from .agent.helpers import (
     active_llm_api_ids,
@@ -69,7 +70,9 @@ from .agent.tools import (
     write_yaml_file,
 )
 from .const import (
+    AUTOMATION_PUSH_SERVICE_PROMPT,
     CONF_CRITICAL_ACTION_PIN_ENABLED,
+    CONF_NOTIFY_SERVICE,
     CONF_PROMPT,
     CONF_SCHEMA_FIRST_YAML,
     CONF_SENTINEL_NETWORK_ENABLED,
@@ -1080,6 +1083,14 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             else ""
         )
         tool_error_prompt = TOOL_CALL_ERROR_SYSTEM_MESSAGE if has_tools else ""
+        push_service = str(options.get(CONF_NOTIFY_SERVICE) or "").strip()
+        push_prompt = (
+            AUTOMATION_PUSH_SERVICE_PROMPT.format(
+                service=normalize_notify_service(push_service)
+            )
+            if has_tools and push_service
+            else ""
+        )
         audit_prompt = (
             NETWORK_AUDIT_TOOL_PROMPT
             if has_tools and self._network_audit_available()
@@ -1099,6 +1110,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     + schema_prompt
                     + audit_prompt
                     + tool_error_prompt
+                    + push_prompt
                 ),
                 self.hass,
             ).async_render(variables, parse_result=False)
