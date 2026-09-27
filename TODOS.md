@@ -533,6 +533,32 @@ validation.
 
 ---
 
+### Write leak, smoke and safety alerts as critical push notifications
+
+**What:** `add_automation` now installs a working leak alert on the first try (PR [#669](https://github.com/goruck/home-generative-agent/pull/669)), but the push it writes is an ordinary `notify.mobile_app_*` call. On the field test the alert was delivered and then sat unseen in the phone's Home Assistant notification group among the ~370 camera-analysis and Sentinel pushes HGA sent that day; a Focus mode would have held it entirely. A wet floor is exactly the notification that must not be grouped, summarised or silenced.
+
+**Why:** Found on the 2026-09-26 field test of #669, after the automation itself was confirmed correct end to end. Out of scope there because it is a change in what the model is told to write, not in what the check refuses.
+
+**How to apply:** For automations whose trigger is a `binary_sensor` of device class `moisture`, `smoke`, `gas`, `carbon_monoxide` or `safety`, have the model add `data: {push: {sound: {name: default, critical: 1, volume: 1.0}}}` (iOS) and `data: {channel: alarm_stream, importance: high}` (Android) to the notify action. Two ways: a sentence in the tool docstring plus an example, or a post-validation rewrite in `add_automation` that adds the critical payload when the trigger's device class is one of those and the action targets a `notify.mobile_app_*` service (deterministic, works for every model). Prefer the rewrite; document it, because a critical alert bypasses the user's Do Not Disturb by design. Test with the field YAML from `test_automation_targets.py`.
+
+**Effort:** S
+**Priority:** P2
+
+---
+
+### The tool-loop guard's give-up message is still blind after an ordinary round
+
+**What:** `_tool_loop_guard` (`agent/graph.py`) now repeats the last tool result when that result was a refused `add_automation`, so the user sees what was wrong. After any other final round (a `GetLiveContext` that returned "Action failed.", a tool error, a lookup that came back empty) it still replies with the bare "I wasn't able to complete this request after several tool-use attempts", which tells the user nothing about which step failed or what the model was trying to do.
+
+**Why:** Found in the review of #669 (red team) and fixed there only for the refusal case, because that was the field failure. The general case is the same user experience: the assistant apologises and the reason is only in the debug log.
+
+**How to apply:** In `_tool_loop_guard`, summarise the last round rather than only a refusal: name the tool that was called last and, when its `ToolMessage` has `status == "error"` or content starting with a known failure marker, include one sanitized line of it (`sanitize_tool_text`, capped). Never echo raw tool payloads, which can carry home data or remote text, and keep the refusal special case, which is already safe to show. Tests: extend `test_action_round_guard.py` with an error round and an empty-lookup round.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
 ## Explain / Prompts
 
 ### Sanitize area/entity strings before injecting into LLM prompts
