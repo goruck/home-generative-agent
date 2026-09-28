@@ -442,6 +442,7 @@
           "llm_hass_api": "Control Home Assistant",
           "video_analyzer_mode": "Video analyzer mode",
           "video_analyzer_uniqueness_enabled": "Enable perceptual-hash frame filter (dHash)",
+          "video_analyzer_event_recording_enabled": "Analyze Ring event recordings (ring-mqtt, Ring Protect)",
           "video_analyzer_motion_camera_map": "Motion sensor → camera overrides (optional)",
           "notify_service": "Video Analyzer Notify Service (optional)",
           "face_recognition": "Enable face recognition",
@@ -471,6 +472,7 @@
           "tool_exclusions": "Tools ticked here are never offered to the model and never executed, even if it asks for one by name. Leave empty to expose every tool of every selected API. Tools a server adds later are available by default.",
           "tool_inclusions": "Tools ticked here are always offered to the model: they are appended after vector-based tool retrieval, on top of the retrieval limit. Useful for general-purpose tools, such as web search, that similarity search may not select. The model still decides whether to use them. A tool cannot be both excluded and always included.",
           "video_analyzer_uniqueness_enabled": "Skip visually near-identical frames before VLM analysis. Warning: enabling this removes inter-frame motion context that the summary model uses to narrate movement. Only enable if a static scene generates excessive duplicates and you accept that motion continuity may be lost.",
+          "video_analyzer_event_recording_enabled": "When a ring-mqtt event_select entity publishes a signed recordingUrl with a new eventId, download the event's MP4, extract up to 8 frames with ffmpeg and analyze those instead of the retained interval snapshot, which on battery cameras can be up to 10 minutes older than the event. Needs a Ring Protect subscription (cameras without a recordingUrl keep using snapshots) and the ffmpeg binary the official Home Assistant image ships.",
           "video_analyzer_motion_camera_map": "One override per line: binary_sensor.X_motion: camera.Y — use this when automatic resolution picks the wrong camera. Leave blank to rely on device-based and name-based resolution."
         }
       }
