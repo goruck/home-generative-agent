@@ -1635,6 +1635,12 @@ Ring capture time, and a strict comparison would reject a genuinely current
 frame published before the delayed `eventId`. Propagate the real Ring event
 timestamp, or allow a documented skew.
 
+**Sidestep (2026-09-28):** the opt-in event-recording path (#491,
+`video_analyzer_event_recording_enabled`) replaces the held pre-event frames
+with frames from the event's own MP4 when a `recordingUrl` is present, so the
+misattribution below no longer happens on Ring Protect cameras with the
+option on. The two checks here still matter for cameras without a recording.
+
 This comparison also governs the common case today: at a mean staleness of
 21 min at event open (10/12 events under the 30-min budget), the previous
 event's frame usually passes and is analyzed as if current (misattributed
