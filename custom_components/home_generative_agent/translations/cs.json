@@ -442,6 +442,7 @@
           "llm_hass_api": "Ovládat Home Assistant",
           "video_analyzer_mode": "Režim video analyzátoru",
           "video_analyzer_uniqueness_enabled": "Povolit filtr snímků dHash (perceptuální hash)",
+          "video_analyzer_event_recording_enabled": "Analyzovat nahrávky událostí Ring (ring-mqtt, Ring Protect)",
           "video_analyzer_motion_camera_map": "Pohybový senzor → přepsání kamery (volitelné)",
           "notify_service": "Oznamovací služba video analyzátoru (volitelné)",
           "face_recognition": "Povolit rozpoznávání obličejů",
@@ -471,6 +472,7 @@
           "tool_exclusions": "Nástroje označené zde se modelu nikdy nenabídnou a nikdy se nespustí, ani když si o ně model výslovně řekne. Ponechte prázdné, aby byly dostupné všechny nástroje všech vybraných API. Nástroje, které server přidá později, jsou ve výchozím stavu dostupné.",
           "tool_inclusions": "Nástroje označené zde se modelu nabídnou vždy: přidávají se po vektorovém vyhledávání nástrojů, nad rámec limitu vyhledávání. Hodí se pro univerzální nástroje, například webové vyhledávání, které sémantické vyhledávání nemusí vybrat. Model sám rozhodne, zda je použije. Nástroj nemůže být zároveň vyloučený a vždy zahrnutý.",
           "video_analyzer_uniqueness_enabled": "Přeskočit vizuálně téměř identické snímky před analýzou VLM. Varování: povolení této funkce odstraní kontext pohybu mezi snímky, který souhrnný model používá k popisu pohybu. Povolte pouze v případě, že statická scéna generuje nadměrné duplikáty a akceptujete ztrátu kontinuity pohybu.",
+          "video_analyzer_event_recording_enabled": "Když entita event_select z ring-mqtt zveřejní podepsanou recordingUrl s novým eventId, stáhne se MP4 dané události, pomocí ffmpeg se z něj vyberou až 8 snímků a analyzují se místo uchovaného intervalového snímku, který u bateriových kamer může být až 10 minut starší než událost. Vyžaduje předplatné Ring Protect (kamery bez recordingUrl dál používají snímky) a binárku ffmpeg, kterou oficiální obraz Home Assistant obsahuje.",
           "video_analyzer_motion_camera_map": "Jedno přepsání na řádek: binary_sensor.X_motion: camera.Y — použijte, když automatické rozpoznávání vybere špatnou kameru. Ponechte prázdné pro spoléhání na rozpoznávání založené na zařízení a názvu."
         }
       }

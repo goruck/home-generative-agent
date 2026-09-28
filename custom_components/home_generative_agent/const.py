@@ -1013,6 +1013,13 @@ VIDEO_ANALYZER_FACE_CROP = False
 VIDEO_ANALYZER_FACE_MERGE_THRESHOLD = 0.85
 CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED = "video_analyzer_uniqueness_enabled"
 RECOMMENDED_VIDEO_ANALYZER_UNIQUENESS_ENABLED = False
+# Opt-in: when a ring-mqtt event_select change carries a signed `recordingUrl`
+# (Ring Protect), download the event MP4 and analyze frames extracted from it
+# instead of the retained interval snapshot, which on battery cameras can
+# predate the event by up to 600 s (issue #491). Needs the ffmpeg binary the
+# official Home Assistant image ships.
+CONF_VIDEO_ANALYZER_EVENT_RECORDING_ENABLED = "video_analyzer_event_recording_enabled"
+RECOMMENDED_VIDEO_ANALYZER_EVENT_RECORDING_ENABLED = False
 
 # Stable “latest” file publication
 VIDEO_ANALYZER_SAVE_LATEST = True

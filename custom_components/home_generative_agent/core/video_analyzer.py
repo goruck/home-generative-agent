@@ -6,8 +6,11 @@ import asyncio
 import contextlib
 import logging
 import math
+import os
 import re
+import shutil
 import statistics
+import tempfile
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -39,6 +42,7 @@ from ..agent.tools import (  # noqa: TID252
 from ..const import (  # noqa: TID252
     CONF_MODEL_PROVIDER_UNCONTENDED,
     CONF_NOTIFY_SERVICE,
+    CONF_VIDEO_ANALYZER_EVENT_RECORDING_ENABLED,
     CONF_VIDEO_ANALYZER_MODE,
     CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP,
     CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED,
@@ -70,6 +74,23 @@ from ..const import (  # noqa: TID252
     VIDEO_ANALYZER_TRIGGER_ON_MOTION,
     VIDEO_SUMMARY_NUM_PREDICT,
     VIDEO_VLM_NUM_PREDICT,
+)
+from .event_recording import (
+    EVENT_WORK_PREFIX,
+    RECORDING_FETCH_BACKOFF_SEC,
+    RECORDING_INGEST_DEADLINE_SEC,
+    RECORDING_MAX_CONCURRENT,
+    RECORDING_MAX_PENDING_PER_CAMERA,
+    RecordingError,
+    RecordingNotReadyError,
+    assert_public_host,
+    download_recording,
+    extract_frames,
+    ffmpeg_available,
+    ffmpeg_binary,
+    is_valid_event_id,
+    recording_url_from_state,
+    thin_frames,
 )
 from .fallback import ainvoke_dropping_unsupported_params
 from .person_gallery import FACE_EMBEDDING_DIMS
@@ -137,7 +158,14 @@ _NOTIFY_PROTECT_TTL_SEC: Final[int] = 1800  # pruning protection for notified im
 # ONLY these (user files like "snapshot_family.jpg" must never match).
 # ASCII digit class on purpose: \d is Unicode-aware and would also claim
 # user files named with e.g. Arabic-Indic digits.
-_SNAPSHOT_FILE_RE: Final = re.compile(r"snapshot_([0-9]{8}_[0-9]{6})\.jpg")
+# Frames extracted from an event recording (issue #491) carry an `_rNN` suffix
+# (their second within the clip) so they never collide with a capture the
+# snapshot loop stamps with the same wall-clock second; epoch_from_path reads
+# only the leading timestamp, so ordering and retention treat both alike.
+_SNAPSHOT_FILE_RE: Final = re.compile(
+    r"snapshot_([0-9]{8}_[0-9]{6})(?:_r[0-9]{2})?\.jpg"
+)
+_RECORDING_FRAME_RE: Final = re.compile(r"snapshot_[0-9]{8}_[0-9]{6}_r[0-9]{2}\.jpg")
 
 
 def _is_analyzer_snapshot_name(name: str) -> bool:
@@ -150,6 +178,38 @@ def _is_analyzer_snapshot_name(name: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _place_recording_frame(
+    src: Path, snapshot_dir: Path, base: datetime, second: int
+) -> Path:
+    """
+    Link ``src`` into ``snapshot_dir`` under a free analyzer-owned name.
+
+    Blocking; runs in the executor. os.link fails on an existing target, so
+    two writers can never overwrite each other; when hard links are not
+    supported (some network mounts) fall back to a checked rename. The stamp
+    is bumped a second at a time until a free name is found.
+    """
+    suffix = f"_r{min(second, 99):02d}.jpg"
+    for bump in range(60):
+        stamp = dt_util.as_local(base + timedelta(seconds=bump)).strftime(
+            "%Y%m%d_%H%M%S"
+        )
+        dst = snapshot_dir / f"snapshot_{stamp}{suffix}"
+        try:
+            os.link(src, dst)
+        except FileExistsError:
+            continue
+        except OSError:
+            if dst.exists():
+                continue
+            src.replace(dst)
+            return dst
+        src.unlink()
+        return dst
+    msg = f"no free name for recording frame {src.name}"
+    raise RecordingError(msg)
 
 
 # --- Snapshot capture (issue #464) ---
@@ -705,6 +765,9 @@ class _Metrics:
     timeouts: int = 0
     semaphore_timeouts: int = 0
     snapshot_failures: int = 0
+    recording_frames: int = 0
+    recording_failures: int = 0
+    replaced_by_recording: int = 0
     unknown_merged: int = 0
     unknown_merge_refused_cooccurrence: int = 0
     unknown_merge_refused_distance: int = 0
@@ -754,6 +817,27 @@ class VideoAnalyzer:
         # camera_id -> monotonic() when the current window opened, enforcing
         # VIDEO_ANALYZER_EVENT_SELECT_MAX_WINDOW across extensions.
         self._event_select_window_started: dict[str, float] = {}
+        # Event-recording ingest (issue #491): in-flight download/extract
+        # tasks keyed "<camera_id>:<eventId>"; the eventIds recently ingested
+        # per camera (a re-published or re-selected state must not fetch the
+        # same clip twice, and A-B-A must not double-book the task key); a
+        # per-camera lock so clips are ingested in event order plus a global
+        # semaphore bounding concurrent decoders; the monotonic time of the
+        # last WARNING per camera (failures are rate-limited to one warning
+        # an hour; the hourly metrics carry the count); the cached ffmpeg
+        # presence probe with its time (re-probed hourly so installing the
+        # binary takes effect without a reload); and a per-camera window
+        # generation, bumped every time a capture window ends, so a clip
+        # that lands after its window closed never displaces a later
+        # window's snapshots.
+        self._event_recording_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._event_recording_recent: dict[str, deque[str]] = {}
+        self._event_recording_locks: dict[str, asyncio.Lock] = {}
+        self._event_recording_sem = asyncio.Semaphore(RECORDING_MAX_CONCURRENT)
+        self._event_recording_warned_at: dict[str, float] = {}
+        self._event_recording_ffmpeg_missing_logged = False
+        self._event_recording_binary_ok: dict[str, tuple[bool, float]] = {}
+        self._window_generation: dict[str, int] = {}
         # camera_id -> the frozen timestamp value whose staleness episode was
         # last recorded (issue #490); prevents one frozen snapshot from
         # spamming a failure per 3-second loop iteration. A changed frozen
@@ -844,6 +928,8 @@ class VideoAnalyzer:
                 "dropped_stale=%d dropped_backlog=%d analyzed=%d "
                 "sentinel_dropped=%d "
                 "timeouts=%d semaphore_timeouts=%d snapshot_failures=%d "
+                "recording_frames=%d recording_failures=%d "
+                "replaced_by_recording=%d "
                 "unknown_merged=%d unknown_merge_refused_cooccurrence=%d "
                 "unknown_merge_refused_distance=%d "
                 "unknown_merge_refused_multi_known=%d "
@@ -863,6 +949,9 @@ class VideoAnalyzer:
                 m.timeouts,
                 m.semaphore_timeouts,
                 m.snapshot_failures,
+                m.recording_frames,
+                m.recording_failures,
+                m.replaced_by_recording,
                 m.unknown_merged,
                 m.unknown_merge_refused_cooccurrence,
                 m.unknown_merge_refused_distance,
@@ -883,6 +972,9 @@ class VideoAnalyzer:
             m.timeouts = 0
             m.semaphore_timeouts = 0
             m.snapshot_failures = 0
+            m.recording_frames = 0
+            m.recording_failures = 0
+            m.replaced_by_recording = 0
             m.unknown_merged = 0
             m.unknown_merge_refused_cooccurrence = 0
             m.unknown_merge_refused_distance = 0
@@ -1768,6 +1860,12 @@ class VideoAnalyzer:
                     continue
                 stamped: list[tuple[float, Path]] = []
                 for f in entries:
+                    # An event-recording work dir (issue #491) only outlives
+                    # its ingest when the process died or shutdown rejected
+                    # the cleanup job; nothing else creates that prefix.
+                    if f.name.startswith(EVENT_WORK_PREFIX) and f.is_dir():
+                        shutil.rmtree(f, ignore_errors=True)
+                        continue
                     if not _is_analyzer_snapshot_name(f.name):
                         continue
                     # Per-file guard: one unreadable entry must cost one
@@ -2685,6 +2783,9 @@ class VideoAnalyzer:
     @callback
     def _stop_motion_loop_and_flush(self, camera_id: str) -> None:
         """Cancel the camera's motion loop and flush its batch, if running."""
+        self._window_generation[camera_id] = (
+            self._window_generation.get(camera_id, 0) + 1
+        )
         self._event_select_owned.discard(camera_id)
         self._event_select_dedupe.discard(camera_id)
         self._event_select_window_started.pop(camera_id, None)
@@ -2778,6 +2879,10 @@ class VideoAnalyzer:
         if camera_id in self._event_select_owned:
             self._extend_event_select_window(camera_id)
 
+        self._maybe_ingest_event_recording(
+            camera_id, entity_id, new_state, str(new_event_id)
+        )
+
     @callback
     def _extend_event_select_window(self, camera_id: str) -> None:
         """
@@ -2814,6 +2919,351 @@ class VideoAnalyzer:
         LOGGER.debug("Event select window closed for %s", camera_id)
         self._event_select_window_cancels.pop(camera_id, None)
         self._stop_motion_loop_and_flush(camera_id)
+
+    # --- Event-recording ingest (issue #491) ---
+
+    @callback
+    def _maybe_ingest_event_recording(
+        self, camera_id: str, select_entity_id: str, new_state: Any, event_id: str
+    ) -> None:
+        """
+        Schedule download + frame extraction of the event's recording.
+
+        Opt-in (CONF_VIDEO_ANALYZER_EVENT_RECORDING_ENABLED). A state without
+        a usable `recordingUrl` degrades silently to the snapshot path — that
+        is the no-subscription shape and is documented, not an error. Event
+        ids and URLs come off MQTT: an id that is not shaped like Ring's is
+        ignored (and never logged raw), the id never reaches a path, and the
+        URL is vetted in the task. Bookkeeping: one task per camera+event,
+        recently ingested ids are not fetched again, and a camera with
+        RECORDING_MAX_PENDING_PER_CAMERA ingests in flight drops the new one
+        as a counted failure rather than queueing without bound.
+        """
+        if not self.entry.runtime_data.options.get(
+            CONF_VIDEO_ANALYZER_EVENT_RECORDING_ENABLED, False
+        ):
+            return
+        if not is_valid_event_id(event_id):
+            LOGGER.debug("[%s] Ignoring event id of unexpected shape", camera_id)
+            return
+        url = recording_url_from_state(new_state)
+        if url is None:
+            LOGGER.debug(
+                "[%s] Event %s carries no recordingUrl; using snapshots only "
+                "(event recordings need a Ring Protect subscription)",
+                camera_id,
+                event_id,
+            )
+            return
+        key = f"{camera_id}:{event_id}"
+        recent = self._event_recording_recent.setdefault(camera_id, deque(maxlen=8))
+        if key in self._event_recording_tasks or event_id in recent:
+            return
+        prefix = f"{camera_id}:"
+        pending = sum(1 for k in self._event_recording_tasks if k.startswith(prefix))
+        if pending >= RECORDING_MAX_PENDING_PER_CAMERA:
+            self._record_recording_failure(
+                camera_id,
+                event_id,
+                f"{pending} recordings already in flight for this camera",
+            )
+            return
+        recent.append(event_id)
+        generation = self._window_generation.get(camera_id, 0)
+        task = self._create_background_task(
+            self._ingest_event_recording(
+                camera_id, select_entity_id, event_id, url, dt_util.utcnow(), generation
+            ),
+            f"hga video event recording {key}",
+        )
+        self._event_recording_tasks[key] = task
+        task.add_done_callback(partial(self._on_event_recording_done, key))
+
+    def _on_event_recording_done(self, key: str, task: asyncio.Task[Any]) -> None:
+        """Forget a finished ingest task — only if the slot still holds it."""
+        if self._event_recording_tasks.get(key) is task:
+            self._event_recording_tasks.pop(key, None)
+
+    async def _resolve_ffmpeg(self) -> str | None:
+        """
+        Return the ffmpeg binary to run, or None (logged once) when absent.
+
+        The PATH probe is blocking, so it runs in the executor; its result is
+        cached per binary and re-probed hourly, so installing ffmpeg after
+        the warning takes effect without a reload.
+        """
+        binary = ffmpeg_binary(self.hass)
+        now = monotonic()
+        cached = self._event_recording_binary_ok.get(binary)
+        if cached is None or now - cached[1] >= _STALE_REREPORT_INTERVAL_SEC:
+            available = await self.hass.async_add_executor_job(ffmpeg_available, binary)
+            self._event_recording_binary_ok[binary] = (available, now)
+        else:
+            available = cached[0]
+        if available:
+            self._event_recording_ffmpeg_missing_logged = False
+            return binary
+        if not self._event_recording_ffmpeg_missing_logged:
+            self._event_recording_ffmpeg_missing_logged = True
+            LOGGER.warning(
+                "Event-recording analysis is enabled but the ffmpeg binary "
+                "(%s) was not found; falling back to snapshots. The official "
+                "Home Assistant image ships ffmpeg — on other installs, "
+                "install it or configure the ffmpeg integration's ffmpeg_bin",
+                binary,
+            )
+        return None
+
+    async def _ingest_event_recording(  # noqa: PLR0913
+        self,
+        camera_id: str,
+        select_entity_id: str,
+        event_id: str,
+        url: str,
+        started: datetime,
+        generation: int,
+    ) -> None:
+        """
+        Download the event MP4, extract frames, and hand them to the batch.
+
+        Bounded by RECORDING_INGEST_DEADLINE_SEC end to end. The work dir is a
+        mkdtemp under the camera's snapshot dir (the event id never names a
+        path) and is removed whatever happens; a dir orphaned by a crash is
+        swept by the next start's retention seed.
+        """
+        try:
+            async with asyncio.timeout(RECORDING_INGEST_DEADLINE_SEC):
+                await self._ingest_event_recording_bounded(
+                    camera_id, select_entity_id, event_id, url, started, generation
+                )
+        except TimeoutError:
+            self._record_recording_failure(
+                camera_id,
+                event_id,
+                f"ingest exceeded {RECORDING_INGEST_DEADLINE_SEC:.0f} s",
+            )
+
+    async def _ingest_event_recording_bounded(  # noqa: PLR0913
+        self,
+        camera_id: str,
+        select_entity_id: str,
+        event_id: str,
+        url: str,
+        started: datetime,
+        generation: int,
+    ) -> None:
+        binary = await self._resolve_ffmpeg()
+        if binary is None:
+            return
+        lock = self._event_recording_locks.setdefault(camera_id, asyncio.Lock())
+        async with lock, self._event_recording_sem:
+            if self._stopped:
+                return
+            snapshot_dir = await self._get_snapshot_dir(camera_id)
+            try:
+                work_dir = Path(
+                    await self.hass.async_add_executor_job(
+                        partial(
+                            tempfile.mkdtemp, prefix=EVENT_WORK_PREFIX, dir=snapshot_dir
+                        )
+                    )
+                )
+            except OSError as err:
+                self._record_recording_failure(
+                    camera_id, event_id, f"could not create work dir: {err}"
+                )
+                return
+            try:
+                clip = work_dir / "recording.mp4"
+                size = await self._download_recording_with_retry(
+                    select_entity_id, event_id, url, clip
+                )
+                frames = await extract_frames(binary, clip, work_dir)
+                kept = await self._stamp_recording_frames(
+                    camera_id, snapshot_dir, started, len(frames), thin_frames(frames)
+                )
+            except RecordingError as err:
+                self._record_recording_failure(camera_id, event_id, str(err))
+                return
+            except OSError as err:
+                self._record_recording_failure(
+                    camera_id, event_id, f"filesystem error: {err}"
+                )
+                return
+            finally:
+                # RuntimeError: the executor rejects jobs during HA shutdown;
+                # the next start's retention seed removes the dir instead.
+                with contextlib.suppress(RuntimeError):
+                    await self.hass.async_add_executor_job(
+                        partial(shutil.rmtree, work_dir, ignore_errors=True)
+                    )
+            LOGGER.debug(
+                "[%s] Event %s recording: %d bytes, %d frames extracted, %d kept",
+                camera_id,
+                event_id,
+                size,
+                len(frames),
+                len(kept),
+            )
+            await self._admit_recording_frames(camera_id, kept, generation)
+
+    def _current_recording_url(
+        self, select_entity_id: str, event_id: str
+    ) -> str | None:
+        """Return the entity's current recordingUrl if it still names this event."""
+        state = self.hass.states.get(select_entity_id)
+        if state is None or str(state.attributes.get("eventId")) != event_id:
+            return None
+        return recording_url_from_state(state)
+
+    async def _download_recording_with_retry(
+        self, select_entity_id: str, event_id: str, url: str, dest: Path
+    ) -> int:
+        """
+        Download with the not-ready backoff schedule; raise on final failure.
+
+        Before every attempt the URL is re-read from the entity while it still
+        names this event (ring-mqtt re-signs on fetch, so a fresh copy beats
+        the one captured at trigger time); once the entity has moved on to a
+        newer event the trigger-time URL — signed for this event — is used.
+        Every attempt vets the host before fetching.
+        """
+        client = self._httpx_client or get_async_client(self.hass)
+        last: RecordingNotReadyError | None = None
+        for delay in RECORDING_FETCH_BACKOFF_SEC:
+            if delay:
+                await asyncio.sleep(delay)
+            attempt_url = self._current_recording_url(select_entity_id, event_id) or url
+            try:
+                await assert_public_host(attempt_url)
+                return await download_recording(client, attempt_url, dest)
+            except RecordingNotReadyError as err:
+                last = err
+                LOGGER.debug("Recording not ready (%s); retrying", err)
+        msg = f"recording never became fetchable ({last})"
+        raise RecordingError(msg)
+
+    async def _stamp_recording_frames(
+        self,
+        camera_id: str,
+        snapshot_dir: Path,
+        started: datetime,
+        clip_seconds: int,
+        kept: list[tuple[int, Path]],
+    ) -> list[Path]:
+        """
+        Move kept frames into the snapshot dir under analyzer-owned names.
+
+        The clip had already ended when ring-mqtt published its eventId, so
+        frame N of a C-second clip is stamped `started - (C - N)` seconds:
+        every clip frame predates the trigger and therefore sorts ahead of
+        any snapshot the window captured afterwards. Placement never
+        overwrites: if the name is taken (a snapshot in that second, or a
+        second event in the same second) the stamp is bumped by one second
+        until free. Whatever was placed is registered for retention even if
+        a later move fails.
+        """
+        out: list[Path] = []
+        try:
+            for second, src in kept:
+                base = started - timedelta(seconds=max(clip_seconds - second, 0))
+                dst = await self.hass.async_add_executor_job(
+                    _place_recording_frame, src, snapshot_dir, base, second
+                )
+                out.append(dst)
+        finally:
+            if out:
+                await self._prune_old_snapshots(camera_id, out)
+        return out
+
+    async def _admit_recording_frames(
+        self, camera_id: str, frames: list[Path], generation: int
+    ) -> None:
+        """
+        Put recording frames where the current window will analyze them.
+
+        While the window that opened for this event is still running (same
+        generation), the snapshots it holds were captured BEFORE the clip
+        landed — on a battery camera that is the retained interval snapshot,
+        which predates the event — so they are dropped (already registered
+        for retention, so nothing leaks) and the clip frames take their
+        place. Frames from an earlier recording in the same window are kept:
+        two events close together must not erase each other. Later loop
+        captures still join the batch. Once that window has closed — or a
+        later window is running — the frames are analyzed as their own
+        ordered batch, never via the live queue, whose backlog rule would
+        keep only the newest of them.
+
+        Dedupe runs among the clip frames alone: the hash history holds the
+        snapshots the clip is about to displace, and a person seen in both
+        would otherwise be rejected from the clip and then deleted with the
+        snapshot. At least one frame is always admitted.
+        """
+        if self._stopped:
+            return
+        self._last_hashes.pop(camera_id, None)
+        admitted: list[Path] = []
+        for path in frames:
+            try:
+                unique = await self._is_unique_enough(camera_id, path)
+            except (OSError, ValueError):
+                unique = True
+            if unique:
+                admitted.append(path)
+            else:
+                self._m_inc(camera_id, "skipped_duplicate")
+        if not admitted and frames:
+            admitted.append(frames[0])
+        same_window = (
+            camera_id in self._active_motion_cameras
+            and self._window_generation.get(camera_id, 0) == generation
+        )
+        if same_window:
+            buffer = self._event_snapshot_buffers.setdefault(
+                camera_id, deque(maxlen=_QUEUE_MAXSIZE)
+            )
+            keep = [p for p in buffer if _RECORDING_FRAME_RE.fullmatch(p.name)]
+            dropped = len(buffer) - len(keep)
+            if dropped:
+                self._m_inc(camera_id, "replaced_by_recording", dropped)
+                LOGGER.debug(
+                    "[%s] Dropping %d pre-recording snapshot(s) from the batch",
+                    camera_id,
+                    dropped,
+                )
+                buffer.clear()
+                buffer.extend(keep)
+            buffer.extend(admitted)
+        else:
+            self._create_background_task(
+                self._analyze_and_finalize(camera_id, order_batch(admitted)),
+                f"hga video event recording batch {camera_id}",
+            )
+        self._m_inc(camera_id, "recording_frames", len(admitted))
+        self._m_inc(camera_id, "enqueued", len(admitted))
+
+    def _record_recording_failure(
+        self, camera_id: str, event_id: str, reason: str
+    ) -> None:
+        """Count a failed recording ingest; WARNING at most hourly per camera."""
+        self._m_inc(camera_id, "recording_failures")
+        now = monotonic()
+        last = self._event_recording_warned_at.get(camera_id)
+        level = (
+            logging.WARNING
+            if last is None or now - last >= _STALE_REREPORT_INTERVAL_SEC
+            else logging.DEBUG
+        )
+        if level == logging.WARNING:
+            self._event_recording_warned_at[camera_id] = now
+        LOGGER.log(
+            level,
+            "[%s] Event %s recording could not be analyzed (%s); the snapshot "
+            "window stands in for it",
+            camera_id,
+            event_id,
+            reason,
+        )
 
     @callback
     def _get_recording_cameras(self) -> list[str]:
@@ -2986,6 +3436,7 @@ class VideoAnalyzer:
             self._active_motion_cameras,
             self._active_recording_cameras,
             self._active_queue_tasks,
+            self._event_recording_tasks,
         ):
             for task in task_dict.values():
                 task.cancel()
@@ -3000,6 +3451,11 @@ class VideoAnalyzer:
         self._event_select_owned.clear()
         self._event_select_dedupe.clear()
         self._event_select_window_started.clear()
+        self._event_recording_recent.clear()
+        self._event_recording_locks.clear()
+        self._event_recording_warned_at.clear()
+        self._event_recording_binary_ok.clear()
+        self._window_generation.clear()
         self._stale_reported.clear()
         self._stale_reported_at.clear()
 
