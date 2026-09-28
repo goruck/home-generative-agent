@@ -1640,6 +1640,12 @@ timestamp, or allow a documented skew.
 with frames from the event's own MP4 when a `recordingUrl` is present, so the
 misattribution below no longer happens on Ring Protect cameras with the
 option on. The two checks here still matter for cameras without a recording.
+**Open (P3, from the #673 review):** a user picking an older option on
+`select.<name>_event_select` changes `eventId` too, which already opens a
+capture window and now also ingests that older recording as current. ring-mqtt
+exposes no attribute that separates "new event" from "user browsed"; a fix
+needs either an event timestamp attribute upstream or a heuristic on the
+select's own state change, and neither is in hand.
 
 This comparison also governs the common case today: at a mean staleness of
 21 min at event open (10/12 events under the 30-min budget), the previous

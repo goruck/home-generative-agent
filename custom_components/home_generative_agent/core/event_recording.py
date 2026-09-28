@@ -11,20 +11,31 @@ attribute on the same ``select.*_event_select`` entity that carries the
 ``eventId`` flips and the MP4 is fetchable 0.4-1.1 s later.
 
 This module holds the pieces that do not need the analyzer's state: reading
-the URL off a state object, downloading the clip with a size cap, extracting
-frames with the ffmpeg binary Home Assistant ships, and thinning them to a
-bounded count. The analyzer owns scheduling, dedupe, and where the frames go.
+the URL off a state object, checking where it points, downloading the clip
+with a size cap, extracting frames with the ffmpeg binary Home Assistant
+ships, and thinning them to a bounded count. The analyzer owns scheduling,
+dedupe, and where the frames go.
+
+Trust boundary: ``eventId`` and ``recordingUrl`` arrive over MQTT, so nothing
+here treats them as safe. The event id never reaches a filesystem path, and
+the URL is fetched only when it is https, names a host (not an address), that
+host resolves to public addresses only, and the server does not redirect.
 """
 
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
+import re
 import shutil
+import socket
 from typing import TYPE_CHECKING, Any, Final
+from urllib.parse import urlsplit
 
 import aiofiles
 import httpx
+from homeassistant.util.network import is_invalid, is_ip_address, is_local
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -41,12 +52,33 @@ RECORDING_FETCH_BACKOFF_SEC: Final[tuple[float, ...]] = (0.0, 1.0, 2.0, 3.0, 4.0
 # Ring clips are a few MB; a 64 MiB cap bounds a pathological (or hostile)
 # response without cutting any real recording short.
 RECORDING_MAX_BYTES: Final[int] = 64 * 1024 * 1024
+# Wall-clock bound on one download attempt (httpx's own timeout is per read,
+# so a trickling server would otherwise hold the camera's lock indefinitely).
 RECORDING_DOWNLOAD_TIMEOUT_SEC: Final[float] = 60.0
 RECORDING_FFMPEG_TIMEOUT_SEC: Final[float] = 60.0
+# Bound on one whole ingest (all retries + decode + placement); the analyzer
+# wraps the task in it so a stuck ingest can never pin a camera.
+RECORDING_INGEST_DEADLINE_SEC: Final[float] = 180.0
 # One frame per second of clip, then thinned to at most this many frames so a
 # long (subscription-length) recording costs a bounded number of VLM calls.
 RECORDING_FRAME_FPS: Final[int] = 1
 RECORDING_MAX_FRAMES: Final[int] = 8
+# Decode budget: Ring recordings are at most 120 s, so `-t` at 180 s never
+# truncates a real clip but stops a hostile hour-long one; frames are scaled
+# down to this width so the transient JPEGs stay a few hundred KB each.
+RECORDING_MAX_CLIP_SEC: Final[int] = 180
+RECORDING_MAX_WIDTH: Final[int] = 1280
+# Concurrency: ffmpeg decoders running at once across all cameras, and how
+# many ingests may be in flight per camera before new events are dropped
+# (counted as failures, so the hourly metrics show it).
+RECORDING_MAX_CONCURRENT: Final[int] = 2
+RECORDING_MAX_PENDING_PER_CAMERA: Final[int] = 3
+# mkdtemp prefix for the per-ingest work dir inside the camera snapshot dir.
+# The retention seed removes any such dir left by a crash or shutdown.
+EVENT_WORK_PREFIX: Final[str] = "_event_"
+# Ring event ids are 19-digit decimals; anything outside this generous shape
+# is not an event this code understands and is never logged raw.
+EVENT_ID_RE: Final = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 _RECORDING_URL_ATTR: Final[str] = "recordingUrl"
 # Home Assistant's ffmpeg integration stores its manager under this hass.data
 # key (homeassistant.components.ffmpeg.DATA_FFMPEG). Read by literal rather
@@ -56,6 +88,8 @@ _RECORDING_URL_ATTR: Final[str] = "recordingUrl"
 _DATA_FFMPEG: Final[str] = "ffmpeg"
 _DEFAULT_FFMPEG_BINARY: Final[str] = "ffmpeg"
 _RETRYABLE_STATUS: Final[frozenset[int]] = frozenset({403, 404, 409, 423, 425, 429})
+_HTTP_REDIRECT_MIN: Final[int] = 300
+_HTTP_ERROR_MIN: Final[int] = 400
 _FFMPEG_STDERR_TAIL: Final[int] = 400
 
 
@@ -87,6 +121,56 @@ def recording_url_from_state(state: State | None) -> str | None:
     return url
 
 
+def is_valid_event_id(event_id: str) -> bool:
+    """Return True for an event id shaped like something Ring would publish."""
+    return EVENT_ID_RE.fullmatch(event_id) is not None
+
+
+async def assert_public_host(url: str) -> None:
+    """
+    Refuse a URL whose host is an address literal or resolves to a local one.
+
+    The URL is attacker-influenced (it arrives over MQTT), and Home Assistant
+    sits on the LAN, so a fetch must never become a probe of the LAN or of
+    the host itself. Ring's download links are always hostnames on public
+    CDNs, so an address literal is rejected outright. A resolution failure is
+    retryable (DNS hiccup); a local or invalid answer is final. The check runs
+    before every attempt; a rebinding between check and fetch would need an
+    attacker who controls both the MQTT attribute and the resolver.
+    """
+    try:
+        host = urlsplit(url).hostname
+    except ValueError as err:
+        msg = f"recording URL is malformed: {err}"
+        raise RecordingError(msg) from err
+    if not host:
+        msg = "recording URL has no host"
+        raise RecordingError(msg)
+    if is_ip_address(host):
+        msg = f"recording URL names an address literal ({host}), not a host"
+        raise RecordingError(msg)
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(
+            host, 443, type=socket.SOCK_STREAM
+        )
+    except socket.gaierror as err:
+        msg = f"could not resolve {host}: {err}"
+        raise RecordingNotReadyError(msg) from err
+    addresses = {ipaddress.ip_address(info[4][0]) for info in infos}
+    if not addresses:
+        msg = f"{host} resolved to no address"
+        raise RecordingNotReadyError(msg)
+    for address in addresses:
+        if (
+            is_local(address)
+            or is_invalid(address)
+            or address.is_multicast
+            or address.is_reserved
+        ):
+            msg = f"{host} resolves to a non-public address ({address})"
+            raise RecordingError(msg)
+
+
 def ffmpeg_binary(hass: HomeAssistant) -> str:
     """
     Return the ffmpeg binary to run.
@@ -103,7 +187,7 @@ def ffmpeg_binary(hass: HomeAssistant) -> str:
 
 
 def ffmpeg_available(binary: str) -> bool:
-    """Return True when the binary resolves to an executable."""
+    """Return True when the binary resolves to an executable (blocking)."""
     return shutil.which(binary) is not None
 
 
@@ -117,26 +201,30 @@ async def download_recording(
     """
     Stream the recording at ``url`` to ``dest`` and return the byte count.
 
-    Raises RecordingNotReadyError on responses that mean "not yet" (403/404 and
-    friends: the signed object may not have landed at the CDN), and
-    RecordingError on anything else, including a body over ``max_bytes``.
+    Redirects are not followed: the signed link points straight at the
+    object, and following one would let the origin steer the fetch anywhere.
+    Raises RecordingNotReadyError on responses that mean "not yet" (403/404
+    and friends: the signed object may not have landed at the CDN), on
+    transport errors, and on an empty body; RecordingError on anything else,
+    including a malformed URL, a body over ``max_bytes``, or an attempt over
+    the wall-clock bound.
     """
     written = 0
     try:
         async with (
-            client.stream(
-                "GET",
-                url,
-                timeout=RECORDING_DOWNLOAD_TIMEOUT_SEC,
-                follow_redirects=True,
-            ) as resp,
+            asyncio.timeout(RECORDING_DOWNLOAD_TIMEOUT_SEC),
+            client.stream("GET", url, follow_redirects=False) as resp,
             aiofiles.open(dest, "wb") as out,
         ):
-            if resp.status_code in _RETRYABLE_STATUS:
-                msg = f"HTTP {resp.status_code}"
+            status = resp.status_code
+            if status in _RETRYABLE_STATUS:
+                msg = f"HTTP {status}"
                 raise RecordingNotReadyError(msg)
-            if resp.status_code >= 400:  # noqa: PLR2004
-                msg = f"HTTP {resp.status_code}"
+            if _HTTP_REDIRECT_MIN <= status < _HTTP_ERROR_MIN:
+                msg = f"unexpected redirect (HTTP {status})"
+                raise RecordingError(msg)
+            if status >= _HTTP_ERROR_MIN:
+                msg = f"HTTP {status}"
                 raise RecordingError(msg)
             declared = resp.headers.get("content-length")
             if declared and declared.isdigit() and int(declared) > max_bytes:
@@ -148,6 +236,12 @@ async def download_recording(
                     msg = f"recording exceeds {max_bytes} bytes"
                     raise RecordingError(msg)
                 await out.write(chunk)
+    except TimeoutError as err:
+        msg = f"download exceeded {RECORDING_DOWNLOAD_TIMEOUT_SEC:.0f} s"
+        raise RecordingError(msg) from err
+    except (httpx.InvalidURL, ValueError) as err:
+        msg = f"recording URL is malformed: {err}"
+        raise RecordingError(msg) from err
     except httpx.HTTPError as err:
         msg = f"download failed: {err.__class__.__name__}: {err}"
         raise RecordingNotReadyError(msg) from err
@@ -172,6 +266,12 @@ async def extract_frames(
     """
     Decode ``recording`` to JPEG frames at ``fps`` in ``out_dir``.
 
+    Decoding stops at RECORDING_MAX_CLIP_SEC and frames are scaled to at most
+    RECORDING_MAX_WIDTH wide, so the transient output is bounded whatever the
+    clip claims to be. The child is killed and reaped on timeout and on
+    cancellation, so a stop() mid-decode never leaves an ffmpeg writing into
+    a directory the caller is about to remove.
+
     Returns the frame paths in clip order (ffmpeg numbers them from 1). Raises
     RecordingError when ffmpeg fails, times out, or produces no frame.
     """
@@ -182,10 +282,14 @@ async def extract_frames(
         "-hide_banner",
         "-loglevel",
         "error",
+        "-t",
+        str(RECORDING_MAX_CLIP_SEC),
         "-i",
         str(recording),
         "-vf",
-        f"fps={fps}",
+        f"fps={fps},scale='min({RECORDING_MAX_WIDTH},iw)':-2",
+        "-frames:v",
+        str(RECORDING_MAX_CLIP_SEC * fps),
         "-q:v",
         "3",
         "-f",
@@ -206,10 +310,12 @@ async def extract_frames(
         async with asyncio.timeout(RECORDING_FFMPEG_TIMEOUT_SEC):
             _, stderr = await proc.communicate()
     except TimeoutError as err:
-        proc.kill()
-        await proc.wait()
+        await _reap(proc)
         msg = f"{binary} did not finish within {RECORDING_FFMPEG_TIMEOUT_SEC:.0f} s"
         raise RecordingError(msg) from err
+    except asyncio.CancelledError:
+        await _reap(proc)
+        raise
     if proc.returncode != 0:
         tail = stderr.decode(errors="replace").strip()[-_FFMPEG_STDERR_TAIL:]
         msg = f"{binary} exited {proc.returncode}: {tail or 'no stderr'}"
@@ -219,6 +325,20 @@ async def extract_frames(
         msg = f"{binary} produced no frames"
         raise RecordingError(msg)
     return frames
+
+
+async def _reap(proc: asyncio.subprocess.Process) -> None:
+    """Kill a still-running child and wait for it (never raises)."""
+    if proc.returncode is not None:
+        return
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5)
+    except TimeoutError:
+        LOGGER.warning("ffmpeg (pid %s) did not exit after kill", proc.pid)
 
 
 def thin_frames[T](
