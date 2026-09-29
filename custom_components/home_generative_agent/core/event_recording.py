@@ -18,8 +18,12 @@ dedupe, and where the frames go.
 
 Trust boundary: ``eventId`` and ``recordingUrl`` arrive over MQTT, so nothing
 here treats them as safe. The event id never reaches a filesystem path, and
-the URL is fetched only when it is https, names a host (not an address), that
-host resolves to public addresses only, and the server does not redirect.
+the URL is fetched only when it is https, names a host (not an address), and
+that host resolves to public addresses only. Ring's signed URL is a
+transcoding endpoint that 302-redirects to a node-specific subdomain of the
+same host (field data, #491), so redirects are followed — but only to https
+targets on the same host or a subdomain of it, each vetted the same way, and
+at most RECORDING_MAX_REDIRECTS hops.
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ import re
 import shutil
 import socket
 from typing import TYPE_CHECKING, Any, Final
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import aiofiles
 import httpx
@@ -88,6 +92,10 @@ _RECORDING_URL_ATTR: Final[str] = "recordingUrl"
 _DATA_FFMPEG: Final[str] = "ffmpeg"
 _DEFAULT_FFMPEG_BINARY: Final[str] = "ffmpeg"
 _RETRYABLE_STATUS: Final[frozenset[int]] = frozenset({403, 404, 409, 423, 425, 429})
+# Ring's `req_type=TranscodingRequest` URL answers 302 to
+# `<edge-node>.<same host>/<same path>`; one hop is the observed shape, three
+# leaves room for a CDN change without letting a redirect chain run away.
+RECORDING_MAX_REDIRECTS: Final[int] = 3
 _HTTP_REDIRECT_MIN: Final[int] = 300
 _HTTP_ERROR_MIN: Final[int] = 400
 _FFMPEG_STDERR_TAIL: Final[int] = 400
@@ -201,41 +209,43 @@ async def download_recording(
     """
     Stream the recording at ``url`` to ``dest`` and return the byte count.
 
-    Redirects are not followed: the signed link points straight at the
-    object, and following one would let the origin steer the fetch anywhere.
-    Raises RecordingNotReadyError on responses that mean "not yet" (403/404
-    and friends: the signed object may not have landed at the CDN), on
-    transport errors, and on an empty body; RecordingError on anything else,
-    including a malformed URL, a body over ``max_bytes``, or an attempt over
-    the wall-clock bound.
+    Redirects are followed by hand rather than by httpx, so every hop is
+    held to the same rule as the signed URL: https, same host or a subdomain
+    of the host the redirect came from, and a public resolution — Ring's
+    transcoding endpoint 302s to ``<edge-node>.<same host>`` (field data,
+    #491), and nothing else is a shape this code should follow. Raises
+    RecordingNotReadyError on responses that mean "not yet" (403/404 and
+    friends: the signed object may not have landed at the CDN), on transport
+    errors, and on an empty body; RecordingError on anything else, including
+    a malformed URL, a redirect off-host or over the hop budget, a body over
+    ``max_bytes``, or an attempt over the wall-clock bound.
     """
     written = 0
     try:
-        async with (
-            asyncio.timeout(RECORDING_DOWNLOAD_TIMEOUT_SEC),
-            client.stream("GET", url, follow_redirects=False) as resp,
-            aiofiles.open(dest, "wb") as out,
-        ):
-            status = resp.status_code
-            if status in _RETRYABLE_STATUS:
-                msg = f"HTTP {status}"
-                raise RecordingNotReadyError(msg)
-            if _HTTP_REDIRECT_MIN <= status < _HTTP_ERROR_MIN:
-                msg = f"unexpected redirect (HTTP {status})"
-                raise RecordingError(msg)
-            if status >= _HTTP_ERROR_MIN:
-                msg = f"HTTP {status}"
-                raise RecordingError(msg)
-            declared = resp.headers.get("content-length")
-            if declared and declared.isdigit() and int(declared) > max_bytes:
-                msg = f"recording is {declared} bytes (limit {max_bytes})"
-                raise RecordingError(msg)
-            async for chunk in resp.aiter_bytes():
-                written += len(chunk)
-                if written > max_bytes:
-                    msg = f"recording exceeds {max_bytes} bytes"
+        async with asyncio.timeout(RECORDING_DOWNLOAD_TIMEOUT_SEC):
+            for hop in range(RECORDING_MAX_REDIRECTS + 1):
+                next_url: str | None = None
+                async with client.stream("GET", url, follow_redirects=False) as resp:
+                    status = resp.status_code
+                    if status in _RETRYABLE_STATUS:
+                        msg = f"HTTP {status}"
+                        raise RecordingNotReadyError(msg)
+                    if _HTTP_REDIRECT_MIN <= status < _HTTP_ERROR_MIN:
+                        next_url = _redirect_target(url, resp.headers.get("location"))
+                    elif status >= _HTTP_ERROR_MIN:
+                        msg = f"HTTP {status}"
+                        raise RecordingError(msg)
+                    else:
+                        written = await _write_body(resp, dest, max_bytes)
+                if next_url is None:
+                    break
+                if hop >= RECORDING_MAX_REDIRECTS:
+                    msg = f"more than {RECORDING_MAX_REDIRECTS} redirects"
                     raise RecordingError(msg)
-                await out.write(chunk)
+                # Vet the hop before fetching it (outside the response
+                # context so the redirect connection is released first).
+                await assert_public_host(next_url)
+                url = next_url
     except TimeoutError as err:
         msg = f"download exceeded {RECORDING_DOWNLOAD_TIMEOUT_SEC:.0f} s"
         raise RecordingError(msg) from err
@@ -249,6 +259,55 @@ async def download_recording(
         msg = "download returned an empty body"
         raise RecordingNotReadyError(msg)
     return written
+
+
+async def _write_body(resp: httpx.Response, dest: Path, max_bytes: int) -> int:
+    """Stream a 2xx body to ``dest`` under the size cap; return bytes written."""
+    declared = resp.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > max_bytes:
+        msg = f"recording is {declared} bytes (limit {max_bytes})"
+        raise RecordingError(msg)
+    written = 0
+    async with aiofiles.open(dest, "wb") as out:
+        async for chunk in resp.aiter_bytes():
+            written += len(chunk)
+            if written > max_bytes:
+                msg = f"recording exceeds {max_bytes} bytes"
+                raise RecordingError(msg)
+            await out.write(chunk)
+    return written
+
+
+def _redirect_target(current: str, location: str | None) -> str:
+    """
+    Resolve and vet a redirect ``Location`` against the URL that sent it.
+
+    The target must be https and its host must be the current host or a
+    subdomain of it (``a.b.example.dev`` for ``b.example.dev``); anything
+    else — another domain, a plaintext scheme, a missing header — is a final
+    error, because the signed URL never legitimately points elsewhere.
+    """
+    if not location:
+        msg = "redirect without a Location header"
+        raise RecordingError(msg)
+    target = urljoin(current, location.strip())
+    try:
+        cur, new = urlsplit(current), urlsplit(target)
+    except ValueError as err:
+        msg = f"redirect target is malformed: {err}"
+        raise RecordingError(msg) from err
+    cur_host = (cur.hostname or "").lower()
+    new_host = (new.hostname or "").lower()
+    if new.scheme.lower() != "https":
+        msg = f"redirect to a non-https URL ({new.scheme or 'no scheme'})"
+        raise RecordingError(msg)
+    if not cur_host or not new_host:
+        msg = "redirect without a host"
+        raise RecordingError(msg)
+    if new_host != cur_host and not new_host.endswith("." + cur_host):
+        msg = f"redirect leaves the host ({cur_host} -> {new_host})"
+        raise RecordingError(msg)
+    return target
 
 
 def _list_frames(out_dir: Path) -> list[Path]:

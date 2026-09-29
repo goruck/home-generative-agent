@@ -323,16 +323,86 @@ async def test_download_server_error_is_final(tmp_path: Path) -> None:
     assert not isinstance(excinfo.value, RecordingNotReadyError)
 
 
+EDGE = URL.replace("https://download-eu", "https://51-49-199-144.download-eu")
+
+
 @respx.mock
-async def test_download_refuses_redirects(tmp_path: Path) -> None:
+async def test_download_follows_same_host_subdomain_redirect(tmp_path: Path) -> None:
+    """Ring's transcoding URL 302s to <edge-node>.<same host>: followed and vetted."""
+    respx.get(URL).mock(return_value=httpx.Response(302, headers={"location": EDGE}))
+    respx.get(EDGE).mock(return_value=httpx.Response(206, content=b"ftyp" * 10))
+    dest = tmp_path / "clip.mp4"
+    with patch.object(er_mod, "assert_public_host", AsyncMock()) as vet:
+        async with httpx.AsyncClient() as client:
+            size = await download_recording(client, URL, dest)
+    assert size == 40
+    assert dest.read_bytes() == b"ftyp" * 10
+    vet.assert_awaited_once_with(EDGE)
+
+
+@respx.mock
+async def test_download_follows_relative_redirect(tmp_path: Path) -> None:
     respx.get(URL).mock(
-        return_value=httpx.Response(302, headers={"location": "http://10.0.0.1/"})
+        return_value=httpx.Response(302, headers={"location": "/v1/download/final.mp4"})
     )
-    other = respx.get("http://10.0.0.1/").mock(return_value=httpx.Response(200))
-    async with httpx.AsyncClient() as client:
-        with pytest.raises(RecordingError, match="redirect"):
-            await download_recording(client, URL, tmp_path / "c.mp4")
+    final = "https://download-eu.prod.phoenix.devices.amazon.dev/v1/download/final.mp4"
+    respx.get(final).mock(return_value=httpx.Response(200, content=b"x" * 5))
+    with patch.object(er_mod, "assert_public_host", AsyncMock()):
+        async with httpx.AsyncClient() as client:
+            assert await download_recording(client, URL, tmp_path / "c.mp4") == 5
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("location", "match"),
+    [
+        ("https://evil.example.net/x.mp4", "leaves the host"),
+        ("https://amazon.dev.evil.example.net/x.mp4", "leaves the host"),
+        ("https://prod.phoenix.devices.amazon.dev/x.mp4", "leaves the host"),
+        (
+            "http://51-49-199-144.download-eu.prod.phoenix.devices.amazon.dev/x",
+            "non-https",
+        ),
+        ("", "without a Location"),
+    ],
+)
+async def test_download_refuses_off_rule_redirects(
+    tmp_path: Path, location: str, match: str
+) -> None:
+    headers = {"location": location} if location else {}
+    respx.get(URL).mock(return_value=httpx.Response(302, headers=headers))
+    other = respx.route().mock(return_value=httpx.Response(200, content=b"x"))
+    with patch.object(er_mod, "assert_public_host", AsyncMock()):
+        async with httpx.AsyncClient() as client:
+            with pytest.raises(RecordingError, match=match):
+                await download_recording(client, URL, tmp_path / "c.mp4")
     assert not other.called
+
+
+@respx.mock
+async def test_download_redirect_hop_budget(tmp_path: Path) -> None:
+    respx.get(URL).mock(return_value=httpx.Response(302, headers={"location": EDGE}))
+    respx.get(EDGE).mock(return_value=httpx.Response(302, headers={"location": EDGE}))
+    with patch.object(er_mod, "assert_public_host", AsyncMock()) as vet:
+        async with httpx.AsyncClient() as client:
+            with pytest.raises(RecordingError, match="redirects"):
+                await download_recording(client, URL, tmp_path / "c.mp4")
+    assert vet.await_count == er_mod.RECORDING_MAX_REDIRECTS
+
+
+@respx.mock
+async def test_download_redirect_target_must_resolve_public(tmp_path: Path) -> None:
+    respx.get(URL).mock(return_value=httpx.Response(302, headers={"location": EDGE}))
+    edge = respx.get(EDGE).mock(return_value=httpx.Response(200, content=b"x"))
+    with patch.object(
+        er_mod,
+        "assert_public_host",
+        AsyncMock(side_effect=RecordingError("non-public")),
+    ):
+        async with httpx.AsyncClient() as client:
+            with pytest.raises(RecordingError, match="non-public"):
+                await download_recording(client, URL, tmp_path / "c.mp4")
+    assert not edge.called
 
 
 @respx.mock
