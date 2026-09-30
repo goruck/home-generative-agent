@@ -949,17 +949,18 @@ async def test_ingest_dedupe_keeps_at_least_first_frame(
 
 
 @pytest.mark.usefixtures("ffmpeg_present")
-async def test_ingest_resets_hash_history_before_gating(
+async def test_ingest_gates_clip_frames_on_a_local_history(
     va: VideoAnalyzer, hass: MagicMock
 ) -> None:
     """Clip frames dedupe among themselves, not against displaced snapshots."""
     hass.states.get.return_value = _state("222")
     va._active_motion_cameras[CAMERA] = MagicMock()  # type: ignore[attr-defined]
-    va._last_hashes[CAMERA] = deque([0xDEADBEEF], maxlen=2)  # type: ignore[attr-defined]
-    seen_history: list[bool] = []
+    window = deque([0xDEADBEEF], maxlen=2)
+    va._last_hashes[CAMERA] = window  # type: ignore[attr-defined]
+    seen: list[Any] = []
 
-    async def _gate(camera_id: str, _path: Path) -> bool:
-        seen_history.append(camera_id in va._last_hashes)  # type: ignore[attr-defined]
+    async def _gate(_camera_id: str, _path: Path, *, history: Any = None) -> bool:
+        seen.append(history)
         return True
 
     va._is_unique_enough = _gate  # type: ignore[method-assign]
@@ -968,7 +969,9 @@ async def test_ingest_resets_hash_history_before_gating(
         patch.object(va_mod, "extract_frames", _fake_extract(2)),
     ):
         await _run_ingest(va)
-    assert seen_history == [False, False]
+    assert len(seen) == 2
+    assert seen[0] is seen[1]
+    assert seen[0] is not window
 
 
 @pytest.mark.usefixtures("ffmpeg_present")
@@ -1399,10 +1402,114 @@ async def test_late_clip_leaves_a_later_windows_history_alone(
     va._window_generation[CAMERA] = 2  # type: ignore[attr-defined]
     va._last_hashes[CAMERA] = deque([0xDEADBEEF], maxlen=2)  # type: ignore[attr-defined]
 
-    async def _gate(camera_id: str, _path: Path) -> bool:
-        va._last_hashes.setdefault(camera_id, deque(maxlen=2)).append(0x1)  # type: ignore[attr-defined]
+    async def _gate(_camera_id: str, _path: Path, *, history: Any = None) -> bool:
+        # A later window's loop accepts its first frame mid-admit.
+        va._last_hashes[CAMERA].append(0x2)  # type: ignore[attr-defined]
+        history.append(0x1)
         return True
 
     va._is_unique_enough = _gate  # type: ignore[method-assign]
     await va._admit_recording_frames(CAMERA, [_clip_frame(tmp_path, 0)], 1)  # type: ignore[attr-defined]
+    assert list(va._last_hashes[CAMERA]) == [0xDEADBEEF, 0x2]  # type: ignore[attr-defined]
+
+
+async def test_clip_frames_dedupe_after_the_window_disengaged_forced_mode(
+    va: VideoAnalyzer, tmp_path: Path
+) -> None:
+    """A late clip of a static scene costs one VLM call, option off or not."""
+    _run_bg(va)
+    va._analyze_and_finalize = AsyncMock()  # type: ignore[method-assign]
+    va._is_unique_enough = VideoAnalyzer._is_unique_enough.__get__(va)  # type: ignore[method-assign]
+    assert CAMERA not in va._event_select_dedupe  # type: ignore[attr-defined]
+    frame = _noise_jpeg(tmp_path / "snapshot_20260928_095950_r00.jpg", 5)
+    same = [frame]
+    for i in range(1, 4):
+        dup = tmp_path / f"snapshot_20260928_09595{i}_r0{i}.jpg"
+        shutil.copy(frame, dup)
+        same.append(dup)
+    await va._admit_recording_frames(CAMERA, same, 0)  # type: ignore[attr-defined]
+    _, ordered = va._analyze_and_finalize.call_args.args  # type: ignore[attr-defined]
+    assert [p for p, _ in ordered] == [frame]
     assert CAMERA not in va._last_hashes  # type: ignore[attr-defined]
+
+
+async def test_repeated_clips_keep_the_history_bounded(
+    va: VideoAnalyzer, tmp_path: Path
+) -> None:
+    va._active_motion_cameras[CAMERA] = MagicMock()  # type: ignore[attr-defined]
+    counter = iter(range(10_000))
+
+    async def _gate(_camera_id: str, _path: Path, *, history: Any = None) -> bool:
+        history.append(next(counter))
+        return True
+
+    va._is_unique_enough = _gate  # type: ignore[method-assign]
+    for _ in range(50):
+        await va._admit_recording_frames(  # type: ignore[attr-defined]
+            CAMERA, [_clip_frame(tmp_path, 0), _clip_frame(tmp_path, 1)], 0
+        )
+    assert len(va._last_hashes[CAMERA]) <= 2 * va_mod._UNIQUENESS_HISTORY  # type: ignore[attr-defined]
+
+
+async def test_parking_takes_the_live_queue_too(
+    va: VideoAnalyzer, tmp_path: Path
+) -> None:
+    """Frames queued during the grace never join the parked recording batch."""
+    created = _run_bg(va)
+    analyze = AsyncMock()
+    va._analyze_and_finalize = analyze  # type: ignore[method-assign]
+    va._active_motion_cameras[CAMERA] = MagicMock()  # type: ignore[attr-defined]
+    queued = tmp_path / "snapshot_20260928_095900.jpg"
+    queue: asyncio.Queue[Any] = asyncio.Queue()
+    va._snapshot_queues[CAMERA] = queue  # type: ignore[attr-defined]
+    queue.put_nowait(va_mod._SnapshotItem(path=queued, enqueued=0.0))
+    ingest: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    va._event_recording_tasks[f"{CAMERA}:222"] = ingest  # type: ignore[attr-defined]
+    va._event_recording_task_gen[f"{CAMERA}:222"] = 0  # type: ignore[attr-defined]
+
+    va._stop_motion_loop_and_flush(CAMERA)  # type: ignore[attr-defined]
+    assert va._deferred_flush[CAMERA, 0] == [queued]  # type: ignore[attr-defined]
+    late = tmp_path / "snapshot_20260928_100010.jpg"
+    queue.put_nowait(va_mod._SnapshotItem(path=late, enqueued=0.0))
+    await va._admit_recording_frames(CAMERA, [_clip_frame(tmp_path, 0)], 0)  # type: ignore[attr-defined]
+    ingest.set_result(None)
+    await asyncio.gather(*created)
+
+    _, ordered = analyze.await_args.args  # type: ignore[union-attr]
+    assert queued not in [p for p, _ in ordered]
+    assert late not in [p for p, _ in ordered]
+    assert queue.qsize() == 1
+
+
+async def test_stop_cancels_a_deferred_flush(va: VideoAnalyzer) -> None:
+    va._create_background_task = lambda coro, _name: asyncio.ensure_future(coro)  # type: ignore[method-assign,assignment]
+    va._analyze_and_finalize = AsyncMock()  # type: ignore[method-assign]
+    va._active_motion_cameras[CAMERA] = MagicMock()  # type: ignore[attr-defined]
+    ingest: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    va._event_recording_tasks[f"{CAMERA}:222"] = ingest  # type: ignore[attr-defined]
+    va._event_recording_task_gen[f"{CAMERA}:222"] = 0  # type: ignore[attr-defined]
+    va._stop_motion_loop_and_flush(CAMERA)  # type: ignore[attr-defined]
+    (flush,) = va._deferred_flush_tasks  # type: ignore[attr-defined]
+    va._cancel_track = MagicMock()  # type: ignore[attr-defined]
+    va._cancel_listen = MagicMock()  # type: ignore[attr-defined]
+
+    await va.stop()
+
+    assert flush.done()
+    assert va._deferred_flush_tasks == set()  # type: ignore[attr-defined]
+    assert va._analyze_and_finalize.await_count == 0  # type: ignore[attr-defined]
+
+
+def test_ingest_keeps_the_generation_read_before_the_window_cap(
+    va: VideoAnalyzer, hass: MagicMock
+) -> None:
+    """An event that hits the window cap never hands its clip to the next window."""
+    _stub_bg_task(va)
+    new_state = _state("333")
+    _wire_handler(va, hass, new_state)
+    va._event_select_window_started[CAMERA] = -1e9  # type: ignore[attr-defined]
+    va._event_select_owned.add(CAMERA)  # type: ignore[attr-defined]
+    va._active_motion_cameras[CAMERA] = MagicMock()  # type: ignore[attr-defined]
+    va._handle_event_select_change(_select_event(_state("222"), new_state))  # type: ignore[attr-defined]
+    assert va._window_generation[CAMERA] == 1  # type: ignore[attr-defined]
+    assert va._event_recording_task_gen[f"{CAMERA}:333"] == 0  # type: ignore[attr-defined]
