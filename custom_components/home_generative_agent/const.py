@@ -168,6 +168,9 @@ CONF_DISABLED_FEATURES = "disabled_features"
 # ---- STT hallucination filter (phantom transcriptions of silence/noise) ----
 CONF_STT_HALLUCINATION_PATTERNS = "stt_hallucination_patterns"
 CONF_STT_HALLUCINATION_EXACT_PATTERNS = "stt_hallucination_exact_patterns"
+# Spoken on a voice turn just before the agent's first tool call, so a
+# satellite is not silent while tools run (#671). Empty means off.
+CONF_VOICE_TOOL_ACK = "voice_tool_acknowledgement"
 DEFAULT_STT_HALLUCINATION_PATTERNS: list[str] = []
 DEFAULT_STT_HALLUCINATION_EXACT_PATTERNS: list[str] = []
 

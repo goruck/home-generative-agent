@@ -23,6 +23,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SCHEMA_FIRST_YAML,
     CONF_STT_HALLUCINATION_EXACT_PATTERNS,
     CONF_STT_HALLUCINATION_PATTERNS,
+    CONF_VOICE_TOOL_ACK,
     DOMAIN,
 )
 
@@ -62,7 +63,8 @@ async def test_options_schema_stt_filters_are_bottom_multiline_section(
     )
     keys = _schema_keys(schema)
 
-    assert keys[-3:] == [
+    assert keys[-4:] == [
+        CONF_VOICE_TOOL_ACK,
         "stt_filters_section",
         CONF_STT_HALLUCINATION_PATTERNS,
         CONF_STT_HALLUCINATION_EXACT_PATTERNS,
@@ -261,3 +263,28 @@ async def test_options_flow_init_form_preserves_stale_llm_api(hass: Any) -> None
     schema = cast("Any", result["data_schema"]).schema
     assert _suggested_llm_apis(schema) == ["assist", "mcp-deleted"]
     assert "mcp-deleted" in _llm_api_options(schema)
+
+
+async def _submit_options(
+    hass: Any, stored: dict[str, Any], user_input: dict[str, Any]
+) -> dict[str, Any]:
+    entry = MockConfigEntry(
+        domain=DOMAIN, title="Home Generative Agent", options=stored
+    )
+    entry.add_to_hass(hass)
+    flow = HomeGenerativeAgentOptionsFlow()
+    flow.hass = hass
+    flow.handler = entry.entry_id
+    result = cast("dict[str, Any]", await flow.async_step_init(user_input))
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    return result["data"]
+
+
+@pytest.mark.asyncio
+async def test_clearing_voice_acknowledgement_turns_it_off(hass: Any) -> None:
+    """The frontend omits an emptied optional field; that must clear it."""
+    stored = {CONF_VOICE_TOOL_ACK: "Let me check."}
+
+    assert CONF_VOICE_TOOL_ACK not in await _submit_options(hass, stored, {})
+    kept = await _submit_options(hass, stored, {CONF_VOICE_TOOL_ACK: "One moment."})
+    assert kept[CONF_VOICE_TOOL_ACK] == "One moment."
