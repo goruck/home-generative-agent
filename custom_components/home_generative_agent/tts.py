@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -9,6 +10,7 @@ from homeassistant.components.tts import (
     ATTR_PREFERRED_FORMAT,
     ATTR_VOICE,
     TextToSpeechEntity,
+    TTSAudioResponse,
     TtsAudioType,
     Voice,
 )
@@ -16,6 +18,7 @@ from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 from openai import AuthenticationError, OpenAIError
 from propcache.api import cached_property
+from sentence_stream import SentenceBoundaryDetector
 
 from .const import (
     CONF_TTS_INSTRUCTIONS,
@@ -34,6 +37,7 @@ from .const import (
     TTS_LOCAL_RESPONSE_FORMATS,
     TTS_OPENAI_RESPONSE_FORMATS,
     TTS_SPEED_DEFAULT,
+    TTS_STREAM_RESPONSE_FORMAT,
 )
 from .core.openai_endpoint import (
     OpenAIClientCache,
@@ -43,8 +47,9 @@ from .core.openai_endpoint import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import AsyncGenerator, AsyncIterable, Mapping
 
+    from homeassistant.components.tts.entity import TTSAudioRequest
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
@@ -323,6 +328,86 @@ class HGATtsEntity(TextToSpeechEntity):
         if not message.strip():
             msg = f"No text to synthesize for {self.entity_id}"
             raise HomeAssistantError(msg)
+        return await self._synthesize(message, options)
+
+    async def async_stream_tts_audio(
+        self, request: TTSAudioRequest
+    ) -> TTSAudioResponse:
+        """
+        Synthesize a text stream sentence by sentence.
+
+        Overriding this is what makes the Assist pipeline hand us the reply
+        while the conversation agent is still writing it, so a voice satellite
+        starts speaking after the first sentence instead of after the whole
+        turn. Home Assistant also routes plain ``tts.speak`` messages here once
+        the entity streams, so this is the only synthesis path in practice.
+
+        The speech endpoint takes whole text, so each batch of sentences is one
+        request and the replies are concatenated; mp3 is used whatever the
+        preference because mp3 frames concatenate into a valid stream and
+        wav/flac files do not. Home Assistant converts to the preferred format.
+        """
+        options = {**request.options, ATTR_PREFERRED_FORMAT: TTS_STREAM_RESPONSE_FORMAT}
+        return TTSAudioResponse(
+            TTS_STREAM_RESPONSE_FORMAT, self._stream_audio(request.message_gen, options)
+        )
+
+    async def _stream_audio(
+        self, message_gen: AsyncIterable[str], options: Mapping[str, Any]
+    ) -> AsyncGenerator[bytes]:
+        """Yield audio per sentence batch as the text stream completes them."""
+        sentences: asyncio.Queue[str | None] = asyncio.Queue()
+
+        async def _split() -> None:
+            # Text chunks are not on word or sentence boundaries.
+            detector = SentenceBoundaryDetector()
+            try:
+                async for chunk in message_gen:
+                    for sentence in detector.add_chunk(chunk):
+                        if sentence.strip():
+                            sentences.put_nowait(sentence)
+                if (tail := detector.finish()).strip():
+                    sentences.put_nowait(tail)
+            finally:
+                sentences.put_nowait(None)
+
+        splitter = self.hass.async_create_background_task(
+            _split(), name=f"{self.entity_id} tts sentence split"
+        )
+        spoke = False
+        finished = False
+        try:
+            while not finished:
+                batch: list[str] = []
+                item = await sentences.get()
+                # The first sentence goes alone so audio starts as early as
+                # possible; after that, one request covers everything that
+                # arrived while the previous batch was being synthesized.
+                while item is not None:
+                    batch.append(item.strip())
+                    if not spoke or sentences.empty():
+                        break
+                    item = sentences.get_nowait()
+                finished = item is None
+                text = " ".join(batch).strip()
+                if not text:
+                    continue
+                _extension, audio = await self._synthesize(text, options)
+                spoke = True
+                yield audio
+            # Surface a failure of the text stream itself.
+            await splitter
+        finally:
+            if not splitter.done():
+                splitter.cancel()
+        if not spoke:
+            msg = f"No text to synthesize for {self.entity_id}"
+            raise HomeAssistantError(msg)
+
+    async def _synthesize(
+        self, message: str, options: Mapping[str, Any]
+    ) -> tuple[str, bytes]:
+        """Run one speech request and return ``(extension, audio bytes)``."""
         provider_type = self._provider_type
         if provider_type not in ("openai", "local"):
             msg = f"Unsupported TTS provider type {provider_type!r}"
