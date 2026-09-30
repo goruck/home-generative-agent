@@ -44,6 +44,14 @@ jobs:
         # Only run if credentials are available (see HAS_CLAUDE_TOKEN above).
         if: ${{ env.HAS_CLAUDE_TOKEN == 'true' }}
         uses: anthropics/claude-code-action@v1
+        env:
+          # The plugin's first step launches an eligibility-check subagent.
+          # Since Claude Code 2.1.198 subagents run in the background by
+          # default, so the headless run ended its turn to wait for it and the
+          # job exited "passed" in ~30 s having reviewed nothing (every run
+          # since, e.g. #679/#680: "The eligibility check is still running").
+          # Foreground subagents let each step finish before the next.
+          CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1"
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
