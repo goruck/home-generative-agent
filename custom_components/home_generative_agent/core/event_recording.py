@@ -63,6 +63,13 @@ RECORDING_FFMPEG_TIMEOUT_SEC: Final[float] = 60.0
 # Bound on one whole ingest (all retries + decode + placement); the analyzer
 # wraps the task in it so a stuck ingest can never pin a camera.
 RECORDING_INGEST_DEADLINE_SEC: Final[float] = 180.0
+# How long a closing capture window waits for its own recording before it
+# flushes the snapshots alone. Battery-cam clips land ~5 s after the window
+# closes (field data, issue #491); flushing first analyzed (and notified on)
+# the retained snapshot, which predates the event. Covers the not-ready retry
+# schedule plus a typical download and decode; a slower clip still arrives,
+# as its own batch, after the snapshot fallback.
+RECORDING_FLUSH_GRACE_SEC: Final[float] = 20.0
 # One frame per second of clip, then thinned to at most this many frames so a
 # long (subscription-length) recording costs a bounded number of VLM calls.
 RECORDING_FRAME_FPS: Final[int] = 1

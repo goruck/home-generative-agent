@@ -78,6 +78,7 @@ from ..const import (  # noqa: TID252
 from .event_recording import (
     EVENT_WORK_PREFIX,
     RECORDING_FETCH_BACKOFF_SEC,
+    RECORDING_FLUSH_GRACE_SEC,
     RECORDING_INGEST_DEADLINE_SEC,
     RECORDING_MAX_CONCURRENT,
     RECORDING_MAX_PENDING_PER_CAMERA,
@@ -829,8 +830,15 @@ class VideoAnalyzer:
         # binary takes effect without a reload); and a per-camera window
         # generation, bumped every time a capture window ends, so a clip
         # that lands after its window closed never displaces a later
-        # window's snapshots.
+        # window's snapshots. Each in-flight ingest remembers the generation
+        # it was scheduled under, and a window that closes while its own
+        # ingest is still running parks its snapshots under (camera,
+        # generation) until the clip lands or RECORDING_FLUSH_GRACE_SEC runs
+        # out, so the clip can still displace them.
         self._event_recording_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._event_recording_task_gen: dict[str, int] = {}
+        self._deferred_flush: dict[tuple[str, int], list[Path]] = {}
+        self._deferred_flush_tasks: set[asyncio.Task[Any]] = set()
         self._event_recording_recent: dict[str, deque[str]] = {}
         self._event_recording_locks: dict[str, asyncio.Lock] = {}
         self._event_recording_sem = asyncio.Semaphore(RECORDING_MAX_CONCURRENT)
@@ -2298,15 +2306,25 @@ class VideoAnalyzer:
                 value={"content": msg, "snapshots": [str(p) for p in batch]},
             )
 
-    async def _process_snapshot_queue(self, camera_id: str) -> None:
-        """Flush held and queued snapshots for a camera as one ordered batch."""
-        batch: list[Path] = list(self._event_snapshot_buffers.pop(camera_id, []))
+    async def _process_snapshot_queue(
+        self, camera_id: str, *, held: list[Path] | None = None
+    ) -> None:
+        """
+        Flush held and queued snapshots for a camera as one ordered batch.
 
-        queue: asyncio.Queue[_SnapshotItem] | None = self._snapshot_queues.get(
-            camera_id
-        )
-        if queue:
-            batch.extend(self._drain_queue(queue))
+        `held` is a window's frames already taken off the camera (a deferred
+        flush, which drained the live queue when it parked); otherwise the
+        camera's current buffer and live queue are flushed.
+        """
+        if held is not None:
+            batch: list[Path] = list(held)
+        else:
+            batch = list(self._event_snapshot_buffers.pop(camera_id, []))
+            queue: asyncio.Queue[_SnapshotItem] | None = self._snapshot_queues.get(
+                camera_id
+            )
+            if queue:
+                batch.extend(self._drain_queue(queue))
         if not batch:
             return
 
@@ -2433,11 +2451,17 @@ class VideoAnalyzer:
                 LOGGER.info(msg.format(id=camera_id))
         return Path(VIDEO_ANALYZER_SNAPSHOT_ROOT) / camera_id.replace(".", "_")
 
-    async def _is_unique_enough(self, camera_id: str, path: Path) -> bool:
+    async def _is_unique_enough(
+        self, camera_id: str, path: Path, *, history: deque[int] | None = None
+    ) -> bool:
         """
         Gate snapshots by perceptual uniqueness + heartbeat.
 
-        Returns True to enqueue, False to skip.
+        Returns True to enqueue, False to skip. With `history`, the frame is
+        gated against (and recorded in) that deque instead of the camera's
+        window history, always deduped and never heartbeat-bypassed: an
+        event recording's frames dedupe among themselves without touching
+        whichever window currently owns the camera's history.
         """
         # Loops the event_select path started always dedupe (issue #489):
         # battery Ring cameras refresh their snapshot at best every 600 s, so
@@ -2448,7 +2472,7 @@ class VideoAnalyzer:
         # with an even longer window. The heartbeat bypass is skipped for these
         # loops too — within one window an unchanged frame never becomes worth
         # re-analyzing.
-        forced = camera_id in self._event_select_dedupe
+        forced = history is not None or camera_id in self._event_select_dedupe
         if not forced and not self.entry.runtime_data.options.get(
             CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED, False
         ):
@@ -2475,13 +2499,18 @@ class VideoAnalyzer:
         except (Image.UnidentifiedImageError, OSError, ValueError, RuntimeError):
             return True  # be permissive on failures
 
-        hist = self._last_hashes.setdefault(
-            camera_id, deque(maxlen=_UNIQUENESS_HISTORY)
+        hist = (
+            history
+            if history is not None
+            else self._last_hashes.setdefault(
+                camera_id, deque(maxlen=_UNIQUENESS_HISTORY)
+            )
         )
         # If we have no history, accept and seed
         if not hist:
             hist.append(dh)
-            self._last_unique_ts[camera_id] = now
+            if history is None:
+                self._last_unique_ts[camera_id] = now
             return True
 
         # Compute min Hamming distance to recent accepted frames
@@ -2493,7 +2522,8 @@ class VideoAnalyzer:
 
         # Accept: update history and last-unique time
         hist.append(dh)
-        self._last_unique_ts[camera_id] = now
+        if history is None:
+            self._last_unique_ts[camera_id] = now
         return True
 
     async def _take_single_snapshot(
@@ -2782,10 +2812,17 @@ class VideoAnalyzer:
 
     @callback
     def _stop_motion_loop_and_flush(self, camera_id: str) -> None:
-        """Cancel the camera's motion loop and flush its batch, if running."""
-        self._window_generation[camera_id] = (
-            self._window_generation.get(camera_id, 0) + 1
-        )
+        """
+        Cancel the camera's motion loop and flush its batch, if running.
+
+        When this window's own event recording is still being fetched, the
+        held snapshots are parked instead and flushed once the clip lands
+        (and displaces them) or RECORDING_FLUSH_GRACE_SEC passes: flushing
+        now would analyze and notify on the retained snapshot — on a battery
+        camera a frame from before the event — ahead of the clip.
+        """
+        closing = self._window_generation.get(camera_id, 0)
+        self._window_generation[camera_id] = closing + 1
         self._event_select_owned.discard(camera_id)
         self._event_select_dedupe.discard(camera_id)
         self._event_select_window_started.pop(camera_id, None)
@@ -2797,10 +2834,48 @@ class VideoAnalyzer:
         # Flush even when the loop crashed (task already done): frames it
         # captured must not strand in the buffer or leak into the next
         # event's batch. An empty flush is a no-op.
+        pending = self._pending_recordings(camera_id, closing)
+        if pending:
+            # Take everything now, as an immediate flush would: the next
+            # window reuses the camera's buffer, and the live queue keeps
+            # filling (recording-state polls resume) during the grace.
+            held = list(self._event_snapshot_buffers.pop(camera_id, []))
+            queue = self._snapshot_queues.get(camera_id)
+            if queue:
+                held.extend(self._drain_queue(queue))
+            self._deferred_flush[camera_id, closing] = held
+            LOGGER.debug(
+                "[%s] Window closed with its recording in flight; holding the "
+                "flush up to %.0f s",
+                camera_id,
+                RECORDING_FLUSH_GRACE_SEC,
+            )
+            flush = self._create_background_task(
+                self._flush_after_recordings(camera_id, closing, pending),
+                f"hga video deferred flush {camera_id}",
+            )
+            # Tracked so stop() cancels it through analysis, not only while
+            # it waits.
+            if isinstance(flush, asyncio.Task):
+                self._deferred_flush_tasks.add(flush)
+                flush.add_done_callback(self._deferred_flush_tasks.discard)
+            return
         self._create_background_task(
             self._process_snapshot_queue(camera_id),
             f"hga video process motion queue {camera_id}",
         )
+
+    async def _flush_after_recordings(
+        self, camera_id: str, generation: int, pending: list[asyncio.Task[Any]]
+    ) -> None:
+        """Flush a parked window once its recordings finish or the grace ends."""
+        try:
+            await asyncio.wait(pending, timeout=RECORDING_FLUSH_GRACE_SEC)
+        finally:
+            held = self._deferred_flush.pop((camera_id, generation), [])
+        if self._stopped:
+            return
+        await self._process_snapshot_queue(camera_id, held=held)
 
     @callback
     def _handle_event_select_change(self, event: Event) -> None:
@@ -2873,6 +2948,10 @@ class VideoAnalyzer:
             self._active_motion_cameras[camera_id] = task
             self._event_select_owned.add(camera_id)
 
+        # Read before the extension: at the window cap it flushes (bumping
+        # the generation), and the next window must not inherit this clip.
+        generation = self._window_generation.get(camera_id, 0)
+
         # Only a loop this path started is subject to the window timer; a
         # motion-sensor-owned loop keeps running until its OFF edge so the
         # window can't truncate it mid-event.
@@ -2880,7 +2959,7 @@ class VideoAnalyzer:
             self._extend_event_select_window(camera_id)
 
         self._maybe_ingest_event_recording(
-            camera_id, entity_id, new_state, str(new_event_id)
+            camera_id, entity_id, new_state, str(new_event_id), generation
         )
 
     @callback
@@ -2924,7 +3003,12 @@ class VideoAnalyzer:
 
     @callback
     def _maybe_ingest_event_recording(
-        self, camera_id: str, select_entity_id: str, new_state: Any, event_id: str
+        self,
+        camera_id: str,
+        select_entity_id: str,
+        new_state: Any,
+        event_id: str,
+        generation: int | None = None,
     ) -> None:
         """
         Schedule download + frame extraction of the event's recording.
@@ -2969,7 +3053,8 @@ class VideoAnalyzer:
             )
             return
         recent.append(event_id)
-        generation = self._window_generation.get(camera_id, 0)
+        if generation is None:
+            generation = self._window_generation.get(camera_id, 0)
         task = self._create_background_task(
             self._ingest_event_recording(
                 camera_id, select_entity_id, event_id, url, dt_util.utcnow(), generation
@@ -2977,12 +3062,27 @@ class VideoAnalyzer:
             f"hga video event recording {key}",
         )
         self._event_recording_tasks[key] = task
+        self._event_recording_task_gen[key] = generation
         task.add_done_callback(partial(self._on_event_recording_done, key))
 
     def _on_event_recording_done(self, key: str, task: asyncio.Task[Any]) -> None:
         """Forget a finished ingest task — only if the slot still holds it."""
         if self._event_recording_tasks.get(key) is task:
             self._event_recording_tasks.pop(key, None)
+            self._event_recording_task_gen.pop(key, None)
+
+    def _pending_recordings(
+        self, camera_id: str, generation: int
+    ) -> list[asyncio.Task[Any]]:
+        """Return the camera's unfinished ingests scheduled under generation."""
+        prefix = f"{camera_id}:"
+        return [
+            task
+            for key, task in self._event_recording_tasks.items()
+            if key.startswith(prefix)
+            and self._event_recording_task_gen.get(key) == generation
+            and not task.done()
+        ]
 
     async def _resolve_ffmpeg(self) -> str | None:
         """
@@ -3180,32 +3280,43 @@ class VideoAnalyzer:
         self, camera_id: str, frames: list[Path], generation: int
     ) -> None:
         """
-        Put recording frames where the current window will analyze them.
+        Put recording frames where their own window will analyze them.
 
         While the window that opened for this event is still running (same
-        generation), the snapshots it holds were captured BEFORE the clip
-        landed — on a battery camera that is the retained interval snapshot,
-        which predates the event — so they are dropped (already registered
-        for retention, so nothing leaks) and the clip frames take their
-        place. Frames from an earlier recording in the same window are kept:
-        two events close together must not erase each other. Later loop
-        captures still join the batch. Once that window has closed — or a
-        later window is running — the frames are analyzed as their own
-        ordered batch, never via the live queue, whose backlog rule would
-        keep only the newest of them.
+        generation) or is parked waiting for this clip (a deferred flush),
+        the snapshots it holds were captured BEFORE the clip landed — on a
+        battery camera that is the retained interval snapshot, which
+        predates the event — so they are dropped (already registered for
+        retention, so nothing leaks) and the clip frames take their place.
+        Frames from an earlier recording in the same window are kept: two
+        events close together must not erase each other. Once that window
+        has flushed — or a later window is running — the frames are
+        analyzed as their own ordered batch, never via the live queue, whose
+        backlog rule would keep only the newest of them.
 
         Dedupe runs among the clip frames alone: the hash history holds the
         snapshots the clip is about to displace, and a person seen in both
         would otherwise be rejected from the clip and then deleted with the
-        snapshot. At least one frame is always admitted.
+        snapshot. The clip's hashes live in a local history — never the
+        camera's, which a later window may own by the time this clip lands —
+        and the clip is always deduped, whether or not the window's forced
+        dedupe is still engaged. At least one frame is always admitted.
+        Afterwards a still running window's history holds the clip hashes AND
+        the displaced snapshots' hashes (bounded): a battery camera keeps
+        re-serving the same frozen frame, and against clip hashes alone every
+        re-capture would pass the gate and join the batch as if it were
+        current (issue #491 field report: a stale person blended into a
+        passing car's clip).
         """
         if self._stopped:
             return
-        self._last_hashes.pop(camera_id, None)
+        clip_hashes: deque[int] = deque(maxlen=_UNIQUENESS_HISTORY)
         admitted: list[Path] = []
         for path in frames:
             try:
-                unique = await self._is_unique_enough(camera_id, path)
+                unique = await self._is_unique_enough(
+                    camera_id, path, history=clip_hashes
+                )
             except (OSError, ValueError):
                 unique = True
             if unique:
@@ -3218,22 +3329,23 @@ class VideoAnalyzer:
             camera_id in self._active_motion_cameras
             and self._window_generation.get(camera_id, 0) == generation
         )
+        parked = self._deferred_flush.get((camera_id, generation))
         if same_window:
             buffer = self._event_snapshot_buffers.setdefault(
                 camera_id, deque(maxlen=_QUEUE_MAXSIZE)
             )
-            keep = [p for p in buffer if _RECORDING_FRAME_RE.fullmatch(p.name)]
-            dropped = len(buffer) - len(keep)
-            if dropped:
-                self._m_inc(camera_id, "replaced_by_recording", dropped)
-                LOGGER.debug(
-                    "[%s] Dropping %d pre-recording snapshot(s) from the batch",
-                    camera_id,
-                    dropped,
-                )
-                buffer.clear()
-                buffer.extend(keep)
-            buffer.extend(admitted)
+            kept = self._displace_snapshots(camera_id, list(buffer))
+            buffer.clear()
+            buffer.extend(kept + admitted)
+            # The window's own history (its displaced snapshots) goes on the
+            # right so later accepted captures push the clip's out first.
+            window = list(self._last_hashes.get(camera_id, ()))
+            self._last_hashes[camera_id] = deque(
+                [*clip_hashes, *window[-_UNIQUENESS_HISTORY:]],
+                maxlen=2 * _UNIQUENESS_HISTORY,
+            )
+        elif parked is not None:
+            parked[:] = self._displace_snapshots(camera_id, parked) + admitted
         else:
             self._create_background_task(
                 self._analyze_and_finalize(camera_id, order_batch(admitted)),
@@ -3241,6 +3353,19 @@ class VideoAnalyzer:
             )
         self._m_inc(camera_id, "recording_frames", len(admitted))
         self._m_inc(camera_id, "enqueued", len(admitted))
+
+    def _displace_snapshots(self, camera_id: str, held: list[Path]) -> list[Path]:
+        """Return `held` without its snapshots; earlier clip frames stay."""
+        keep = [p for p in held if _RECORDING_FRAME_RE.fullmatch(p.name)]
+        dropped = len(held) - len(keep)
+        if dropped:
+            self._m_inc(camera_id, "replaced_by_recording", dropped)
+            LOGGER.debug(
+                "[%s] Dropping %d pre-recording snapshot(s) from the batch",
+                camera_id,
+                dropped,
+            )
+        return keep
 
     def _record_recording_failure(
         self, camera_id: str, event_id: str, reason: str
@@ -3442,6 +3567,10 @@ class VideoAnalyzer:
                 task.cancel()
                 tasks_to_await.append(task)
             task_dict.clear()
+        for task in self._deferred_flush_tasks:
+            task.cancel()
+            tasks_to_await.append(task)
+        self._deferred_flush_tasks.clear()
 
         self._event_snapshot_buffers.clear()
 
@@ -3456,6 +3585,8 @@ class VideoAnalyzer:
         self._event_recording_warned_at.clear()
         self._event_recording_binary_ok.clear()
         self._window_generation.clear()
+        self._event_recording_task_gen.clear()
+        self._deferred_flush.clear()
         self._stale_reported.clear()
         self._stale_reported_at.clear()
 
