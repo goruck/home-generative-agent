@@ -61,10 +61,10 @@ jobs:
           # was discarded unread.
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }} --comment'
           allowed_bots: 'dependabot,dependabot[bot]'
-          # TEMPORARY: diagnose why the review stops after ~2 turns without
-          # posting (seen on #677). The transcript lands in the public job
-          # log; turn this back off once the stop reason is known.
-          show_full_output: true
+          # Off: the transcript lands in the public job log. It was on to find
+          # why reviews stopped after ~2 turns (background subagents, fixed by
+          # CLAUDE_CODE_DISABLE_BACKGROUND_TASKS above; verified on #679/#680).
+          show_full_output: false
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
           
