@@ -544,6 +544,59 @@ async def test_stream_speaks_first_sentence_before_text_ends() -> None:
 
 
 @pytest.mark.usefixtures("patched_client")
+async def test_stream_speaks_held_sentence_when_text_pauses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A finished sentence followed by silence is spoken during the silence.
+
+    The splitter holds "Let me check." until the next word, and on a tool turn
+    the next word comes only after the tools return; the idle flush is what
+    lets the acknowledgement fill that gap.
+    """
+    monkeypatch.setattr(hga_tts, "TTS_STREAM_IDLE_FLUSH_S", 0.01)
+    entity, _ = _make_entity()
+    seen: list[dict[str, Any]] = []
+    _stub_client(entity, seen)
+    tools_done = asyncio.Event()
+
+    async def _tool_turn() -> AsyncGenerator[str]:
+        yield "Let me check."
+        await tools_done.wait()
+        yield " The landing light is off."
+
+    response = await entity.async_stream_tts_audio(
+        TTSAudioRequest("en-US", dict(entity.default_options), _tool_turn())
+    )
+    assert await anext(response.data_gen) == AUDIO
+    assert [req["input"] for req in seen] == ["Let me check."]
+
+    tools_done.set()
+    assert [chunk async for chunk in response.data_gen] == [AUDIO]
+    assert seen[1]["input"] == "The landing light is off."
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_stream_pause_mid_sentence_keeps_the_fragment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pause inside a sentence does not cut it into two utterances."""
+    monkeypatch.setattr(hga_tts, "TTS_STREAM_IDLE_FLUSH_S", 0.01)
+    entity, _ = _make_entity()
+    seen: list[dict[str, Any]] = []
+    _stub_client(entity, seen)
+
+    async def _slow() -> AsyncGenerator[str]:
+        yield "The landing light"
+        await asyncio.sleep(0.05)
+        yield " is off."
+
+    _, audio = await _stream(entity, _slow())
+    assert audio == [AUDIO]
+    assert [req["input"] for req in seen] == ["The landing light is off."]
+
+
+@pytest.mark.usefixtures("patched_client")
 async def test_stream_batches_sentences_after_the_first() -> None:
     """Sentences that arrive together after the first share one request."""
     entity, _ = _make_entity()

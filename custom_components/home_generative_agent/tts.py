@@ -47,7 +47,7 @@ from .core.openai_endpoint import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterable, Mapping
+    from collections.abc import AsyncGenerator, AsyncIterable, Iterable, Mapping
 
     from homeassistant.components.tts.entity import TTSAudioRequest
     from homeassistant.config_entries import ConfigEntry
@@ -62,6 +62,15 @@ LOGGER = logging.getLogger(__name__)
 # client happens to carry. A spoken reply is a few sentences; a minute covers a
 # cold model load on a local server with room to spare.
 TTS_REQUEST_TIMEOUT_S = 60.0
+
+# The sentence splitter holds a finished sentence until the next word arrives
+# (so "Dr." is not a sentence). A pause this long in the reply means the agent
+# stopped writing -- typically to run a tool -- so a held sentence is spoken
+# now instead of after the tool returns. Local models stream tokens tens of
+# milliseconds apart, well under this.
+TTS_STREAM_IDLE_FLUSH_S = 0.4
+# ASCII, ellipsis, and the CJK full stop, exclamation and question marks.
+_SENTENCE_ENDINGS = (".", "!", "?", "\u2026", "\u3002", "\uff01", "\uff1f")
 
 # Language tags the OpenAI speech models document. The models detect the input
 # language themselves, so this list only has to satisfy the Assist pipeline's
@@ -158,6 +167,59 @@ def _wants_instructions(provider_type: str, model_name: str) -> bool:
     return provider_type == "openai" and model_name.startswith(
         TTS_INSTRUCTIONS_MODEL_PREFIX
     )
+
+
+async def _pump_text(
+    message_gen: AsyncIterable[str], chunks: asyncio.Queue[str | None]
+) -> None:
+    """
+    Copy the pipeline's text stream into ``chunks``, then ``None``.
+
+    A task of its own, so the splitter's idle timeout never cancels a read of
+    the pipeline's generator.
+    """
+    try:
+        async for chunk in message_gen:
+            chunks.put_nowait(chunk)
+    finally:
+        chunks.put_nowait(None)
+
+
+async def _split_sentences(
+    chunks: asyncio.Queue[str | None], sentences: asyncio.Queue[str | None]
+) -> None:
+    """Turn text chunks into sentences, then ``None``; see TTS_STREAM_IDLE_FLUSH_S."""
+
+    def _emit(texts: Iterable[str]) -> None:
+        for text in texts:
+            if text.strip():
+                sentences.put_nowait(text.strip())
+
+    # Text chunks are not on word or sentence boundaries.
+    detector = SentenceBoundaryDetector()
+    holding = False
+    try:
+        while True:
+            try:
+                async with asyncio.timeout(
+                    TTS_STREAM_IDLE_FLUSH_S if holding else None
+                ):
+                    chunk = await chunks.get()
+            except TimeoutError:
+                holding = False
+                held = detector.finish()
+                if held.rstrip().endswith(_SENTENCE_ENDINGS):
+                    _emit([held])
+                else:
+                    _emit(detector.add_chunk(held))
+                continue
+            if chunk is None:
+                break
+            _emit(detector.add_chunk(chunk))
+            holding = holding or bool(chunk.strip())
+        _emit([detector.finish()])
+    finally:
+        sentences.put_nowait(None)
 
 
 async def async_setup_entry(
@@ -356,23 +418,14 @@ class HGATtsEntity(TextToSpeechEntity):
         self, message_gen: AsyncIterable[str], options: Mapping[str, Any]
     ) -> AsyncGenerator[bytes]:
         """Yield audio per sentence batch as the text stream completes them."""
+        chunks: asyncio.Queue[str | None] = asyncio.Queue()
         sentences: asyncio.Queue[str | None] = asyncio.Queue()
-
-        async def _split() -> None:
-            # Text chunks are not on word or sentence boundaries.
-            detector = SentenceBoundaryDetector()
-            try:
-                async for chunk in message_gen:
-                    for sentence in detector.add_chunk(chunk):
-                        if sentence.strip():
-                            sentences.put_nowait(sentence)
-                if (tail := detector.finish()).strip():
-                    sentences.put_nowait(tail)
-            finally:
-                sentences.put_nowait(None)
-
+        reader = self.hass.async_create_background_task(
+            _pump_text(message_gen, chunks), name=f"{self.entity_id} tts text read"
+        )
         splitter = self.hass.async_create_background_task(
-            _split(), name=f"{self.entity_id} tts sentence split"
+            _split_sentences(chunks, sentences),
+            name=f"{self.entity_id} tts sentence split",
         )
         spoke = False
         finished = False
@@ -384,7 +437,7 @@ class HGATtsEntity(TextToSpeechEntity):
                 # possible; after that, one request covers everything that
                 # arrived while the previous batch was being synthesized.
                 while item is not None:
-                    batch.append(item.strip())
+                    batch.append(item)
                     if not spoke or sentences.empty():
                         break
                     item = sentences.get_nowait()
@@ -396,10 +449,12 @@ class HGATtsEntity(TextToSpeechEntity):
                 spoke = True
                 yield audio
             # Surface a failure of the text stream itself.
+            await reader
             await splitter
         finally:
-            if not splitter.done():
-                splitter.cancel()
+            for task in (reader, splitter):
+                if not task.done():
+                    task.cancel()
         if not spoke:
             msg = f"No text to synthesize for {self.entity_id}"
             raise HomeAssistantError(msg)
