@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import inspect
 from typing import TYPE_CHECKING, Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -276,7 +277,14 @@ def test_no_rule_emits_a_dotted_suggested_action() -> None:
 
 
 def test_network_rule_types_match_engine_rules_with_requires() -> None:
-    """Every engine rule that declares ``requires`` is in NETWORK_RULE_TYPES."""
+    """
+    The rules the engine registers with ``requires`` are exactly NETWORK_RULE_TYPES.
+
+    Read from a real engine, not a copied list: the audit path evaluates only
+    registered rules whose id is in NETWORK_RULE_TYPES (engine.py
+    ``_evaluate_gated_rules``), so a gated rule missing from the set would
+    never run, and a type the engine never registers would never report.
+    """
     from custom_components.home_generative_agent.sentinel.discovery_engine import (  # noqa: PLC0415
         _STATIC_RULE_IDS,
     )
@@ -284,14 +292,18 @@ def test_network_rule_types_match_engine_rules_with_requires() -> None:
         SentinelEngine,
     )
 
-    engine = SentinelEngine.__new__(SentinelEngine)
-    # Build the rule list the way the constructor does, without dependencies.
-    init_src = inspect.getsource(SentinelEngine.__init__)
-    assert "HaNewAdminOrTokenRule()" in init_src
-    gated = {r.rule_id for r in ALL_RULES if getattr(r, "requires", None)}
+    engine = SentinelEngine(
+        hass=MagicMock(),
+        options={},
+        suppression=MagicMock(),
+        notifier=MagicMock(),
+        audit_store=MagicMock(),
+        explainer=None,
+        entry_id="test_entry",
+    )
+    gated = {r.rule_id for r in engine._rules if getattr(r, "requires", None)}
     assert gated == NETWORK_RULE_TYPES
     assert NETWORK_RULE_TYPES <= _STATIC_RULE_IDS
-    del engine
 
 
 # ---------------------------------------------------------------------------
