@@ -49,10 +49,14 @@ jobs:
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           # --comment: without it the plugin prints its findings to the job's
-          # terminal and stops, and show_full_output is off, so every review
+          # terminal and stops, and the job log hid that output, so every review
           # was discarded unread.
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }} --comment'
           allowed_bots: 'dependabot,dependabot[bot]'
+          # TEMPORARY: diagnose why the review stops after ~2 turns without
+          # posting (seen on #677). The transcript lands in the public job
+          # log; turn this back off once the stop reason is known.
+          show_full_output: true
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
           
