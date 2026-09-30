@@ -441,19 +441,6 @@ validation.
 
 ---
 
-### Leaked `<think>` reasoning can become the final chat reply
-
-**What:** The streaming path commits model text to `chat_log` verbatim — `_stream_langgraph_to_ha` / `_nonstreaming_text` never run it through `extract_final`. Only the graph-state copy is cleaned. When a response is entirely reasoning (a `<think>` block with no closing tag, or think-only output), `extract_final` returns `""`, `_normalize_ai_content("")` returns `None`, so `_async_run_astream` takes neither the `replace_partial` nor the `add_recovered` branch and the raw `<think>` text stays as the user-visible reply. Reasoning emitted before a tool call likewise stays in Show Details, since recovery only inspects the final assistant entry.
-
-**Why:** Found by the Codex adversarial pass on the #628 branch; pre-existing, not introduced by it. #628 makes the normal path byte-identical, which leaves this as the remaining case where the streamed and cleaned copies diverge. User-visible: raw chain-of-thought rendered in chat and spoken by voice pipelines.
-
-**How to apply:** Strip `<think>` in the delta path rather than only in `_call_model`, which needs a small state machine — an opening tag can arrive in one delta and its closing tag several deltas later, so the generator has to suppress text between them and handle a stream that ends mid-block. Alternatively, in `_async_run_astream`, treat an empty `recovered_content` with a non-empty last `AssistantContent` as a signal to replace with the "Done."-style fallback instead of leaving raw reasoning. Add a test for the unclosed-`<think>` case.
-
-**Effort:** M
-**Priority:** P2
-
----
-
 ### `replace_partial` drops tool calls when it re-commits the last entry
 
 **What:** `_async_run_astream`'s `replace_partial` branch (`conversation.py`) pops `chat_log.content[-1]` and re-adds it via `async_add_assistant_content_without_tools` with only `content` set. The guard checks `isinstance(..., AssistantContent)` but not `.tool_calls`, so if the last entry carries tool calls they are silently discarded. `_recommit_final_assistant_content` does guard on `not ...tool_calls`; this branch does not.
@@ -2178,6 +2165,19 @@ This is the same allowlist-omission class as #480 and as the triage options fixe
 ---
 
 ## Completed
+
+### Leaked `<think>` reasoning can become the final chat reply
+
+**What:** The streaming path commits model text to `chat_log` verbatim — `_stream_langgraph_to_ha` / `_nonstreaming_text` never run it through `extract_final`. Only the graph-state copy is cleaned. When a response is entirely reasoning (a `<think>` block with no closing tag, or think-only output), `extract_final` returns `""`, `_normalize_ai_content("")` returns `None`, so `_async_run_astream` takes neither the `replace_partial` nor the `add_recovered` branch and the raw `<think>` text stays as the user-visible reply. Reasoning emitted before a tool call likewise stays in Show Details, since recovery only inspects the final assistant entry.
+
+**Why:** Found by the Codex adversarial pass on the #628 branch; pre-existing, not introduced by it. #628 makes the normal path byte-identical, which leaves this as the remaining case where the streamed and cleaned copies diverge. User-visible: raw chain-of-thought rendered in chat and spoken by voice pipelines.
+
+**How to apply:** Strip `<think>` in the delta path rather than only in `_call_model`, which needs a small state machine — an opening tag can arrive in one delta and its closing tag several deltas later, so the generator has to suppress text between them and handle a stream that ends mid-block. Alternatively, in `_async_run_astream`, treat an empty `recovered_content` with a non-empty last `AssistantContent` as a signal to replace with the "Done."-style fallback instead of leaving raw reasoning. Add a test for the unclosed-`<think>` case.
+
+**Effort:** M
+**Priority:** P2
+
+**Resolution:** Fixed in the streaming-TTS PR for [#671](https://github.com/goruck/home-generative-agent/issues/671), which made it urgent: once HGA's TTS engine streams, the Assist pipeline speaks the deltas as they arrive, before any cleaned copy replaces them, so inline reasoning would be read aloud on every turn rather than only on a think-only reply. `_ThinkStreamFilter` (`conversation.py`) drops `<think>` blocks from the delta path with the state machine described above — a tag split across deltas is held until the next one, an unclosed block runs to the end of the model turn, held text that never became a tag is released at turn end ahead of the tool calls — and the `on_chat_model_end` fallback runs `extract_final`. A think-only reply now commits no assistant text, so the existing no-reply guard answers with its apology. Reasoning before a tool call no longer reaches Show Details either. One byte-level difference remains: a reply ending in whitespace after a removed block keeps that trailing whitespace in the streamed copy, which `extract_final` strips, so `replace_partial` re-commits the cleaned text; harmless.
 
 ### The Trust device button trusts every device in a multi-device finding
 
