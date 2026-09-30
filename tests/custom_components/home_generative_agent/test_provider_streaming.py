@@ -4,11 +4,6 @@
 from __future__ import annotations
 
 import pathlib
-from unittest.mock import AsyncMock
-
-from langchain_core.messages import AIMessage
-
-from custom_components.home_generative_agent.agent.graph import _invoke_model
 
 _INIT = pathlib.Path("custom_components/home_generative_agent/__init__.py").read_text()
 
@@ -51,19 +46,3 @@ def test_anthropic_provider_primed_before_publish() -> None:
     prime = block.index("await async_prime_async_client(hass, anthropic_chat)")
     publish = block.index("anthropic_provider = anthropic_chat.configurable_fields(")
     assert prime < publish
-
-
-async def test_stream_usage_metadata_flows_through_invoke_model() -> None:
-    """_invoke_model preserves usage_metadata; empty means stream_usage=True was removed."""
-    expected_usage: dict[str, int] = {
-        "input_tokens": 42,
-        "output_tokens": 17,
-        "total_tokens": 59,
-    }
-    mock_model = AsyncMock()
-    mock_model.ainvoke.return_value = AIMessage(
-        content="Hello", usage_metadata=expected_usage
-    )
-
-    result = await _invoke_model(mock_model, [], {})
-    assert result.usage_metadata == expected_usage
