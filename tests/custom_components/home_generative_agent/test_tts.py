@@ -38,7 +38,10 @@ from custom_components.home_generative_agent.tts import HGATtsEntity
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Mapping
 
-AUDIO = b"ID3\x00fake-mp3-bytes"
+# A well-formed ID3v2 tag (4-byte body) followed by stand-in mp3 frames; joined
+# stream pieces after the first arrive without the tag.
+MP3_FRAMES = b"\xff\xfbfake-mp3-frames"
+AUDIO = b"ID3\x04\x00\x00\x00\x00\x00\x04TAG!" + MP3_FRAMES
 LOCAL_BASE_URL = "http://speaches-box:8000/v1"
 
 
@@ -496,6 +499,14 @@ def _stub_client(entity: HGATtsEntity, seen: list[dict[str, Any]]) -> None:
 
 
 async def _text(*chunks: str) -> AsyncGenerator[str]:
+    """Yield a whole message at once, as tts.speak does."""
+    for chunk in chunks:
+        yield chunk
+
+
+async def _live(*chunks: str) -> AsyncGenerator[str]:
+    """Yield a reply that is still being written when synthesis starts."""
+    await asyncio.sleep(hga_tts.TTS_ONE_SHOT_GRACE_S * 3)
     for chunk in chunks:
         yield chunk
 
@@ -539,7 +550,7 @@ async def test_stream_speaks_first_sentence_before_text_ends() -> None:
 
     release.set()
     rest = [chunk async for chunk in response.data_gen]
-    assert rest == [AUDIO]
+    assert rest == [MP3_FRAMES]
     assert seen[1]["input"] == "It was turned off by the evening automation."
 
 
@@ -572,7 +583,7 @@ async def test_stream_speaks_held_sentence_when_text_pauses(
     assert [req["input"] for req in seen] == ["Let me check."]
 
     tools_done.set()
-    assert [chunk async for chunk in response.data_gen] == [AUDIO]
+    assert [chunk async for chunk in response.data_gen] == [MP3_FRAMES]
     assert seen[1]["input"] == "The landing light is off."
 
 
@@ -603,10 +614,10 @@ async def test_stream_batches_sentences_after_the_first() -> None:
     seen: list[dict[str, Any]] = []
     _stub_client(entity, seen)
     extension, audio = await _stream(
-        entity, _text("One is short. Two follows. ", "Three ends it.")
+        entity, _live("One is short. Two follows. ", "Three ends it.")
     )
     assert extension == "mp3"
-    assert audio == [AUDIO, AUDIO]
+    assert audio == [AUDIO, MP3_FRAMES]
     assert [req["input"] for req in seen] == [
         "One is short.",
         "Two follows. Three ends it.",
@@ -614,16 +625,111 @@ async def test_stream_batches_sentences_after_the_first() -> None:
 
 
 @pytest.mark.usefixtures("patched_client")
-async def test_stream_forces_mp3_whatever_the_preference() -> None:
+async def test_live_stream_forces_mp3_whatever_the_preference() -> None:
     """Per-batch files are concatenated, so only mp3 is requested."""
     entity, _ = _make_entity()
     seen: list[dict[str, Any]] = []
     _stub_client(entity, seen)
     extension, _ = await _stream(
-        entity, _text("Hello there."), {ATTR_PREFERRED_FORMAT: "flac"}
+        entity, _live("Hello there."), {ATTR_PREFERRED_FORMAT: "flac"}
     )
     assert extension == "mp3"
     assert seen[0]["response_format"] == "mp3"
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_one_shot_message_is_one_request_in_the_preferred_format() -> None:
+    """tts.speak text arrives whole: no splitting, no mp3 join, no transcode."""
+    entity, _ = _make_entity()
+    seen: list[dict[str, Any]] = []
+    _stub_client(entity, seen)
+    extension, audio = await _stream(
+        entity,
+        _text("The front door is open. ", "The garage is closed."),
+        {ATTR_PREFERRED_FORMAT: "flac"},
+    )
+    assert extension == "flac"
+    assert audio == [AUDIO]
+    assert [(req["input"], req["response_format"]) for req in seen] == [
+        ("The front door is open. The garage is closed.", "flac")
+    ]
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_stream_stops_waiting_when_text_never_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn the pipeline never finishes does not leave synthesis waiting."""
+    monkeypatch.setattr(hga_tts, "TTS_STREAM_TEXT_TIMEOUT_S", 0.2)
+    entity, _ = _make_entity()
+    seen: list[dict[str, Any]] = []
+    _stub_client(entity, seen)
+
+    async def _abandoned() -> AsyncGenerator[str]:
+        await asyncio.sleep(0.1)
+        yield "Let me check."
+        await asyncio.Event().wait()  # the agent failed; no end ever comes
+        yield "unreachable"
+
+    _, audio = await _stream(entity, _abandoned())
+    assert audio == [AUDIO]
+    assert [req["input"] for req in seen] == ["Let me check."]
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_stream_pause_after_word_keeps_the_space(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pause after a space must not glue the next word onto the last one."""
+    monkeypatch.setattr(hga_tts, "TTS_STREAM_IDLE_FLUSH_S", 0.01)
+    entity, _ = _make_entity()
+    seen: list[dict[str, Any]] = []
+    _stub_client(entity, seen)
+
+    async def _slow() -> AsyncGenerator[str]:
+        await asyncio.sleep(0.2)
+        yield "Here is the list:\n"
+        await asyncio.sleep(0.05)
+        yield "first the temperature is "
+        await asyncio.sleep(0.05)
+        yield "21 degrees."
+
+    await _stream(entity, _slow())
+    assert " ".join(req["input"] for req in seen) == (
+        "Here is the list:\nfirst the temperature is 21 degrees."
+    )
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_stream_flushes_sentence_ending_in_a_quote(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A closing quote after the full stop still ends the sentence."""
+    monkeypatch.setattr(hga_tts, "TTS_STREAM_IDLE_FLUSH_S", 0.01)
+    entity, _ = _make_entity()
+    seen: list[dict[str, Any]] = []
+    _stub_client(entity, seen)
+    release = asyncio.Event()
+
+    async def _quoted() -> AsyncGenerator[str]:
+        await asyncio.sleep(0.2)
+        yield 'I will check the "Kitchen" sensor (one moment.)'
+        await release.wait()
+        yield " Done."
+
+    response = await entity.async_stream_tts_audio(
+        TTSAudioRequest("en-US", dict(entity.default_options), _quoted())
+    )
+    assert await anext(response.data_gen) == AUDIO
+    release.set()
+    assert [chunk async for chunk in response.data_gen] == [MP3_FRAMES]
+
+
+def test_strip_id3_leaves_untagged_audio_alone() -> None:
+    """Only a real ID3v2 header is removed."""
+    assert hga_tts._strip_id3(AUDIO) == MP3_FRAMES
+    assert hga_tts._strip_id3(MP3_FRAMES) == MP3_FRAMES
+    assert hga_tts._strip_id3(b"ID3") == b"ID3"
 
 
 async def test_stream_of_whitespace_is_rejected(patched_client: Any) -> None:

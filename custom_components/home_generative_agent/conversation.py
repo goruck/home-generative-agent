@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import re
 import string
 from collections import deque
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -602,12 +603,16 @@ def _is_stt_hallucination(
 
 _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
+# Searched in the original text: indexing str.lower() would misplace every cut
+# after a character whose lowercase is longer (Turkish "İ" becomes two).
+_THINK_OPEN_RE = re.compile(re.escape(_THINK_OPEN), re.IGNORECASE)
+_THINK_CLOSE_RE = re.compile(re.escape(_THINK_CLOSE), re.IGNORECASE)
 
 
 def _partial_tag_len(text: str, tag: str) -> int:
     """Return how many trailing chars of ``text`` could start ``tag``."""
     for size in range(min(len(tag) - 1, len(text)), 0, -1):
-        if text.endswith(tag[:size]):
+        if text[-size:].lower() == tag[:size]:
             return size
     return 0
 
@@ -622,44 +627,62 @@ class _ThinkStreamFilter:
     be removed here or it is read aloud. Tags can straddle deltas, so a
     possible tag prefix at the end of a delta is held until the next one.
     An unclosed block runs to the end of the model turn, like extract_final.
+
+    Whitespace follows extract_final(collapse_whitespace=False): once a block
+    has been removed, the reply's outer whitespace is stripped and nothing
+    inside it is touched. Leading whitespace is dropped until the first
+    visible text; trailing whitespace is held until more text follows it and
+    dropped at the end of the turn.
     """
 
     def __init__(self) -> None:
+        self._reset()
+
+    def _reset(self) -> None:
+        """Start a new model turn."""
         self._pending = ""
         self._inside = False
-        self._skip_space = False
+        self._removed = False
+        self._emitted = False
+        self._held_space = ""
+
+    def _visible(self, text: str) -> str:
+        """Apply the outer-whitespace rule to text outside any block."""
+        text = self._held_space + text
+        self._held_space = ""
+        if self._removed:
+            if not self._emitted:
+                text = text.lstrip()
+            body = text.rstrip()
+            self._held_space = text[len(body) :]
+            text = body
+        if text:
+            self._emitted = True
+        return text
 
     def feed(self, text: str) -> str:
         """Return the part of ``text`` that is safe to show and speak."""
         self._pending += text
         out: list[str] = []
         while self._pending:
-            lower = self._pending.lower()
             if self._inside:
-                end = lower.find(_THINK_CLOSE)
-                if end == -1:
-                    keep = _partial_tag_len(lower, _THINK_CLOSE)
+                close = _THINK_CLOSE_RE.search(self._pending)
+                if close is None:
+                    keep = _partial_tag_len(self._pending, _THINK_CLOSE)
                     self._pending = self._pending[len(self._pending) - keep :]
                     break
-                self._pending = self._pending[end + len(_THINK_CLOSE) :]
+                self._pending = self._pending[close.end() :]
                 self._inside = False
-                # extract_final strips the whitespace a removed block leaves.
-                self._skip_space = True
                 continue
-            if self._skip_space:
-                self._pending = self._pending.lstrip()
-                if not self._pending:
-                    break
-                self._skip_space = False
-                continue
-            start = lower.find(_THINK_OPEN)
-            if start != -1:
-                out.append(self._pending[:start])
-                self._pending = self._pending[start + len(_THINK_OPEN) :]
+            opening = _THINK_OPEN_RE.search(self._pending)
+            if opening is not None:
+                out.append(self._visible(self._pending[: opening.start()]))
+                self._pending = self._pending[opening.end() :]
                 self._inside = True
+                self._removed = True
                 continue
-            keep = _partial_tag_len(lower, _THINK_OPEN)
-            out.append(self._pending[: len(self._pending) - keep])
+            keep = _partial_tag_len(self._pending, _THINK_OPEN)
+            out.append(self._visible(self._pending[: len(self._pending) - keep]))
             self._pending = self._pending[len(self._pending) - keep :]
             break
         return "".join(out)
@@ -694,10 +717,8 @@ class _ThinkStreamFilter:
 
     def flush(self) -> str:
         """End the model turn: return held text that never became a tag."""
-        tail = "" if self._inside or self._skip_space else self._pending
-        self._pending = ""
-        self._inside = False
-        self._skip_space = False
+        tail = "" if self._inside else self._visible(self._pending)
+        self._reset()
         return tail
 
 

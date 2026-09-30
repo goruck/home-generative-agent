@@ -1046,3 +1046,33 @@ async def test_nonstreaming_think_only_reply_streams_nothing() -> None:
         }
 
     assert await _streamed_text(event_stream()) == ""
+
+
+@pytest.mark.asyncio
+async def test_think_filter_survives_characters_that_lengthen_when_lowered() -> None:
+    """Turkish "İ" lowers to two characters; the answer must not lose any."""
+    streamed = await _streamed_text(
+        _replay(_chunked_turn("<think>İyi İstanbul</think>", "Merhaba dünya"))
+    )
+
+    assert streamed == "Merhaba dünya"
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        ("Hello<think>x</think> world",),
+        ("Sure. <think>x</think> ok",),
+        ("<think>x</think>Answer\n",),
+        ("<thi", "nk>x</think>\n\nLine one.\n\n", "Line two.\n"),
+        ("Intro ", "<think>a</think>", " middle ", "<THINK>b</think>", " end\n"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_think_filter_whitespace_matches_extract_final(
+    chunks: tuple[str, ...],
+) -> None:
+    """Only the reply's outer whitespace goes; words are never glued together."""
+    streamed = await _streamed_text(_replay(_chunked_turn(*chunks)))
+
+    assert streamed == extract_final("".join(chunks), collapse_whitespace=False)

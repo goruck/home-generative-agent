@@ -33,7 +33,7 @@ Most AI conversation integrations are prompt passthroughs: they forward your wor
 | **Internet search & extra tools** | Give the agent web search, Wikipedia, or any other tool through an MCP server or an integration that registers a Home Assistant LLM API (for example [Tools for Assist](https://github.com/skye-harris/llm_intents) with Brave or a self-hosted SearXNG) — see [Internet search](docs/configuration.md#internet-search). |
 | **Streaming responses** | First tokens appear word-by-word in the HA conversation UI — no waiting for the full response. |
 | **Built-in speech-to-text** | STT provider for Assist pipelines, backed by the OpenAI Whisper API or a fully local OpenAI-compatible server — e.g. [Speaches](https://speaches.ai/) running faster-whisper on any machine Home Assistant can reach; it does not have to be the box that serves your LLM — see [STT setup](docs/configuration.md#speech-to-text-stt). |
-| **Built-in text-to-speech** | TTS provider for Assist pipelines, backed by the OpenAI speech API or a local OpenAI-compatible server (one Speaches container can serve both STT and TTS, with Kokoro or piper voices), so the whole voice pipeline can stay on your network — see [TTS setup](docs/configuration.md#text-to-speech-tts). |
+| **Built-in text-to-speech** | Streaming TTS provider for Assist pipelines (a satellite starts speaking after the agent's first sentence), backed by the OpenAI speech API or a local OpenAI-compatible server (one Speaches container can serve both STT and TTS, with Kokoro or piper voices), so the whole voice pipeline can stay on your network — see [TTS setup](docs/configuration.md#text-to-speech-tts). |
 | **Cloud and edge models** | Use OpenAI, Gemini, Anthropic, or run everything locally with Ollama or any OpenAI-compatible server. |
 
 ## Screenshots
@@ -112,7 +112,7 @@ You can now open the HA Assist panel and start talking to your home.
 | Guide | Contents |
 | --- | --- |
 | [Installation](docs/installation.md) | HACS install, manual install, optional apps (Ollama, face recognition, local speech server for STT/TTS) |
-| [Configuration](docs/configuration.md) | Model providers, features, per-model thinking/reasoning & budget, Tool Retrieval (RAG), per-tool exclusions & always-included tools, LLM API, STT and TTS (OpenAI or local), YAML mode, Critical Action PIN, prompt caching, camera description language & extra VLM instructions, UI languages (en/cs/ru/tr) |
+| [Configuration](docs/configuration.md) | Model providers, features, per-model thinking/reasoning & budget, Tool Retrieval (RAG), per-tool exclusions & always-included tools, LLM API, STT and TTS (OpenAI or local, streaming replies), YAML mode, Critical Action PIN, prompt caching, camera description language & extra VLM instructions, UI languages (en/cs/ru/tr) |
 | [Sentinel](docs/sentinel.md) | Anomaly detection pipeline, built-in rules, the Home Assistant & network security audit (router and eero setup notes), triage, baseline, discovery templates, blueprints, notification quiet hours, services API, health sensor |
 | [Camera Entities](docs/camera-entities.md) | Image and sensor entities, dashboards, automations, proactive video analysis, face recognition |
 | [Architecture](docs/architecture.md) | LangGraph agent, model tiers, context management, streaming, latency, tools, the home-state snapshot and network audit adapters |
