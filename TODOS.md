@@ -1659,6 +1659,78 @@ window-scoped check could suppress.
 
 ---
 
+### A late event recording displaces every snapshot of its window, and misses the frozen frame when no snapshot preceded it
+
+**What:** Two gaps in how event-recording frames (#491) displace snapshots,
+both left by [#675](https://github.com/goruck/home-generative-agent/pull/675):
+
+1. *Over-displacement (P2-1 of the #675 review).* When a window closes with its
+   recording still downloading, the whole parked buffer is replaced by the clip
+   (`_displace_snapshots` keeps only `_rNN` frames). That buffer spans the whole
+   window (30 s for an `event_select` window, longer for a motion-sensor one),
+   and every clip frame is stamped before the trigger. A genuinely fresh
+   post-trigger snapshot (a wired camera, or a battery camera whose interval
+   frame refreshed mid-window) showing someone who arrived after the clip ended
+   is dropped with the stale frame.
+2. *Under-displacement (P3-4).* The frozen frame is kept out of the batch only by
+   restoring the window's hash history after a same-window admit. If the clip
+   lands before the window accepted any snapshot (the first `camera.snapshot`
+   timed out or failed), there is no frozen hash to restore, so the next
+   re-capture of the frozen frame passes the gate and joins the clip's batch:
+   the #491 field bug's exact shape.
+
+**Why:** Found by the Claude adversarial pass on #675 (confidence 5 for 1, 5 for
+2). Deferred by Lindo (2026-09-30): #675 ships the field fix for beta.4. Both
+gaps close with one image-age rule, and whether that rule works depends on the
+`timestamp` data asked of @andymcmanus on #491: whether ring-mqtt keeps bumping
+`timestamp` while serving an unchanged image. If it does, the rule below cannot
+see the frozen frame and a hash-based rule is needed instead.
+
+**How to apply:** Tag each capture with the snapshot camera's ring-mqtt
+`timestamp` (image epoch, already read by `_retained_frame_is_stale`) when it
+is taken. Displace, and after an admit refuse to hold, only snapshots whose
+image epoch predates the event, instead of every non-clip frame. `started` is
+eventId *detection* time (ring-mqtt polls ~1 min, see the item above), so allow
+a documented skew (~90 s) rather than a strict comparison. Keep the current
+all-snapshots rule as the fallback when a camera publishes no `timestamp`.
+Tests: parked buffer with a fresh post-trigger snapshot survives; frozen
+re-capture rejected when no snapshot preceded the clip.
+
+**Effort:** S–M
+**Priority:** P2
+
+---
+
+### An earlier window's slow recording download eats a later window's flush grace
+
+**What:** Recording ingests are serialized per camera by
+`_event_recording_locks[camera_id]`, held across download + decode, and
+`RECORDING_INGEST_DEADLINE_SEC` counts time spent waiting for the lock. A
+window that closes while its own ingest is still queued behind an earlier
+event's ingest waits only `RECORDING_FLUSH_GRACE_SEC` (20 s) from close. With
+~35 s ingests, events 20 s apart make the second window's grace a coin flip. On
+a miss its parked snapshots (possibly the stale frame) flush and notify alone,
+and the clip then notifies separately: the double notification #675 set out to
+remove.
+
+**Why:** P3-5 of the Claude adversarial pass on #675; deferred by Lindo
+(2026-09-30). Needs a structural choice, and the field has only shown single
+events so far.
+
+**How to apply:** Options, cheapest first: (a) start a window's grace when its
+ingest *acquires* the lock (record acquisition time per task key and wait until
+`acquired + grace`, still bounded by the ingest deadline); (b) hold the lock
+only around frame placement and admission, letting downloads and decodes run
+concurrently under the existing global `_event_recording_sem`; (c) extend the
+grace per ingest queued ahead. (b) removes the cause but changes the per-camera
+ordering the same-second placement relies on (`_place_recording_frame` bumps
+names, so check it stays collision-safe).
+
+**Effort:** S
+**Priority:** P3
+
+---
+
 ## Notifier / Observability
 
 ### Sanitize friendly_name-derived text in notification copy like the unit string
