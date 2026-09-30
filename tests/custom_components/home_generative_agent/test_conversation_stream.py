@@ -64,6 +64,8 @@ from custom_components.home_generative_agent.conversation import (
     _normalize_tool_result,
     _sanitize_tool_result_dict,
     _stream_langgraph_to_ha,
+    _voice_tool_acknowledgement,
+    _with_tool_acknowledgement,
 )
 from custom_components.home_generative_agent.core.utils import extract_final
 
@@ -1046,6 +1048,137 @@ async def test_nonstreaming_think_only_reply_streams_nothing() -> None:
         }
 
     assert await _streamed_text(event_stream()) == ""
+
+
+_TOOL_CALL = [{"name": "get_state", "args": {}, "id": "call_1"}]
+
+
+def _tool_then_answer(*first_turn_chunks: str) -> list[dict[str, Any]]:
+    """Build a tool-calling turn, its result, then a text answer."""
+    return [
+        *_chunked_turn(*first_turn_chunks, tool_calls=_TOOL_CALL),
+        {
+            "event": "on_chain_end",
+            "metadata": {"langgraph_node": "action"},
+            "data": {
+                "output": {
+                    "messages": [
+                        ToolMessage(
+                            content="off", tool_call_id="call_1", name="get_state"
+                        )
+                    ]
+                }
+            },
+        },
+        *_chunked_turn("The landing light is off."),
+    ]
+
+
+async def _acked(events: list[dict[str, Any]], ack: str) -> list[dict[str, Any]]:
+    stream = _with_tool_acknowledgement(
+        _stream_langgraph_to_ha(_replay(events), "agent_1"), ack
+    )
+    return [cast("dict[str, Any]", d) async for d in stream]
+
+
+@pytest.mark.asyncio
+async def test_acknowledgement_precedes_first_tool_call() -> None:
+    """Text then a tool call is what makes the pipeline start speaking (#671)."""
+    deltas = await _acked(_tool_then_answer(), "Let me check.")
+
+    assert deltas[0] == {"role": "assistant"}
+    assert deltas[1] == {"content": "Let me check. "}
+    assert "tool_calls" in deltas[2]
+    assert [d.get("content") for d in deltas if d.get("content")] == [
+        "Let me check. ",
+        "The landing light is off.",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_acknowledgement_skipped_when_model_speaks_first() -> None:
+    """A model that says something before its tool call is not talked over."""
+    deltas = await _acked(_tool_then_answer("One moment."), "Let me check.")
+
+    contents = [d.get("content") for d in deltas if d.get("content")]
+    assert contents == ["One moment.", "The landing light is off."]
+
+
+@pytest.mark.asyncio
+async def test_acknowledgement_said_once_per_turn() -> None:
+    """A second tool round does not repeat it."""
+    events = [
+        *_tool_then_answer()[:-3],
+        *_tool_then_answer(),
+    ]
+    deltas = await _acked(events, "Let me check.")
+
+    assert [d.get("content") for d in deltas].count("Let me check. ") == 1
+
+
+@pytest.mark.asyncio
+async def test_no_acknowledgement_on_text_only_turn_or_when_off() -> None:
+    """An answer with no tool call, or an empty option, adds nothing."""
+    text_only = await _acked(_chunked_turn("It is noon."), "Let me check.")
+    assert [d.get("content") for d in text_only if d.get("content")] == ["It is noon."]
+
+    off = await _acked(_tool_then_answer(), "")
+    assert all(d.get("content") != " " for d in off)
+    assert [d.get("content") for d in off if d.get("content")] == [
+        "The landing light is off."
+    ]
+
+
+@pytest.mark.parametrize(
+    ("satellite_id", "device_id", "expected"),
+    [
+        ("assist_satellite.voice_pe", None, "Let me check."),
+        ("assist_satellite.voice_pe", "voice_device", "Let me check."),
+        # A typed pipeline run may carry a device id for area context.
+        (None, "voice_device", ""),
+        (None, None, ""),
+    ],
+)
+def test_acknowledgement_only_on_satellite_turns(
+    satellite_id: str | None, device_id: str | None, expected: str
+) -> None:
+    """A device id alone does not mean anyone is listening."""
+    user_input = cast(
+        "Any", types.SimpleNamespace(satellite_id=satellite_id, device_id=device_id)
+    )
+    options = {"voice_tool_acknowledgement": "  Let me check.  "}
+
+    assert _voice_tool_acknowledgement(options, user_input) == expected
+    assert _voice_tool_acknowledgement({}, user_input) == ""
+
+
+@pytest.mark.parametrize(
+    ("configured", "spoken"),
+    [
+        ("One moment", "One moment."),
+        ("Let me check!", "Let me check!"),
+        ("Momentík…", "Momentík…"),
+        ('Checking "now."', 'Checking "now."'),
+    ],
+)
+def test_acknowledgement_gets_a_sentence_end(configured: str, spoken: str) -> None:
+    """A streaming TTS engine only speaks a phrase early once it ends a sentence."""
+    user_input = cast("Any", types.SimpleNamespace(satellite_id="s", device_id=None))
+
+    assert (
+        _voice_tool_acknowledgement(
+            {"voice_tool_acknowledgement": configured}, user_input
+        )
+        == spoken
+    )
+
+
+@pytest.mark.asyncio
+async def test_whitespace_before_tool_call_does_not_use_up_acknowledgement() -> None:
+    """A model that emits only a newline before its tool call said nothing."""
+    deltas = await _acked(_tool_then_answer("\n\n"), "Let me check.")
+
+    assert "Let me check. " in [d.get("content") for d in deltas]
 
 
 @pytest.mark.asyncio

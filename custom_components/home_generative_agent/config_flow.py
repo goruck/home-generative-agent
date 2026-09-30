@@ -69,6 +69,7 @@ from .const import (
     CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED,
     CONF_VLM_PROMPT_EXTRA,
     CONF_VLM_RESPONSE_LANGUAGE,
+    CONF_VOICE_TOOL_ACK,
     CONFIG_ENTRY_VERSION,
     CRITICAL_PIN_MAX_LEN,
     CRITICAL_PIN_MIN_LEN,
@@ -730,6 +731,10 @@ async def _schema_for_options(
     schema.update(
         {
             vol.Optional(
+                CONF_VOICE_TOOL_ACK,
+                description={"suggested_value": opts.get(CONF_VOICE_TOOL_ACK, "")},
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+            vol.Optional(
                 _CONF_STT_FILTERS_SECTION,
                 default="speech_input_filters",
             ): ConstantSelector(
@@ -912,6 +917,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             CONF_NOTIFY_SERVICE,
             CONF_VLM_RESPONSE_LANGUAGE,
             CONF_VLM_PROMPT_EXTRA,
+            CONF_VOICE_TOOL_ACK,
         ):
             if not _get_str(final_options, k):
                 final_options.pop(k, None)
@@ -1028,6 +1034,11 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
 
         # Merge new input for non-validated fields
         options.update(user_input or {})
+        # The frontend omits an optional text field the user emptied, so an
+        # always-rendered field that is absent was cleared; update() alone
+        # would keep the stored value and the feature could not be turned off.
+        if CONF_VOICE_TOOL_ACK not in user_input:
+            options.pop(CONF_VOICE_TOOL_ACK, None)
         errors: dict[str, str] = {}
 
         # Field-specific edits with validation/normalization

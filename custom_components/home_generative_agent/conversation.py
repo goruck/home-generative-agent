@@ -79,6 +79,7 @@ from .const import (
     CONF_SENTINEL_NETWORK_ENABLED,
     CONF_STT_HALLUCINATION_EXACT_PATTERNS,
     CONF_STT_HALLUCINATION_PATTERNS,
+    CONF_VOICE_TOOL_ACK,
     CRITICAL_ACTION_PROMPT,
     DEFAULT_STT_HALLUCINATION_EXACT_PATTERNS,
     DEFAULT_STT_HALLUCINATION_PATTERNS,
@@ -106,6 +107,7 @@ from .core.utils import (
 
 if TYPE_CHECKING:
     from collections.abc import (
+        AsyncGenerator,
         AsyncIterable,
         AsyncIterator,
         Callable,
@@ -545,6 +547,28 @@ def _nonstreaming_text(event: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _voice_tool_acknowledgement(
+    options: Mapping[str, Any], user_input: conversation.ConversationInput
+) -> str:
+    """
+    Return the configured pre-tool acknowledgement for a voice turn, else "".
+
+    Only an Assist satellite turn counts: a device id alone is also sent with
+    typed pipeline runs (for area context), so it does not mean anyone is
+    listening. Commands matched by local intents never reach this agent.
+
+    A missing sentence mark is added, because a streaming TTS engine holds
+    text back until it sees a sentence end, and without one the phrase would
+    wait for the answer instead of filling the tool run.
+    """
+    if not user_input.satellite_id:
+        return ""
+    text = str(options.get(CONF_VOICE_TOOL_ACK) or "").strip()
+    if text and not text.rstrip(_ACK_CLOSERS).endswith(_ACK_SENTENCE_ENDINGS):
+        text += "."
+    return text
+
+
 def _get_stt_hallucination_patterns(
     options: dict[str, Any],
 ) -> tuple[str, ...]:
@@ -601,6 +625,21 @@ def _is_stt_hallucination(
     )
 
 
+# Mirrors tts._SENTENCE_ENDINGS / _SENTENCE_CLOSERS: marks that end a
+# sentence, and quotes or brackets that may follow one.
+_ACK_SENTENCE_ENDINGS = (
+    ".",
+    "!",
+    "?",
+    "\u2026",
+    "\u3002",
+    "\uff01",
+    "\uff1f",
+    "\u061f",
+    "\u0964",
+    "\u0965",
+)
+_ACK_CLOSERS = "\"')]}\u00bb\u201d\u2019\u300d\u300f"
 _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
 # Searched in the original text: indexing str.lower() would misplace every cut
@@ -722,10 +761,40 @@ class _ThinkStreamFilter:
         return tail
 
 
+async def _with_tool_acknowledgement(
+    deltas: AsyncGenerator[AssistantContentDeltaDict | ToolResultContentDeltaDict],
+    acknowledgement: str,
+) -> AsyncIterator[AssistantContentDeltaDict | ToolResultContentDeltaDict]:
+    """
+    Insert ``acknowledgement`` as text just ahead of the turn's first tool call.
+
+    The Assist pipeline starts streaming speech when an assistant message has
+    text and then a tool call, so this is what a voice satellite says while
+    the tools run instead of staying silent (#671). Skipped when the model
+    already wrote text before the call (it says something itself), and used
+    at most once per turn. The text lives only in chat_log, never in the
+    graph's thread, so the model never sees it.
+    """
+    wrote_text = False
+    async with contextlib.aclosing(deltas):
+        async for delta in deltas:
+            if delta.get("role"):
+                wrote_text = False
+            if str(delta.get("content") or "").strip():
+                wrote_text = True
+            if delta.get("tool_calls") and acknowledgement:
+                if not wrote_text:
+                    # The trailing space keeps the answer that follows the
+                    # tools from running into this sentence in the TTS text.
+                    yield AssistantContentDeltaDict(content=f"{acknowledgement} ")
+                acknowledgement = ""
+            yield delta
+
+
 async def _stream_langgraph_to_ha(
     event_stream: AsyncIterable[Mapping[str, Any]],
     _agent_id: str,
-) -> AsyncIterator[AssistantContentDeltaDict | ToolResultContentDeltaDict]:
+) -> AsyncGenerator[AssistantContentDeltaDict | ToolResultContentDeltaDict]:
     """
     Transform LangGraph astream_events into HA ChatLog deltas.
 
@@ -1362,13 +1431,14 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         _populate_chat_log_from_response(chat_log, self.entity_id, processed_messages)
 
-    async def _async_run_astream(
+    async def _async_run_astream(  # noqa: PLR0913
         self,
         app: Any,
         input_data: State,
         config: RunnableConfig,
         chat_log: conversation.ChatLog,
         tools: list[dict[str, Any]] | None,
+        tool_acknowledgement: str = "",
     ) -> None:
         """Handle the streaming astream_events path."""
         hass = self.hass
@@ -1380,7 +1450,10 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             )
             async for _ in chat_log.async_add_delta_content_stream(
                 self.entity_id,
-                _stream_langgraph_to_ha(event_stream, self.entity_id),
+                _with_tool_acknowledgement(
+                    _stream_langgraph_to_ha(event_stream, self.entity_id),
+                    tool_acknowledgement,
+                ),
             ):
                 pass
 
@@ -1695,7 +1768,14 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     response=intent_response, conversation_id=conversation_id
                 )
         else:
-            await self._async_run_astream(app, app_input, app_config, chat_log, tools)
+            await self._async_run_astream(
+                app,
+                app_input,
+                app_config,
+                chat_log,
+                tools,
+                _voice_tool_acknowledgement(options, user_input),
+            )
 
         # Guard against a turn that committed no reply (e.g. a HomeAssistantError
         # swallowed mid-stream and a state recovery that raised too). Earlier
