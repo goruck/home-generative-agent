@@ -1667,21 +1667,30 @@ both left by [#675](https://github.com/goruck/home-generative-agent/pull/675):
    the #491 field bug's exact shape.
 
 **Why:** Found by the Claude adversarial pass on #675 (confidence 5 for 1, 5 for
-2). Deferred by Lindo (2026-09-30): #675 ships the field fix for beta.4. Both
-gaps close with one image-age rule, and whether that rule works depends on the
-`timestamp` data asked of @andymcmanus on #491: whether ring-mqtt keeps bumping
-`timestamp` while serving an unchanged image. If it does, the rule below cannot
-see the frozen frame and a hash-based rule is needed instead.
+2). Deferred by Lindo (2026-09-30): #675 ships the field fix for beta.4. The
+first plan was one image-age rule keyed on ring-mqtt's `timestamp`. That rule
+cannot work: @andymcmanus's recorder history on #491 (2026-09-30) shows
+ring-mqtt restamps every on-demand snapshot with its serve time even while the
+image is frozen (the image froze at 13:09, `timestamp` jumped to 14:01 with no
+motion, and the 14:14/14:18 phantom frames carried the 14:01 stamp, well inside
+the 30 min stale gate). `timestamp` means "when the frame was handed over", not
+"when the scene happened", so the discriminator has to be the image itself.
 
-**How to apply:** Tag each capture with the snapshot camera's ring-mqtt
-`timestamp` (image epoch, already read by `_retained_frame_is_stale`) when it
-is taken. Displace, and after an admit refuse to hold, only snapshots whose
-image epoch predates the event, instead of every non-clip frame. `started` is
-eventId *detection* time (ring-mqtt polls ~1 min, see the item above), so allow
-a documented skew (~90 s) rather than a strict comparison. Keep the current
-all-snapshots rule as the fallback when a camera publishes no `timestamp`.
-Tests: parked buffer with a fresh post-trigger snapshot survives; frozen
-re-capture rejected when no snapshot preceded the clip.
+**How to apply:** Hash-based, per camera rather than per window. Keep the hash of
+the last snapshot captured before each event's trigger (the frame ring-mqtt was
+serving when the event started) in camera-scoped state that survives window
+resets. (1) When a clip displaces a parked buffer, drop only snapshots that are
+near-duplicates of that pre-trigger hash; a snapshot that differs from it is a
+post-trigger change and stays. (2) After an admit, refuse re-captures that match
+the pre-trigger hash even when this window never accepted a snapshot, which
+closes the "clip landed first" case. Keep the current all-snapshots rule as the
+fallback when no pre-trigger hash exists (first capture after startup). Do not
+use `timestamp` as an image-age signal for battery cameras. Tests: parked buffer
+with a changed post-trigger snapshot survives; frozen re-capture rejected when
+no snapshot preceded the clip; frozen frame with a fresh `timestamp` still
+rejected. Field repro: andymcmanus's battery doorbell (motion sensor off, a
+passing car fires `event_select`) reproduces it reliably and he offered to soak
+test.
 
 **Effort:** S–M
 **Priority:** P2
