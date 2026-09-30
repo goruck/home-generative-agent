@@ -577,6 +577,9 @@ TTS_SPEED_DEFAULT = 1.0
 TTS_OPENAI_RESPONSE_FORMATS = frozenset({"mp3", "opus", "aac", "flac", "wav", "pcm"})
 TTS_LOCAL_RESPONSE_FORMATS = frozenset({"mp3", "flac", "wav", "pcm"})
 TTS_DEFAULT_RESPONSE_FORMAT = "mp3"
+# Streamed replies are synthesized per sentence batch and concatenated, which
+# only yields a valid stream for a frame-based format both backends produce.
+TTS_STREAM_RESPONSE_FORMAT = "mp3"
 
 # ---------------- Chat model ----------------
 CHAT_MODEL_TOP_P = 1.0

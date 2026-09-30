@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from types import MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -10,6 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 import httpx
 import pytest
 from homeassistant.components.tts import ATTR_PREFERRED_FORMAT, ATTR_VOICE
+from homeassistant.components.tts.entity import TTSAudioRequest
 from homeassistant.exceptions import HomeAssistantError
 from openai import AuthenticationError, Omit, OpenAIError
 from openai._models import FinalRequestOptions
@@ -34,9 +36,12 @@ from custom_components.home_generative_agent.core import openai_endpoint
 from custom_components.home_generative_agent.tts import HGATtsEntity
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import AsyncGenerator, Mapping
 
-AUDIO = b"ID3\x00fake-mp3-bytes"
+# A well-formed ID3v2 tag (4-byte body) followed by stand-in mp3 frames; joined
+# stream pieces after the first arrive without the tag.
+MP3_FRAMES = b"\xff\xfbfake-mp3-frames"
+AUDIO = b"ID3\x04\x00\x00\x00\x00\x00\x04TAG!" + MP3_FRAMES
 LOCAL_BASE_URL = "http://speaches-box:8000/v1"
 
 
@@ -89,7 +94,15 @@ def _make_entity(
         )
     entry = _FakeEntry(subentries)
     entity = HGATtsEntity(cast("Any", entry), "tts_1")
-    entity.hass = cast("Any", SimpleNamespace(config=SimpleNamespace(language="en")))
+    entity.hass = cast(
+        "Any",
+        SimpleNamespace(
+            config=SimpleNamespace(language="en"),
+            async_create_background_task=lambda coro, name: asyncio.create_task(
+                coro, name=name
+            ),
+        ),
+    )
     entity.entity_id = "tts.hga_test"
     return entity, entry
 
@@ -468,6 +481,294 @@ async def test_unknown_provider_type_fails(patched_client: Any) -> None:
     with pytest.raises(HomeAssistantError, match="Unsupported"):
         await _speak(entity)
     assert patched_client["constructed"] == []
+
+
+# ---------------------------------------------------------------- streaming
+
+
+def _stub_client(entity: HGATtsEntity, seen: list[dict[str, Any]]) -> None:
+    """Stub every client the entity builds, recording each request."""
+    original = entity._get_client
+
+    def _wrapped(api_key: str, base_url: str | None = None) -> Any:
+        client = original(api_key, base_url)
+        _install_stub(client, [], seen)
+        return client
+
+    entity._get_client = _wrapped  # type: ignore[method-assign]
+
+
+async def _text(*chunks: str) -> AsyncGenerator[str]:
+    """Yield a whole message at once, as tts.speak does."""
+    for chunk in chunks:
+        yield chunk
+
+
+async def _live(*chunks: str) -> AsyncGenerator[str]:
+    """Yield a reply that is still being written when synthesis starts."""
+    await asyncio.sleep(hga_tts.TTS_ONE_SHOT_GRACE_S * 3)
+    for chunk in chunks:
+        yield chunk
+
+
+async def _stream(
+    entity: HGATtsEntity, message_gen: Any, options: dict[str, Any] | None = None
+) -> tuple[str, list[bytes]]:
+    merged = {**entity.default_options, **(options or {})}
+    response = await entity.async_stream_tts_audio(
+        TTSAudioRequest("en-US", merged, message_gen)
+    )
+    return response.extension, [chunk async for chunk in response.data_gen]
+
+
+def test_entity_supports_streaming_input() -> None:
+    """The override is what lets the Assist pipeline stream text to us."""
+    entity, _ = _make_entity()
+    assert entity.async_supports_streaming_input()
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_stream_speaks_first_sentence_before_text_ends() -> None:
+    """Audio for the first sentence is produced while the reply is unfinished."""
+    entity, _ = _make_entity()
+    seen: list[dict[str, Any]] = []
+    _stub_client(entity, seen)
+    release = asyncio.Event()
+
+    async def _slow_reply() -> AsyncGenerator[str]:
+        yield "Let me check the landing light. "
+        yield "It was"
+        await release.wait()
+        yield " turned off by the evening automation."
+
+    response = await entity.async_stream_tts_audio(
+        TTSAudioRequest("en-US", dict(entity.default_options), _slow_reply())
+    )
+    first = await anext(response.data_gen)
+    assert first == AUDIO
+    assert [req["input"] for req in seen] == ["Let me check the landing light."]
+
+    release.set()
+    rest = [chunk async for chunk in response.data_gen]
+    assert rest == [MP3_FRAMES]
+    assert seen[1]["input"] == "It was turned off by the evening automation."
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_stream_speaks_held_sentence_when_text_pauses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A finished sentence followed by silence is spoken during the silence.
+
+    The splitter holds "Let me check." until the next word, and on a tool turn
+    the next word comes only after the tools return; the idle flush is what
+    lets the acknowledgement fill that gap.
+    """
+    monkeypatch.setattr(hga_tts, "TTS_STREAM_IDLE_FLUSH_S", 0.01)
+    entity, _ = _make_entity()
+    seen: list[dict[str, Any]] = []
+    _stub_client(entity, seen)
+    tools_done = asyncio.Event()
+
+    async def _tool_turn() -> AsyncGenerator[str]:
+        yield "Let me check."
+        await tools_done.wait()
+        yield " The landing light is off."
+
+    response = await entity.async_stream_tts_audio(
+        TTSAudioRequest("en-US", dict(entity.default_options), _tool_turn())
+    )
+    assert await anext(response.data_gen) == AUDIO
+    assert [req["input"] for req in seen] == ["Let me check."]
+
+    tools_done.set()
+    assert [chunk async for chunk in response.data_gen] == [MP3_FRAMES]
+    assert seen[1]["input"] == "The landing light is off."
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_stream_pause_mid_sentence_keeps_the_fragment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pause inside a sentence does not cut it into two utterances."""
+    monkeypatch.setattr(hga_tts, "TTS_STREAM_IDLE_FLUSH_S", 0.01)
+    entity, _ = _make_entity()
+    seen: list[dict[str, Any]] = []
+    _stub_client(entity, seen)
+
+    async def _slow() -> AsyncGenerator[str]:
+        yield "The landing light"
+        await asyncio.sleep(0.05)
+        yield " is off."
+
+    _, audio = await _stream(entity, _slow())
+    assert audio == [AUDIO]
+    assert [req["input"] for req in seen] == ["The landing light is off."]
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_stream_batches_sentences_after_the_first() -> None:
+    """Sentences that arrive together after the first share one request."""
+    entity, _ = _make_entity()
+    seen: list[dict[str, Any]] = []
+    _stub_client(entity, seen)
+    extension, audio = await _stream(
+        entity, _live("One is short. Two follows. ", "Three ends it.")
+    )
+    assert extension == "mp3"
+    assert audio == [AUDIO, MP3_FRAMES]
+    assert [req["input"] for req in seen] == [
+        "One is short.",
+        "Two follows. Three ends it.",
+    ]
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_live_stream_forces_mp3_whatever_the_preference() -> None:
+    """Per-batch files are concatenated, so only mp3 is requested."""
+    entity, _ = _make_entity()
+    seen: list[dict[str, Any]] = []
+    _stub_client(entity, seen)
+    extension, _ = await _stream(
+        entity, _live("Hello there."), {ATTR_PREFERRED_FORMAT: "flac"}
+    )
+    assert extension == "mp3"
+    assert seen[0]["response_format"] == "mp3"
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_one_shot_message_is_one_request_in_the_preferred_format() -> None:
+    """tts.speak text arrives whole: no splitting, no mp3 join, no transcode."""
+    entity, _ = _make_entity()
+    seen: list[dict[str, Any]] = []
+    _stub_client(entity, seen)
+    extension, audio = await _stream(
+        entity,
+        _text("The front door is open. ", "The garage is closed."),
+        {ATTR_PREFERRED_FORMAT: "flac"},
+    )
+    assert extension == "flac"
+    assert audio == [AUDIO]
+    assert [(req["input"], req["response_format"]) for req in seen] == [
+        ("The front door is open. The garage is closed.", "flac")
+    ]
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_stream_stops_waiting_when_text_never_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn the pipeline never finishes does not leave synthesis waiting."""
+    monkeypatch.setattr(hga_tts, "TTS_STREAM_TEXT_TIMEOUT_S", 0.2)
+    entity, _ = _make_entity()
+    seen: list[dict[str, Any]] = []
+    _stub_client(entity, seen)
+
+    async def _abandoned() -> AsyncGenerator[str]:
+        await asyncio.sleep(0.1)
+        yield "Let me check."
+        await asyncio.Event().wait()  # the agent failed; no end ever comes
+        yield "unreachable"
+
+    _, audio = await _stream(entity, _abandoned())
+    assert audio == [AUDIO]
+    assert [req["input"] for req in seen] == ["Let me check."]
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_stream_pause_after_word_keeps_the_space(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pause after a space must not glue the next word onto the last one."""
+    monkeypatch.setattr(hga_tts, "TTS_STREAM_IDLE_FLUSH_S", 0.01)
+    entity, _ = _make_entity()
+    seen: list[dict[str, Any]] = []
+    _stub_client(entity, seen)
+
+    async def _slow() -> AsyncGenerator[str]:
+        await asyncio.sleep(0.2)
+        yield "Here is the list:\n"
+        await asyncio.sleep(0.05)
+        yield "first the temperature is "
+        await asyncio.sleep(0.05)
+        yield "21 degrees."
+
+    await _stream(entity, _slow())
+    assert " ".join(req["input"] for req in seen) == (
+        "Here is the list:\nfirst the temperature is 21 degrees."
+    )
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_stream_flushes_sentence_ending_in_a_quote(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A closing quote after the full stop still ends the sentence."""
+    monkeypatch.setattr(hga_tts, "TTS_STREAM_IDLE_FLUSH_S", 0.01)
+    entity, _ = _make_entity()
+    seen: list[dict[str, Any]] = []
+    _stub_client(entity, seen)
+    release = asyncio.Event()
+
+    async def _quoted() -> AsyncGenerator[str]:
+        await asyncio.sleep(0.2)
+        yield 'I will check the "Kitchen" sensor (one moment.)'
+        await release.wait()
+        yield " Done."
+
+    response = await entity.async_stream_tts_audio(
+        TTSAudioRequest("en-US", dict(entity.default_options), _quoted())
+    )
+    assert await anext(response.data_gen) == AUDIO
+    release.set()
+    assert [chunk async for chunk in response.data_gen] == [MP3_FRAMES]
+
+
+def test_strip_id3_leaves_untagged_audio_alone() -> None:
+    """Only a real ID3v2 header is removed."""
+    assert hga_tts._strip_id3(AUDIO) == MP3_FRAMES
+    assert hga_tts._strip_id3(MP3_FRAMES) == MP3_FRAMES
+    assert hga_tts._strip_id3(b"ID3") == b"ID3"
+
+
+async def test_stream_of_whitespace_is_rejected(patched_client: Any) -> None:
+    """A stream with no speakable text fails without a request."""
+    entity, _ = _make_entity()
+    with pytest.raises(HomeAssistantError, match="No text"):
+        await _stream(entity, _text("  ", "\n"))
+    assert patched_client["constructed"] == []
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_stream_backend_error_raises_home_assistant_error() -> None:
+    """A failed batch surfaces the same error as the buffered path."""
+    entity, _ = _make_entity()
+    original = entity._get_client
+
+    def _wrapped(api_key: str, base_url: str | None = None) -> Any:
+        client = original(api_key, base_url)
+        _install_stub(client, [_openai_error()], [])
+        return client
+
+    entity._get_client = _wrapped  # type: ignore[method-assign]
+    with pytest.raises(HomeAssistantError, match="request failed"):
+        await _stream(entity, _text("Hello there."))
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_stream_text_failure_is_raised() -> None:
+    """A text stream that dies mid-reply is not swallowed as a short reply."""
+    entity, _ = _make_entity()
+    _stub_client(entity, [])
+
+    async def _broken() -> AsyncGenerator[str]:
+        yield "First part. "
+        msg = "agent crashed"
+        raise RuntimeError(msg)
+
+    with pytest.raises(RuntimeError, match="agent crashed"):
+        await _stream(entity, _broken())
 
 
 # ------------------------------------------------------------------- voices

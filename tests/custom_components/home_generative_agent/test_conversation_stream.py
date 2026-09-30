@@ -938,3 +938,141 @@ async def test_nonstreaming_text_matches_graph_state_for_multiline_reply() -> No
     streamed = await _streamed_text(event_stream())
 
     assert streamed == extract_final(reply, collapse_whitespace=False)
+
+
+def _chunked_turn(
+    *chunks: str, tool_calls: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
+    """One streamed model turn: start, one stream event per chunk, end."""
+    events: list[dict[str, Any]] = [
+        {"event": "on_chat_model_start", "metadata": {"langgraph_node": "agent"}}
+    ]
+    events.extend(
+        {
+            "event": "on_chat_model_stream",
+            "metadata": {"langgraph_node": "agent"},
+            "data": {"chunk": AIMessageChunk(content=chunk)},
+        }
+        for chunk in chunks
+    )
+    events.append(
+        {
+            "event": "on_chat_model_end",
+            "metadata": {"langgraph_node": "agent"},
+            "data": {
+                "output": AIMessage(
+                    content="".join(chunks), tool_calls=tool_calls or []
+                )
+            },
+        }
+    )
+    return events
+
+
+async def _replay(events: list[dict[str, Any]]) -> AsyncGenerator[dict[str, Any]]:
+    for event in events:
+        yield event
+
+
+@pytest.mark.asyncio
+async def test_stream_drops_think_block_split_across_deltas() -> None:
+    """Inline reasoning never reaches the chat_log, so a voice pipeline never speaks it."""
+    chunks = ("<thi", "nk>The user wants the lig", "ht.</th", "ink>\n\nIt is ", "on.")
+    streamed = await _streamed_text(_replay(_chunked_turn(*chunks)))
+
+    assert streamed == "It is on."
+    assert streamed == extract_final("".join(chunks), collapse_whitespace=False)
+
+
+@pytest.mark.asyncio
+async def test_stream_drops_unclosed_think_block() -> None:
+    """A block the model never closes runs to the end of the turn, like extract_final."""
+    streamed = await _streamed_text(
+        _replay(_chunked_turn("Sure. ", "<think>still reasoning", " about it"))
+    )
+
+    assert streamed == "Sure. "
+
+
+@pytest.mark.asyncio
+async def test_stream_keeps_angle_brackets_that_are_not_tags() -> None:
+    """A held tag prefix that never completes is released at the end of the turn."""
+    streamed = await _streamed_text(_replay(_chunked_turn("If a < b then ", "use <th")))
+
+    assert streamed == "If a < b then use <th"
+
+
+@pytest.mark.asyncio
+async def test_stream_releases_held_text_before_tool_calls() -> None:
+    """Text held as a possible tag is emitted ahead of the turn's tool calls."""
+    events = _chunked_turn(
+        "Let me check <",
+        tool_calls=[{"name": "get_state", "args": {}, "id": "call_1"}],
+    )
+    deltas = [d async for d in _stream_langgraph_to_ha(_replay(events), "agent_1")]
+
+    assert deltas[0] == {"role": "assistant"}
+    assert deltas[1] == {"content": "Let me check "}
+    assert deltas[2] == {"content": "<"}
+    assert "tool_calls" in deltas[3]
+
+
+@pytest.mark.asyncio
+async def test_nonstreaming_text_drops_think_block() -> None:
+    """The on_chat_model_end fallback path strips inline reasoning too."""
+    reply = "<think>reasoning</think>\n\nThe door is locked."
+
+    async def event_stream() -> AsyncGenerator[dict[str, Any]]:
+        yield {"event": "on_chat_model_start", "metadata": {"langgraph_node": "agent"}}
+        yield {
+            "event": "on_chat_model_end",
+            "metadata": {"langgraph_node": "agent"},
+            "data": {"output": AIMessage(content=reply)},
+        }
+
+    assert await _streamed_text(event_stream()) == "The door is locked."
+
+
+@pytest.mark.asyncio
+async def test_nonstreaming_think_only_reply_streams_nothing() -> None:
+    """A reply that is all reasoning is not delivered as the answer."""
+
+    async def event_stream() -> AsyncGenerator[dict[str, Any]]:
+        yield {"event": "on_chat_model_start", "metadata": {"langgraph_node": "agent"}}
+        yield {
+            "event": "on_chat_model_end",
+            "metadata": {"langgraph_node": "agent"},
+            "data": {"output": AIMessage(content="<think>only reasoning")},
+        }
+
+    assert await _streamed_text(event_stream()) == ""
+
+
+@pytest.mark.asyncio
+async def test_think_filter_survives_characters_that_lengthen_when_lowered() -> None:
+    """Turkish "İ" lowers to two characters; the answer must not lose any."""
+    streamed = await _streamed_text(
+        _replay(_chunked_turn("<think>İyi İstanbul</think>", "Merhaba dünya"))
+    )
+
+    assert streamed == "Merhaba dünya"
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        ("Hello<think>x</think> world",),
+        ("Sure. <think>x</think> ok",),
+        ("<think>x</think>Answer\n",),
+        ("<thi", "nk>x</think>\n\nLine one.\n\n", "Line two.\n"),
+        ("Intro ", "<think>a</think>", " middle ", "<THINK>b</think>", " end\n"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_think_filter_whitespace_matches_extract_final(
+    chunks: tuple[str, ...],
+) -> None:
+    """Only the reply's outer whitespace goes; words are never glued together."""
+    streamed = await _streamed_text(_replay(_chunked_turn(*chunks)))
+
+    assert streamed == extract_final("".join(chunks), collapse_whitespace=False)

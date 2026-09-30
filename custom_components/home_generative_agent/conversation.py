@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import re
 import string
 from collections import deque
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -97,13 +98,18 @@ from .core.conversation_helpers import (
     _maybe_fix_dashboard_entities,
 )
 from .core.pipeline_guard import async_check_pin_pipeline_conflict
-from .core.utils import gather_store_puts_in_chunks, local_chat_session
+from .core.utils import (
+    extract_final,
+    gather_store_puts_in_chunks,
+    local_chat_session,
+)
 
 if TYPE_CHECKING:
     from collections.abc import (
         AsyncIterable,
         AsyncIterator,
         Callable,
+        Iterable,
         Mapping,
     )
 
@@ -595,6 +601,127 @@ def _is_stt_hallucination(
     )
 
 
+_THINK_OPEN = "<think>"
+_THINK_CLOSE = "</think>"
+# Searched in the original text: indexing str.lower() would misplace every cut
+# after a character whose lowercase is longer (Turkish "İ" becomes two).
+_THINK_OPEN_RE = re.compile(re.escape(_THINK_OPEN), re.IGNORECASE)
+_THINK_CLOSE_RE = re.compile(re.escape(_THINK_CLOSE), re.IGNORECASE)
+
+
+def _partial_tag_len(text: str, tag: str) -> int:
+    """Return how many trailing chars of ``text`` could start ``tag``."""
+    for size in range(min(len(tag) - 1, len(text)), 0, -1):
+        if text[-size:].lower() == tag[:size]:
+            return size
+    return 0
+
+
+class _ThinkStreamFilter:
+    """
+    Drop ``<think>`` blocks from streamed text, as extract_final does whole.
+
+    A voice pipeline speaks the deltas as they arrive, before the cleaned
+    final text replaces the streamed copy, so reasoning a model writes inline
+    (qwen3 or deepseek-r1 behind a server without a reasoning parser) has to
+    be removed here or it is read aloud. Tags can straddle deltas, so a
+    possible tag prefix at the end of a delta is held until the next one.
+    An unclosed block runs to the end of the model turn, like extract_final.
+
+    Whitespace follows extract_final(collapse_whitespace=False): once a block
+    has been removed, the reply's outer whitespace is stripped and nothing
+    inside it is touched. Leading whitespace is dropped until the first
+    visible text; trailing whitespace is held until more text follows it and
+    dropped at the end of the turn.
+    """
+
+    def __init__(self) -> None:
+        self._reset()
+
+    def _reset(self) -> None:
+        """Start a new model turn."""
+        self._pending = ""
+        self._inside = False
+        self._removed = False
+        self._emitted = False
+        self._held_space = ""
+
+    def _visible(self, text: str) -> str:
+        """Apply the outer-whitespace rule to text outside any block."""
+        text = self._held_space + text
+        self._held_space = ""
+        if self._removed:
+            if not self._emitted:
+                text = text.lstrip()
+            body = text.rstrip()
+            self._held_space = text[len(body) :]
+            text = body
+        if text:
+            self._emitted = True
+        return text
+
+    def feed(self, text: str) -> str:
+        """Return the part of ``text`` that is safe to show and speak."""
+        self._pending += text
+        out: list[str] = []
+        while self._pending:
+            if self._inside:
+                close = _THINK_CLOSE_RE.search(self._pending)
+                if close is None:
+                    keep = _partial_tag_len(self._pending, _THINK_CLOSE)
+                    self._pending = self._pending[len(self._pending) - keep :]
+                    break
+                self._pending = self._pending[close.end() :]
+                self._inside = False
+                continue
+            opening = _THINK_OPEN_RE.search(self._pending)
+            if opening is not None:
+                out.append(self._visible(self._pending[: opening.start()]))
+                self._pending = self._pending[opening.end() :]
+                self._inside = True
+                self._removed = True
+                continue
+            keep = _partial_tag_len(self._pending, _THINK_OPEN)
+            out.append(self._visible(self._pending[: len(self._pending) - keep]))
+            self._pending = self._pending[len(self._pending) - keep :]
+            break
+        return "".join(out)
+
+    def filter(
+        self,
+        event_type: Any,
+        deltas: Iterable[AssistantContentDeltaDict | ToolResultContentDeltaDict],
+    ) -> Iterator[AssistantContentDeltaDict | ToolResultContentDeltaDict]:
+        """
+        Yield one event's ``deltas`` with content filtered; drop emptied ones.
+
+        Model-call boundaries end a turn: a start discards anything a failed
+        turn left held, an end releases text held as a possible tag ahead of
+        the turn's tool calls.
+        """
+        if event_type == "on_chat_model_start":
+            self.flush()
+        elif event_type == "on_chat_model_end" and (tail := self.flush()):
+            yield AssistantContentDeltaDict(content=tail)
+        for delta in deltas:
+            if content := delta.get("content"):
+                text = self.feed(content)
+                if not text:
+                    continue
+                yield cast(
+                    "AssistantContentDeltaDict | ToolResultContentDeltaDict",
+                    {**delta, "content": text},
+                )
+            else:
+                yield delta
+
+    def flush(self) -> str:
+        """End the model turn: return held text that never became a tag."""
+        tail = "" if self._inside else self._visible(self._pending)
+        self._reset()
+        return tail
+
+
 async def _stream_langgraph_to_ha(
     event_stream: AsyncIterable[Mapping[str, Any]],
     _agent_id: str,
@@ -626,6 +753,7 @@ async def _stream_langgraph_to_ha(
     # Ollama, Gemini, or any provider with streaming disabled) never fire these
     # events, so text must be extracted from on_chat_model_end instead.
     text_streamed_in_turn: bool = False
+    think_filter = _ThinkStreamFilter()
 
     try:
         async for event in event_stream:
@@ -637,8 +765,9 @@ async def _stream_langgraph_to_ha(
             if node == "agent" and event_type == "on_chat_model_start":
                 text_streamed_in_turn = False
 
-            for delta in _process_stream_event(
-                event, pending_tool_map, unidentified_call_ids
+            for delta in think_filter.filter(
+                event_type,
+                _process_stream_event(event, pending_tool_map, unidentified_call_ids),
             ):
                 new_role = delta.get("role")
                 if new_role == "assistant" and active_role == "assistant":
@@ -658,6 +787,7 @@ async def _stream_langgraph_to_ha(
                 and event_type == "on_chat_model_end"
                 and not text_streamed_in_turn
                 and (text := _nonstreaming_text(event))
+                and (text := extract_final(text, collapse_whitespace=False))
             ):
                 text_streamed_in_turn = True
                 yield AssistantContentDeltaDict(content=text)
