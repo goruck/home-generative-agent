@@ -206,6 +206,14 @@ def _ends_sentence(text: str) -> bool:
 # reply's next sentences arrived -- and a Voice PE gives up on a response
 # that sends nothing for 2 s. The first piece is padded with silence past it.
 _CONVERTER_START_BYTES = 64 * 1024 + 4096
+# A Voice PE buffers only ~100 ms of speaker audio, and when a stream stalls
+# (the model thinking between sentences) it runs dry and its speaker makes a
+# brief click/"t" sound -- heard on streamed turns, never on one-shot speech
+# of the same text. While a reply waits for text or synthesis, silence is
+# fed paced to real time, keeping the stream this far ahead of playback;
+# speech is delayed by at most that much.
+TTS_STREAM_KEEPALIVE_S = 0.1
+TTS_STREAM_LEAD_S = 0.3
 _RIFF_HEADER_LEN = 12  # "RIFF", size, "WAVE"
 _PCM_FMT_LEN = 16  # the fields every WAV fmt chunk carries
 _UNSIGNED_SAMPLE_BITS = 8  # 8-bit WAV samples are unsigned; wider are signed
@@ -297,6 +305,44 @@ def _single_wav(data: bytes) -> bytes:
         + struct.pack("<I", len(piece.samples))
         + piece.samples
     )
+
+
+class _Pacer:
+    """Track audio sent against wall time, and top up with silence."""
+
+    def __init__(self, piece: _WavPiece, now: float) -> None:
+        self._piece = piece
+        self._byte_rate = max(struct.unpack_from("<I", piece.fmt, 8)[0], 1)
+        self._start = now
+        self._sent_s = 0.0
+
+    @property
+    def fmt(self) -> bytes:
+        """Return the stream's WAV format chunk."""
+        return self._piece.fmt
+
+    def sent(self, audio: bytes) -> bytes:
+        """Count ``audio`` as sent and return it."""
+        self._sent_s += len(audio) / self._byte_rate
+        return audio
+
+    def top_up(self, now: float) -> bytes:
+        """Return the silence that keeps the stream TTS_STREAM_LEAD_S ahead."""
+        deficit = (now - self._start) + TTS_STREAM_LEAD_S - self._sent_s
+        if deficit <= 0:
+            return b""
+        return self.sent(_silence(int(deficit * self._byte_rate), self._piece))
+
+
+async def _keep_fed(
+    task: asyncio.Future[Any], pacer: _Pacer | None
+) -> AsyncGenerator[bytes]:
+    """Yield paced silence until ``task`` is done (nothing before audio starts)."""
+    loop = asyncio.get_running_loop()
+    while not task.done():
+        await asyncio.wait({task}, timeout=TTS_STREAM_KEEPALIVE_S)
+        if not task.done() and pacer is not None and (gap := pacer.top_up(loop.time())):
+            yield gap
 
 
 def _streaming_wav_header(fmt: bytes) -> bytes:
@@ -645,11 +691,16 @@ class HGATtsEntity(TextToSpeechEntity):
         """Yield audio per sentence batch as the text stream completes them."""
         spoke = False
         finished = False
-        stream_fmt: bytes | None = None
+        pacer: _Pacer | None = None
+        pending: asyncio.Future[Any] | None = None
+        loop = asyncio.get_running_loop()
         try:
             while not finished:
                 batch: list[str] = []
-                item = await sentences.get()
+                pending = asyncio.ensure_future(sentences.get())
+                async for gap in _keep_fed(pending, pacer):
+                    yield gap
+                item = pending.result()
                 # The first sentence goes alone so audio starts as early as
                 # possible; after that, one request covers everything that
                 # arrived while the previous batch was being synthesized.
@@ -662,32 +713,19 @@ class HGATtsEntity(TextToSpeechEntity):
                 text = " ".join(batch).strip()
                 if not text:
                     continue
-                _extension, audio = await self._synthesize(text, options)
-                try:
-                    piece = _parse_wav(audio)
-                except ValueError as err:
-                    msg = f"TTS backend returned unreadable WAV for {self.entity_id}"
-                    raise HomeAssistantError(msg) from err
-                if stream_fmt is None:
-                    stream_fmt = piece.fmt
-                    header = _streaming_wav_header(piece.fmt)
-                    pad = _CONVERTER_START_BYTES - len(header) - len(piece.samples)
-                    yield header + piece.samples + _silence(pad, piece)
-                elif piece.fmt != stream_fmt:
-                    # One voice keeps one format; a change mid-reply cannot be
-                    # spliced into the same stream, so that batch is skipped.
-                    LOGGER.warning(
-                        "TTS backend changed audio format mid-reply for %s; "
-                        "skipping %d characters",
-                        self.entity_id,
-                        len(text),
-                    )
+                pending = asyncio.ensure_future(self._synthesize(text, options))
+                async for gap in _keep_fed(pending, pacer):
+                    yield gap
+                _extension, audio = pending.result()
+                chunk, pacer = self._stream_bytes(audio, text, pacer, loop.time())
+                if chunk is None:
                     continue
-                else:
-                    yield piece.samples
+                yield chunk
                 spoke = True
         except BaseException:
             # Keep the failure (or GeneratorExit) that is propagating.
+            if pending is not None and not pending.done():
+                pending.cancel()
             await _finish_tasks(tasks, reraise=False)
             raise
         # Surface a failure of the text stream itself.
@@ -695,6 +733,37 @@ class HGATtsEntity(TextToSpeechEntity):
         if not spoke:
             msg = f"No text to synthesize for {self.entity_id}"
             raise HomeAssistantError(msg)
+
+    def _stream_bytes(
+        self, audio: bytes, text: str, pacer: _Pacer | None, now: float
+    ) -> tuple[bytes | None, _Pacer | None]:
+        """
+        Turn one synthesized batch into stream bytes; None skips the batch.
+
+        The first batch opens the stream: one open-ended WAV header, then its
+        samples padded past _CONVERTER_START_BYTES, and it starts the pacer.
+        """
+        try:
+            piece = _parse_wav(audio)
+        except ValueError as err:
+            msg = f"TTS backend returned unreadable WAV for {self.entity_id}"
+            raise HomeAssistantError(msg) from err
+        if pacer is None:
+            pacer = _Pacer(piece, now)
+            header = _streaming_wav_header(piece.fmt)
+            pad = _CONVERTER_START_BYTES - len(header) - len(piece.samples)
+            return header + pacer.sent(piece.samples + _silence(pad, piece)), pacer
+        if piece.fmt != pacer.fmt:
+            # One voice keeps one format; a change mid-reply cannot be spliced
+            # into the same stream, so that batch is skipped.
+            LOGGER.warning(
+                "TTS backend changed audio format mid-reply for %s; "
+                "skipping %d characters",
+                self.entity_id,
+                len(text),
+            )
+            return None, pacer
+        return pacer.sent(piece.samples), pacer
 
     async def _synthesize(
         self, message: str, options: Mapping[str, Any]
