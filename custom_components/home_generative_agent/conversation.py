@@ -198,6 +198,16 @@ else:
     set_debug(False)
 
 
+# Appended to the user message of a turn Home Assistant's own agent answered
+# with a tool (a local intent), so the model reads it as done. Model-facing.
+HANDLED_ELSEWHERE_NOTE = (
+    "(Home Assistant already handled this request directly: {answer})"
+)
+HANDLED_ELSEWHERE_NOTE_NO_ANSWER = (
+    "(Home Assistant already handled this request directly.)"
+)
+
+
 def _convert_content(
     content: conversation.UserContent | conversation.AssistantContent,
     message_id: str,
@@ -213,6 +223,25 @@ def _convert_content(
     if isinstance(content, conversation.UserContent):
         return HumanMessage(content=content.content or "", id=message_id)
     return AIMessage(content=content.content or "", id=message_id)
+
+
+def _spoken_answer(turn: list[tuple[int, Any]]) -> str:
+    """Return the text a turn ended with, or "" when it ended without one."""
+    for _, entry in reversed(turn[1:]):
+        if (
+            isinstance(entry, conversation.AssistantContent)
+            and not entry.tool_calls
+            and entry.content
+        ):
+            return entry.content.strip()
+    return ""
+
+
+def _handled_elsewhere(question: str, answer: str) -> str:
+    """Mark a request another agent already answered with a tool (#588, #671)."""
+    if answer:
+        return f"{question} {HANDLED_ELSEWHERE_NOTE.format(answer=answer)}"
+    return f"{question} {HANDLED_ELSEWHERE_NOTE_NO_ANSWER}"
 
 
 def _normalize_ai_content(content: str | list) -> str | None:
@@ -1152,9 +1181,20 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         message_history: list[HumanMessage | AIMessage] = []
         for turn in turns[last_own + 1 :]:
             index, user = turn[0]
-            message_history.append(_convert_content(user, _message_id(index)))
+            message = _convert_content(user, _message_id(index))
             if _used_tools(turn):
+                # The question alone reads as still unanswered, and a small
+                # model answers every such question again in its next reply,
+                # claiming actions it never took (issue #671; qwen3:8b 6/6).
+                # Saying in the USER message that it was handled, and how,
+                # stops that and keeps "turn it off" resolvable, without the
+                # assistant-prose shape #588 removed (0/6, 6/6 tool calls).
+                message.content = _handled_elsewhere(
+                    str(message.content), _spoken_answer(turn)
+                )
+                message_history.append(message)
                 continue
+            message_history.append(message)
             message_history.extend(
                 _convert_content(entry, _message_id(index)) for index, entry in turn[1:]
             )
