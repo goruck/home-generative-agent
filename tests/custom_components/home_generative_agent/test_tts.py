@@ -783,6 +783,55 @@ def test_parse_wav_handles_streaming_sizes_and_extra_chunks() -> None:
     assert piece.block_align == 2
 
 
+def test_parse_wav_reads_every_per_sentence_segment() -> None:
+    """
+    Speaches answers a multi-sentence request with one WAV file per sentence.
+
+    Field report (2026-10-01): reading only the first file cut a reply off
+    after its first sentence, a fraction of a second when it was "Yes.".
+    """
+    first, second = b"\x01\x00" * 50, b"\x02\x00" * 80
+    piece = hga_tts._parse_wav(_wav(first) + _wav(second))
+    assert piece.samples == first + second
+
+
+def test_parse_wav_runs_an_unknown_size_to_the_next_segment() -> None:
+    """A streaming-sized data chunk stops at the next RIFF header, not the end."""
+    first, second = b"\x01\x00" * 50, b"\x02\x00" * 80
+    unsized = bytearray(_wav(first))
+    unsized[unsized.index(b"data") + 4 : unsized.index(b"data") + 8] = b"\xff" * 4
+    piece = hga_tts._parse_wav(bytes(unsized) + _wav(second))
+    assert piece.samples == first + second
+
+
+def test_parse_wav_skips_a_segment_in_another_format() -> None:
+    """A segment that cannot be spliced in is dropped, not played as noise."""
+    first = b"\x01\x00" * 50
+    piece = hga_tts._parse_wav(_wav(first) + _wav(b"\x02\x00" * 80, rate=16000))
+    assert piece.samples == first
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_one_shot_wav_is_merged_into_one_file() -> None:
+    """tts.speak to a WAV player must not stop after the first sentence."""
+    entity, _ = _make_entity()
+    first, second = b"\x01\x00" * 50, b"\x02\x00" * 80
+    original = entity._get_client
+
+    def _wrapped(api_key: str, base_url: str | None = None) -> Any:
+        client = original(api_key, base_url)
+        _install_stub(client, [SimpleNamespace(content=_wav(first) + _wav(second))], [])
+        return client
+
+    entity._get_client = _wrapped  # type: ignore[method-assign]
+    extension, audio = await _stream(
+        entity, _text("One. Two."), {ATTR_PREFERRED_FORMAT: "wav"}
+    )
+
+    assert extension == "wav"
+    assert audio == [_wav(first + second)]
+
+
 @pytest.mark.parametrize("bad", [b"", b"ID3 not wav", b"RIFF\x00\x00\x00\x00WAVE"])
 def test_parse_wav_rejects_what_is_not_wav(bad: bytes) -> None:
     """A backend that ignored the format request fails clearly."""
