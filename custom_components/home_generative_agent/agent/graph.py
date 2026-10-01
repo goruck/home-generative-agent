@@ -39,6 +39,7 @@ from pydantic import ValidationError
 
 from custom_components.home_generative_agent.const import (
     ACTUATION_KEYWORDS_REGEX,
+    AFFIRMATIVE_FOLLOW_UP_REGEX,
     AUTOMATION_ACTION_KEYWORDS_REGEX,
     AUTOMATION_INTENT_MARKERS_REGEX,
     AUTOMATION_TRIGGER_CLAUSE_REGEX,
@@ -55,6 +56,7 @@ from custom_components.home_generative_agent.const import (
     CONF_TOOL_RELEVANCE_THRESHOLD,
     CONF_TOOL_RETRIEVAL_LIMIT,
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
+    MAX_AFFIRMATIVE_FOLLOW_UP_WORDS,
     MAX_REFERENTIAL_FOLLOW_UP_WORDS,
     NON_OPEN_ACTUATION_KEYWORDS_REGEX,
     OPEN_AS_STATE_REGEX,
@@ -1024,6 +1026,34 @@ def _is_referential_follow_up(query: str) -> bool:
     return bool(re.search(REFERENTIAL_FOLLOW_UP_REGEX, query))
 
 
+def _is_affirmative_follow_up(query: str) -> bool:
+    """Return True for a short reply accepting an offer ("Yes", "Sure, go ahead")."""
+    query = query[:_MAX_INTENT_SCAN_CHARS].strip()
+    if not query or len(query.split()) > MAX_AFFIRMATIVE_FOLLOW_UP_WORDS:
+        return False
+    return bool(re.search(AFFIRMATIVE_FOLLOW_UP_REGEX, query))
+
+
+_SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _offer_text(messages: Sequence[BaseMessage]) -> str:
+    """
+    Return the end of the agent's last spoken reply, where an offer sits.
+
+    Only the last two sentences: "The light is on because you asked. ...
+    Want me to turn it off?" carries its action target at the end, and a long
+    reply's earlier sentences would only add noise to the ranking.
+    """
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            continue
+        if isinstance(msg, AIMessage) and (text := _message_text(msg).strip()):
+            sentences = [s for s in _SENTENCE_END_RE.split(text) if s.strip()]
+            return " ".join(sentences[-2:])
+    return ""
+
+
 def _retrieval_query(messages: Sequence[BaseMessage]) -> str:
     """
     Build the query used to RANK tools, which is not always the user's words.
@@ -1049,6 +1079,27 @@ def _retrieval_query(messages: Sequence[BaseMessage]) -> str:
     if not messages:
         return ""
     current = _message_text(messages[-1])
+    if _is_affirmative_follow_up(current):
+        # "Yes" to "Want me to turn it off?": the target and the action are
+        # both in the agent's offer, so rank on it, the user's previous turn,
+        # and the reply itself (each searched separately; best score wins).
+        offer = _offer_text(messages[:-1])
+        previous = next(
+            (
+                _message_text(m).strip()
+                for m in reversed(messages[:-1])
+                if isinstance(m, HumanMessage)
+            ),
+            "",
+        )
+        parts = [p.rstrip(".!? ") for p in (previous, offer) if p]
+        if parts:
+            LOGGER.debug(
+                "Affirmative follow-up: widening the retrieval query with the "
+                "agent's offer (model input unchanged)"
+            )
+            return ". ".join([*parts, current])
+        return current
     if not _is_referential_follow_up(current):
         return current
     for msg in reversed(messages[:-1]):
