@@ -70,6 +70,7 @@ from .const import (
     CONF_VLM_PROMPT_EXTRA,
     CONF_VLM_RESPONSE_LANGUAGE,
     CONF_VOICE_TOOL_ACK,
+    CONF_VOICE_TOOL_ACK_TIMING,
     CONFIG_ENTRY_VERSION,
     CRITICAL_PIN_MAX_LEN,
     CRITICAL_PIN_MIN_LEN,
@@ -85,6 +86,7 @@ from .const import (
     RECOMMENDED_VIDEO_ANALYZER_UNIQUENESS_ENABLED,
     RECOMMENDED_VLM_PROMPT_EXTRA,
     RECOMMENDED_VLM_RESPONSE_LANGUAGE,
+    RECOMMENDED_VOICE_ACK_TIMING,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
     SUBENTRY_TYPE_SENTINEL,
@@ -93,6 +95,7 @@ from .const import (
     VIDEO_ANALYZER_MODE_ALWAYS_NOTIFY,
     VIDEO_ANALYZER_MODE_DISABLE,
     VIDEO_ANALYZER_MODE_NOTIFY_ON_ANOMALY,
+    VOICE_ACK_TIMINGS,
 )
 from .core.utils import (
     CannotConnectError,
@@ -734,6 +737,20 @@ async def _schema_for_options(
                 CONF_VOICE_TOOL_ACK,
                 description={"suggested_value": opts.get(CONF_VOICE_TOOL_ACK, "")},
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+            vol.Optional(
+                CONF_VOICE_TOOL_ACK_TIMING,
+                default=opts.get(
+                    CONF_VOICE_TOOL_ACK_TIMING, RECOMMENDED_VOICE_ACK_TIMING
+                ),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=list(VOICE_ACK_TIMINGS),
+                    mode=SelectSelectorMode.DROPDOWN,
+                    sort=False,
+                    custom_value=False,
+                    translation_key="voice_ack_timing",
+                )
+            ),
             vol.Optional(
                 _CONF_STT_FILTERS_SECTION,
                 default="speech_input_filters",

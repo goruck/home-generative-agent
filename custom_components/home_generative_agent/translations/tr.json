@@ -376,6 +376,12 @@
         "multipart": "Multipart yükleme (varsayılan)",
         "json_base64": "base64 sesli JSON"
       }
+    },
+    "voice_ack_timing": {
+      "options": {
+        "turn_start": "Ajan başlar başlamaz",
+        "tool_call": "İlk araç çağrısından önce"
+      }
     }
   },
   "exceptions": {
@@ -406,7 +412,8 @@
           "stt_filters_section": "Konuşma girişi filtreleri",
           "stt_hallucination_patterns": "Yok sayılan STT alt dizeleri",
           "stt_hallucination_exact_patterns": "Yok sayılan tam STT ifadeleri",
-          "voice_tool_acknowledgement": "Araç kullanımından önce sesli onay (yalnızca ses)",
+          "voice_tool_acknowledgement": "Sesli onay (yalnızca ses)",
+          "voice_tool_acknowledgement_timing": "Onayın ne zaman söyleneceği",
           "tool_relevance_threshold": "Araç ilgi eşiği",
           "tool_exclusions": "Hariç tutulan araçlar",
           "tool_inclusions": "Her zaman dahil edilen araçlar",
@@ -419,7 +426,8 @@
           "schema_first_yaml": "Etkinleştirildiğinde, YAML istekleri YAML'ye çevrilecek sıkı JSON ile yanıtlanır.",
           "stt_hallucination_patterns": "Her satıra bir alt dize yazın. STT metni herhangi bir girdiyi içerirse LLM çalışmadan önce yok sayılır. Eşleşme büyük/küçük harfe duyarsızdır.",
           "stt_hallucination_exact_patterns": "Her satıra bir ifade yazın. STT metninin tamamı herhangi bir girdiye eşitse LLM çalışmadan önce yok sayılır. Eşleşme büyük/küçük harfe duyarsızdır.",
-          "voice_tool_acknowledgement": "Ajan araçları çağırmaya başlamadan hemen önce sesli uydu tarafından söylenir, böylece yavaş bir soruya sessizlikle karşılık verilmez (örneğin \"Hemen bakıyorum.\"). Yalnızca sesli isteklerde, yalnızca model kendisi bir şey söylemediğinde, yanıt başına en fazla bir kez; HGA'nın metinden konuşmaya motoru veya akış destekli başka bir motor gerekir. Asistanınızın dilinde yazın. Kapatmak için boş bırakın.",
+          "voice_tool_acknowledgement": "Ajan bir istek üzerinde çalışırken sesli uydu tarafından söylenir, böylece yavaş bir soruya sessizlikle karşılık verilmez (örneğin \"Bir dakika.\"). Yalnızca sesli isteklerde, yanıt başına en fazla bir kez; ne zaman söyleneceğini sonraki seçenek belirler. HGA'nın metinden konuşmaya motoru veya akış destekli başka bir motor gerekir. Asistanınızın dilinde yazın. Kapatmak için boş bırakın.",
+          "voice_tool_acknowledgement_timing": "\"Ajan başlar başlamaz\" tüm bekleme süresini, yerel bir modelin ilk kelimesinden önceki süre dahil kapsar, ancak araç gerektirmeyen bir yanıttan önce de söylenir (bu yüzden \"Bir dakika.\" gibi nötr bir ifade tercih edin). \"İlk araç çağrısından önce\" yalnızca araç kullanan isteklerde, model başladıktan sonra söylenir.",
           "tool_relevance_threshold": "Bir aracın getirilmesi için gereken minimum anlamsal benzerlik puanı (0,0 ile 1,0 arasında).",
           "tool_exclusions": "Burada işaretlenen araçlar modele hiçbir zaman sunulmaz ve adıyla istense bile hiçbir zaman çalıştırılmaz. Seçili tüm API'lerin tüm araçlarını açmak için boş bırakın. Bir sunucunun sonradan eklediği araçlar varsayılan olarak kullanılabilir.",
           "tool_inclusions": "Burada işaretlenen araçlar modele her zaman sunulur: vektör tabanlı araç aramasından sonra, arama limitinin üzerine eklenirler. Anlamsal aramanın seçmeyebileceği web araması gibi genel amaçlı araçlar için kullanışlıdır. Aracı kullanıp kullanmamaya yine model karar verir. Bir araç aynı anda hem hariç tutulan hem de her zaman dahil edilen olamaz.",

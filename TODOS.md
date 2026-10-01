@@ -441,6 +441,19 @@ validation.
 
 ---
 
+### A reply replaced after its speech started streaming is never spoken
+
+**What:** `_async_run_astream`'s `replace_partial` branch swaps the streamed reply in `chat_log` for the graph-state copy (a mid-stream model fallback, or a streamed copy that differs from `extract_final`'s). Once the Assist pipeline has started streaming a turn's speech, it speaks only deltas and skips the final result (`assist_pipeline/pipeline.py`, `elif not self._streamed_response_text`), so the satellite keeps whatever it already said and the replacement is only shown, never heard.
+
+**Why:** Pre-existing since streaming TTS (#679) for any reply that streamed past 60 characters before being replaced. The turn-start acknowledgement (#671 follow-up) starts streaming on every satellite turn, so it now applies to short replies too. Rare: it needs a mid-stream fallback or a streamed/graph-state mismatch, which the think filter and #628 made uncommon. Surfaced by the code review of the turn-start acknowledgement PR.
+
+**How to apply:** There is no way to retract audio already spoken. Options: speak the replacement as a delta after the partial (the satellite then says both, so only when the partial was abandoned mid-sentence), or hold back a model's text from the delta stream until the turn can no longer fall back (costs the streaming latency win). Decide with real fallback traces; do not apply blindly.
+
+**Effort:** M
+**Priority:** P3
+
+---
+
 ### `replace_partial` drops tool calls when it re-commits the last entry
 
 **What:** `_async_run_astream`'s `replace_partial` branch (`conversation.py`) pops `chat_log.content[-1]` and re-adds it via `async_add_assistant_content_without_tools` with only `content` set. The guard checks `isinstance(..., AssistantContent)` but not `.tool_calls`, so if the last entry carries tool calls they are silently discarded. `_recommit_final_assistant_content` does guard on `not ...tool_calls`; this branch does not.

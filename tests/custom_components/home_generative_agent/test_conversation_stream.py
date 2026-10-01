@@ -62,6 +62,7 @@ _stub_ha_conversation()
 
 from custom_components.home_generative_agent.conversation import (
     _normalize_tool_result,
+    _reply_entry,
     _sanitize_tool_result_dict,
     _stream_langgraph_to_ha,
     _voice_tool_acknowledgement,
@@ -1148,8 +1149,8 @@ def test_acknowledgement_only_on_satellite_turns(
     )
     options = {"voice_tool_acknowledgement": "  Let me check.  "}
 
-    assert _voice_tool_acknowledgement(options, user_input) == expected
-    assert _voice_tool_acknowledgement({}, user_input) == ""
+    assert _voice_tool_acknowledgement(options, user_input).text == expected
+    assert _voice_tool_acknowledgement({}, user_input).text == ""
 
 
 @pytest.mark.parametrize(
@@ -1168,7 +1169,7 @@ def test_acknowledgement_gets_a_sentence_end(configured: str, spoken: str) -> No
     assert (
         _voice_tool_acknowledgement(
             {"voice_tool_acknowledgement": configured}, user_input
-        )
+        ).text
         == spoken
     )
 
@@ -1209,3 +1210,33 @@ async def test_think_filter_whitespace_matches_extract_final(
     streamed = await _streamed_text(_replay(_chunked_turn(*chunks)))
 
     assert streamed == extract_final("".join(chunks), collapse_whitespace=False)
+
+
+def test_acknowledgement_timing_defaults_to_turn_start() -> None:
+    """Unset timing means turn start; a stored choice is honored."""
+    user_input = cast("Any", types.SimpleNamespace(satellite_id="s", device_id=None))
+    options: dict[str, Any] = {"voice_tool_acknowledgement": "One moment."}
+
+    assert _voice_tool_acknowledgement(options, user_input).timing == "turn_start"
+    options["voice_tool_acknowledgement_timing"] = "tool_call"
+    assert _voice_tool_acknowledgement(options, user_input).timing == "tool_call"
+
+
+def test_unknown_acknowledgement_timing_falls_back_to_the_default() -> None:
+    """A stale or hand-edited timing value never silently changes the trigger."""
+    user_input = cast("Any", types.SimpleNamespace(satellite_id="s", device_id=None))
+    options = {
+        "voice_tool_acknowledgement": "One moment.",
+        "voice_tool_acknowledgement_timing": "start",
+    }
+
+    assert _voice_tool_acknowledgement(options, user_input).timing == "turn_start"
+
+
+def test_reply_entry_ignores_only_a_lone_acknowledgement() -> None:
+    """Recovery must not read a turn-start acknowledgement as the reply."""
+    only_ack = ["user request", "One moment."]
+    assert _reply_entry(only_ack, 1) is None
+    assert _reply_entry([*only_ack, "The light is off."], 1) == "The light is off."
+    assert _reply_entry(["user request", "reply"], None) == "reply"
+    assert _reply_entry([], None) is None

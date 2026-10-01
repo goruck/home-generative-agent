@@ -168,9 +168,16 @@ CONF_DISABLED_FEATURES = "disabled_features"
 # ---- STT hallucination filter (phantom transcriptions of silence/noise) ----
 CONF_STT_HALLUCINATION_PATTERNS = "stt_hallucination_patterns"
 CONF_STT_HALLUCINATION_EXACT_PATTERNS = "stt_hallucination_exact_patterns"
-# Spoken on a voice turn just before the agent's first tool call, so a
-# satellite is not silent while tools run (#671). Empty means off.
+# Spoken on a voice turn while the agent works, so a satellite is not silent
+# (#671); CONF_VOICE_TOOL_ACK_TIMING sets when. Empty means off.
 CONF_VOICE_TOOL_ACK = "voice_tool_acknowledgement"
+# When it is spoken: as soon as the agent starts (covers a local model's
+# prefill, but also chit-chat) or just before the first tool call.
+CONF_VOICE_TOOL_ACK_TIMING = "voice_tool_acknowledgement_timing"
+VOICE_ACK_TIMING_TURN_START = "turn_start"
+VOICE_ACK_TIMING_TOOL_CALL = "tool_call"
+VOICE_ACK_TIMINGS = (VOICE_ACK_TIMING_TURN_START, VOICE_ACK_TIMING_TOOL_CALL)
+RECOMMENDED_VOICE_ACK_TIMING = VOICE_ACK_TIMING_TURN_START
 DEFAULT_STT_HALLUCINATION_PATTERNS: list[str] = []
 DEFAULT_STT_HALLUCINATION_EXACT_PATTERNS: list[str] = []
 
