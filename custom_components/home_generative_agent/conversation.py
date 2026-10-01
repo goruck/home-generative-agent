@@ -10,7 +10,7 @@ import logging
 import re
 import string
 from collections import deque
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -80,6 +80,7 @@ from .const import (
     CONF_STT_HALLUCINATION_EXACT_PATTERNS,
     CONF_STT_HALLUCINATION_PATTERNS,
     CONF_VOICE_TOOL_ACK,
+    CONF_VOICE_TOOL_ACK_TIMING,
     CRITICAL_ACTION_PROMPT,
     DEFAULT_STT_HALLUCINATION_EXACT_PATTERNS,
     DEFAULT_STT_HALLUCINATION_PATTERNS,
@@ -87,10 +88,12 @@ from .const import (
     LANGCHAIN_LOGGING_LEVEL,
     NETWORK_AUDIT_TOOL_PROMPT,
     RECOMMENDED_SENTINEL_NETWORK_ENABLED,
+    RECOMMENDED_VOICE_ACK_TIMING,
     SCHEMA_FIRST_YAML_PROMPT,
     SIGNAL_TOOL_INDEX_UPDATED,
     SUBENTRY_TYPE_MODEL_PROVIDER,
     TOOL_CALL_ERROR_SYSTEM_MESSAGE,
+    VOICE_ACK_TIMING_TURN_START,
 )
 from .core.conversation_helpers import (
     _convert_schema_json_to_yaml,
@@ -576,9 +579,16 @@ def _nonstreaming_text(event: Mapping[str, Any]) -> str | None:
     return None
 
 
+class VoiceAck(NamedTuple):
+    """The configured acknowledgement for this turn and when to speak it."""
+
+    text: str = ""
+    timing: str = RECOMMENDED_VOICE_ACK_TIMING
+
+
 def _voice_tool_acknowledgement(
     options: Mapping[str, Any], user_input: conversation.ConversationInput
-) -> str:
+) -> VoiceAck:
     """
     Return the configured pre-tool acknowledgement for a voice turn, else "".
 
@@ -591,11 +601,14 @@ def _voice_tool_acknowledgement(
     wait for the answer instead of filling the tool run.
     """
     if not user_input.satellite_id:
-        return ""
+        return VoiceAck()
     text = str(options.get(CONF_VOICE_TOOL_ACK) or "").strip()
     if text and not text.rstrip(_ACK_CLOSERS).endswith(_ACK_SENTENCE_ENDINGS):
         text += "."
-    return text
+    timing = str(
+        options.get(CONF_VOICE_TOOL_ACK_TIMING) or RECOMMENDED_VOICE_ACK_TIMING
+    )
+    return VoiceAck(text, timing)
 
 
 def _get_stt_hallucination_patterns(
@@ -788,6 +801,96 @@ class _ThinkStreamFilter:
         tail = "" if self._inside else self._visible(self._pending)
         self._reset()
         return tail
+
+
+# HA's Assist pipeline (assist_pipeline/pipeline.py) starts streaming speech
+# only after more than this many characters, or on text followed by a tool
+# call. Read from HA at runtime; this is the value when it cannot be read.
+_DEFAULT_STREAM_RESPONSE_CHARS = 60
+
+
+def _stream_response_chars() -> int:
+    """Return the Assist pipeline's streaming threshold, or the known default."""
+    # Imported lazily and defensively: assist_pipeline is an after_dependency
+    # and the constant is internal. If it moves, the default keeps the same
+    # behavior, and if HA's rule changes, padding only fails to start early.
+    try:
+        from homeassistant.components.assist_pipeline import (  # noqa: PLC0415
+            pipeline as ha_pipeline,
+        )
+    except ImportError:
+        return _DEFAULT_STREAM_RESPONSE_CHARS
+    value = getattr(ha_pipeline, "STREAM_RESPONSE_CHARS", None)
+    return value if isinstance(value, int) else _DEFAULT_STREAM_RESPONSE_CHARS
+
+
+def _padded_for_streaming(text: str) -> str:
+    """
+    Pad ``text`` with spaces until HA's pipeline starts streaming on it.
+
+    The pipeline begins speaking only past its character threshold or on
+    text followed by a tool call. A short phrase at the start of a turn meets
+    neither, so it would be held until the model's own reply pushed the count
+    over -- after the prefill it was meant to cover (#671). The pipeline
+    counts every character it receives; the speech engine drops the spaces.
+    """
+    return text + " " * max(0, _stream_response_chars() + 1 - len(text))
+
+
+async def _with_turn_start_acknowledgement(
+    deltas: AsyncGenerator[AssistantContentDeltaDict | ToolResultContentDeltaDict],
+    acknowledgement: str,
+) -> AsyncIterator[AssistantContentDeltaDict | ToolResultContentDeltaDict]:
+    """
+    Speak ``acknowledgement`` before the model is called at all.
+
+    On a local model the wait is the prefill before the first token, which
+    the tool-call trigger lands after. This speaks within about a second of
+    the request reaching the agent, at the cost of also speaking it on turns
+    that answer without tools. It is its own assistant message, so the
+    model's reply and the history filter, which judge the last entry, are
+    unaffected; like the tool-call variant it never enters the graph thread.
+    """
+    async with contextlib.aclosing(deltas):
+        if acknowledgement:
+            yield AssistantContentDeltaDict(
+                role="assistant", content=_padded_for_streaming(acknowledgement)
+            )
+        async for delta in deltas:
+            yield delta
+
+
+def _turn_start_ack_index(content: list[Any], ack: VoiceAck) -> int | None:
+    """Return where a turn-start acknowledgement will land in chat_log, if any."""
+    if ack.text and ack.timing == VOICE_ACK_TIMING_TURN_START:
+        return len(content)
+    return None
+
+
+def _reply_entry(content: list[Any], ack_index: int | None) -> Any | None:
+    """
+    Return the turn's last chat_log entry, unless it is only the acknowledgement.
+
+    Recovery and the no-reply guard both judge a turn by its last entry. A
+    turn-start acknowledgement is an AssistantContent written before the model
+    runs, so a turn that then failed, or produced only reasoning, would look
+    answered and the user would hear "One moment." and nothing else.
+    """
+    if not content:
+        return None
+    if ack_index is not None and len(content) == ack_index + 1:
+        return None
+    return content[-1]
+
+
+def _with_acknowledgement(
+    deltas: AsyncGenerator[AssistantContentDeltaDict | ToolResultContentDeltaDict],
+    ack: VoiceAck,
+) -> AsyncIterator[AssistantContentDeltaDict | ToolResultContentDeltaDict]:
+    """Wrap ``deltas`` with the acknowledgement at its configured moment."""
+    if ack.timing == VOICE_ACK_TIMING_TURN_START:
+        return _with_turn_start_acknowledgement(deltas, ack.text)
+    return _with_tool_acknowledgement(deltas, ack.text)
 
 
 async def _with_tool_acknowledgement(
@@ -1471,17 +1574,19 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         _populate_chat_log_from_response(chat_log, self.entity_id, processed_messages)
 
-    async def _async_run_astream(  # noqa: PLR0913
+    async def _async_run_astream(  # noqa: PLR0913, PLR0915
         self,
         app: Any,
         input_data: State,
         config: RunnableConfig,
         chat_log: conversation.ChatLog,
         tools: list[dict[str, Any]] | None,
-        tool_acknowledgement: str = "",
+        acknowledgement: VoiceAck | None = None,
     ) -> None:
         """Handle the streaming astream_events path."""
         hass = self.hass
+        ack = acknowledgement or VoiceAck()
+        ack_index = _turn_start_ack_index(chat_log.content, ack)
 
         async def _run_streaming_task() -> None:
             """Coroutine to drive the delta stream and ensure cancellation."""
@@ -1490,9 +1595,9 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             )
             async for _ in chat_log.async_add_delta_content_stream(
                 self.entity_id,
-                _with_tool_acknowledgement(
+                _with_acknowledgement(
                     _stream_langgraph_to_ha(event_stream, self.entity_id),
-                    tool_acknowledgement,
+                    ack,
                 ),
             ):
                 pass
@@ -1550,7 +1655,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 if messages and isinstance(messages[-1], AIMessage)
                 else None
             )
-            last_chat_content = chat_log.content[-1] if chat_log.content else None
+            last_chat_content = _reply_entry(chat_log.content, ack_index)
             replace_partial = (
                 isinstance(last_chat_content, conversation.AssistantContent)
                 and recovered_content is not None
@@ -1602,6 +1707,30 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             _LOGGER.debug("aget_state unavailable; skipping trace for streaming turn.")
         except Exception:
             _LOGGER.exception("Failed to retrieve final state for tracing.")
+
+        self._ensure_reply_after_ack(chat_log, ack_index, stream_error)
+
+    def _ensure_reply_after_ack(
+        self,
+        chat_log: conversation.ChatLog,
+        ack_index: int | None,
+        stream_error: Exception | None,
+    ) -> None:
+        """
+        Add the failure reply when a turn-start acknowledgement is all there is.
+
+        The caller's no-reply guard reads the last entry, which a lone
+        acknowledgement would satisfy; recovery covers the usual paths, this
+        covers recovery being skipped (graph state unavailable).
+        """
+        if ack_index is None or _reply_entry(chat_log.content, ack_index) is not None:
+            return
+        chat_log.async_add_assistant_content_without_tools(
+            conversation.AssistantContent(
+                agent_id=self.entity_id,
+                content=_streaming_failure_content(stream_error),
+            )
+        )
 
     async def _async_handle_message(
         self,

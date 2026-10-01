@@ -63,8 +63,9 @@ async def test_options_schema_stt_filters_are_bottom_multiline_section(
     )
     keys = _schema_keys(schema)
 
-    assert keys[-4:] == [
+    assert keys[-5:] == [
         CONF_VOICE_TOOL_ACK,
+        "voice_tool_acknowledgement_timing",
         "stt_filters_section",
         CONF_STT_HALLUCINATION_PATTERNS,
         CONF_STT_HALLUCINATION_EXACT_PATTERNS,

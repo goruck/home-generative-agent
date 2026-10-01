@@ -422,6 +422,12 @@
         "multipart": "Multipart upload (default)",
         "json_base64": "JSON with base64 audio"
       }
+    },
+    "voice_ack_timing": {
+      "options": {
+        "turn_start": "As soon as the agent starts",
+        "tool_call": "Before the first tool call"
+      }
     }
   },
   "exceptions": {
@@ -455,7 +461,8 @@
           "stt_filters_section": "Speech input filters",
           "stt_hallucination_patterns": "Ignored STT substrings",
           "stt_hallucination_exact_patterns": "Ignored exact STT phrases",
-          "voice_tool_acknowledgement": "Spoken acknowledgement before tool use (voice only)",
+          "voice_tool_acknowledgement": "Spoken acknowledgement (voice only)",
+          "voice_tool_acknowledgement_timing": "When to speak the acknowledgement",
           "tool_retrieval_limit": "Tool retrieval limit",
           "tool_relevance_threshold": "Tool relevance threshold",
           "tool_exclusions": "Excluded tools",
@@ -468,7 +475,8 @@
           "schema_first_yaml": "When enabled, YAML requests are answered with strict JSON that is converted to YAML.",
           "stt_hallucination_patterns": "One substring per line. If an STT transcript contains any entry, it is ignored before the LLM runs. Matching is case-insensitive.",
           "stt_hallucination_exact_patterns": "One phrase per line. If the entire STT transcript equals any entry, it is ignored before the LLM runs. Matching is case-insensitive.",
-          "voice_tool_acknowledgement": "Said by a voice satellite just before the agent starts calling tools, so a slow question is not met with silence (for example \"Let me check.\"). Only on voice turns, only when the model has not said anything itself, at most once per reply; needs HGA's text-to-speech engine or another streaming one. Write it in your assistant's language. Leave empty to turn it off.",
+          "voice_tool_acknowledgement": "Said by a voice satellite while the agent works on a request, so a slow question is not met with silence (for example \"One moment.\"). Only on voice turns, at most once per reply; the next option sets when. Needs HGA's text-to-speech engine or another streaming one. Write it in your assistant's language. Leave empty to turn it off.",
+          "voice_tool_acknowledgement_timing": "As soon as the agent starts covers the whole wait, including a local model's time before its first word, but is also said before a reply that needs no tools (so prefer neutral wording such as \"One moment.\"). Before the first tool call is said only on turns that use tools, after the model has started.",
           "tool_retrieval_limit": "The maximum number of tools to retrieve based on semantic similarity to the user's query.",
           "tool_relevance_threshold": "The minimum semantic similarity score (0.0 to 1.0) required for a tool to be retrieved.",
           "tool_exclusions": "Tools ticked here are never offered to the model and never executed, even if it asks for one by name. Leave empty to expose every tool of every selected API. Tools a server adds later are available by default.",

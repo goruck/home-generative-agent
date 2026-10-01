@@ -2150,3 +2150,30 @@ async def test_eviction_survives_a_store_that_cannot_be_listed() -> None:
     await entity._async_evict_stale_tool_index_rows(rd, set(), {"assist"})
 
     rd.store.adelete.assert_not_awaited()
+
+
+def test_turn_start_padding_tracks_home_assistants_streaming_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The padding must clear the pipeline's real threshold (#671).
+
+    Reads Home Assistant's constant, so a change to it is caught here rather
+    than as an acknowledgement that silently waits for the model again.
+    """
+    from homeassistant.components.assist_pipeline import (  # noqa: PLC0415
+        pipeline as ha_pipeline,
+    )
+
+    from custom_components.home_generative_agent.conversation import (  # noqa: PLC0415
+        _padded_for_streaming,
+    )
+
+    padded = _padded_for_streaming("One moment.")
+    assert padded.strip() == "One moment."
+    assert len(padded) > ha_pipeline.STREAM_RESPONSE_CHARS
+
+    monkeypatch.setattr(ha_pipeline, "STREAM_RESPONSE_CHARS", 100)
+    assert len(_padded_for_streaming("One moment.")) == 101
+    long_phrase = "x" * 150
+    assert _padded_for_streaming(long_phrase) == long_phrase
