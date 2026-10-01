@@ -799,6 +799,7 @@ async def test_stream_keeps_the_satellite_fed_while_the_model_thinks(
     # Pad nothing extra, so the first chunk's audio is short and the pacer
     # has to top up during the stall.
     monkeypatch.setattr(hga_tts, "_CONVERTER_START_BYTES", 0)
+    monkeypatch.setattr(hga_tts, "_MIN_TRAILING_SILENCE_S", 0)
     entity, _ = _make_entity()
     _stub_client(entity, [])
     stall_s = 0.4
@@ -840,6 +841,27 @@ async def test_stream_sends_nothing_before_the_first_speech(
 
     _, audio = await _stream(entity, _slow_start())
     assert audio[0].startswith(b"RIFF")
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_first_piece_always_ends_in_silence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A first sentence past the converter threshold still gets trailing silence.
+
+    The converter holds back its last partial frame until more input comes;
+    without silence after it, that held tail was speech ("...se") and played
+    seconds later, just before the answer (#671).
+    """
+    monkeypatch.setattr(hga_tts, "_CONVERTER_START_BYTES", 0)
+    entity, _ = _make_entity()
+    _stub_client(entity, [])
+    _, audio = await _stream(entity, _live("Hello there."))
+    body = audio[0][audio[0].index(b"data") + 8 :]
+    tail = body[len(SAMPLES) :]
+    assert len(tail) >= int(hga_tts._MIN_TRAILING_SILENCE_S * 22050 * 2) - 2
+    assert set(tail) <= {0}
 
 
 def test_parse_wav_reads_every_per_sentence_segment() -> None:

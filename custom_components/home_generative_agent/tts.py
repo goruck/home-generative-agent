@@ -206,6 +206,14 @@ def _ends_sentence(text: str) -> bool:
 # reply's next sentences arrived -- and a Voice PE gives up on a response
 # that sends nothing for 2 s. The first piece is padded with silence past it.
 _CONVERTER_START_BYTES = 64 * 1024 + 4096
+# The same converter holds back its last partial output frame until more
+# input arrives: measured 51 ms of a 1587 ms sentence withheld while stdin
+# stayed open. A first sentence long enough to need no padding (Kokoro's
+# "One moment, please.") therefore had its tail ("...se") stuck there and
+# played seconds later, right before the answer (#671, 15/15 runs). The
+# first piece always ends with at least this much silence, so what is held
+# back is silence.
+_MIN_TRAILING_SILENCE_S = 0.25
 # A Voice PE buffers only ~100 ms of speaker audio, and when a stream stalls
 # (the model thinking between sentences) it runs dry and its speaker makes a
 # brief click/"t" sound -- heard on streamed turns, never on one-shot speech
@@ -331,6 +339,12 @@ class _Pacer:
         deficit = (now - self._start) + TTS_STREAM_LEAD_S - self._sent_s
         if deficit <= 0:
             return b""
+        if deficit > TTS_STREAM_LEAD_S:
+            # Everything sent has already played: the satellite ran dry for
+            # about this long. Logged so a click can be matched to a stall.
+            LOGGER.debug(
+                "TTS stream fell behind playback by %.3f s", deficit - TTS_STREAM_LEAD_S
+            )
         return self.sent(_silence(int(deficit * self._byte_rate), self._piece))
 
 
@@ -751,7 +765,11 @@ class HGATtsEntity(TextToSpeechEntity):
         if pacer is None:
             pacer = _Pacer(piece, now)
             header = _streaming_wav_header(piece.fmt)
-            pad = _CONVERTER_START_BYTES - len(header) - len(piece.samples)
+            byte_rate = struct.unpack_from("<I", piece.fmt, 8)[0]
+            pad = max(
+                _CONVERTER_START_BYTES - len(header) - len(piece.samples),
+                int(_MIN_TRAILING_SILENCE_S * byte_rate),
+            )
             return header + pacer.sent(piece.samples + _silence(pad, piece)), pacer
         if piece.fmt != pacer.fmt:
             # One voice keeps one format; a change mid-reply cannot be spliced
