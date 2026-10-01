@@ -214,12 +214,12 @@ _CONVERTER_START_BYTES = 64 * 1024 + 4096
 # first piece always ends with at least this much silence, so what is held
 # back is silence.
 _MIN_TRAILING_SILENCE_S = 0.25
-# A Voice PE buffers only ~100 ms of speaker audio, and when a stream stalls
-# (the model thinking between sentences) it runs dry and its speaker makes a
-# brief click/"t" sound -- heard on streamed turns, never on one-shot speech
-# of the same text. While a reply waits for text or synthesis, silence is
-# fed paced to real time, keeping the stream this far ahead of playback;
-# speech is delayed by at most that much.
+# While a reply waits for text or synthesis (the model thinking between
+# sentences), silence is fed paced to real time, keeping the stream this far
+# ahead of playback; speech is delayed by at most that much. It keeps input
+# reaching the converter, which otherwise holds back its last partial frame
+# for the whole wait (see _MIN_TRAILING_SILENCE_S), and keeps the satellite's
+# stream from stalling.
 TTS_STREAM_KEEPALIVE_S = 0.1
 TTS_STREAM_LEAD_S = 0.3
 _RIFF_HEADER_LEN = 12  # "RIFF", size, "WAVE"
