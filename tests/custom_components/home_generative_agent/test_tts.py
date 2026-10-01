@@ -783,6 +783,87 @@ def test_parse_wav_handles_streaming_sizes_and_extra_chunks() -> None:
     assert piece.block_align == 2
 
 
+@pytest.mark.usefixtures("patched_client")
+async def test_stream_keeps_the_satellite_fed_while_the_model_thinks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A stall between sentences is filled with silence paced to real time.
+
+    A Voice PE buffers ~100 ms; when a streamed reply stalled while the model
+    worked, its speaker ran dry and made a brief click -- heard on streamed
+    turns, never on one-shot speech of the same text (2026-10-01).
+    """
+    monkeypatch.setattr(hga_tts, "TTS_STREAM_KEEPALIVE_S", 0.02)
+    monkeypatch.setattr(hga_tts, "TTS_STREAM_LEAD_S", 0.05)
+    # Pad nothing extra, so the first chunk's audio is short and the pacer
+    # has to top up during the stall.
+    monkeypatch.setattr(hga_tts, "_CONVERTER_START_BYTES", 0)
+    monkeypatch.setattr(hga_tts, "_MIN_TRAILING_SILENCE_S", 0)
+    entity, _ = _make_entity()
+    _stub_client(entity, [])
+    stall_s = 0.4
+
+    async def _thinking() -> AsyncGenerator[str]:
+        await asyncio.sleep(hga_tts.TTS_ONE_SHOT_GRACE_S * 3)
+        yield "One moment, please.\n\n"
+        await asyncio.sleep(stall_s)
+        yield "Because I turned it on."
+
+    response = await entity.async_stream_tts_audio(
+        TTSAudioRequest("en-US", dict(entity.default_options), _thinking())
+    )
+    chunks = [chunk async for chunk in response.data_gen]
+
+    assert chunks[0].startswith(b"RIFF")
+    assert chunks[-1] == SAMPLES
+    fillers = chunks[1:-1]
+    assert fillers, "the stall must be filled"
+    assert all(set(chunk) <= {0} for chunk in fillers)
+    byte_rate = 22050 * 2
+    filled_s = sum(len(chunk) for chunk in fillers) / byte_rate
+    # Real-time pacing: about the stall, never far beyond it plus the lead.
+    assert stall_s * 0.5 < filled_s < stall_s + 0.05 + 0.15
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_stream_sends_nothing_before_the_first_speech(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Silence is only fed once audio has started; the header comes first."""
+    monkeypatch.setattr(hga_tts, "TTS_STREAM_KEEPALIVE_S", 0.02)
+    entity, _ = _make_entity()
+    _stub_client(entity, [])
+
+    async def _slow_start() -> AsyncGenerator[str]:
+        await asyncio.sleep(0.3)
+        yield "Hello there."
+
+    _, audio = await _stream(entity, _slow_start())
+    assert audio[0].startswith(b"RIFF")
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_first_piece_always_ends_in_silence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A first sentence past the converter threshold still gets trailing silence.
+
+    The converter holds back its last partial frame until more input comes;
+    without silence after it, that held tail was speech ("...se") and played
+    seconds later, just before the answer (#671).
+    """
+    monkeypatch.setattr(hga_tts, "_CONVERTER_START_BYTES", 0)
+    entity, _ = _make_entity()
+    _stub_client(entity, [])
+    _, audio = await _stream(entity, _live("Hello there."))
+    body = audio[0][audio[0].index(b"data") + 8 :]
+    tail = body[len(SAMPLES) :]
+    assert len(tail) >= int(hga_tts._MIN_TRAILING_SILENCE_S * 22050 * 2) - 2
+    assert set(tail) <= {0}
+
+
 def test_parse_wav_reads_every_per_sentence_segment() -> None:
     """
     Speaches answers a multi-sentence request with one WAV file per sentence.
