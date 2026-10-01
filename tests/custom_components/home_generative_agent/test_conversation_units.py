@@ -1349,12 +1349,16 @@ def test_message_history_drops_spoken_text_of_a_tool_using_turn() -> None:
     history = _history(content)
 
     assert [type(m).__name__ for m in history] == ["HumanMessage"], (
-        "the spoken tail of a tool-using turn must not reach the model"
+        "the spoken tail of a tool-using turn must not reach the model as a reply"
     )
-    assert history[0].content == "Turn on the garage light."
-    assert not any("Turned on the light" in str(m.content) for m in history), (
-        "an assistant reply with the tool call erased is the poison itself"
+    assert history[0].content == (
+        "Turn on the garage light. "
+        "(Home Assistant already handled this request directly: Turned on the light)"
     )
+    # The poison is the answer in the ASSISTANT role (#588: qwen3:8b and
+    # qwen3.8 then reply "Turned off the light" with no tool call, 0/6). The
+    # same words inside the user's note are measured safe (6/6 tool calls).
+    assert not any(isinstance(m, AIMessage) for m in history)
 
 
 def test_message_history_keeps_a_genuine_toolless_reply() -> None:
@@ -1443,7 +1447,9 @@ def test_message_history_non_none_tool_calls_still_excluded() -> None:
     history = _history(content)
 
     assert [type(m).__name__ for m in history] == ["HumanMessage"]
-    assert history[0].content == "hello"
+    assert history[0].content == (
+        "hello (Home Assistant already handled this request directly: Hi there.)"
+    )
 
 
 def test_message_history_skips_the_entitys_own_turns() -> None:
@@ -1575,7 +1581,85 @@ def test_message_history_locally_handled_intent_is_a_foreign_turn() -> None:
     assert [m.content for m in _history(content)] == [
         "what time is it?",
         "It is 4:42 AM.",
-        "Turn on the garage light.",
+        (
+            "Turn on the garage light. "
+            "(Home Assistant already handled this request directly: Turned on the light)"
+        ),
+    ]
+
+
+def _local_intent_turn(question: str, answer: str | None, tool: str) -> list:
+    """Build what HA's built-in agent writes for a request it handled itself."""
+    turn = [
+        _mk_content(ha_conversation.UserContent, content=question),
+        _mk_content(
+            ha_conversation.AssistantContent,
+            agent_id=FOREIGN_AGENT_ID,
+            content=None,
+            tool_calls=[object()],
+        ),
+        _mk_content(
+            ha_conversation.ToolResultContent,
+            agent_id=FOREIGN_AGENT_ID,
+            tool_call_id="call_1",
+            tool_name=tool,
+            tool_result={"speech": {"plain": {"speech": answer or ""}}},
+        ),
+    ]
+    if answer is not None:
+        turn.append(
+            _mk_content(
+                ha_conversation.AssistantContent,
+                agent_id=FOREIGN_AGENT_ID,
+                content=answer,
+                tool_calls=None,
+            )
+        )
+    return turn
+
+
+def test_message_history_marks_locally_handled_requests_as_answered() -> None:
+    """
+    Requests HA answered itself must not read as unanswered questions (#671).
+
+    Field report: "what time is it", "turn on hallway light" (both local
+    intents), then "say hello" reached the agent as three bare user messages
+    in a row, and the satellite said "9:06 PM ... turned on the lights ...
+    hello". Replayed on qwen3:8b: 6/6 answered all three, claiming an action
+    it never took; with each request marked as handled, 0/6.
+    """
+    content = [
+        *_local_intent_turn("What time is it?", "9:06 PM", "HassGetCurrentTime"),
+        *_local_intent_turn(
+            "Turn on hallway light.", "Turned on the lights", "HassTurnOn"
+        ),
+        _mk_content(ha_conversation.UserContent, content="Say hello."),
+    ]
+
+    history = _history(content)
+
+    assert [type(m).__name__ for m in history] == ["HumanMessage", "HumanMessage"]
+    assert [m.content for m in history] == [
+        (
+            "What time is it? "
+            "(Home Assistant already handled this request directly: 9:06 PM)"
+        ),
+        (
+            "Turn on hallway light. "
+            "(Home Assistant already handled this request directly: Turned on the lights)"
+        ),
+    ]
+
+
+def test_message_history_marks_a_silent_local_turn_as_handled() -> None:
+    """A tool turn that ended without spoken text still reads as handled."""
+    content = [
+        *_local_intent_turn("Turn on hallway light.", None, "HassTurnOn"),
+        _mk_content(ha_conversation.UserContent, content="Say hello."),
+    ]
+
+    assert [m.content for m in _history(content)] == [
+        "Turn on hallway light. (Home Assistant already handled this request directly.)"
     ]
 
 
