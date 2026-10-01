@@ -36,6 +36,7 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ### Changed
 
+- Four runtime requirements are now short version ranges instead of exact pins: `aiofiles>=25.1.0`, `ollama>=0.6.1,<0.7`, `anthropic>=0.125.0,<0.126` and `sentence-stream>=1.3.0,<1.4`. Home Assistant's validator (Hassfest) began refusing exact pins on packages Home Assistant itself pins, and an `ollama` pin that excludes the version Home Assistant's own Ollama integration uses (0.6.2). The caps keep a fresh install from drifting to a new minor release, which is what the `anthropic` pin was for. Nothing changes for an existing install: the versions already installed satisfy the ranges.
 - Releases now bundle several changes instead of following every merge, so updates arrive on a
   monthly cadence rather than most days. Fixes for anything broken in the wild — regressions,
   Home Assistant compatibility breaks, security and safety failures — still ship the moment
