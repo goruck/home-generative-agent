@@ -1500,6 +1500,15 @@ REFERENTIAL_FOLLOW_UP_REGEX = (
 # must keep ranking on its own words.
 MAX_REFERENTIAL_FOLLOW_UP_WORDS = 8
 
+# A short reply that accepts the agent's offer ("Want me to turn it off?" ->
+# "Yes") names nothing at all; its target is in the agent's previous reply.
+# First words of such replies in the UI languages (en/cs/ru/tr).
+AFFIRMATIVE_FOLLOW_UP_REGEX = (
+    r"(?i)^\W*(?:yes|yeah|yep|yup|sure|ok|okay|alright|please|absolutely|"
+    r"definitely|go\s+ahead|do\s+it|ano|jo|jasně|да|давай|конечно|evet|tamam)\b"
+)
+MAX_AFFIRMATIVE_FOLLOW_UP_WORDS = 4
+
 # Tool prefixes/names for actuation safety net
 ACTUATION_TOOL_PREFIXES = (
     "HassTurn",

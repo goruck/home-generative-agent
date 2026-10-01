@@ -21,6 +21,7 @@ from custom_components.home_generative_agent.agent.graph import (
     _get_actuation_safety_tools,
     _get_allowed_api_ids,
     _get_rag_retrieved_tools,
+    _is_affirmative_follow_up,
     _is_referential_follow_up,
     _latest_open_state_query,
     _normalize_live_context_args_for_open_state,
@@ -2784,6 +2785,84 @@ def test_retrieval_query_skips_ai_turns_to_find_the_user_turn() -> None:
         HumanMessage(content="Turn it off"),
     ]
     assert _retrieval_query(messages) == "Turn on the garage lights. Turn it off"
+
+
+def test_retrieval_query_widens_a_yes_with_the_agents_offer() -> None:
+    """
+    The field case (2026-10-01): "Yes" to "Want me to turn it off?".
+
+    Ranked on "Yes" alone, retrieval offered five media-player tools and no
+    light tool, so the model called GetLiveContext three times and hit the
+    tool-loop guard. The action and target are in the agent's offer.
+    """
+    messages = [
+        HumanMessage(content="Why is the back porch light on?"),
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "GetLiveContext", "args": {}, "id": "1"}],
+        ),
+        ToolMessage(content="{}", name="GetLiveContext", tool_call_id="1"),
+        AIMessage(
+            content=(
+                "The back porch light is on because you asked me to turn it on. "
+                "I don't see any automation that would have done it. "
+                "Want me to turn it off?"
+            )
+        ),
+        HumanMessage(content="Yes"),
+    ]
+    assert _retrieval_query(messages) == (
+        "Why is the back porch light on. "
+        "I don't see any automation that would have done it. "
+        "Want me to turn it off. Yes"
+    )
+
+
+def test_yes_to_an_offer_brings_in_the_actuation_tools() -> None:
+    """
+    The deterministic half: the safety net fires on the widened query.
+
+    Ranking alone is not trusted to surface intent__HassTurnOff ("turn them
+    off" once ranked five media-player tools first), but the actuation
+    safety net force-injects the on/off tools whenever the ranking query
+    carries an actuation phrase -- which "Want me to turn it off?" does and
+    "Yes" never did.
+    """
+    messages = [
+        HumanMessage(content="Why is the back porch light on?"),
+        AIMessage(content="It was turned on by you. Want me to turn it off?"),
+        HumanMessage(content="Yes"),
+    ]
+    assert not _query_needs_actuation_safety("Yes")
+    assert _query_needs_actuation_safety(_retrieval_query(messages))
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["Yes", "yes please", "Sure, go ahead.", "OK", "do it", "Ano", "Да", "Evet"],
+)
+def test_short_affirmatives_are_follow_ups(query: str) -> None:
+    """Accepting an offer in any UI language counts."""
+    assert _is_affirmative_follow_up(query)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "No",
+        "Yesterday's weather",
+        "Okay so what is the temperature in the living room",
+        "turn on the porch light",
+    ],
+)
+def test_other_replies_are_not_affirmative_follow_ups(query: str) -> None:
+    """A refusal, a word that merely starts with "yes", or a full request."""
+    assert not _is_affirmative_follow_up(query)
+
+
+def test_retrieval_query_keeps_a_yes_without_context() -> None:
+    """A first-turn "Yes" has nothing to widen with."""
+    assert _retrieval_query([HumanMessage(content="Yes")]) == "Yes"
 
 
 def test_retrieval_query_handles_a_first_turn() -> None:
