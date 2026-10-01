@@ -580,9 +580,11 @@ TTS_SPEED_DEFAULT = 1.0
 TTS_OPENAI_RESPONSE_FORMATS = frozenset({"mp3", "opus", "aac", "flac", "wav", "pcm"})
 TTS_LOCAL_RESPONSE_FORMATS = frozenset({"mp3", "flac", "wav", "pcm"})
 TTS_DEFAULT_RESPONSE_FORMAT = "mp3"
-# Streamed replies are synthesized per sentence batch and concatenated, which
-# only yields a valid stream for a frame-based format both backends produce.
-TTS_STREAM_RESPONSE_FORMAT = "mp3"
+# Streamed replies are synthesized per sentence batch and sent as one WAV
+# stream: a single header, then each batch's raw samples. WAV because Home
+# Assistant's converter starts emitting only after 64 KiB of input, which raw
+# audio reaches in about 1.5 s of speech and mp3 in about 8 s.
+TTS_STREAM_RESPONSE_FORMAT = "wav"
 
 # ---------------- Chat model ----------------
 CHAT_MODEL_TOP_P = 1.0

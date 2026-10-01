@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import struct
 from types import MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -40,8 +41,29 @@ if TYPE_CHECKING:
 
 # A well-formed ID3v2 tag (4-byte body) followed by stand-in mp3 frames; joined
 # stream pieces after the first arrive without the tag.
-MP3_FRAMES = b"\xff\xfbfake-mp3-frames"
-AUDIO = b"ID3\x04\x00\x00\x00\x00\x00\x04TAG!" + MP3_FRAMES
+
+
+def _wav(samples: bytes, rate: int = 22050, bits: int = 16) -> bytes:
+    """Build a minimal mono PCM WAV file around ``samples``."""
+    block = bits // 8
+    fmt = struct.pack("<HHIIHH", 1, 1, rate, rate * block, block, bits)
+    return (
+        b"RIFF"
+        + struct.pack("<I", 4 + 8 + len(fmt) + 8 + len(samples))
+        + b"WAVE"
+        + b"fmt "
+        + struct.pack("<I", len(fmt))
+        + fmt
+        + b"data"
+        + struct.pack("<I", len(samples))
+        + samples
+    )
+
+
+# What the stub backend returns: a real (tiny) WAV, since the streaming path
+# parses it; the buffered path only passes the bytes through.
+SAMPLES = b"\x01\x00" * 200
+AUDIO = _wav(SAMPLES)
 LOCAL_BASE_URL = "http://speaches-box:8000/v1"
 
 
@@ -498,6 +520,20 @@ def _stub_client(entity: HGATtsEntity, seen: list[dict[str, Any]]) -> None:
     entity._get_client = _wrapped  # type: ignore[method-assign]
 
 
+def _assert_stream_start(chunk: bytes, samples: bytes = SAMPLES) -> None:
+    """Check a streamed reply starts with one open-ended WAV header, then audio."""
+    assert chunk[:4] == b"RIFF"
+    assert chunk[4:8] == b"\xff\xff\xff\xff"
+    assert chunk[8:12] == b"WAVE"
+    data = chunk.index(b"data")
+    assert chunk[data + 4 : data + 8] == b"\xff\xff\xff\xff"
+    body = chunk[data + 8 :]
+    assert body.startswith(samples)
+    # Padded with silence past Home Assistant's converter start threshold.
+    assert len(chunk) >= 64 * 1024
+    assert set(body[len(samples) :]) <= {0}
+
+
 async def _text(*chunks: str) -> AsyncGenerator[str]:
     """Yield a whole message at once, as tts.speak does."""
     for chunk in chunks:
@@ -545,12 +581,12 @@ async def test_stream_speaks_first_sentence_before_text_ends() -> None:
         TTSAudioRequest("en-US", dict(entity.default_options), _slow_reply())
     )
     first = await anext(response.data_gen)
-    assert first == AUDIO
+    _assert_stream_start(first)
     assert [req["input"] for req in seen] == ["Let me check the landing light."]
 
     release.set()
     rest = [chunk async for chunk in response.data_gen]
-    assert rest == [MP3_FRAMES]
+    assert rest == [SAMPLES]
     assert seen[1]["input"] == "It was turned off by the evening automation."
 
 
@@ -579,11 +615,11 @@ async def test_stream_speaks_held_sentence_when_text_pauses(
     response = await entity.async_stream_tts_audio(
         TTSAudioRequest("en-US", dict(entity.default_options), _tool_turn())
     )
-    assert await anext(response.data_gen) == AUDIO
+    _assert_stream_start(await anext(response.data_gen))
     assert [req["input"] for req in seen] == ["Let me check."]
 
     tools_done.set()
-    assert [chunk async for chunk in response.data_gen] == [MP3_FRAMES]
+    assert [chunk async for chunk in response.data_gen] == [SAMPLES]
     assert seen[1]["input"] == "The landing light is off."
 
 
@@ -603,7 +639,7 @@ async def test_stream_pause_mid_sentence_keeps_the_fragment(
         yield " is off."
 
     _, audio = await _stream(entity, _slow())
-    assert audio == [AUDIO]
+    assert len(audio) == 1
     assert [req["input"] for req in seen] == ["The landing light is off."]
 
 
@@ -616,8 +652,9 @@ async def test_stream_batches_sentences_after_the_first() -> None:
     extension, audio = await _stream(
         entity, _live("One is short. Two follows. ", "Three ends it.")
     )
-    assert extension == "mp3"
-    assert audio == [AUDIO, MP3_FRAMES]
+    assert extension == "wav"
+    _assert_stream_start(audio[0])
+    assert audio[1:] == [SAMPLES]
     assert [req["input"] for req in seen] == [
         "One is short.",
         "Two follows. Three ends it.",
@@ -625,16 +662,16 @@ async def test_stream_batches_sentences_after_the_first() -> None:
 
 
 @pytest.mark.usefixtures("patched_client")
-async def test_live_stream_forces_mp3_whatever_the_preference() -> None:
-    """Per-batch files are concatenated, so only mp3 is requested."""
+async def test_live_stream_is_wav_whatever_the_preference() -> None:
+    """Batches are spliced into one WAV stream, so WAV is requested."""
     entity, _ = _make_entity()
     seen: list[dict[str, Any]] = []
     _stub_client(entity, seen)
     extension, _ = await _stream(
         entity, _live("Hello there."), {ATTR_PREFERRED_FORMAT: "flac"}
     )
-    assert extension == "mp3"
-    assert seen[0]["response_format"] == "mp3"
+    assert extension == "wav"
+    assert seen[0]["response_format"] == "wav"
 
 
 @pytest.mark.usefixtures("patched_client")
@@ -672,7 +709,8 @@ async def test_stream_stops_waiting_when_text_never_ends(
         yield "unreachable"
 
     _, audio = await _stream(entity, _abandoned())
-    assert audio == [AUDIO]
+    assert len(audio) == 1
+    _assert_stream_start(audio[0])
     assert [req["input"] for req in seen] == ["Let me check."]
 
 
@@ -720,16 +758,81 @@ async def test_stream_flushes_sentence_ending_in_a_quote(
     response = await entity.async_stream_tts_audio(
         TTSAudioRequest("en-US", dict(entity.default_options), _quoted())
     )
-    assert await anext(response.data_gen) == AUDIO
+    _assert_stream_start(await anext(response.data_gen))
     release.set()
-    assert [chunk async for chunk in response.data_gen] == [MP3_FRAMES]
+    assert [chunk async for chunk in response.data_gen] == [SAMPLES]
 
 
-def test_strip_id3_leaves_untagged_audio_alone() -> None:
-    """Only a real ID3v2 header is removed."""
-    assert hga_tts._strip_id3(AUDIO) == MP3_FRAMES
-    assert hga_tts._strip_id3(MP3_FRAMES) == MP3_FRAMES
-    assert hga_tts._strip_id3(b"ID3") == b"ID3"
+def test_parse_wav_handles_streaming_sizes_and_extra_chunks() -> None:
+    """Unknown data sizes run to the end; chunks before fmt/data are skipped."""
+    fmt = struct.pack("<HHIIHH", 1, 1, 24000, 48000, 2, 16)
+    data = (
+        b"RIFF\xff\xff\xff\xffWAVE"
+        b"LIST"
+        + struct.pack("<I", 3)
+        + b"abc\x00"  # odd size, padded
+        + b"fmt "
+        + struct.pack("<I", len(fmt))
+        + fmt
+        + b"data\xff\xff\xff\xff"
+        + b"\x02\x00" * 5
+    )
+    piece = hga_tts._parse_wav(data)
+    assert piece.fmt == fmt
+    assert piece.samples == b"\x02\x00" * 5
+    assert piece.block_align == 2
+
+
+@pytest.mark.parametrize("bad", [b"", b"ID3 not wav", b"RIFF\x00\x00\x00\x00WAVE"])
+def test_parse_wav_rejects_what_is_not_wav(bad: bytes) -> None:
+    """A backend that ignored the format request fails clearly."""
+    with pytest.raises(ValueError, match=r"RIFF|data"):
+        hga_tts._parse_wav(bad)
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_stream_skips_a_batch_in_another_format(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A mid-reply format change cannot be spliced in; it is logged and skipped."""
+    entity, _ = _make_entity()
+    original = entity._get_client
+    other = _wav(SAMPLES, rate=16000)
+    stubbed: set[int] = set()
+
+    def _wrapped(api_key: str, base_url: str | None = None) -> Any:
+        client = original(api_key, base_url)
+        if id(client) not in stubbed:  # one response queue per client
+            stubbed.add(id(client))
+            _install_stub(
+                client,
+                [SimpleNamespace(content=AUDIO), SimpleNamespace(content=other)],
+                [],
+            )
+        return client
+
+    entity._get_client = _wrapped  # type: ignore[method-assign]
+    _, audio = await _stream(entity, _live("One is short. ", "Two follows."))
+
+    assert len(audio) == 1
+    _assert_stream_start(audio[0])
+    assert "changed audio format" in caplog.text
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_stream_rejects_a_backend_that_returns_no_wav() -> None:
+    """Unreadable audio surfaces as a HomeAssistantError, the TTS contract."""
+    entity, _ = _make_entity()
+    original = entity._get_client
+
+    def _wrapped(api_key: str, base_url: str | None = None) -> Any:
+        client = original(api_key, base_url)
+        _install_stub(client, [SimpleNamespace(content=b"ID3 mp3 bytes")], [])
+        return client
+
+    entity._get_client = _wrapped  # type: ignore[method-assign]
+    with pytest.raises(HomeAssistantError, match="unreadable WAV"):
+        await _stream(entity, _live("Hello there."))
 
 
 async def test_stream_of_whitespace_is_rejected(patched_client: Any) -> None:

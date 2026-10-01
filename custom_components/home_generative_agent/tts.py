@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any
+import struct
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from homeassistant.components.tts import (
     ATTR_PREFERRED_FORMAT,
@@ -197,16 +198,84 @@ def _ends_sentence(text: str) -> bool:
     return text.rstrip().rstrip(_SENTENCE_CLOSERS).endswith(_SENTENCE_ENDINGS)
 
 
-def _strip_id3(audio: bytes) -> bytes:
-    """Drop a leading ID3v2 tag so a joined mp3 piece carries no tag mid-stream."""
-    header_len = 10
-    if len(audio) < header_len or audio[:3] != b"ID3":
-        return audio
-    size = 0
-    for byte in audio[6:10]:
-        size = (size << 7) | (byte & 0x7F)
-    footer = header_len if audio[5] & 0x10 else 0
-    return audio[header_len + size + footer :]
+# Home Assistant converts streamed TTS audio for the satellite with ffmpeg fed
+# through a pipe, and nothing comes out until 64 KiB have gone in (measured on
+# ffmpeg 7 with HA's own arguments: 63 KiB of WAV stays silent with stdin
+# open, 64 KiB is converted in 0.1 s; later pieces pass straight through).
+# A short first sentence ("One moment.") would otherwise sit unheard until the
+# reply's next sentences arrived -- and a Voice PE gives up on a response
+# that sends nothing for 2 s. The first piece is padded with silence past it.
+_CONVERTER_START_BYTES = 64 * 1024 + 4096
+_RIFF_HEADER_LEN = 12  # "RIFF", size, "WAVE"
+_PCM_FMT_LEN = 16  # the fields every WAV fmt chunk carries
+_UNSIGNED_SAMPLE_BITS = 8  # 8-bit WAV samples are unsigned; wider are signed
+
+
+class _WavPiece(NamedTuple):
+    """A synthesized WAV file split into its format and its samples."""
+
+    fmt: bytes
+    block_align: int
+    bits: int
+    samples: bytes
+
+
+def _parse_wav(data: bytes) -> _WavPiece:
+    """
+    Split a RIFF/WAVE file into its ``fmt `` chunk and sample data.
+
+    Servers that stream write an unknown size (0 or 0xFFFFFFFF) in the data
+    chunk, so its samples are taken to the end of the file in that case.
+    """
+    if (
+        len(data) < _RIFF_HEADER_LEN
+        or data[:4] != b"RIFF"
+        or data[8:_RIFF_HEADER_LEN] != b"WAVE"
+    ):
+        msg = "not a RIFF/WAVE file"
+        raise ValueError(msg)
+    fmt = b""
+    pos = _RIFF_HEADER_LEN
+    while pos + 8 <= len(data):
+        chunk_id = data[pos : pos + 4]
+        size = struct.unpack_from("<I", data, pos + 4)[0]
+        body = pos + 8
+        if chunk_id == b"fmt ":
+            fmt = data[body : body + size]
+        elif chunk_id == b"data":
+            if len(fmt) < _PCM_FMT_LEN:
+                msg = "data chunk before a valid fmt chunk"
+                raise ValueError(msg)
+            end = body + size if 0 < size <= len(data) - body else len(data)
+            # channels, sample rate, byte rate are not needed: the whole fmt
+            # chunk is compared between pieces and copied into the header.
+            block_align, bits = struct.unpack_from("<HH", fmt, 12)
+            return _WavPiece(fmt, max(block_align, 1), bits, data[body:end])
+        pos = body + size + (size & 1)
+    msg = "no data chunk"
+    raise ValueError(msg)
+
+
+def _streaming_wav_header(fmt: bytes) -> bytes:
+    """Return a WAV header with unknown lengths, for a stream of samples."""
+    unknown = 0xFFFFFFFF
+    return (
+        b"RIFF"
+        + struct.pack("<I", unknown)
+        + b"WAVE"
+        + b"fmt "
+        + struct.pack("<I", len(fmt))
+        + fmt
+        + b"data"
+        + struct.pack("<I", unknown)
+    )
+
+
+def _silence(length: int, piece: _WavPiece) -> bytes:
+    """Return ``length`` bytes of silence in ``piece``'s sample format."""
+    length -= length % piece.block_align
+    zero = b"\x80" if piece.bits == _UNSIGNED_SAMPLE_BITS else b"\x00"
+    return zero * max(length, 0)
 
 
 async def _pump_text(
@@ -479,10 +548,10 @@ class HGATtsEntity(TextToSpeechEntity):
         preferred format (TTS_ONE_SHOT_GRACE_S).
 
         The speech endpoint takes whole text, so for a live reply each batch
-        of sentences is one request and the replies are concatenated; mp3 is
-        used whatever the preference because mp3 frames concatenate into a
-        valid stream and wav/flac files do not. Home Assistant converts to the
-        preferred format.
+        of sentences is one request. They are sent as one WAV stream (a
+        single header, then each batch's samples) whatever the preference;
+        Home Assistant converts to the preferred format. See
+        _CONVERTER_START_BYTES for why WAV and why the first piece is padded.
         """
         chunks: asyncio.Queue[str | None] = asyncio.Queue()
         sentences: asyncio.Queue[str | None] = asyncio.Queue()
@@ -526,6 +595,7 @@ class HGATtsEntity(TextToSpeechEntity):
         """Yield audio per sentence batch as the text stream completes them."""
         spoke = False
         finished = False
+        stream_fmt: bytes | None = None
         try:
             while not finished:
                 batch: list[str] = []
@@ -543,7 +613,28 @@ class HGATtsEntity(TextToSpeechEntity):
                 if not text:
                     continue
                 _extension, audio = await self._synthesize(text, options)
-                yield audio if not spoke else _strip_id3(audio)
+                try:
+                    piece = _parse_wav(audio)
+                except ValueError as err:
+                    msg = f"TTS backend returned unreadable WAV for {self.entity_id}"
+                    raise HomeAssistantError(msg) from err
+                if stream_fmt is None:
+                    stream_fmt = piece.fmt
+                    header = _streaming_wav_header(piece.fmt)
+                    pad = _CONVERTER_START_BYTES - len(header) - len(piece.samples)
+                    yield header + piece.samples + _silence(pad, piece)
+                elif piece.fmt != stream_fmt:
+                    # One voice keeps one format; a change mid-reply cannot be
+                    # spliced into the same stream, so that batch is skipped.
+                    LOGGER.warning(
+                        "TTS backend changed audio format mid-reply for %s; "
+                        "skipping %d characters",
+                        self.entity_id,
+                        len(text),
+                    )
+                    continue
+                else:
+                    yield piece.samples
                 spoke = True
         except BaseException:
             # Keep the failure (or GeneratorExit) that is propagating.
