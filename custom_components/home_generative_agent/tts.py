@@ -220,40 +220,83 @@ class _WavPiece(NamedTuple):
     samples: bytes
 
 
-def _parse_wav(data: bytes) -> _WavPiece:
+def _parse_wav_segment(data: bytes, pos: int) -> tuple[bytes, bytes, int]:
     """
-    Split a RIFF/WAVE file into its ``fmt `` chunk and sample data.
+    Parse one RIFF/WAVE file starting at ``pos``: ``(fmt, samples, end)``.
 
-    Servers that stream write an unknown size (0 or 0xFFFFFFFF) in the data
-    chunk, so its samples are taken to the end of the file in that case.
+    A data size of 0 or 0xFFFFFFFF (a server that streams) or one past the
+    end runs to the next RIFF header or the end of the response.
     """
     if (
-        len(data) < _RIFF_HEADER_LEN
-        or data[:4] != b"RIFF"
-        or data[8:_RIFF_HEADER_LEN] != b"WAVE"
+        len(data) - pos < _RIFF_HEADER_LEN
+        or data[pos : pos + 4] != b"RIFF"
+        or data[pos + 8 : pos + _RIFF_HEADER_LEN] != b"WAVE"
     ):
         msg = "not a RIFF/WAVE file"
         raise ValueError(msg)
     fmt = b""
-    pos = _RIFF_HEADER_LEN
-    while pos + 8 <= len(data):
-        chunk_id = data[pos : pos + 4]
-        size = struct.unpack_from("<I", data, pos + 4)[0]
-        body = pos + 8
+    chunk = pos + _RIFF_HEADER_LEN
+    while chunk + 8 <= len(data):
+        chunk_id = data[chunk : chunk + 4]
+        size = struct.unpack_from("<I", data, chunk + 4)[0]
+        body = chunk + 8
         if chunk_id == b"fmt ":
             fmt = data[body : body + size]
         elif chunk_id == b"data":
             if len(fmt) < _PCM_FMT_LEN:
                 msg = "data chunk before a valid fmt chunk"
                 raise ValueError(msg)
-            end = body + size if 0 < size <= len(data) - body else len(data)
-            # channels, sample rate, byte rate are not needed: the whole fmt
-            # chunk is compared between pieces and copied into the header.
-            block_align, bits = struct.unpack_from("<HH", fmt, 12)
-            return _WavPiece(fmt, max(block_align, 1), bits, data[body:end])
-        pos = body + size + (size & 1)
+            if 0 < size <= len(data) - body:
+                end = body + size
+            else:
+                following = data.find(b"RIFF", body)
+                end = following if following != -1 else len(data)
+            return fmt, data[body:end], end
+        chunk = body + size + (size & 1)
     msg = "no data chunk"
     raise ValueError(msg)
+
+
+def _parse_wav(data: bytes) -> _WavPiece:
+    """
+    Split a WAV response into its format and all of its samples.
+
+    Some servers answer a multi-sentence request with one complete WAV file
+    per sentence, back to back, each header sized for its own sentence
+    (Speaches with piper does). Reading only the first file dropped every
+    sentence after it, so a reply was cut off after its first sentence --
+    a fraction of a second when that sentence was "Yes." or "Sure!". All
+    segments are read; one in a different format is skipped.
+    """
+    fmt, samples, end = _parse_wav_segment(data, 0)
+    parts = [samples]
+    while (start := data.find(b"RIFF", end)) != -1:
+        try:
+            seg_fmt, seg_samples, end = _parse_wav_segment(data, start)
+        except ValueError:
+            break
+        if seg_fmt == fmt:
+            parts.append(seg_samples)
+        else:
+            LOGGER.warning("Skipping a WAV segment in a different format")
+    # channels, sample rate, byte rate are not needed: the whole fmt chunk is
+    # compared between pieces and copied into the header.
+    block_align, bits = struct.unpack_from("<HH", fmt, 12)
+    return _WavPiece(fmt, max(block_align, 1), bits, b"".join(parts))
+
+
+def _single_wav(data: bytes) -> bytes:
+    """Return a WAV response as one file, merging per-sentence segments."""
+    piece = _parse_wav(data)
+    header = _streaming_wav_header(piece.fmt)
+    riff_size = len(header) - 8 + len(piece.samples)
+    return (
+        header[:4]
+        + struct.pack("<I", riff_size)
+        + header[8:-4]
+        + struct.pack("<I", len(piece.samples))
+        + piece.samples
+    )
 
 
 def _streaming_wav_header(fmt: bytes) -> bytes:
@@ -575,6 +618,13 @@ class HGATtsEntity(TextToSpeechEntity):
                 msg = f"No text to synthesize for {self.entity_id}"
                 raise HomeAssistantError(msg)
             extension, audio = await self._synthesize(message, request.options)
+            if extension == "wav":
+                # One file per sentence would play only its first sentence.
+                try:
+                    audio = _single_wav(audio)
+                except ValueError as err:
+                    msg = f"TTS backend returned unreadable WAV for {self.entity_id}"
+                    raise HomeAssistantError(msg) from err
 
             async def _whole() -> AsyncGenerator[bytes]:
                 yield audio
