@@ -2167,13 +2167,130 @@ def test_turn_start_padding_tracks_home_assistants_streaming_threshold(
 
     from custom_components.home_generative_agent.conversation import (  # noqa: PLC0415
         _padded_for_streaming,
+        _stream_response_chars,
     )
 
+    _stream_response_chars.cache_clear()
     padded = _padded_for_streaming("One moment.")
     assert padded.strip() == "One moment."
     assert len(padded) > ha_pipeline.STREAM_RESPONSE_CHARS
 
     monkeypatch.setattr(ha_pipeline, "STREAM_RESPONSE_CHARS", 100)
-    assert len(_padded_for_streaming("One moment.")) == 101
-    long_phrase = "x" * 150
-    assert _padded_for_streaming(long_phrase) == long_phrase
+    _stream_response_chars.cache_clear()
+    try:
+        assert len(_padded_for_streaming("One moment.")) == 101
+        long_phrase = "x" * 150
+        assert _padded_for_streaming(long_phrase) == long_phrase + "\n\n"
+    finally:
+        _stream_response_chars.cache_clear()
+
+
+class _DeltaChatLog:
+    """
+    A chat_log that commits content only through the delta stream.
+
+    Records every delta the way the Assist pipeline's listener sees them, so
+    a test can tell a spoken reply from one added directly.
+    """
+
+    def __init__(self, content: list[Any]) -> None:
+        self.content = content
+        self.heard: list[dict[str, Any]] = []
+
+    async def async_add_delta_content_stream(self, agent_id: str, stream: Any) -> Any:
+        async for delta in stream:
+            self.heard.append(delta)
+            entry = _mk_content(
+                ha_conversation.AssistantContent,
+                agent_id=agent_id,
+                content=delta.get("content"),
+                tool_calls=None,
+            )
+            self.content.append(entry)
+            yield entry
+
+    def async_add_assistant_content_without_tools(self, entry: Any) -> None:
+        self.content.append(entry)
+
+
+def _ack_entity() -> Any:
+    entity = HGAConversationEntity.__new__(HGAConversationEntity)
+    entity.entity_id = HGA_AGENT_ID
+    return entity
+
+
+async def test_turn_start_acknowledgement_is_spoken_at_once() -> None:
+    """It goes through the delta stream, padded past the pipeline threshold (#671)."""
+    from sentence_stream import SentenceBoundaryDetector  # noqa: PLC0415
+
+    from custom_components.home_generative_agent.conversation import (  # noqa: PLC0415
+        VoiceAck,
+    )
+
+    chat_log = _DeltaChatLog([_mk_content(ha_conversation.UserContent, content="Why?")])
+    index = await HGAConversationEntity._async_speak_turn_start_ack(
+        cast("Any", _ack_entity()),
+        cast("Any", chat_log),
+        VoiceAck("One moment.", "turn_start"),
+    )
+
+    assert index == 1
+    assert len(chat_log.heard) == 1
+    spoken = chat_log.heard[0]["content"]
+    assert spoken.strip() == "One moment."
+    assert len(spoken) > 60
+    # A sentence-stream engine releases it without waiting for the next word.
+    assert list(SentenceBoundaryDetector().add_chunk(spoken)) == ["One moment."]
+
+
+async def test_tool_call_timing_speaks_nothing_at_turn_start() -> None:
+    """The tool-call timing and an empty phrase leave the turn start silent."""
+    from custom_components.home_generative_agent.conversation import (  # noqa: PLC0415
+        VoiceAck,
+    )
+
+    for ack in (VoiceAck("One moment.", "tool_call"), VoiceAck("", "turn_start")):
+        chat_log = _DeltaChatLog([])
+        index = await HGAConversationEntity._async_speak_turn_start_ack(
+            cast("Any", _ack_entity()), cast("Any", chat_log), ack
+        )
+        assert index is None
+        assert chat_log.heard == []
+
+
+async def test_failure_after_a_lone_acknowledgement_is_spoken() -> None:
+    """
+    "One moment." followed by a failed turn still says why, aloud.
+
+    Once the acknowledgement starts the pipeline's speech stream, it speaks
+    only deltas; an error reply added directly would never be heard.
+    """
+    chat_log = _DeltaChatLog(
+        [
+            _mk_content(ha_conversation.UserContent, content="Why?"),
+            _mk_content(
+                ha_conversation.AssistantContent,
+                agent_id=HGA_AGENT_ID,
+                content="One moment.",
+                tool_calls=None,
+            ),
+        ]
+    )
+    entity = _ack_entity()
+
+    await HGAConversationEntity._async_ensure_reply_after_ack(
+        cast("Any", entity),
+        cast("Any", chat_log),
+        1,
+        HomeAssistantError("Model invocation failed: timeout"),
+    )
+
+    assert len(chat_log.heard) == 1
+    assert "timeout" in chat_log.heard[0]["content"]
+
+    # A turn that did reply is left alone.
+    before = len(chat_log.heard)
+    await HGAConversationEntity._async_ensure_reply_after_ack(
+        cast("Any", entity), cast("Any", chat_log), 1, None
+    )
+    assert len(chat_log.heard) == before

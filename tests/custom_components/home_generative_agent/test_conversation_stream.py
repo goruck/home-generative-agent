@@ -61,14 +61,11 @@ def _stub_ha_conversation() -> None:
 _stub_ha_conversation()
 
 from custom_components.home_generative_agent.conversation import (
-    VoiceAck,
     _normalize_tool_result,
     _reply_entry,
     _sanitize_tool_result_dict,
     _stream_langgraph_to_ha,
-    _turn_start_ack_index,
     _voice_tool_acknowledgement,
-    _with_acknowledgement,
     _with_tool_acknowledgement,
 )
 from custom_components.home_generative_agent.core.utils import extract_final
@@ -1215,66 +1212,6 @@ async def test_think_filter_whitespace_matches_extract_final(
     assert streamed == extract_final("".join(chunks), collapse_whitespace=False)
 
 
-async def _turn_start(
-    events: list[dict[str, Any]], ack: VoiceAck
-) -> list[dict[str, Any]]:
-    stream = _with_acknowledgement(
-        _stream_langgraph_to_ha(_replay(events), "agent_1"), ack
-    )
-    return [cast("dict[str, Any]", d) async for d in stream]
-
-
-@pytest.mark.asyncio
-async def test_turn_start_acknowledgement_is_the_first_delta() -> None:
-    """Spoken before the model is called, as its own assistant message (#671)."""
-    deltas = await _turn_start(
-        _tool_then_answer(), VoiceAck("One moment.", "turn_start")
-    )
-
-    first = deltas[0]
-    assert first["role"] == "assistant"
-    assert first["content"].strip() == "One moment."
-    # Past the pipeline's streaming threshold, so it is spoken at once.
-    assert len(first["content"]) > 60
-    # The model's own turn follows unchanged, with no second acknowledgement.
-    assert deltas[1] == {"role": "assistant"}
-    contents = [d.get("content", "").strip() for d in deltas[1:] if d.get("content")]
-    assert contents == ["The landing light is off."]
-
-
-@pytest.mark.asyncio
-async def test_turn_start_acknowledgement_also_precedes_a_toolless_reply() -> None:
-    """The documented cost: chit-chat gets it too."""
-    deltas = await _turn_start(
-        _chunked_turn("Hello!"), VoiceAck("One moment.", "turn_start")
-    )
-
-    assert deltas[0]["content"].strip() == "One moment."
-    assert [d.get("content") for d in deltas[1:] if d.get("content")] == ["Hello!"]
-
-
-@pytest.mark.asyncio
-async def test_tool_call_timing_keeps_the_original_trigger() -> None:
-    """The tool-call timing behaves exactly as before."""
-    deltas = await _turn_start(
-        _tool_then_answer(), VoiceAck("Let me check.", "tool_call")
-    )
-
-    assert deltas[0] == {"role": "assistant"}
-    assert deltas[1] == {"content": "Let me check. "}
-    assert "tool_calls" in deltas[2]
-
-
-@pytest.mark.asyncio
-async def test_no_acknowledgement_when_text_is_empty_at_either_timing() -> None:
-    """An empty option adds nothing, whatever the timing."""
-    for timing in ("turn_start", "tool_call"):
-        deltas = await _turn_start(_tool_then_answer(), VoiceAck("", timing))
-        assert [d.get("content") for d in deltas if d.get("content")] == [
-            "The landing light is off."
-        ]
-
-
 def test_acknowledgement_timing_defaults_to_turn_start() -> None:
     """Unset timing means turn start; a stored choice is honored."""
     user_input = cast("Any", types.SimpleNamespace(satellite_id="s", device_id=None))
@@ -1285,29 +1222,21 @@ def test_acknowledgement_timing_defaults_to_turn_start() -> None:
     assert _voice_tool_acknowledgement(options, user_input).timing == "tool_call"
 
 
-def test_lone_turn_start_acknowledgement_is_not_a_reply() -> None:
-    """
-    A turn that failed after "One moment." must still get its error reply.
+def test_unknown_acknowledgement_timing_falls_back_to_the_default() -> None:
+    """A stale or hand-edited timing value never silently changes the trigger."""
+    user_input = cast("Any", types.SimpleNamespace(satellite_id="s", device_id=None))
+    options = {
+        "voice_tool_acknowledgement": "One moment.",
+        "voice_tool_acknowledgement_timing": "start",
+    }
 
-    Recovery and the no-reply guard judge a turn by its last chat_log entry,
-    and the turn-start acknowledgement is an assistant entry written before
-    the model runs.
-    """
-    before = ["user request"]
-    ack_index = _turn_start_ack_index(before, VoiceAck("One moment.", "turn_start"))
-    assert ack_index == 1
-
-    only_ack = [*before, "One moment.   "]
-    assert _reply_entry(only_ack, ack_index) is None
-
-    answered = [*only_ack, "The light is off."]
-    assert _reply_entry(answered, ack_index) == "The light is off."
+    assert _voice_tool_acknowledgement(options, user_input).timing == "turn_start"
 
 
-def test_reply_entry_unchanged_without_a_turn_start_acknowledgement() -> None:
-    """Tool-call timing or no acknowledgement leaves recovery as it was."""
-    content = ["user request", "reply"]
-    assert _turn_start_ack_index(content, VoiceAck("Hi.", "tool_call")) is None
-    assert _turn_start_ack_index(content, VoiceAck("", "turn_start")) is None
-    assert _reply_entry(content, None) == "reply"
+def test_reply_entry_ignores_only_a_lone_acknowledgement() -> None:
+    """Recovery must not read a turn-start acknowledgement as the reply."""
+    only_ack = ["user request", "One moment."]
+    assert _reply_entry(only_ack, 1) is None
+    assert _reply_entry([*only_ack, "The light is off."], 1) == "The light is off."
+    assert _reply_entry(["user request", "reply"], None) == "reply"
     assert _reply_entry([], None) is None
