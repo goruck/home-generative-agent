@@ -26,4 +26,4 @@ PyTurboJPEG>=2.5.0
 # HGA reads the Assist pipeline's streaming threshold from
 # assist_pipeline.pipeline, which imports these; pin to core's assist_pipeline manifest.
 pymicro-vad==2.1.0
-pyspeex-noise==1.0.2
+pyspeex-noise==2.0.1
