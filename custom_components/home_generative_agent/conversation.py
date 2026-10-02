@@ -1630,15 +1630,24 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 else None
             )
             last_chat_content = _reply_entry(chat_log.content, ack_index)
+            # A turn that ended on a tool call has no spoken reply yet (the
+            # tool-loop guard's give-up is one): the recovered text must be
+            # added and spoken, not swapped in for the tool call -- which
+            # would also drop the call and, once a turn-start
+            # acknowledgement has started the speech stream, never be heard.
+            reply = (
+                last_chat_content
+                if isinstance(last_chat_content, conversation.AssistantContent)
+                and not last_chat_content.tool_calls
+                else None
+            )
+            has_reply = reply is not None
             replace_partial = (
-                isinstance(last_chat_content, conversation.AssistantContent)
+                reply is not None
                 and recovered_content is not None
-                and last_chat_content.content != recovered_content
+                and reply.content != recovered_content
             )
-            add_recovered = (
-                not isinstance(last_chat_content, conversation.AssistantContent)
-                and recovered_content is not None
-            )
+            add_recovered = not has_reply and recovered_content is not None
             if replace_partial:
                 chat_log.content.pop()
                 chat_log.async_add_assistant_content_without_tools(
@@ -1657,7 +1666,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     "Recovered final AssistantContent from graph state after "
                     "streaming failure."
                 )
-            elif not isinstance(last_chat_content, conversation.AssistantContent):
+            elif not has_reply:
                 # Graph state has no usable AI response (e.g. model timed out
                 # before generating a reply). Emit a user-visible error message
                 # so the chat UI shows something instead of a blank bubble.

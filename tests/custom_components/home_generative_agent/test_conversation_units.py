@@ -2294,3 +2294,55 @@ async def test_failure_after_a_lone_acknowledgement_is_spoken() -> None:
         cast("Any", entity), cast("Any", chat_log), 1, None
     )
     assert len(chat_log.heard) == before
+
+
+async def test_recovered_reply_after_a_tool_call_is_added_and_spoken() -> None:
+    """
+    A turn that ends on a tool call gets its recovered reply spoken, not swapped in.
+
+    Field trial (2026-10-01): the tool-loop guard's give-up replaced the turn's
+    last tool-call entry directly; with a turn-start acknowledgement already
+    streaming, the satellite said nothing at all.
+    """
+    from langchain_core.messages import AIMessage  # noqa: PLC0415
+
+    give_up = "I wasn't able to complete this request after several tool-use attempts."
+    tool_call = _mk_content(
+        ha_conversation.AssistantContent,
+        agent_id=HGA_AGENT_ID,
+        content=None,
+        tool_calls=[object()],
+    )
+    chat_log = _DeltaChatLog(
+        [
+            _mk_content(ha_conversation.UserContent, content="Is the lock locked?"),
+            tool_call,
+        ]
+    )
+
+    async def _no_events(**_kwargs: Any) -> Any:
+        return
+        yield  # pragma: no cover - makes this an async generator
+
+    app = types.SimpleNamespace(
+        astream_events=_no_events,
+        aget_state=AsyncMock(
+            return_value=types.SimpleNamespace(
+                values={"messages": [AIMessage(content=give_up)]}
+            )
+        ),
+    )
+
+    entity = _ack_entity()
+    entity.hass = types.SimpleNamespace(async_create_task=asyncio.ensure_future)
+    await HGAConversationEntity._async_run_astream(
+        cast("Any", entity),
+        app,
+        cast("Any", {}),
+        cast("Any", {}),
+        cast("Any", chat_log),
+        None,
+    )
+
+    assert [d.get("content") for d in chat_log.heard] == [give_up]
+    assert tool_call in chat_log.content, "the tool call must not be replaced"
