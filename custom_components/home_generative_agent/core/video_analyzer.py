@@ -1654,9 +1654,12 @@ class VideoAnalyzer:
         # Decision tree: one early-return per CaptionNoveltyDecision reason code.
         # PLR0911 (too many return statements) suppressed intentionally — each
         # return maps to a named reason that callers and tests can assert on.
-        # Snapshot names are in the form "snapshot_20250426_002804.jpg".
-        first_str = first_path.replace("snapshot_", "").replace(".jpg", "")
-        first_dt = dt_util.as_local(datetime.strptime(first_str, "%Y%m%d_%H%M%S"))  # noqa: DTZ007
+        # Snapshot names are in the form "snapshot_20250426_002804.jpg"; an
+        # event-recording frame adds an "_rNN" suffix, which epoch_from_path
+        # ignores.
+        first_dt = dt_util.as_local(
+            dt_util.utc_from_timestamp(epoch_from_path(Path(first_path)))
+        )
         if first_dt < dt_util.now() - timedelta(minutes=VIDEO_ANALYZER_TIME_OFFSET):
             return CaptionNoveltyDecision(notify=True, reason="stale_snapshot")
 

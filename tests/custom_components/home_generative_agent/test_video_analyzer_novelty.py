@@ -290,6 +290,25 @@ async def test_stale_snapshot_skips_store_search(va: VideoAnalyzer) -> None:
     va.entry.runtime_data.store.asearch.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_recording_frame_name_is_parsed(va: VideoAnalyzer) -> None:
+    """An event-recording frame (`_rNN` suffix) heading the batch must not raise."""
+    name = _stale_snapshot_name().replace(".jpg", "_r00.jpg")
+    decision = await va._is_caption_novel(  # type: ignore[attr-defined]
+        "frontgate", "a car passes the door", name, []
+    )
+    assert decision == CaptionNoveltyDecision(notify=True, reason="stale_snapshot")
+
+
+@pytest.mark.asyncio
+async def test_fresh_recording_frame_reaches_store_search(va: VideoAnalyzer) -> None:
+    name = _fresh_snapshot_name().replace(".jpg", "_r07.jpg")
+    await va._is_caption_novel(  # type: ignore[attr-defined]
+        "frontgate", "a car passes the door", name, []
+    )
+    va.entry.runtime_data.store.asearch.assert_called_once()
+
+
 # ---------------------------------------------------------------------------
 # _is_caption_novel: store_timeout
 # ---------------------------------------------------------------------------
