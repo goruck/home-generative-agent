@@ -469,6 +469,12 @@ def _prepare_tool_args(
     """Normalize, guard, and sanitize arguments before calling HA."""
     tool_args = normalize_intent_for_alarm(tool_name, tool_args)
     tool_args = normalize_intent_for_lock(tool_name, tool_args)
+    if _is_live_context_tool(tool_name):
+        # Read-only, and HA's schema is name/domain/area only. The lock
+        # rewriting below exists for lock/unlock commands; applied to a state
+        # query it added service/entity_id keys HA rejects (ExtraKeysInvalid),
+        # so every "is the lock locked?" failed and looped since v2.8.0.
+        return None, _live_context_args(sanitize_tool_args(tool_args))
     tool_args = maybe_fill_lock_entity(tool_args, ctx.hass)
     tool_args = sanitize_tool_args(tool_args)
 
@@ -2991,6 +2997,14 @@ def _is_critical_action(
         entity_ids=entities,
         critical_actions=critical_actions,
     )
+
+
+_LIVE_CONTEXT_KEYS = ("name", "domain", "area")
+
+
+def _live_context_args(tool_args: dict[str, Any]) -> dict[str, Any]:
+    """Keep only the filters GetLiveContext accepts; models add entity_id too."""
+    return {key: tool_args[key] for key in _LIVE_CONTEXT_KEYS if tool_args.get(key)}
 
 
 def _minimal_payload_for_domain(tool_args: dict[str, Any]) -> dict[str, Any]:
