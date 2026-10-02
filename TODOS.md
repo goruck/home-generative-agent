@@ -447,22 +447,11 @@ validation.
 
 **Why:** Pre-existing since streaming TTS (#679) for any reply that streamed past 60 characters before being replaced. The turn-start acknowledgement (#671 follow-up) starts streaming on every satellite turn, so it now applies to short replies too. Rare: it needs a mid-stream fallback or a streamed/graph-state mismatch, which the think filter and #628 made uncommon. Surfaced by the code review of the turn-start acknowledgement PR.
 
+**Narrowed (2026-10-01):** the commonest case, a turn ending on a tool call (the tool-loop guard's give-up), now adds and speaks the recovered reply instead of replacing anything. What remains is a true mid-stream fallback, where spoken text is replaced.
+
 **How to apply:** There is no way to retract audio already spoken. Options: speak the replacement as a delta after the partial (the satellite then says both, so only when the partial was abandoned mid-sentence), or hold back a model's text from the delta stream until the turn can no longer fall back (costs the streaming latency win). Decide with real fallback traces; do not apply blindly.
 
 **Effort:** M
-**Priority:** P3
-
----
-
-### `replace_partial` drops tool calls when it re-commits the last entry
-
-**What:** `_async_run_astream`'s `replace_partial` branch (`conversation.py`) pops `chat_log.content[-1]` and re-adds it via `async_add_assistant_content_without_tools` with only `content` set. The guard checks `isinstance(..., AssistantContent)` but not `.tool_calls`, so if the last entry carries tool calls they are silently discarded. `_recommit_final_assistant_content` does guard on `not ...tool_calls`; this branch does not.
-
-**Why:** Found by the `/code-review` pass on the #628 branch; pre-existing. Hard to hit today because a turn normally ends on a text-only reply, but #628's byte-identity work is what makes it clear this branch should be rare, and any future change that makes it fire on a tool-calling turn would corrupt Show Details.
-
-**How to apply:** Mirror the `_recommit_final_assistant_content` guard — skip the replacement (or carry the tool calls through) when the popped entry has `tool_calls`.
-
-**Effort:** S
 **Priority:** P3
 
 ---
@@ -2187,6 +2176,19 @@ This is the same allowlist-omission class as #480 and as the triage options fixe
 ---
 
 ## Completed
+
+### `replace_partial` drops tool calls when it re-commits the last entry
+
+**What:** `_async_run_astream`'s `replace_partial` branch (`conversation.py`) pops `chat_log.content[-1]` and re-adds it via `async_add_assistant_content_without_tools` with only `content` set. The guard checks `isinstance(..., AssistantContent)` but not `.tool_calls`, so if the last entry carries tool calls they are silently discarded. `_recommit_final_assistant_content` does guard on `not ...tool_calls`; this branch does not.
+
+**Why:** Found by the `/code-review` pass on the #628 branch; pre-existing. Hard to hit today because a turn normally ends on a text-only reply, but #628's byte-identity work is what makes it clear this branch should be rare, and any future change that makes it fire on a tool-calling turn would corrupt Show Details.
+
+**How to apply:** Mirror the `_recommit_final_assistant_content` guard — skip the replacement (or carry the tool calls through) when the popped entry has `tool_calls`.
+
+**Effort:** S
+**Priority:** P3
+
+**Resolution:** `_async_run_astream` now treats a last entry that carries tool calls as "no reply yet": the recovered text is added through the spoken delta path instead of replacing it, so the tool call survives in Show Details. Found in the field on 2026-10-01, where it also made the tool-loop guard's give-up silent on a satellite whose turn-start acknowledgement had already started the speech stream. Pinned by `test_recovered_reply_after_a_tool_call_is_added_and_spoken`.
 
 ### Leaked `<think>` reasoning can become the final chat reply
 
