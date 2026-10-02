@@ -1913,6 +1913,23 @@ def test_friendly_type_motion_while_away() -> None:
     assert _display_type(finding) == "Motion while away"
 
 
+def test_display_type_low_battery_template_label() -> None:
+    """Low-battery dynamic rules show a curated label, not the raw slug."""
+    finding = AnomalyFinding(
+        anomaly_id="slug-battery",
+        type="v1_subject_sensor_predicate_low_battery_night_any",
+        severity="low",
+        confidence=0.7,
+        triggering_entities=["sensor.hall_battery"],
+        evidence={"template_id": "low_battery_sensors"},
+        suggested_actions=["check_sensor"],
+        is_sensitive=False,
+    )
+    assert _display_type(finding) == "Low battery"
+    hass = DummyHass()
+    hass.config.language = "cs"
+    assert _display_type(finding, hass) == "Slabá baterie senzoru"
+
 # ---------------------------------------------------------------------------
 # response_language vs deterministic mobile formatters (PR #523 field report)
 # ---------------------------------------------------------------------------
