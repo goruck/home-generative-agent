@@ -971,6 +971,46 @@ is a required argument; the notify service is resolved once per push.
 
 Not done: Russian and Turkish strings for the new field (English fallback).
 
+## Final design after the adversarial reviews (/ship, 2026-10-02)
+
+A Claude adversarial pass and a Codex adversarial pass both asked for changes to the reworked
+code. Nearly every serious finding came from one thing: deciding "a new person appeared" from
+caption text. Lindo chose to remove that instead of patching it again. **This section is the
+design that shipped; it overrides everything above, including item 2 of the previous section.**
+
+- **Captions decide nothing.** The human-level ladder (`none` < `known` < `unidentified`), the
+  resident-turned-away rule and every use of `_caption_mentions_person` in the cooldown are
+  gone. `_NEGATED_PERSON_RE` is restored to exactly what it was on main, so behaviour with the
+  option at 0 is unchanged apart from the batch-local names fix. Reasons, all reproduced: the
+  detector's word list misses "a figure", "someone", "an intruder", "a stranger", "a driver"
+  and every non-English caption; the widened negation scrubbed real people ("Not a person I
+  recognize, standing at the door"; "The porch is not empty of people").
+- **One bypass: the first face-recognition "Unknown Person" in a window sounds, once.** It
+  reads every frame of the batch (full-batch names, R4). It gets a new card and does not
+  restart the window.
+- **Fixed window.** A window runs N seconds from the push that opened it. Nothing extends or
+  restarts it, so every failure case is bounded by N.
+- **Maximum 600 seconds** (was 3600), for the same reason.
+- **Second card.** After an unknown-person alert, a push whose displayed frames (the
+  summary-aligned names) show no unknown face goes to the `_more` card. The card choice uses
+  what is displayed, not the whole batch (Codex finding 2).
+- **Window tied to the notify target.** If the resolved service changes, the new target starts
+  its own window (Codex finding 5).
+- **Also fixed:** a stored non-finite option value is treated as 0 (`OverflowError`); a failed
+  push with the cooldown on is logged with its traceback.
+
+Rejected finding: Codex's "two integration entries can share a card tag". `manifest.json` sets
+`single_config_entry: true`.
+
+Accepted and documented, not fixed: a second unknown person in one window is quiet; a resident
+misread as Unknown Person uses up the window's one alert; an unknown face in a frame whose
+analysis failed can sound with a notification that shows only the resident; an undetected
+face (hood, mask) is quiet; push delivery cannot be confirmed.
+
+What this gives up, by decision: without face recognition there is no bypass at all. A person
+arriving inside a window opened by a car is a quiet card update. That is the plain cooldown
+the issue asked for, with nothing withheld, and the docs say so first in the limits list.
+
 ## GSTACK REVIEW REPORT
 
 | Review | Trigger | Why | Runs | Status | Findings |

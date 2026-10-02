@@ -101,10 +101,11 @@ from .notify_cooldown import (
     CooldownAction,
     CooldownWindow,
     active_window,
-    batch_evidence,
     decide,
-    next_window,
+    has_unknown_face,
     notification_tag,
+    opened_window,
+    window_after_unknown_face,
 )
 from .person_gallery import FACE_EMBEDDING_DIMS
 from .utils import (
@@ -424,17 +425,11 @@ _HUMAN_TERMS_WORDS: Final = (
     r"child|children"
 )
 _HUMAN_TERM_RE: Final = re.compile(rf"\b(?:{_HUMAN_TERMS_WORDS})\b")
-# Any negated human span, regardless of trailing wording — broader than
+# Any "no <human term>" span, regardless of trailing wording — broader than
 # _NEGATED_HUMAN_RE, which only covers "no ... visible" phrasings. The
-# optional modifier covers "no other person" / "no visible people". The other
-# openers cover wording such as "without any people", "not a person in sight"
-# and "empty of people". They matter to the notification cooldown, where a
-# negated caption read as a human would mark an empty scene as one that showed
-# an unidentified person (issue #672).
+# optional modifier covers "no other person" / "no additional people".
 _NEGATED_PERSON_RE: Final = re.compile(
-    r"\b(?:no|without(?:\s+any)?|not\s+an?(?:\s+single)?|"
-    r"(?:empty|free|devoid|clear)\s+of(?:\s+any)?)\s+"
-    r"(?:(?:other|additional|second|more|visible|apparent|discernible)\s+)?"
+    rf"\bno\s+(?:(?:other|additional|second|more)\s+)?"
     rf"(?:{_HUMAN_TERMS_WORDS}|one|body|humans?|"
     r"individuals?|figures?|kids?|ladies|lady|guys?)\b"
 )
@@ -739,7 +734,7 @@ class _BatchNotifyContext:
 
     # Names on the frames the summary kept (sensor, image entity, novelty).
     recognized: list[str]
-    # Every name detected anywhere in the batch (notification cooldown).
+    # Every name detected in any frame of the batch (notification cooldown).
     batch_names: list[str]
 
 
@@ -1659,7 +1654,8 @@ class VideoAnalyzer:
         )
         try:
             seconds = int(float(raw or 0))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError: a stored "inf" or "1e999"; junk like any other.
             return 0
         return min(VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_MAX_S, max(0, seconds))
 
@@ -1700,7 +1696,9 @@ class VideoAnalyzer:
         lock = self._notify_locks.setdefault(camera_id, asyncio.Lock())
         async with lock:
             try:
-                card, window = self._plan_cooldown_push(camera_id, msg, context)
+                card, window = self._plan_cooldown_push(
+                    camera_id, f"{target[0]}.{target[1]}", context, cooldown_s
+                )
             except Exception:
                 # The cooldown is a convenience layered on the alert: a bug in
                 # it must cost the convenience, never the push.
@@ -1712,11 +1710,11 @@ class VideoAnalyzer:
                 sent = await self._send_notification(
                     msg, camera_name, notify_img, target=target, card=card
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception:
                 # Isolated so the batch's analysis is still stored (_finalize
                 # stores after notifying). CancelledError is not an Exception
                 # and still propagates, so unload cancels the worker as before.
-                LOGGER.warning("[%s] Camera notification failed: %r", camera_id, exc)
+                LOGGER.exception("[%s] Camera notification failed", camera_id)
                 return
             # Commit only a push the notify service accepted, so a push that
             # could not even be handed over never starts a quiet window.
@@ -1724,7 +1722,11 @@ class VideoAnalyzer:
                 self._notify_windows[camera_id] = window
 
     def _plan_cooldown_push(
-        self, camera_id: str, msg: str, context: _BatchNotifyContext
+        self,
+        camera_id: str,
+        target: str,
+        context: _BatchNotifyContext,
+        cooldown_s: int,
     ) -> tuple[_NotifyCard, CooldownWindow | None]:
         """
         Decide which card this push lands on and whether it sounds.
@@ -1734,36 +1736,38 @@ class VideoAnalyzer:
         """
         now = monotonic()
         previous = self._notify_windows.get(camera_id)
-        window = active_window(
-            previous, now=now, cooldown_s=self._notification_cooldown_s()
+        window = active_window(previous, now=now, cooldown_s=cooldown_s, target=target)
+        # Escalation looks at every frame of the batch; which card a quiet
+        # update lands on looks only at the frames its text and image show.
+        unknown_in_batch = has_unknown_face(context.batch_names)
+        action = decide(
+            window,
+            unknown_in_batch=unknown_in_batch,
+            unknown_displayed=has_unknown_face(context.recognized),
         )
-        evidence = batch_evidence(
-            context.batch_names,
-            caption_has_human=_caption_mentions_person(msg),
-            window_level=window.level if window is not None else None,
-        )
-        action = decide(window, evidence)
         LOGGER.debug(
-            "[%s] notification cooldown: action=%s level=%s unknown_face=%s "
-            "window_level=%s",
+            "[%s] notification cooldown: action=%s unknown_face=%s window=%s",
             camera_id,
             action,
-            evidence.level.name,
-            evidence.unknown_face,
-            window.level.name if window is not None else "none",
+            unknown_in_batch,
+            "open" if window is not None else "none",
         )
-        if window is not None and action in (
-            CooldownAction.QUIET,
-            CooldownAction.FOLLOW_UP,
-        ):
+        if window is None:
+            new_window = opened_window(
+                previous,
+                now=now,
+                wall_time=time(),
+                target=target,
+                unknown_face=unknown_in_batch,
+            )
+        elif action is CooldownAction.UNKNOWN_FACE:
+            new_window = window_after_unknown_face(window, wall_time=time())
+        else:
             tag = notification_tag(
                 camera_id, window, follow_up=action is CooldownAction.FOLLOW_UP
             )
             return _NotifyCard(tag=tag, quiet=True), None
-        # OPEN or BYPASS: a sounding push on a new card starts a new window.
-        new_window = next_window(
-            previous, evidence, now=now, wall_time=time(), carry=window
-        )
+        # A sounding push on a new card; commit its window once it is sent.
         return (
             _NotifyCard(tag=notification_tag(camera_id, new_window), quiet=False),
             new_window,

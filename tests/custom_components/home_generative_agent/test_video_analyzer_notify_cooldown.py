@@ -25,12 +25,10 @@ from custom_components.home_generative_agent.const import (
     VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_MAX_S,
 )
 from custom_components.home_generative_agent.core import video_analyzer as va_mod
-from custom_components.home_generative_agent.core.notify_cooldown import HumanLevel
 from custom_components.home_generative_agent.core.video_analyzer import (
     CaptionNoveltyDecision,
     VideoAnalyzer,
     _BatchNotifyContext,
-    _caption_mentions_person,
 )
 
 
@@ -114,8 +112,14 @@ def _sounds(call: Any) -> bool:
     return "alert_once" not in _data(call)
 
 
-def _context(names: list[str] | None = None) -> _BatchNotifyContext:
-    return _BatchNotifyContext(recognized=names or [], batch_names=names or [])
+def _context(
+    names: list[str] | None = None, *, batch_names: list[str] | None = None
+) -> _BatchNotifyContext:
+    """Names on the displayed frames; `batch_names` when the whole batch differs."""
+    shown = names or []
+    return _BatchNotifyContext(
+        recognized=shown, batch_names=shown if batch_names is None else batch_names
+    )
 
 
 async def _push(
@@ -123,9 +127,12 @@ async def _push(
     msg: str = "A person stands at the door.",
     *,
     names: list[str] | None = None,
+    batch_names: list[str] | None = None,
     camera_id: str = _CAMERA,
 ) -> None:
-    await va._dispatch_notification(camera_id, msg, _IMG, _context(names))
+    await va._dispatch_notification(
+        camera_id, msg, _IMG, _context(names, batch_names=batch_names)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +140,7 @@ async def _push(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("value", [0, 0.0, None, "", "abc", -5])
+@pytest.mark.parametrize("value", [0, 0.0, None, "", "abc", -5, "inf", "1e999"])
 @pytest.mark.asyncio
 async def test_cooldown_off_sends_the_unchanged_payload(
     va: VideoAnalyzer, entry: MagicMock, value: object
@@ -240,9 +247,10 @@ async def test_another_camera_is_never_affected(
 
 
 # ---------------------------------------------------------------------------
-# Bypass, quiet update, follow-up card
+# Unknown-face bypass, quiet update, follow-up card
 # ---------------------------------------------------------------------------
 
+_UNKNOWN = ["Unknown Person"]
 _SOUND = "sound"
 _QUIET = "quiet"
 _FOLLOW_UP = "follow_up"
@@ -251,28 +259,24 @@ _FOLLOW_UP = "follow_up"
 @pytest.mark.parametrize(
     ("first", "second", "expected"),
     [
-        # Recognized resident, then an explicit unknown face: escalates.
-        (("Lindo walks in.", ["Lindo"]), ("A man waits.", ["Unknown Person"]), _SOUND),
-        # Recognized resident, then a caption human with no face: same person.
-        (("Lindo walks in.", ["Lindo"]), ("A person walks away.", []), _QUIET),
-        # A caption human, then the first face-confirmed unknown: sounds once.
-        (("A person walks in.", []), ("A man waits.", ["Unknown Person"]), _SOUND),
-        # Animals, vehicles and packages never escalate.
-        (("A person walks past.", []), ("A person with a dog.", []), _QUIET),
-        # No human, then the first human: escalates.
-        (("A car is parked.", []), ("Two men approach.", []), _SOUND),
-        # Known limit: human words outside the detector's list stay quiet.
-        (("A car is parked.", []), ("A visitor approaches.", []), _QUIET),
-        # A second enrolled person is not an escalation.
-        (("Lindo walks in.", ["Lindo"]), ("Sam walks in.", ["Sam"]), _QUIET),
-        # Negated human phrases are not a human.
+        # The first face-confirmed unknown person in a window sounds...
+        (("Lindo walks in.", ["Lindo"]), ("A man waits.", _UNKNOWN), _SOUND),
+        (("A person walks in.", []), ("A man waits.", _UNKNOWN), _SOUND),
+        (("A car is parked.", []), ("A man waits.", _UNKNOWN), _SOUND),
+        # ...and nothing else does. Captions decide nothing, whatever they say.
+        (("A car is parked.", []), ("Two men approach.", []), _QUIET),
+        (("A car is parked.", []), ("An intruder climbs the fence.", []), _QUIET),
         (("A car is parked.", []), ("No people are visible.", []), _QUIET),
-        (("A car is parked.", []), ("A truck. No visible persons.", []), _QUIET),
-        # A non-English human caption is not recognized as a human.
-        (("A car is parked.", []), ("Osoba stoji u dveri.", []), _QUIET),
-        # A calmer scene must not replace the card of the alert that sounded.
-        (("A man waits.", ["Unknown Person"]), ("A car is parked.", []), _FOLLOW_UP),
-        (("Lindo walks in.", ["Lindo"]), ("A car is parked.", []), _FOLLOW_UP),
+        (("A person walks past.", []), ("A person with a dog.", []), _QUIET),
+        (("Lindo walks in.", ["Lindo"]), ("A person walks away.", []), _QUIET),
+        (("Lindo walks in.", ["Lindo"]), ("Sam walks in.", ["Sam"]), _QUIET),
+        (("Lindo walks in.", ["Lindo"]), ("A car is parked.", []), _QUIET),
+        # A window that opened on an unknown face has had its one alert.
+        (("A man waits.", _UNKNOWN), ("A man still waits.", _UNKNOWN), _QUIET),
+        # After an unknown-person alert, a push that does not show an unknown
+        # face must not replace that alert's card.
+        (("A man waits.", _UNKNOWN), ("A car is parked.", []), _FOLLOW_UP),
+        (("A man waits.", _UNKNOWN), ("Lindo walks in.", ["Lindo"]), _FOLLOW_UP),
     ],
 )
 @pytest.mark.asyncio
@@ -298,67 +302,84 @@ async def test_what_the_second_push_in_a_window_does(
         assert not _tag(follow_up).startswith(_tag(alert))
 
 
-@pytest.mark.parametrize(
-    "empty_scene",
-    [
-        "An empty driveway with no visible people.",
-        "The porch is empty without any people.",
-        "A quiet street, not a person in sight.",
-        "A car drives by. No visible persons or animals.",
-        "The yard is empty of people.",
-    ],
-)
 @pytest.mark.asyncio
-async def test_empty_scene_caption_cannot_silence_a_real_person(
-    va: VideoAnalyzer, clock: _Clock, empty_scene: str
+async def test_unknown_face_sounds_once_per_window(
+    va: VideoAnalyzer, clock: _Clock
 ) -> None:
-    """A caption saying nobody is there must leave the window at NONE."""
-    assert not _caption_mentions_person(empty_scene)
+    """A lingering unknown visitor is one alert, then quiet updates."""
+    await _push(va, "A car is parked.")
+    clock.advance(10)
+    await _push(va, "A man waits.", names=_UNKNOWN)
+    clock.advance(10)
+    await _push(va, "A man still waits.", names=_UNKNOWN)
+    clock.advance(10)
+    await _push(va, "A man knocks.", names=_UNKNOWN)
 
-    await _push(va, empty_scene)
-    clock.advance(20)
-    await _push(va, "A person approaches the door.")
+    calls = _calls(va)
+    assert [_sounds(c) for c in calls] == [True, True, False, False]
+    assert _tag(calls[2]) == _tag(calls[3]) == _tag(calls[1])
+    assert va._notify_windows[_CAMERA].unknown_face
+
+
+@pytest.mark.asyncio
+async def test_unknown_face_alert_does_not_restart_the_window(
+    va: VideoAnalyzer, clock: _Clock
+) -> None:
+    """The window is a fixed length from its opening push, whatever sounds in it."""
+    await _push(va, "Lindo walks in.", names=["Lindo"])
+    opened_at = va._notify_windows[_CAMERA].started
+    clock.advance(100)
+    await _push(va, "A man waits.", names=_UNKNOWN)
+    assert va._notify_windows[_CAMERA].started == opened_at
+    clock.advance(20)  # 120 s after the open: the window is over
+    await _push(va, "A man still waits.", names=_UNKNOWN)
+
+    assert [_sounds(c) for c in _calls(va)] == [True, True, True]
+
+
+@pytest.mark.asyncio
+async def test_unknown_face_in_a_frame_the_summary_dropped_still_sounds(
+    va: VideoAnalyzer, clock: _Clock
+) -> None:
+    """Escalation reads the whole batch, not only the frames that are shown."""
+    await _push(va, "Lindo works in the yard.", names=["Lindo"])
+    clock.advance(30)
+    await _push(
+        va,
+        "Lindo keeps working in the yard.",
+        names=["Lindo"],
+        batch_names=["Lindo", "Unknown Person"],
+    )
 
     assert [_sounds(c) for c in _calls(va)] == [True, True]
 
 
 @pytest.mark.asyncio
-async def test_face_confirmed_unknown_sounds_once_after_a_caption_only_human(
+async def test_push_not_showing_the_unknown_cannot_replace_the_alert_card(
     va: VideoAnalyzer, clock: _Clock
 ) -> None:
-    """Caption human, Unknown Person, Unknown Person again, then a name."""
-    await _push(va, "A person approaches.")
-    clock.advance(10)
-    await _push(va, "A man waits.", names=["Unknown Person"])
-    clock.advance(10)
-    await _push(va, "A man still waits.", names=["Unknown Person"])
-    clock.advance(10)
-    await _push(va, "Lindo waits.", names=["Lindo"])
+    """
+    Which card a quiet update lands on follows what it displays.
 
-    assert [_sounds(c) for c in _calls(va)] == [True, True, False, False]
-    window = va._notify_windows[_CAMERA]
-    assert window.level is HumanLevel.UNIDENTIFIED
-    assert window.unknown_face
+    The batch still carries an unknown face in an early frame, but the summary
+    and image show an empty scene, so it must go to the follow-up card.
+    """
+    await _push(va, "A man waits.", names=_UNKNOWN)
+    clock.advance(30)
+    await _push(va, "The porch is empty.", names=[], batch_names=_UNKNOWN)
 
-
-@pytest.mark.asyncio
-async def test_bypass_restarts_the_window(va: VideoAnalyzer, clock: _Clock) -> None:
-    await _push(va, "Lindo walks in.", names=["Lindo"])
-    clock.advance(100)
-    await _push(va, "A man waits.", names=["Unknown Person"])
-    clock.advance(100)  # 200 s after the open, 100 s after the bypass
-    await _push(va, "A man still waits.", names=["Unknown Person"])
-
-    assert [_sounds(c) for c in _calls(va)] == [True, True, False]
+    alert, update = _calls(va)
+    assert not _sounds(update)
+    assert _tag(update) == _tag(alert) + "_more"
 
 
 @pytest.mark.asyncio
-async def test_bypass_in_the_same_second_still_gets_a_new_card(
+async def test_unknown_face_alert_in_the_same_second_gets_a_new_card(
     va: VideoAnalyzer,
 ) -> None:
-    """An escalating batch parked on the lock can dispatch within the second."""
+    """A batch parked on the lock can dispatch within the opening second."""
     await _push(va, "Lindo walks in.", names=["Lindo"])
-    await _push(va, "A man waits.", names=["Unknown Person"])
+    await _push(va, "A man waits.", names=_UNKNOWN)
 
     first, second = _calls(va)
     assert _sounds(second)
@@ -369,19 +390,35 @@ async def test_bypass_in_the_same_second_still_gets_a_new_card(
 async def test_follow_up_updates_share_one_card_and_leave_the_alert_card(
     va: VideoAnalyzer, clock: _Clock
 ) -> None:
-    await _push(va, "A man waits.", names=["Unknown Person"])
+    await _push(va, "A man waits.", names=_UNKNOWN)
     clock.advance(10)
     await _push(va, "A car is parked.")
     clock.advance(10)
     await _push(va, "The porch is quiet.")
     clock.advance(10)
-    await _push(va, "A man returns.", names=["Unknown Person"])
+    await _push(va, "A man returns.", names=_UNKNOWN)
 
-    alert, calm_1, calm_2, same_level = _calls(va)
+    alert, calm_1, calm_2, same = _calls(va)
     assert _tag(calm_1) == _tag(calm_2) == _tag(alert) + "_more"
     assert not _sounds(calm_1)
-    assert _tag(same_level) == _tag(alert)
-    assert not _sounds(same_level)
+    assert _tag(same) == _tag(alert)
+    assert not _sounds(same)
+
+
+@pytest.mark.asyncio
+async def test_a_different_notify_target_starts_its_own_window(
+    va: VideoAnalyzer, entry: MagicMock, clock: _Clock
+) -> None:
+    """A phone that never got the sounding push must not get a quiet one."""
+    await _push(va)
+    entry.runtime_data.options[CONF_NOTIFY_SERVICE] = "notify.mobile_app_other"
+    clock.advance(10)
+    await _push(va)
+
+    first, second = _calls(va)
+    assert second.args[:2] == ("notify", "mobile_app_other")
+    assert _sounds(second)
+    assert _tag(second) != _tag(first)
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +446,7 @@ async def test_push_the_service_rejects_opens_no_window(
 
 
 @pytest.mark.asyncio
-async def test_failed_bypass_and_failed_quiet_update_leave_the_window_unchanged(
+async def test_failed_unknown_face_alert_and_quiet_update_leave_the_window_unchanged(
     va: VideoAnalyzer, clock: _Clock
 ) -> None:
     await _push(va, "Lindo walks in.", names=["Lindo"])
@@ -417,7 +454,7 @@ async def test_failed_bypass_and_failed_quiet_update_leave_the_window_unchanged(
     _service(va).side_effect = ServiceNotFound("notify", "mobile_app_phone")
 
     clock.advance(10)
-    await _push(va, "A man waits.", names=["Unknown Person"])  # failed bypass
+    await _push(va, "A man waits.", names=_UNKNOWN)  # failed sounding push
     clock.advance(10)
     await _push(va, "Lindo sits down.", names=["Lindo"])  # failed quiet update
 
@@ -601,7 +638,7 @@ async def test_novelty_gate_still_runs_before_the_cooldown(
         )
 
     assert len(_calls(va)) == 1
-    assert va._notify_windows[_CAMERA].level is HumanLevel.KNOWN
+    assert not va._notify_windows[_CAMERA].unknown_face
 
 
 @pytest.mark.asyncio
