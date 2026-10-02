@@ -1437,9 +1437,9 @@ That satisfies all three cases at once: different devices with identical prose s
 
 **What:** `_finalize` (core/video_analyzer.py) awaits `_handle_notification` and only then `_store_results`. Anything `_handle_notification` raises before or around the push skips the store: `publish_latest_atomic` (a filesystem error publishing the latest frame), `_is_caption_novel` (it catches only `TimeoutError` from the vector search, so any other store error propagates), or the notify service call itself when the cooldown is off. The batch's caption then never reaches the vector store, so camera-activity recall misses it and the next similar caption is treated as new.
 
-**Why:** Found while designing the notification cooldown ([#672](https://github.com/goruck/home-generative-agent/issues/672), Codex cold read 2026-10-02). With the cooldown on, a failed push is caught in `_dispatch_notification`, but the pre-existing paths around it were left alone to keep that PR to one behavior.
+**Why:** Found while designing the notification cooldown ([#672](https://github.com/goruck/home-generative-agent/issues/672), Codex cold read 2026-10-02). The cooldown PR left these paths alone to keep it to one behavior.
 
-**How to apply:** Run `_store_results` in a `finally`, or store first and notify second (check that `_is_caption_novel` would then not match the batch's own just-stored caption: it searches the same namespace). Either way keep `CancelledError` propagating. Pin with a test where `publish_latest_atomic` raises and the store is still written.
+**How to apply:** One constraint first: when the push itself is what failed, storing the caption is wrong, because caption dedup would then match it and suppress the next notification for 30 minutes on the strength of an alert that never went out (Codex, #672 review). So separate the two cases: store when the failure was in publishing the latest frame or in the novelty search, do not store when the notify call raised. Then run `_store_results` in a `finally` for the first case, or store first and notify second (check that `_is_caption_novel` would then not match the batch's own just-stored caption: it searches the same namespace). Either way keep `CancelledError` propagating. Pin with a test where `publish_latest_atomic` raises and the store is still written.
 
 **Effort:** S
 **Priority:** P3

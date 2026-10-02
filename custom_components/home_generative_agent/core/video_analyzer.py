@@ -1706,16 +1706,13 @@ class VideoAnalyzer:
                     "[%s] Notification cooldown failed; sending without it", camera_id
                 )
                 card, window = None, None
-            try:
-                sent = await self._send_notification(
-                    msg, camera_name, notify_img, target=target, card=card
-                )
-            except Exception:
-                # Isolated so the batch's analysis is still stored (_finalize
-                # stores after notifying). CancelledError is not an Exception
-                # and still propagates, so unload cancels the worker as before.
-                LOGGER.exception("[%s] Camera notification failed", camera_id)
-                return
+            # A send the notify service refuses raises out of here exactly as
+            # it does with the cooldown off: no window is committed, and the
+            # batch's caption is not stored, so caption dedup cannot suppress
+            # the next attempt on the strength of an alert that never went out.
+            sent = await self._send_notification(
+                msg, camera_name, notify_img, target=target, card=card
+            )
             # Commit only a push the notify service accepted, so a push that
             # could not even be handed over never starts a quiet window.
             if sent and window is not None:

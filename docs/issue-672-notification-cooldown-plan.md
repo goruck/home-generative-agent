@@ -1011,6 +1011,22 @@ What this gives up, by decision: without face recognition there is no bypass at 
 arriving inside a window opened by a car is a quiet card update. That is the plain cooldown
 the issue asked for, with nothing withheld, and the docs say so first in the limits list.
 
+### Final Codex pass on the face-only design (2026-10-02)
+
+Two findings, both fixed without a new decision:
+
+- A window could show three cards (opening card, unknown-face card, `_more` card). Follow-ups
+  now reuse the opening card when the unknown-face alert arrived later; `_more` is used only
+  when the window opened on the alert itself. At most two cards.
+- With the cooldown on, a refused push was caught so the analysis was still stored. A stored
+  caption is what caption dedup matches, so the retry after the service recovered could be
+  suppressed for 30 minutes. A refused push now raises exactly as with the cooldown off: no
+  window, nothing stored. This reverses the earlier "a notify failure does not skip storage"
+  criterion, which was wrong for this failure; the TODOS entry records the distinction.
+
+Codex also confirmed `git diff origin/main` shows no change to `_NEGATED_PERSON_RE` or
+`_caption_mentions_person`.
+
 ## GSTACK REVIEW REPORT
 
 | Review | Trigger | Why | Runs | Status | Findings |

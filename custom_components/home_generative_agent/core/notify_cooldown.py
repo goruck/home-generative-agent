@@ -43,8 +43,8 @@ class CooldownAction(StrEnum):
     # Open window, nothing that must sound: replace the current card quietly.
     QUIET = "quiet"
     # Open window whose card shows an unknown person, and this push does not:
-    # update a second card quietly, so the alert's card keeps explaining the
-    # sound.
+    # update the window's other card quietly, so the alert's card keeps
+    # explaining the sound.
     FOLLOW_UP = "follow_up"
 
 
@@ -61,6 +61,10 @@ class CooldownWindow:
     target: str
     # A face-confirmed unknown person has already sounded in this window.
     unknown_face: bool
+    # The card the window opened with, once an unknown-face alert has moved
+    # the window to a new card. Follow-ups reuse it, so a window never shows
+    # more than two cards.
+    opening_card_id: int | None = None
 
 
 def has_unknown_face(names: Iterable[str]) -> bool:
@@ -144,6 +148,7 @@ def window_after_unknown_face(
         window,
         card_id=card_id_after(window, wall_time=wall_time),
         unknown_face=True,
+        opening_card_id=window.card_id,
     )
 
 
@@ -157,5 +162,11 @@ def notification_tag(
     for a collapse id, whatever the entity id's length.
     """
     digest = hashlib.sha256(camera_id.encode()).hexdigest()[:_CAMERA_HASH_CHARS]
-    suffix = "_more" if follow_up else ""
-    return f"hga_cam_{digest}_{window.card_id}{suffix}"
+    prefix = f"hga_cam_{digest}_"
+    if not follow_up:
+        return f"{prefix}{window.card_id}"
+    if window.opening_card_id is not None:
+        return f"{prefix}{window.opening_card_id}"
+    # The window opened on the unknown-face alert itself: no earlier card to
+    # reuse, so follow-ups get a sibling of the alert's card.
+    return f"{prefix}{window.card_id}_more"

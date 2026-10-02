@@ -129,6 +129,7 @@ def test_unknown_face_gets_a_new_card_without_moving_the_window() -> None:
     assert after.started == window.started
     assert after.unknown_face
     assert after.card_id == 1_790_000_050
+    assert after.opening_card_id == window.card_id
     assert after.target == window.target
 
 
@@ -153,8 +154,14 @@ def test_notification_tag_is_per_card() -> None:
 
     assert notification_tag(camera, first) == notification_tag(camera, first)
     assert notification_tag(camera, first) != notification_tag(camera, second)
+    # A window that opened on the alert itself has no earlier card to reuse.
     assert notification_tag(camera, first, follow_up=True) == (
         notification_tag(camera, first) + "_more"
+    )
+    # After an unknown-face alert, follow-ups go back to the opening card.
+    moved = window_after_unknown_face(first, wall_time=first.card_id + 30.0)
+    assert notification_tag(camera, moved, follow_up=True) == notification_tag(
+        camera, first
     )
     assert notification_tag(camera, first) != notification_tag("camera.side", first)
 

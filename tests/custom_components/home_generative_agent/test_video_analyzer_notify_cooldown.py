@@ -406,6 +406,26 @@ async def test_follow_up_updates_share_one_card_and_leave_the_alert_card(
 
 
 @pytest.mark.asyncio
+async def test_a_window_never_shows_more_than_two_cards(
+    va: VideoAnalyzer, clock: _Clock
+) -> None:
+    """After an unknown-face alert, calm follow-ups reuse the opening card."""
+    await _push(va, "A car is parked.")
+    clock.advance(10)
+    await _push(va, "A man waits.", names=_UNKNOWN)
+    clock.advance(10)
+    await _push(va, "The porch is empty.")
+    clock.advance(10)
+    await _push(va, "A car leaves.")
+
+    opening, alert, calm_1, calm_2 = _calls(va)
+    assert _tag(calm_1) == _tag(calm_2) == _tag(opening)
+    assert not _sounds(calm_1)
+    assert len({_tag(c) for c in _calls(va)}) == 2
+    assert _tag(alert) != _tag(opening)
+
+
+@pytest.mark.asyncio
 async def test_a_different_notify_target_starts_its_own_window(
     va: VideoAnalyzer, entry: MagicMock, clock: _Clock
 ) -> None:
@@ -436,7 +456,8 @@ async def test_push_the_service_rejects_opens_no_window(
         None,
     ]
 
-    await _push(va)  # must not raise
+    with pytest.raises(ServiceNotFound):
+        await _push(va)
     assert _CAMERA not in va._notify_windows
 
     clock.advance(5)
@@ -454,9 +475,11 @@ async def test_failed_unknown_face_alert_and_quiet_update_leave_the_window_uncha
     _service(va).side_effect = ServiceNotFound("notify", "mobile_app_phone")
 
     clock.advance(10)
-    await _push(va, "A man waits.", names=_UNKNOWN)  # failed sounding push
+    with pytest.raises(ServiceNotFound):  # failed sounding push
+        await _push(va, "A man waits.", names=_UNKNOWN)
     clock.advance(10)
-    await _push(va, "Lindo sits down.", names=["Lindo"])  # failed quiet update
+    with pytest.raises(ServiceNotFound):  # failed quiet update
+        await _push(va, "Lindo sits down.", names=["Lindo"])
 
     assert va._notify_windows[_CAMERA] == opened
 
@@ -467,7 +490,8 @@ async def test_failure_on_one_camera_does_not_touch_another(
 ) -> None:
     _service(va).side_effect = [ServiceNotFound("notify", "mobile_app_phone"), None]
 
-    await _push(va)
+    with pytest.raises(ServiceNotFound):
+        await _push(va)
     clock.advance(5)
     await _push(va, camera_id=_OTHER_CAMERA)
 
@@ -587,21 +611,33 @@ def _handle_patches() -> Any:
     )
 
 
+@pytest.mark.parametrize("cooldown", [0, _COOLDOWN])
 @pytest.mark.asyncio
-async def test_failed_push_with_the_cooldown_on_does_not_skip_storage(
-    va: VideoAnalyzer,
+async def test_refused_push_is_not_stored_so_dedup_cannot_suppress_the_retry(
+    va: VideoAnalyzer, cooldown: int
 ) -> None:
+    """
+    A push the notify service refuses behaves the same with the cooldown on.
+
+    The batch's caption must not reach the vector store: caption dedup would
+    match it and suppress the next notification for 30 minutes, although this
+    alert never went out.
+    """
     va.entry.runtime_data.options[CONF_VIDEO_ANALYZER_MODE] = "always_notify"
+    va.entry.runtime_data.options[CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S] = (
+        cooldown
+    )
     va.protect_notify_image = MagicMock()  # type: ignore[method-assign]
     _service(va).side_effect = ServiceNotFound("notify", "mobile_app_phone")
     p1, p2, p3 = _handle_patches()
 
-    with p1, p2, p3:
+    with p1, p2, p3, pytest.raises(ServiceNotFound):
         await va._finalize(
             _CAMERA, _batch(), "A person stands at the door.", context=_context()
         )
 
-    va.entry.runtime_data.store.aput.assert_awaited_once()
+    va.entry.runtime_data.store.aput.assert_not_awaited()
+    assert va._notify_windows == {}
 
 
 @pytest.mark.asyncio
