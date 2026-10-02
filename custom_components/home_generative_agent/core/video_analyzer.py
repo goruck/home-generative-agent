@@ -1616,13 +1616,9 @@ class VideoAnalyzer:
         domain, service = resolved
 
         clean_msg = msg.replace("**", "").replace("`", "")
-        LOGGER.debug(
-            "[%s] Dispatching notification via %s.%s: %r",
-            camera_name,
-            domain,
-            service,
-            clean_msg[:80],
-        )
+        # The target service name is deliberately not logged: it carries the
+        # phone's device name, which code scanning treats as private data.
+        LOGGER.debug("[%s] Dispatching notification: %r", camera_name, clean_msg[:80])
         data: dict[str, Any] = {"image": str(notify_img_path)}
         if card is not None:
             data["tag"] = card.tag
