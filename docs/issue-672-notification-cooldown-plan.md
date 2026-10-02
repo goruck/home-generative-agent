@@ -936,6 +936,41 @@ is settled except for the log excerpt, which confirms the diagnosis and does not
 One consequence: the reporter is on the same phone platform as Lindo, so nobody has tested
 Android. Per Next Steps 1, the docs state that the quiet update is unverified on Android.
 
+## Changes from the pre-landing review (/ship, 2026-10-02)
+
+Six reviewers (testing, maintainability, security, performance, simplification, red team) read
+the first implementation. Four findings changed the design; Lindo decided each. These override
+the ledger and the Amendments above.
+
+1. **No awaited push, no fallback timer (reverses the blocking send and R7).** Home Assistant's
+   `notify.mobile_app_*` service catches push failures and only logs them, so an awaited call
+   returned normally on a failed push and the window opened anyway. The wait also held the
+   camera's worker and, on a timeout, cancelled the push without re-sending it. Sounding pushes
+   are now sent exactly like today's (non-blocking) plus a tag. A window is not opened only
+   when the service call raises immediately. Limit documented: delivery cannot be confirmed.
+2. **Face-confirmed unknown always sounds once per window, and the negation scrub is wider.**
+   `_caption_mentions_person` read "no visible people", "without any people", "not a person in
+   sight" and "empty of people" as a human, which put a window at `unidentified` and silenced a
+   later "Unknown Person" face result. The window now tracks whether an unknown person was
+   confirmed by face recognition; the first such result in a window sounds. `_NEGATED_PERSON_RE`
+   covers the listed phrasings. Cost: one stranger can sound twice (caption, then face).
+3. **Stale-update rule removed (reverses R6).** Ring event-recording frames are stamped before
+   the trigger on purpose, so a late clip always looked older than the snapshot that opened the
+   window and its push would have been withheld. The rule also misfired for an hour at the
+   autumn clock change. Every push that passes novelty is now sent. Limit documented: the card
+   shows whichever analysis finished last.
+4. **Calmer scenes go to a second card.** A quiet update at a lower human level than the window
+   no longer replaces the card of the alert that sounded; it updates a follow-up card
+   (`<tag>_more`). At most two cards per camera per window.
+
+Fixed without a decision: tag hashed to stay under the 64-byte APNs collapse-id limit; window
+ids unique within a second; a bug in the cooldown code falls back to a plain push; the
+unsupported-target notice is a WARNING and the docs note the Sentinel notify-service override;
+the option is clamped to 3600 at runtime; the `_last_recognized` slot is gone and the context
+is a required argument; the notify service is resolved once per push.
+
+Not done: Russian and Turkish strings for the new field (English fallback).
+
 ## GSTACK REVIEW REPORT
 
 | Review | Trigger | Why | Runs | Status | Findings |

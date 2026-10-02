@@ -272,25 +272,27 @@ With the cooldown set to N seconds:
 - The first notification from a camera sounds as usual and starts a window of N seconds for that camera. Each camera has its own window.
 - Later notifications from that camera inside the window **replace the same notification card quietly**, with the latest description and image. The window has a fixed length: quiet updates do not extend it.
 - A notification still sounds, on a new card, when the scene escalates inside the window:
-  - a person appears where the window had shown none, or
-  - face recognition reports an **Unknown Person** where the window had shown only recognized people.
+  - a person appears where the window had shown none,
+  - an unidentified person appears where the window had shown only recognized people, or
+  - face recognition reports an **Unknown Person** for the first time in the window, whatever the descriptions said before.
 
   That sounding notification starts a new window.
+- A calmer scene never replaces the card of a notification that sounded. If a notification sounded for a person and a later one in the window shows no person (or shows only recognized people after an unidentified one), the later one goes to a second card for that window, which also updates quietly. So a window shows at most two cards per camera: the one that explains the sound, and one with what happened after.
 - Nothing else changes. Frames are analyzed, `sensor.*_recognized_people` and `image.*_last_event` update, `hga_last_event_frame` fires and the analysis is stored exactly as with the cooldown off.
 
 The cooldown acts only on notifications that pass [caption deduplication](#caption-deduplication) (or on every notification in `always_notify` mode); it does not bring back one that deduplication withheld.
 
 **Requirements and limits**
 
-- It works only when notifications go to a single Home Assistant companion-app service (`notify.mobile_app_*`), which is what the notify-service picker offers. Any other target is sent every notification as if the cooldown were off.
+- It works only when notifications go to a single Home Assistant companion-app service (`notify.mobile_app_*`). Any other target is sent every notification as if the cooldown were off, and a warning is logged once. Note that a notify service set in the Sentinel configuration takes precedence over the one in Global Options, for camera notifications too.
+- Home Assistant does not report whether a push reached the phone. If the notification that should have sounded is lost on the way (phone offline, push service outage), the ones that follow in the window are still sent quietly. A window is not started only when Home Assistant refuses the notification outright, for example because the notify service no longer exists.
 - Verified on iOS. On Android the quiet update relies on the companion app's `alert_once` and has not been verified; if you dismissed the card, Android may sound again when the next update arrives.
 - A vehicle, animal or package arriving inside a window is a quiet update, as is a second recognized person.
 - Two different unidentified people inside one window cannot be told apart: the second is a quiet update.
-- A stranger arriving while a recognized resident is in view sounds only when face recognition returns Unknown Person for the stranger. Without face recognition, or when the stranger's face is not detected, it is a quiet update. If the resident was never recognized in this window, the stranger is a quiet update too.
-- Face recognition sometimes reads a recognized resident as Unknown Person a moment later (face turned, blur). Inside that resident's window this sounds once more; it cannot repeat within the window.
-- A person is detected in the description by the English words person, people, man, woman, boy, girl and child (and their plurals). A description that uses another word ("a visitor"), or is written in another language via *Camera description language*, relies on face recognition alone.
-- If two analyses of one camera finish out of order, the quiet update from the older one is not sent, so the card never goes back to an older scene. Sounding notifications are never withheld.
-- If the notify service fails or does not answer within 10 seconds when a sounding notification is sent, no window is opened and that camera's notifications are sent as if the cooldown were off for the next 60 seconds.
+- A stranger arriving while a recognized resident is in view sounds only when face recognition returns Unknown Person for the stranger. Without face recognition, or when the stranger's face is not detected, it is a quiet update.
+- Face recognition sometimes reads a recognized resident as Unknown Person a moment later (face turned, blur). Inside that resident's window this sounds once more; it cannot repeat within the window. For the same reason, one stranger can sound twice: once when a description first mentions a person, and once when the face is first detected.
+- A person is detected in the description by the English words person, people, man, woman, boy, girl and child (and their plurals), ignoring negated phrases such as "no visible people". A description that uses another word ("a visitor"), or is written in another language via *Camera description language*, relies on face recognition alone.
+- If two analyses of one camera finish out of order, the card shows whichever finished last.
 - Changing any option reloads the integration and clears every open window.
 
 ---

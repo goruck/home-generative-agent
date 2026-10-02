@@ -6,12 +6,14 @@ from __future__ import annotations
 import pytest
 
 from custom_components.home_generative_agent.core.notify_cooldown import (
+    BatchEvidence,
     CooldownAction,
     CooldownWindow,
     HumanLevel,
     active_window,
+    batch_evidence,
     decide,
-    human_level,
+    next_window,
     notification_tag,
 )
 
@@ -21,48 +23,62 @@ _UNIDENTIFIED = HumanLevel.UNIDENTIFIED
 
 
 def _window(
-    level: HumanLevel = _NONE, *, started: float = 100.0, last_capture: float = 1000.0
+    level: HumanLevel = _NONE,
+    *,
+    unknown_face: bool = False,
+    started: float = 100.0,
+    window_id: int = 1_790_000_000,
 ) -> CooldownWindow:
     return CooldownWindow(
-        started=started, window_id=1_790_000_000, level=level, last_capture=last_capture
+        started=started, window_id=window_id, level=level, unknown_face=unknown_face
     )
+
+
+def _ev(level: HumanLevel, *, unknown_face: bool = False) -> BatchEvidence:
+    return BatchEvidence(level, unknown_face=unknown_face)
 
 
 @pytest.mark.parametrize(
     ("names", "caption_has_human", "window_level", "expected"),
     [
-        # An explicit unknown face is unidentified, whatever else is present.
-        (["Unknown Person"], False, None, _UNIDENTIFIED),
-        (["Lindo", "Unknown Person"], True, _KNOWN, _UNIDENTIFIED),
+        # An explicit unknown face is unidentified and face-confirmed.
+        (["Unknown Person"], False, None, _ev(_UNIDENTIFIED, unknown_face=True)),
+        (
+            ["Lindo", "Unknown Person"],
+            True,
+            _KNOWN,
+            _ev(_UNIDENTIFIED, unknown_face=True),
+        ),
         # Pre-guard gallery rows may carry label variants.
-        ([" unknown person "], False, _KNOWN, _UNIDENTIFIED),
+        ([" unknown person "], False, _KNOWN, _ev(_UNIDENTIFIED, unknown_face=True)),
         # Enrolled names only are known, with or without a caption human.
-        (["Lindo"], False, None, _KNOWN),
-        (["Lindo", "Indeterminate"], True, None, _KNOWN),
-        # A caption human with no face result is unidentified...
-        ([], True, None, _UNIDENTIFIED),
-        (["Indeterminate"], True, _NONE, _UNIDENTIFIED),
-        ([], True, _UNIDENTIFIED, _UNIDENTIFIED),
+        (["Lindo"], False, None, _ev(_KNOWN)),
+        (["Lindo", "Indeterminate"], True, None, _ev(_KNOWN)),
+        # A caption human with no face result is unidentified, never
+        # face-confirmed...
+        ([], True, None, _ev(_UNIDENTIFIED)),
+        (["Indeterminate"], True, _NONE, _ev(_UNIDENTIFIED)),
+        ([], True, _UNIDENTIFIED, _ev(_UNIDENTIFIED)),
         # ...except inside a KNOWN window: the resident turned away.
-        ([], True, _KNOWN, _KNOWN),
-        (["Indeterminate"], True, _KNOWN, _KNOWN),
+        ([], True, _KNOWN, _ev(_KNOWN)),
+        (["Indeterminate"], True, _KNOWN, _ev(_KNOWN)),
         # No human evidence at all, including legacy placeholders.
-        ([], False, None, _NONE),
-        (["Indeterminate", "None", ""], False, _KNOWN, _NONE),
+        ([], False, None, _ev(_NONE)),
+        (["Indeterminate", "None", ""], False, _KNOWN, _ev(_NONE)),
     ],
 )
-def test_human_level(
+def test_batch_evidence(
     names: list[str],
     caption_has_human: bool,  # noqa: FBT001
     window_level: HumanLevel | None,
-    expected: HumanLevel,
+    expected: BatchEvidence,
 ) -> None:
-    """Each row of the batch human-level table."""
+    """Each row of the batch evidence table."""
     assert (
-        human_level(
+        batch_evidence(
             names, caption_has_human=caption_has_human, window_level=window_level
         )
-        is expected
+        == expected
     )
 
 
@@ -75,62 +91,128 @@ def test_active_window_expires_at_the_exact_boundary() -> None:
 
 
 @pytest.mark.parametrize(
-    ("window_level", "batch_level", "capture_ts", "expected"),
+    ("window", "evidence", "expected"),
     [
-        # Escalation sounds; anything else inside the window is quiet.
-        (_NONE, _KNOWN, 1001.0, CooldownAction.BYPASS),
-        (_NONE, _UNIDENTIFIED, 1001.0, CooldownAction.BYPASS),
-        (_KNOWN, _UNIDENTIFIED, 1001.0, CooldownAction.BYPASS),
-        (_KNOWN, _KNOWN, 1001.0, CooldownAction.QUIET),
-        (_UNIDENTIFIED, _KNOWN, 1001.0, CooldownAction.QUIET),
-        (_UNIDENTIFIED, _UNIDENTIFIED, 1001.0, CooldownAction.QUIET),
-        (_KNOWN, _NONE, 1001.0, CooldownAction.QUIET),
-        # The same capture second is not stale; an older batch is.
-        (_KNOWN, _KNOWN, 1000.0, CooldownAction.QUIET),
-        (_KNOWN, _KNOWN, 999.0, CooldownAction.SKIP_STALE),
-        # A sounding push is never withheld, however old its batch.
-        (_KNOWN, _UNIDENTIFIED, 999.0, CooldownAction.BYPASS),
+        # A higher human level sounds.
+        (_window(_NONE), _ev(_KNOWN), CooldownAction.BYPASS),
+        (_window(_NONE), _ev(_UNIDENTIFIED), CooldownAction.BYPASS),
+        (_window(_KNOWN), _ev(_UNIDENTIFIED, unknown_face=True), CooldownAction.BYPASS),
+        # The same level replaces the window's card quietly.
+        (_window(_NONE), _ev(_NONE), CooldownAction.QUIET),
+        (_window(_KNOWN), _ev(_KNOWN), CooldownAction.QUIET),
+        (_window(_UNIDENTIFIED), _ev(_UNIDENTIFIED), CooldownAction.QUIET),
+        # A calmer scene goes to the follow-up card, not the alert's card.
+        (_window(_KNOWN), _ev(_NONE), CooldownAction.FOLLOW_UP),
+        (_window(_UNIDENTIFIED), _ev(_KNOWN), CooldownAction.FOLLOW_UP),
+        (_window(_UNIDENTIFIED), _ev(_NONE), CooldownAction.FOLLOW_UP),
+        # The first face-confirmed unknown person sounds even when a caption
+        # had already put the window at UNIDENTIFIED...
+        (
+            _window(_UNIDENTIFIED),
+            _ev(_UNIDENTIFIED, unknown_face=True),
+            CooldownAction.BYPASS,
+        ),
+        # ...and only once per window.
+        (
+            _window(_UNIDENTIFIED, unknown_face=True),
+            _ev(_UNIDENTIFIED, unknown_face=True),
+            CooldownAction.QUIET,
+        ),
     ],
 )
 def test_decide_inside_a_window(
-    window_level: HumanLevel,
-    batch_level: HumanLevel,
-    capture_ts: float,
-    expected: CooldownAction,
+    window: CooldownWindow, evidence: BatchEvidence, expected: CooldownAction
 ) -> None:
     """Each row of the decision table for an open window."""
-    window = _window(window_level, last_capture=1000.0)
-    assert decide(window, level=batch_level, capture_ts=capture_ts) is expected
+    assert decide(window, evidence) is expected
 
 
 def test_decide_without_a_window_opens_one() -> None:
-    """No active window always opens, even for an old batch with no human."""
-    assert decide(None, level=_NONE, capture_ts=0.0) is CooldownAction.OPEN
+    """No active window always opens, even with no human in the batch."""
+    assert decide(None, _ev(_NONE)) is CooldownAction.OPEN
 
 
 def test_alternating_subjects_cannot_flap() -> None:
     """A level never goes back down, so resident/stranger/resident sounds twice."""
     window = _window(_NONE)
     sounding = 0
-    for batch_level in (_KNOWN, _UNIDENTIFIED, _KNOWN, _UNIDENTIFIED, _KNOWN):
-        action = decide(window, level=batch_level, capture_ts=1001.0)
-        if action is CooldownAction.BYPASS:
+    for evidence in (
+        _ev(_KNOWN),
+        _ev(_UNIDENTIFIED, unknown_face=True),
+        _ev(_KNOWN),
+        _ev(_UNIDENTIFIED, unknown_face=True),
+        _ev(_KNOWN),
+    ):
+        if decide(window, evidence) is CooldownAction.BYPASS:
             sounding += 1
-            window = _window(batch_level)
+            window = next_window(
+                window, evidence, now=window.started + 1, wall_time=0.0, carry=window
+            )
     assert sounding == 2
     assert window.level is _UNIDENTIFIED
+    assert window.unknown_face
 
 
-def test_notification_tag_is_per_window() -> None:
-    """A new window id gives a new card; the same window reuses its tag."""
+def test_next_window_from_a_bypass_keeps_what_the_window_showed() -> None:
+    """A bypass restarts the clock but never lowers the level or the face flag."""
+    carried = _window(_UNIDENTIFIED, unknown_face=True, started=100.0)
+
+    restarted = next_window(
+        carried, _ev(_KNOWN), now=150.0, wall_time=1_790_000_050.0, carry=carried
+    )
+
+    assert restarted.started == 150.0
+    assert restarted.level is _UNIDENTIFIED
+    assert restarted.unknown_face
+    assert restarted.window_id == 1_790_000_050
+
+
+def test_next_window_after_expiry_starts_from_the_batch_alone() -> None:
+    """An expired window contributes nothing but its id."""
+    expired = _window(_UNIDENTIFIED, unknown_face=True)
+
+    opened = next_window(
+        expired, _ev(_NONE), now=900.0, wall_time=1_790_000_800.0, carry=None
+    )
+
+    assert opened.level is _NONE
+    assert not opened.unknown_face
+
+
+@pytest.mark.parametrize(
+    "wall_time", [1_790_000_000.0, 1_790_000_000.9, 1_789_999_000.0]
+)
+def test_window_ids_are_unique_within_a_second_and_across_clock_steps(
+    wall_time: float,
+) -> None:
+    """Two windows in one second, or after a clock step back, get distinct ids."""
+    previous = _window(window_id=1_790_000_000)
+
+    following = next_window(
+        previous, _ev(_KNOWN), now=101.0, wall_time=wall_time, carry=previous
+    )
+
+    assert following.window_id == previous.window_id + 1
+
+
+def test_notification_tag_is_per_window_and_per_card() -> None:
+    """A new window gives a new card; the follow-up card has its own tag."""
     first = _window()
-    second = CooldownWindow(
-        started=first.started,
-        window_id=first.window_id + 60,
-        level=first.level,
-        last_capture=first.last_capture,
+    second = _window(window_id=first.window_id + 60)
+    camera = "camera.front_door"
+
+    assert notification_tag(camera, first) == notification_tag(camera, first)
+    assert notification_tag(camera, first) != notification_tag(camera, second)
+    assert notification_tag(camera, first) != notification_tag(
+        camera, first, follow_up=True
     )
-    assert notification_tag("front_door", first) == "hga_camera_front_door_1790000000"
-    assert notification_tag("front_door", first) != notification_tag(
-        "front_door", second
-    )
+    assert notification_tag(camera, first) != notification_tag("camera.side", first)
+
+
+def test_notification_tag_fits_the_apns_collapse_id_limit() -> None:
+    """The tag stays under 64 bytes however long the entity id is."""
+    camera = "camera." + "very_long_camera_object_id_" * 8
+
+    tag = notification_tag(camera, _window(), follow_up=True)
+
+    assert len(tag.encode()) <= 64

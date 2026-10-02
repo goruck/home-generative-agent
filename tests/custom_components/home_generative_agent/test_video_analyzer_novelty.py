@@ -27,6 +27,7 @@ from custom_components.home_generative_agent.const import (
 from custom_components.home_generative_agent.core.video_analyzer import (
     CaptionNoveltyDecision,
     VideoAnalyzer,
+    _BatchNotifyContext,
     _has_action,
     _has_real_subject,
     _in_artifact_bucket,
@@ -936,6 +937,8 @@ async def test_decision_carries_matched_caption_and_score(va: VideoAnalyzer) -> 
 from pathlib import Path  # noqa: E402
 from unittest.mock import patch  # noqa: E402
 
+_NO_NAMES = _BatchNotifyContext(recognized=[], batch_names=[])
+
 
 def _make_batch() -> list[Path]:
     """Minimal batch: one snapshot path with 3+ parts so chosen.parts[-3:] works."""
@@ -969,7 +972,10 @@ async def test_handle_notification_notifies_when_decision_is_notify(
         ),
     ):
         await va._handle_notification(  # type: ignore[attr-defined]
-            "camera.frontporch", "a person walks up the path", _make_batch()
+            "camera.frontporch",
+            "a person walks up the path",
+            _make_batch(),
+            context=_NO_NAMES,
         )
 
     va.protect_notify_image.assert_called_once()
@@ -1004,7 +1010,10 @@ async def test_handle_notification_suppresses_when_decision_is_no_notify(
         ),
     ):
         await va._handle_notification(  # type: ignore[attr-defined]
-            "camera.frontporch", "empty porch scene", _make_batch()
+            "camera.frontporch",
+            "empty porch scene",
+            _make_batch(),
+            context=_NO_NAMES,
         )
 
     va.protect_notify_image.assert_not_called()
@@ -1034,7 +1043,10 @@ async def test_handle_notification_always_notifies_outside_anomaly_mode(
         ),
     ):
         await va._handle_notification(  # type: ignore[attr-defined]
-            "camera.frontporch", "empty porch scene", _make_batch()
+            "camera.frontporch",
+            "empty porch scene",
+            _make_batch(),
+            context=_NO_NAMES,
         )
 
     va.protect_notify_image.assert_called_once()

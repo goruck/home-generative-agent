@@ -25,6 +25,7 @@ from custom_components.home_generative_agent.core.video_analyzer import (
     _PERSON_SENTINEL_CAPTION,
     FaceHit,
     VideoAnalyzer,
+    _BatchNotifyContext,
     _caption_mentions_person,
 )
 from custom_components.home_generative_agent.core.video_helpers import (
@@ -616,7 +617,12 @@ async def test_handle_notification_without_notify_frame_uses_batch_middle(
             "dispatch_on_loop"
         ),
     ):
-        await va._handle_notification(_CAMERA, "a quiet porch", batch)
+        await va._handle_notification(
+            _CAMERA,
+            "a quiet porch",
+            batch,
+            context=_BatchNotifyContext(recognized=[], batch_names=[]),
+        )
 
     assert mock_publish.await_args is not None
     assert mock_publish.await_args.args[1] == batch[1]

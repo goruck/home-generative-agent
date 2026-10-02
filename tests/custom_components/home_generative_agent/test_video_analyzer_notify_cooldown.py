@@ -16,12 +16,13 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import ServiceNotFound
 
 from custom_components.home_generative_agent.const import (
     CONF_NOTIFY_SERVICE,
     CONF_VIDEO_ANALYZER_MODE,
     CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S,
+    VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_MAX_S,
 )
 from custom_components.home_generative_agent.core import video_analyzer as va_mod
 from custom_components.home_generative_agent.core.notify_cooldown import HumanLevel
@@ -29,6 +30,7 @@ from custom_components.home_generative_agent.core.video_analyzer import (
     CaptionNoveltyDecision,
     VideoAnalyzer,
     _BatchNotifyContext,
+    _caption_mentions_person,
 )
 
 
@@ -104,22 +106,26 @@ def _data(call: Any) -> dict[str, Any]:
     return call.args[2]["data"]
 
 
+def _tag(call: Any) -> str:
+    return _data(call)["tag"]
+
+
+def _sounds(call: Any) -> bool:
+    return "alert_once" not in _data(call)
+
+
+def _context(names: list[str] | None = None) -> _BatchNotifyContext:
+    return _BatchNotifyContext(recognized=names or [], batch_names=names or [])
+
+
 async def _push(
     va: VideoAnalyzer,
     msg: str = "A person stands at the door.",
     *,
     names: list[str] | None = None,
-    capture_ts: float = 2000.0,
     camera_id: str = _CAMERA,
 ) -> None:
-    await va._dispatch_notification(
-        camera_id,
-        camera_id.rsplit(".", maxsplit=1)[-1],
-        msg,
-        _IMG,
-        batch_names=names or [],
-        capture_ts=capture_ts,
-    )
+    await va._dispatch_notification(camera_id, msg, _IMG, _context(names))
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +133,7 @@ async def _push(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("value", [0, None, "", "abc", -5])
+@pytest.mark.parametrize("value", [0, 0.0, None, "", "abc", -5])
 @pytest.mark.asyncio
 async def test_cooldown_off_sends_the_unchanged_payload(
     va: VideoAnalyzer, entry: MagicMock, value: object
@@ -150,8 +156,30 @@ async def test_cooldown_off_sends_the_unchanged_payload(
         },
     )
     assert first.kwargs == {"blocking": False}
-    assert _calls(va)[1].kwargs == {"blocking": False}
+    assert _data(_calls(va)[1]) == {"image": str(_IMG)}
     assert va._notify_windows == {}
+
+
+@pytest.mark.parametrize("value", [120, 120.0, "120", 1.0])
+@pytest.mark.asyncio
+async def test_cooldown_is_on_for_the_values_the_options_flow_stores(
+    va: VideoAnalyzer, entry: MagicMock, clock: _Clock, value: object
+) -> None:
+    """The number selector stores a float; a string survives a restore."""
+    entry.runtime_data.options[CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S] = value
+
+    await _push(va)
+
+    assert "tag" in _data(_calls(va)[0])
+    assert va._notify_windows[_CAMERA].started == clock.mono
+
+
+def test_cooldown_is_clamped_to_the_documented_maximum(
+    va: VideoAnalyzer, entry: MagicMock
+) -> None:
+    entry.runtime_data.options[CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S] = 999_999
+
+    assert va._notification_cooldown_s() == VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_MAX_S
 
 
 # ---------------------------------------------------------------------------
@@ -163,21 +191,21 @@ async def test_cooldown_off_sends_the_unchanged_payload(
 async def test_first_push_sounds_and_later_ones_replace_the_card_quietly(
     va: VideoAnalyzer, clock: _Clock
 ) -> None:
-    await _push(va, capture_ts=2000.0)
+    await _push(va)
     clock.advance(30)
-    await _push(va, "A person still stands at the door.", capture_ts=2030.0)
+    await _push(va, "A person still stands at the door.")
 
     alert, update = _calls(va)
-    tag = f"hga_camera_{_NAME}_1790000000"
-    assert _data(alert) == {"image": str(_IMG), "tag": tag}
-    assert alert.kwargs == {"blocking": True}
+    assert _data(alert) == {"image": str(_IMG), "tag": _tag(alert)}
+    assert _tag(alert).endswith("_1790000000")
     assert _data(update) == {
         "image": str(_IMG),
-        "tag": tag,
+        "tag": _tag(alert),
         "alert_once": True,
         "push": _QUIET_PUSH,
     }
-    assert update.kwargs == {"blocking": False}
+    # Sent exactly like today's push: fire-and-forget, never awaited.
+    assert alert.kwargs == update.kwargs == {"blocking": False}
     assert update.args[2]["message"] == "A person still stands at the door."
 
 
@@ -186,17 +214,16 @@ async def test_quiet_updates_do_not_extend_the_window(
     va: VideoAnalyzer, clock: _Clock
 ) -> None:
     """A lingering subject sounds again once the fixed window has run out."""
-    await _push(va, capture_ts=2000.0)
-    for step in range(1, 4):
+    await _push(va)
+    for _ in range(3):
         clock.advance(39)
-        await _push(va, capture_ts=2000.0 + 39 * step)
+        await _push(va)
     clock.advance(3)  # 120 s after the opening push
-    await _push(va, capture_ts=2120.0)
+    await _push(va)
 
     calls = _calls(va)
-    assert [c.kwargs["blocking"] for c in calls] == [True, False, False, False, True]
-    assert "alert_once" not in _data(calls[-1])
-    assert _data(calls[-1])["tag"] != _data(calls[0])["tag"]
+    assert [_sounds(c) for c in calls] == [True, False, False, False, True]
+    assert _tag(calls[-1]) != _tag(calls[0])
 
 
 @pytest.mark.asyncio
@@ -207,115 +234,154 @@ async def test_another_camera_is_never_affected(
     clock.advance(5)
     await _push(va, camera_id=_OTHER_CAMERA)
 
-    other = _calls(va)[1]
-    assert other.kwargs == {"blocking": True}
-    assert "alert_once" not in _data(other)
-    assert _data(other)["tag"].startswith("hga_camera_side_")
+    first, other = _calls(va)
+    assert _sounds(other)
+    assert _tag(other) != _tag(first)
 
 
 # ---------------------------------------------------------------------------
-# Bypass: only a human-level escalation sounds inside a window
+# Bypass, quiet update, follow-up card
 # ---------------------------------------------------------------------------
+
+_SOUND = "sound"
+_QUIET = "quiet"
+_FOLLOW_UP = "follow_up"
 
 
 @pytest.mark.parametrize(
-    ("first", "second", "second_sounds"),
+    ("first", "second", "expected"),
     [
         # Recognized resident, then an explicit unknown face: escalates.
-        (("Lindo walks in.", ["Lindo"]), ("A man waits.", ["Unknown Person"]), True),
+        (("Lindo walks in.", ["Lindo"]), ("A man waits.", ["Unknown Person"]), _SOUND),
         # Recognized resident, then a caption human with no face: same person.
-        (("Lindo walks in.", ["Lindo"]), ("A person walks away.", []), False),
-        # Unrecognized resident, then an unknown face: already unidentified.
-        (("A person walks in.", []), ("A man waits.", ["Unknown Person"]), False),
+        (("Lindo walks in.", ["Lindo"]), ("A person walks away.", []), _QUIET),
+        # A caption human, then the first face-confirmed unknown: sounds once.
+        (("A person walks in.", []), ("A man waits.", ["Unknown Person"]), _SOUND),
         # Animals, vehicles and packages never escalate.
-        (("A person walks past.", []), ("A person with a dog.", []), False),
+        (("A person walks past.", []), ("A person with a dog.", []), _QUIET),
         # No human, then the first human: escalates.
-        (("A car is parked.", []), ("Two men approach.", []), True),
+        (("A car is parked.", []), ("Two men approach.", []), _SOUND),
         # Known limit: human words outside the detector's list stay quiet.
-        (("A car is parked.", []), ("A visitor approaches.", []), False),
+        (("A car is parked.", []), ("A visitor approaches.", []), _QUIET),
         # A second enrolled person is not an escalation.
-        (("Lindo walks in.", ["Lindo"]), ("Sam walks in.", ["Sam"]), False),
-        # A negated human phrase is not a human.
-        (("A car is parked.", []), ("No people are visible.", []), False),
+        (("Lindo walks in.", ["Lindo"]), ("Sam walks in.", ["Sam"]), _QUIET),
+        # Negated human phrases are not a human.
+        (("A car is parked.", []), ("No people are visible.", []), _QUIET),
+        (("A car is parked.", []), ("A truck. No visible persons.", []), _QUIET),
         # A non-English human caption is not recognized as a human.
-        (("A car is parked.", []), ("Osoba stoji u dveri.", []), False),
+        (("A car is parked.", []), ("Osoba stoji u dveri.", []), _QUIET),
+        # A calmer scene must not replace the card of the alert that sounded.
+        (("A man waits.", ["Unknown Person"]), ("A car is parked.", []), _FOLLOW_UP),
+        (("Lindo walks in.", ["Lindo"]), ("A car is parked.", []), _FOLLOW_UP),
     ],
 )
 @pytest.mark.asyncio
-async def test_only_an_escalation_sounds_inside_a_window(
+async def test_what_the_second_push_in_a_window_does(
     va: VideoAnalyzer,
     clock: _Clock,
     first: tuple[str, list[str]],
     second: tuple[str, list[str]],
-    second_sounds: bool,  # noqa: FBT001
+    expected: str,
 ) -> None:
-    await _push(va, first[0], names=first[1], capture_ts=2000.0)
+    await _push(va, first[0], names=first[1])
     clock.advance(20)
-    await _push(va, second[0], names=second[1], capture_ts=2020.0)
+    await _push(va, second[0], names=second[1])
 
-    follow_up = _calls(va)[1]
-    assert follow_up.kwargs == {"blocking": second_sounds}
-    assert ("alert_once" in _data(follow_up)) is not second_sounds
-    # A sounding push gets its own card; a quiet one reuses the window's.
-    same_tag = _data(follow_up)["tag"] == _data(_calls(va)[0])["tag"]
-    assert same_tag is not second_sounds
+    alert, follow_up = _calls(va)
+    assert _sounds(follow_up) is (expected == _SOUND)
+    if expected == _QUIET:
+        assert _tag(follow_up) == _tag(alert)
+    elif expected == _FOLLOW_UP:
+        assert _tag(follow_up) == _tag(alert) + "_more"
+    else:
+        # A sounding push gets its own card.
+        assert not _tag(follow_up).startswith(_tag(alert))
+
+
+@pytest.mark.parametrize(
+    "empty_scene",
+    [
+        "An empty driveway with no visible people.",
+        "The porch is empty without any people.",
+        "A quiet street, not a person in sight.",
+        "A car drives by. No visible persons or animals.",
+        "The yard is empty of people.",
+    ],
+)
+@pytest.mark.asyncio
+async def test_empty_scene_caption_cannot_silence_a_real_person(
+    va: VideoAnalyzer, clock: _Clock, empty_scene: str
+) -> None:
+    """A caption saying nobody is there must leave the window at NONE."""
+    assert not _caption_mentions_person(empty_scene)
+
+    await _push(va, empty_scene)
+    clock.advance(20)
+    await _push(va, "A person approaches the door.")
+
+    assert [_sounds(c) for c in _calls(va)] == [True, True]
 
 
 @pytest.mark.asyncio
-async def test_improving_face_evidence_on_one_subject_stays_quiet(
+async def test_face_confirmed_unknown_sounds_once_after_a_caption_only_human(
     va: VideoAnalyzer, clock: _Clock
 ) -> None:
-    """Caption human, then Unknown Person, then an enrolled name: one buzz."""
-    await _push(va, "A person approaches.", names=[], capture_ts=2000.0)
+    """Caption human, Unknown Person, Unknown Person again, then a name."""
+    await _push(va, "A person approaches.")
     clock.advance(10)
-    await _push(va, "A man waits.", names=["Unknown Person"], capture_ts=2010.0)
+    await _push(va, "A man waits.", names=["Unknown Person"])
     clock.advance(10)
-    await _push(va, "Lindo waits.", names=["Lindo"], capture_ts=2020.0)
+    await _push(va, "A man still waits.", names=["Unknown Person"])
+    clock.advance(10)
+    await _push(va, "Lindo waits.", names=["Lindo"])
 
-    assert [c.kwargs["blocking"] for c in _calls(va)] == [True, False, False]
-    assert va._notify_windows[_CAMERA].level is HumanLevel.UNIDENTIFIED
+    assert [_sounds(c) for c in _calls(va)] == [True, True, False, False]
+    window = va._notify_windows[_CAMERA]
+    assert window.level is HumanLevel.UNIDENTIFIED
+    assert window.unknown_face
 
 
 @pytest.mark.asyncio
 async def test_bypass_restarts_the_window(va: VideoAnalyzer, clock: _Clock) -> None:
-    await _push(va, "Lindo walks in.", names=["Lindo"], capture_ts=2000.0)
+    await _push(va, "Lindo walks in.", names=["Lindo"])
     clock.advance(100)
-    await _push(va, "A man waits.", names=["Unknown Person"], capture_ts=2100.0)
+    await _push(va, "A man waits.", names=["Unknown Person"])
     clock.advance(100)  # 200 s after the open, 100 s after the bypass
-    await _push(va, "A man still waits.", names=["Unknown Person"], capture_ts=2200.0)
+    await _push(va, "A man still waits.", names=["Unknown Person"])
 
-    assert [c.kwargs["blocking"] for c in _calls(va)] == [True, True, False]
-
-
-# ---------------------------------------------------------------------------
-# Stale quiet update (an older batch finishing last)
-# ---------------------------------------------------------------------------
+    assert [_sounds(c) for c in _calls(va)] == [True, True, False]
 
 
 @pytest.mark.asyncio
-async def test_an_older_batch_does_not_overwrite_a_newer_card(
+async def test_bypass_in_the_same_second_still_gets_a_new_card(
+    va: VideoAnalyzer,
+) -> None:
+    """An escalating batch parked on the lock can dispatch within the second."""
+    await _push(va, "Lindo walks in.", names=["Lindo"])
+    await _push(va, "A man waits.", names=["Unknown Person"])
+
+    first, second = _calls(va)
+    assert _sounds(second)
+    assert _tag(second) != _tag(first)
+
+
+@pytest.mark.asyncio
+async def test_follow_up_updates_share_one_card_and_leave_the_alert_card(
     va: VideoAnalyzer, clock: _Clock
 ) -> None:
-    await _push(va, capture_ts=2000.0)
+    await _push(va, "A man waits.", names=["Unknown Person"])
     clock.advance(10)
-    await _push(va, "Newer scene: a person leaves.", capture_ts=2050.0)
-    clock.advance(1)
-    await _push(va, "Older scene: a person arrives.", capture_ts=2020.0)
+    await _push(va, "A car is parked.")
+    clock.advance(10)
+    await _push(va, "The porch is quiet.")
+    clock.advance(10)
+    await _push(va, "A man returns.", names=["Unknown Person"])
 
-    assert len(_calls(va)) == 2
-    assert va._notify_windows[_CAMERA].last_capture == 2050.0
-
-
-@pytest.mark.asyncio
-async def test_an_older_batch_still_sounds_when_it_escalates(
-    va: VideoAnalyzer, clock: _Clock
-) -> None:
-    """A sounding push is never withheld, however old its batch."""
-    await _push(va, "Lindo walks in.", names=["Lindo"], capture_ts=2050.0)
-    clock.advance(5)
-    await _push(va, "A man waits.", names=["Unknown Person"], capture_ts=2020.0)
-
-    assert [c.kwargs["blocking"] for c in _calls(va)] == [True, True]
+    alert, calm_1, calm_2, same_level = _calls(va)
+    assert _tag(calm_1) == _tag(calm_2) == _tag(alert) + "_more"
+    assert not _sounds(calm_1)
+    assert _tag(same_level) == _tag(alert)
+    assert not _sounds(same_level)
 
 
 # ---------------------------------------------------------------------------
@@ -324,60 +390,66 @@ async def test_an_older_batch_still_sounds_when_it_escalates(
 
 
 @pytest.mark.asyncio
-async def test_failed_alert_opens_no_window_and_falls_back_for_a_minute(
+async def test_push_the_service_rejects_opens_no_window(
     va: VideoAnalyzer, clock: _Clock
 ) -> None:
+    """A push that cannot even be handed over must not start a quiet window."""
     _service(va).side_effect = [
-        HomeAssistantError("offline"),
-        None,
+        ServiceNotFound("notify", "mobile_app_phone"),
         None,
     ]
 
-    await _push(va)  # sounding attempt fails
+    await _push(va)  # must not raise
     assert _CAMERA not in va._notify_windows
 
-    clock.advance(30)
-    await _push(va)  # inside the fallback: exactly the cooldown-off call
-    fallback = _calls(va)[1]
-    assert _data(fallback) == {"image": str(_IMG)}
-    assert fallback.kwargs == {"blocking": False}
-    assert _CAMERA not in va._notify_windows
-
-    clock.advance(31)
-    await _push(va)  # fallback over: the cooldown is tried again
-    retry = _calls(va)[2]
-    assert retry.kwargs == {"blocking": True}
-    assert "tag" in _data(retry)
+    clock.advance(5)
+    await _push(va)
+    assert _sounds(_calls(va)[1])
     assert _CAMERA in va._notify_windows
 
 
 @pytest.mark.asyncio
-async def test_alert_that_hangs_times_out_and_opens_no_window(
+async def test_failed_bypass_and_failed_quiet_update_leave_the_window_unchanged(
     va: VideoAnalyzer, clock: _Clock
 ) -> None:
-    async def _hang(*_args: Any, **_kwargs: Any) -> None:
-        await asyncio.sleep(3600)
+    await _push(va, "Lindo walks in.", names=["Lindo"])
+    opened = va._notify_windows[_CAMERA]
+    _service(va).side_effect = ServiceNotFound("notify", "mobile_app_phone")
 
-    _service(va).side_effect = _hang
-    with patch.object(va_mod, "_NOTIFY_ALERT_TIMEOUT_SEC", 0.01):
-        await _push(va)
+    clock.advance(10)
+    await _push(va, "A man waits.", names=["Unknown Person"])  # failed bypass
+    clock.advance(10)
+    await _push(va, "Lindo sits down.", names=["Lindo"])  # failed quiet update
 
-    assert _CAMERA not in va._notify_windows
-    assert va._notify_fallback_until[_CAMERA] == clock.mono + 60
+    assert va._notify_windows[_CAMERA] == opened
 
 
 @pytest.mark.asyncio
-async def test_failed_bypass_leaves_the_window_unchanged(
+async def test_failure_on_one_camera_does_not_touch_another(
     va: VideoAnalyzer, clock: _Clock
 ) -> None:
-    await _push(va, "Lindo walks in.", names=["Lindo"], capture_ts=2000.0)
-    opened = va._notify_windows[_CAMERA]
-    _service(va).side_effect = HomeAssistantError("offline")
+    _service(va).side_effect = [ServiceNotFound("notify", "mobile_app_phone"), None]
 
-    clock.advance(10)
-    await _push(va, "A man waits.", names=["Unknown Person"], capture_ts=2010.0)
+    await _push(va)
+    clock.advance(5)
+    await _push(va, camera_id=_OTHER_CAMERA)
 
-    assert va._notify_windows[_CAMERA] == opened
+    assert _CAMERA not in va._notify_windows
+    assert _OTHER_CAMERA in va._notify_windows
+
+
+@pytest.mark.asyncio
+async def test_cooldown_bug_still_sends_the_push_without_the_cooldown(
+    va: VideoAnalyzer, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A bug in the decision costs the convenience, never the alert."""
+    with patch.object(va_mod, "decide", side_effect=RuntimeError("bug")):
+        await _push(va)
+
+    (call,) = _calls(va)
+    assert _data(call) == {"image": str(_IMG)}
+    assert va._notify_windows == {}
+    assert "Notification cooldown failed" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -390,7 +462,6 @@ async def test_no_notify_service_changes_no_state(
 
     assert _calls(va) == []
     assert va._notify_windows == {}
-    assert va._notify_fallback_until == {}
 
 
 @pytest.mark.asyncio
@@ -400,11 +471,13 @@ async def test_discovered_companion_app_service_gets_the_cooldown(
     del entry.runtime_data.options[CONF_NOTIFY_SERVICE]
     with patch.object(
         va_mod, "discover_mobile_notify_service", return_value="mobile_app_found"
-    ):
+    ) as discover:
         await _push(va)
 
     assert _calls(va)[0].args[:2] == ("notify", "mobile_app_found")
-    assert _calls(va)[0].kwargs == {"blocking": True}
+    assert "tag" in _data(_calls(va)[0])
+    # Resolved once: the service the decision was made for gets the push.
+    discover.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -416,17 +489,21 @@ async def test_non_companion_target_is_sent_as_if_the_cooldown_were_off(
 ) -> None:
     entry.runtime_data.options[CONF_NOTIFY_SERVICE] = "notify.family_group"
 
-    with caplog.at_level("INFO"):
-        await _push(va)
-        clock.advance(5)
-        await _push(va)
+    await _push(va)
+    clock.advance(5)
+    await _push(va)
 
     for call in _calls(va):
         assert call.args[:2] == ("notify", "family_group")
         assert _data(call) == {"image": str(_IMG)}
         assert call.kwargs == {"blocking": False}
     assert va._notify_windows == {}
-    notices = [r for r in caplog.records if "does not apply" in r.getMessage()]
+    # Visible at Home Assistant's default log level, and only once.
+    notices = [
+        r
+        for r in caplog.records
+        if "does not apply" in r.getMessage() and r.levelname == "WARNING"
+    ]
     assert len(notices) == 1
 
 
@@ -438,23 +515,22 @@ async def test_overlapping_batches_on_one_camera_sound_once(
     release = asyncio.Event()
     started = asyncio.Event()
 
-    async def _slow_first(*_args: Any, **kwargs: Any) -> None:
-        if kwargs["blocking"]:
+    async def _slow_first(*_args: Any, **_kwargs: Any) -> None:
+        if not started.is_set():
             started.set()
             await release.wait()
 
     _service(va).side_effect = _slow_first
 
-    first = asyncio.create_task(_push(va, capture_ts=2000.0))
+    first = asyncio.create_task(_push(va))
     await started.wait()
-    second = asyncio.create_task(_push(va, capture_ts=2008.0))
+    second = asyncio.create_task(_push(va))
     await asyncio.sleep(0)
     assert len(_calls(va)) == 1  # the second is parked on the lock
     release.set()
     await asyncio.gather(first, second)
 
-    assert [c.kwargs["blocking"] for c in _calls(va)] == [True, False]
-    assert _data(_calls(va)[1])["alert_once"] is True
+    assert [_sounds(c) for c in _calls(va)] == [True, False]
 
 
 # ---------------------------------------------------------------------------
@@ -475,16 +551,18 @@ def _handle_patches() -> Any:
 
 
 @pytest.mark.asyncio
-async def test_cooldown_bug_does_not_skip_storage(va: VideoAnalyzer) -> None:
+async def test_failed_push_with_the_cooldown_on_does_not_skip_storage(
+    va: VideoAnalyzer,
+) -> None:
     va.entry.runtime_data.options[CONF_VIDEO_ANALYZER_MODE] = "always_notify"
     va.protect_notify_image = MagicMock()  # type: ignore[method-assign]
-    va._dispatch_with_cooldown = AsyncMock(  # type: ignore[method-assign]
-        side_effect=RuntimeError("bug")
-    )
+    _service(va).side_effect = ServiceNotFound("notify", "mobile_app_phone")
     p1, p2, p3 = _handle_patches()
 
     with p1, p2, p3:
-        await va._finalize(_CAMERA, _batch(), "A person stands at the door.")
+        await va._finalize(
+            _CAMERA, _batch(), "A person stands at the door.", context=_context()
+        )
 
     va.entry.runtime_data.store.aput.assert_awaited_once()
 
@@ -493,9 +571,7 @@ async def test_cooldown_bug_does_not_skip_storage(va: VideoAnalyzer) -> None:
 async def test_cancellation_still_propagates_through_the_cooldown(
     va: VideoAnalyzer,
 ) -> None:
-    va._dispatch_with_cooldown = AsyncMock(  # type: ignore[method-assign]
-        side_effect=asyncio.CancelledError
-    )
+    _service(va).side_effect = asyncio.CancelledError
 
     with pytest.raises(asyncio.CancelledError):
         await _push(va)
@@ -513,46 +589,34 @@ async def test_novelty_gate_still_runs_before_the_cooldown(
         CaptionNoveltyDecision(notify=False, reason="score_above_threshold"),
     ]
     va._is_caption_novel = AsyncMock(side_effect=decisions)  # type: ignore[method-assign]
-    context = _BatchNotifyContext(
-        recognized=["Lindo"], batch_names=["Lindo"], capture_ts=2000.0
-    )
-    stranger = _BatchNotifyContext(
-        recognized=["Unknown Person"],
-        batch_names=["Unknown Person"],
-        capture_ts=2010.0,
-    )
     p1, p2, p3 = _handle_patches()
 
     with p1, p2, p3:
         await va._handle_notification(
-            _CAMERA, "Lindo walks in.", _batch(), None, context
+            _CAMERA, "Lindo walks in.", _batch(), context=_context(["Lindo"])
         )
         clock.advance(10)
-        await va._handle_notification(_CAMERA, "A man waits.", _batch(), None, stranger)
+        await va._handle_notification(
+            _CAMERA, "A man waits.", _batch(), context=_context(["Unknown Person"])
+        )
 
     assert len(_calls(va)) == 1
     assert va._notify_windows[_CAMERA].level is HumanLevel.KNOWN
 
 
 @pytest.mark.asyncio
-async def test_signals_and_novelty_use_the_batch_names_not_the_shared_slot(
-    va: VideoAnalyzer,
-) -> None:
-    """Another batch overwriting _last_recognized must not leak into this one."""
+async def test_signals_and_novelty_use_the_batch_names(va: VideoAnalyzer) -> None:
+    """Sensor, image entity and dedup all get the names this batch carried."""
     va.entry.runtime_data.options[CONF_VIDEO_ANALYZER_MODE] = "notify_on_anomaly"
     va.protect_notify_image = MagicMock()  # type: ignore[method-assign]
     va._is_caption_novel = AsyncMock(  # type: ignore[method-assign]
         return_value=CaptionNoveltyDecision(notify=False, reason="no_match")
     )
-    va._last_recognized[_CAMERA] = ["Someone Else"]
-    context = _BatchNotifyContext(
-        recognized=["Lindo"], batch_names=["Lindo"], capture_ts=2000.0
-    )
     p1, p2, p3 = _handle_patches()
 
     with p1, p2, p3 as dispatch:
         await va._handle_notification(
-            _CAMERA, "Lindo walks in.", _batch(), None, context
+            _CAMERA, "Lindo walks in.", _batch(), context=_context(["Lindo"])
         )
 
     latest, recognized = dispatch.call_args_list
@@ -564,29 +628,43 @@ async def test_signals_and_novelty_use_the_batch_names_not_the_shared_slot(
 
 
 @pytest.mark.asyncio
-async def test_analyze_and_finalize_passes_full_batch_names_to_the_cooldown(
+async def test_overlapping_analyses_each_keep_their_own_names(
     va: VideoAnalyzer,
 ) -> None:
-    """Names the summary cap sliced off still reach the cooldown."""
-    va._process_batch = AsyncMock(  # type: ignore[method-assign]
-        return_value=(
-            [{"t+0s. Lindo works in the yard.": ["Lindo"]}],
-            ["Lindo"],
-            _IMG,
-            None,
-            ["Lindo", "Unknown Person"],
-        )
-    )
-    va._summarize = AsyncMock(return_value="Lindo works.")  # type: ignore[method-assign]
+    """
+    Two analyses of one camera must not swap names (the shared-slot race).
+
+    The first batch is parked in its summary call while a second batch for the
+    same camera runs to completion. Each must reach _finalize with the names
+    its own frames produced.
+    """
+    release = asyncio.Event()
+    batches = {
+        2000: (["Lindo"], ["Lindo"]),
+        3000: (["Sam"], ["Sam", "Unknown Person"]),
+    }
+
+    async def _process(_camera: str, ordered: list[tuple[Path, int]]) -> Any:
+        recognized, batch_names = batches[ordered[0][1]]
+        return [{"t+0s. caption": recognized}], recognized, _IMG, None, batch_names
+
+    async def _summarize(_camera: str, descs: Any, _sole: Any) -> str:
+        if descs[0]["t+0s. caption"] == ["Lindo"]:
+            await release.wait()
+        return "summary"
+
+    va._process_batch = AsyncMock(side_effect=_process)  # type: ignore[method-assign]
+    va._summarize = AsyncMock(side_effect=_summarize)  # type: ignore[method-assign]
     va._finalize = AsyncMock()  # type: ignore[method-assign]
 
-    await va._analyze_and_finalize(_CAMERA, [(_IMG, 2000), (_IMG, 2016)])
+    first = asyncio.create_task(va._analyze_and_finalize(_CAMERA, [(_IMG, 2000)]))
+    await asyncio.sleep(0)
+    await va._analyze_and_finalize(_CAMERA, [(_IMG, 3000)])
+    release.set()
+    await first
 
-    finalize_call = va._finalize.await_args
-    assert finalize_call is not None
-    context = finalize_call.args[4]
-    assert context == _BatchNotifyContext(
-        recognized=["Lindo"],
-        batch_names=["Lindo", "Unknown Person"],
-        capture_ts=2016,
-    )
+    contexts = [c.kwargs["context"] for c in va._finalize.await_args_list]
+    assert contexts == [
+        _BatchNotifyContext(recognized=["Sam"], batch_names=["Sam", "Unknown Person"]),
+        _BatchNotifyContext(recognized=["Lindo"], batch_names=["Lindo"]),
+    ]

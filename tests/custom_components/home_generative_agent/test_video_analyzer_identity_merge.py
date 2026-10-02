@@ -478,10 +478,10 @@ async def test_alignment_sentinel_keep_frame_carries_embedding(
 
 
 @pytest.mark.asyncio
-async def test_merged_identities_reach_summary_and_last_recognized(
+async def test_merged_identities_reach_summary_and_notify_context(
     va: VideoAnalyzer, entry: MagicMock
 ) -> None:
-    """AC7: summary input and _last_recognized (sensor/notify source) merge."""
+    """AC7: summary input and the names handed to sensor/notify merge."""
     entry.runtime_data.person_gallery = _dao(_GOOD_DISTANCE)
     _stub_snapshots(
         va,
@@ -495,7 +495,8 @@ async def test_merged_identities_reach_summary_and_last_recognized(
 
     await va._analyze_and_finalize(_CAMERA, _ordered(2))
 
-    assert va._last_recognized[_CAMERA] == [_KNOWN]
+    assert va._finalize.await_args is not None
+    assert va._finalize.await_args.kwargs["context"].recognized == [_KNOWN]
     assert va._summarize.await_args is not None
     summary_descs = va._summarize.await_args.args[1]
     assert _identities(summary_descs) == [[_KNOWN], [_KNOWN]]
