@@ -548,6 +548,21 @@ validation.
 
 ---
 
+### Voice replies end with an offer, and a declined offer comes back
+
+**What:** On voice turns the agent often closes with an offer ("Shall I look into the automations?", "Want me to check any other cameras?", "Would you like me to turn it off?"). The Assist pipeline treats a reply ending in a question as a request to keep listening, so the satellite reopens its mic for a follow-up turn. Two things then go wrong. First, after the user answers "No", the agent sometimes makes the same offer again in its next reply, so the user has to decline twice to get out (reported by @andymcmanus on #671, 2026-10-01). Second, every such reply opens a continued-conversation turn, which is where stray speech-to-text noise turned into turns nobody made ("Frigate", "Ha ha ha" in the maintainer's 2026-10-01 trials) and where a "No" still costs a full model call (and, with the turn-start acknowledgement, a spoken "One moment" before the agent says "OK").
+
+**Why:** Conversational design, not a failure: each offer was executed correctly when accepted (#687 made "Yes" work). But on a voice satellite an offer is never free: it holds the mic open, and repeating a declined one makes the assistant feel stuck. Nothing in the system prompt discourages either, and the model has no signal that the turn is spoken.
+
+**How to apply:** Two independent pieces, smallest first:
+- A voice-turn instruction in the system prompt (only when the turn comes from a satellite, the same `satellite_id` signal the acknowledgement uses): end with an offer only when there is a concrete next action, and never repeat an offer the user has just declined. Measure on qwen3:8b with replayed turns before and after (the #684 method), since prompt clauses alone have been ignored before.
+- A cheap path for a bare decline: a short "No" / "No thanks" / "Nope" (and the cs/ru/tr equivalents, mirroring `AFFIRMATIVE_FOLLOW_UP_REGEX`) right after an agent offer ends the turn with a fixed "OK." without a model call, and without the turn-start acknowledgement. Gate it on the previous assistant message ending in a question, so "No" to anything else still reaches the model.
+
+**Effort:** M
+**Priority:** P3
+
+---
+
 ## Explain / Prompts
 
 ### Sanitize area/entity strings before injecting into LLM prompts
