@@ -1587,7 +1587,6 @@ class VideoAnalyzer:
             domain, service = full_service.split(".", 1)
             return domain, service
         service = discover_mobile_notify_service(self.hass)
-        LOGGER.debug("Discovered notify service: %s", service)
         if not service:
             return None
         return "notify", service
