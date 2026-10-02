@@ -1353,7 +1353,45 @@ def _open_state_live_context_normalization_context(
         (tc for tc in tool_calls if _is_live_context_tool(str(tc.get("name", "")))),
         None,
     )
+    if first_call is not None and _names_a_specific_device(
+        (first_call.get("args") or {}).get("name")
+    ):
+        # "Is the front door open?" asks about one device. Widening the call
+        # and keeping only open entries removed a closed front door from the
+        # answer, so the model reported it could not find it. Widening is for
+        # list questions whose name filter is a category ("Window").
+        return query, None
     return query, first_call
+
+
+# Words that make a GetLiveContext name filter a category rather than a device:
+# "Window", "doors", "all gates" -- the brittle filters the widening exists for.
+_GENERIC_OPEN_NAME_WORDS: frozenset[str] = frozenset(
+    {
+        "all",
+        "any",
+        "the",
+        "open",
+        "opened",
+        "opening",
+        "openings",
+        "sensor",
+        "sensors",
+        "binary",
+        "door",
+        "doors",
+        "window",
+        "windows",
+        "gate",
+        "gates",
+    }
+)
+
+
+def _names_a_specific_device(name: object) -> bool:
+    """Return True when a name filter names a device, not a category of them."""
+    words = re.findall(r"[a-z0-9]+", str(name or "").lower())
+    return bool(words) and not set(words) <= _GENERIC_OPEN_NAME_WORDS
 
 
 def _query_needs_actuation_safety(query: str) -> bool:

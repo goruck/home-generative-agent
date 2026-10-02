@@ -24,7 +24,9 @@ from custom_components.home_generative_agent.agent.graph import (
     _is_affirmative_follow_up,
     _is_referential_follow_up,
     _latest_open_state_query,
+    _names_a_specific_device,
     _normalize_live_context_args_for_open_state,
+    _open_state_live_context_normalization_context,
     _query_needs_actuation_safety,
     _query_wants_automation,
     _query_wants_security_audit,
@@ -2917,3 +2919,52 @@ async def test_widened_query_does_not_leak_into_the_intent_detectors() -> None:
 
     # The actuation tool survives: step 3b never fired.
     assert "intent__HassTurnOff" in result["tool_routing_map"]
+
+
+def _live_call(args: dict[str, Any]) -> dict[str, Any]:
+    return {"name": "homeassistant__GetLiveContext", "args": args, "id": "1"}
+
+
+def test_named_device_open_question_is_not_widened() -> None:
+    """
+    "Is the front door open?" must reach HA as the model asked it.
+
+    Field report (2026-10-01): the call {'name': 'Front Door'} was widened to
+    every binary_sensor and the result cut to open entries, so a CLOSED front
+    door vanished and the model said it could not find it.
+    """
+    messages = [HumanMessage(content="Is the front door open?")]
+    call = _live_call({"name": "Front Door", "domain": ["binary_sensor"]})
+
+    query, first = _open_state_live_context_normalization_context(messages, [call])
+
+    assert query == "Is the front door open?"
+    assert first is None, "a named device is neither widened nor filtered"
+
+
+def test_category_name_open_question_is_still_widened() -> None:
+    """The original case: a brittle category filter is still widened."""
+    messages = [HumanMessage(content="List all open windows")]
+    call = _live_call({"name": "Window"})
+
+    _, first = _open_state_live_context_normalization_context(messages, [call])
+
+    assert first is call
+
+
+@pytest.mark.parametrize(
+    ("name", "specific"),
+    [
+        ("Front Door", True),
+        ("Garage and Play Room Doors", True),
+        ("Kitchen Left Window", True),
+        ("Window", False),
+        ("doors", False),
+        ("all open windows", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_names_a_specific_device(name: str | None, *, specific: bool) -> None:
+    """Category words alone are not a device name."""
+    assert _names_a_specific_device(name) is specific
