@@ -367,7 +367,7 @@ async def test_batch_verdict_set_for_all_known_batch(
         ],
     )
 
-    _descs, recognized, _, sole = await va._process_batch(_CAMERA, _ordered(2))
+    _descs, recognized, _, sole, _ = await va._process_batch(_CAMERA, _ordered(2))
 
     assert recognized == [_KNOWN]
     assert sole == _KNOWN
@@ -387,7 +387,7 @@ async def test_batch_verdict_none_when_dropped_frame_had_companion(
         ],
     )
 
-    _descs, _recognized, _, sole = await va._process_batch(_CAMERA, _ordered(2))
+    _descs, _recognized, _, sole, _ = await va._process_batch(_CAMERA, _ordered(2))
 
     assert sole is None
 
@@ -412,10 +412,41 @@ async def test_batch_verdict_none_when_cap_slices_the_unknown(
     ]
     _stub_snapshots(va, frames)
 
-    descs, _recognized, _, sole = await va._process_batch(_CAMERA, _ordered(10))
+    descs, _recognized, _, sole, _ = await va._process_batch(_CAMERA, _ordered(10))
 
     assert len(descs) == 8  # the unknown's frame was sliced from the summary
     assert sole is None
+
+
+@pytest.mark.asyncio
+async def test_batch_names_keep_an_unknown_the_cap_slices(
+    va: VideoAnalyzer, entry: MagicMock
+) -> None:
+    """
+    Full-batch names survive the cap and the dropped frames (issue #672).
+
+    `recognized` describes only the frames the summary kept, so the early
+    unknown is gone from it. The notification cooldown reads the fifth
+    return value instead, which also counts a face on a frame whose VLM call
+    failed.
+    """
+    entry.runtime_data.person_gallery = _dao(None)
+    frames = (
+        [_frame("A man lingers by the gate.", [FaceHit("Unknown Person", _EMB)])]
+        + [
+            _frame(f"Lindo does thing number {i} in the yard.", [FaceHit(_KNOWN, _EMB)])
+            for i in range(9)
+        ]
+        + [({}, [FaceHit("Sam", _EMB), FaceHit("Indeterminate")])]
+    )
+    _stub_snapshots(va, frames)
+
+    _descs, recognized, _, _sole, batch_names = await va._process_batch(
+        _CAMERA, _ordered(11)
+    )
+
+    assert recognized == [_KNOWN]
+    assert batch_names == [_KNOWN, "Sam", "Unknown Person"]
 
 
 # ---------------------------------------------------------------------------
@@ -479,7 +510,7 @@ async def test_batch_verdict_vetoed_by_plural_caption_beyond_cap(
     ]
     _stub_snapshots(va, frames)
 
-    descs, _recognized, _, sole = await va._process_batch(_CAMERA, _ordered(10))
+    descs, _recognized, _, sole, _ = await va._process_batch(_CAMERA, _ordered(10))
 
     assert len(descs) == 8  # the plural frame was sliced from the summary
     assert sole is None
@@ -643,7 +674,7 @@ async def test_two_indeterminate_boxes_in_error_frame_veto_verdict(
         ],
     )
 
-    _descs, _recognized, _, sole = await va._process_batch(_CAMERA, _ordered(2))
+    _descs, _recognized, _, sole, _ = await va._process_batch(_CAMERA, _ordered(2))
 
     assert sole is None
 
@@ -665,7 +696,7 @@ async def test_lone_indeterminate_error_frame_keeps_verdict(
         ],
     )
 
-    _descs, _recognized, _, sole = await va._process_batch(_CAMERA, _ordered(2))
+    _descs, _recognized, _, sole, _ = await va._process_batch(_CAMERA, _ordered(2))
 
     assert sole == _KNOWN
 
@@ -770,6 +801,6 @@ async def test_batch_verdict_vetoed_by_demographic_conflict(
         ],
     )
 
-    _descs, _recognized, _, sole = await va._process_batch(_CAMERA, _ordered(2))
+    _descs, _recognized, _, sole, _ = await va._process_batch(_CAMERA, _ordered(2))
 
     assert sole is None
