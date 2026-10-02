@@ -1,3 +1,147 @@
+const HGA_PROPOSALS_I18N = {
+  en: {
+    pipeline_title: "HGA Rule Pipeline",
+    refresh: "Refresh",
+    refreshing: "Refreshing...",
+    refreshing_all: "Refreshing discovery and proposals...",
+    sec_discovery: "Discovery Candidates",
+    sec_filtered: "Filtered Discovery Candidates",
+    sec_pending: "Proposal Drafts (Pending)",
+    sec_history: "Proposal History",
+    load_fail_discovery: "Failed to load discovery candidates.",
+    load_fail_filtered: "Failed to load filtered discovery metadata.",
+    load_fail_pending: "Failed to load pending drafts.",
+    load_fail_history: "Failed to load proposal history.",
+    refresh_failed: "Refresh failed: {msg}",
+    unknown_error: "unknown error",
+    no_discovery: "No discovery candidates.",
+    no_filtered: "No filtered discovery candidates.",
+    no_pending: "No pending proposal drafts.",
+    no_history: "No proposal history.",
+    candidate_id: "Candidate ID",
+    type: "Type",
+    unspecified: "unspecified",
+    status: "Status",
+    rule_id: "Rule ID",
+    covered_rule: "Covered Rule",
+    rule_state: "Rule State",
+    reason: "Reason",
+    semantic_key: "Semantic Key",
+    promote: "Promote to Draft",
+    promoting: "Promoting {id}...",
+    promote_result: "Promote result: {r}",
+    promote_failed: "Promote failed: {msg}",
+    reject_candidate: "Reject Candidate",
+    rejected_discovery: "Rejected discovery candidate {id}",
+    approve: "Approve",
+    approving: "Approving {id}...",
+    approve_result: "Approve result: {r}",
+    approve_failed: "Approve failed: {msg}",
+    reject: "Reject",
+    rejecting: "Rejecting {id}...",
+    reject_result: "Reject result: {r}",
+    reject_failed: "Reject failed: {msg}",
+    unsupported_warn:
+      "Unsupported: this proposal cannot be mapped to an existing deterministic template yet.",
+    template_recorded: "Template request recorded for this candidate.",
+    request_template: "Request New Template",
+    template_requested: "Template Requested",
+    template_marked: "Template request marked for {id}.",
+    reactivate: "Reactivate",
+    reactivating: "Reactivating {id}...",
+    reactivate_result: "Reactivate result: {r}",
+    reactivate_failed: "Reactivate failed: {msg}",
+    deactivate: "Deactivate",
+    deactivating: "Deactivating {id}...",
+    deactivate_result: "Deactivate result: {r}",
+    deactivate_failed: "Deactivate failed: {msg}",
+    active: "active",
+    inactive: "inactive",
+    loaded:
+      "Loaded {c} candidate(s), {f} filtered candidate(s), {p} pending draft(s), {h} historical draft(s) at {t}",
+    dedupe_batch_duplicate: "Duplicate in this discovery batch",
+    dedupe_existing_semantic_key: "Already covered by active/pending/recent rule idea",
+    dedupe_novel: "Novel candidate",
+    dedupe_unknown: "Unknown",
+    status_draft: "draft",
+    status_approved: "approved",
+    status_rejected: "rejected",
+    status_unsupported: "unsupported",
+    status_covered_by_existing_rule: "covered_by_existing_rule",
+  },
+  cs: {
+    pipeline_title: "HGA – pipeline pravidel",
+    refresh: "Obnovit",
+    refreshing: "Obnovuji…",
+    refreshing_all: "Obnovuji kandidáty a návrhy…",
+    sec_discovery: "Kandidáti z discovery",
+    sec_filtered: "Odfiltrovaní kandidáti",
+    sec_pending: "Návrhy pravidel (čekající)",
+    sec_history: "Historie návrhů",
+    load_fail_discovery: "Kandidáty se nepodařilo načíst.",
+    load_fail_filtered: "Metadata odfiltrovaných kandidátů se nepodařilo načíst.",
+    load_fail_pending: "Čekající návrhy se nepodařilo načíst.",
+    load_fail_history: "Historii návrhů se nepodařilo načíst.",
+    refresh_failed: "Obnovení selhalo: {msg}",
+    unknown_error: "neznámá chyba",
+    no_discovery: "Žádní kandidáti.",
+    no_filtered: "Žádní odfiltrovaní kandidáti.",
+    no_pending: "Žádné čekající návrhy.",
+    no_history: "Žádná historie návrhů.",
+    candidate_id: "ID kandidáta",
+    type: "Typ",
+    unspecified: "neuvedeno",
+    status: "Stav",
+    rule_id: "ID pravidla",
+    covered_rule: "Pokryto pravidlem",
+    rule_state: "Stav pravidla",
+    reason: "Důvod",
+    semantic_key: "Sémantický klíč",
+    promote: "Povýšit na návrh",
+    promoting: "Povyšuji {id}…",
+    promote_result: "Výsledek povýšení: {r}",
+    promote_failed: "Povýšení selhalo: {msg}",
+    reject_candidate: "Zamítnout kandidáta",
+    rejected_discovery: "Kandidát zamítnut: {id}",
+    approve: "Schválit",
+    approving: "Schvaluji {id}…",
+    approve_result: "Výsledek schválení: {r}",
+    approve_failed: "Schválení selhalo: {msg}",
+    reject: "Zamítnout",
+    rejecting: "Zamítám {id}…",
+    reject_result: "Výsledek zamítnutí: {r}",
+    reject_failed: "Zamítnutí selhalo: {msg}",
+    unsupported_warn:
+      "Nepodporováno: tento návrh zatím nelze převést na existující deterministickou šablonu.",
+    template_recorded: "Žádost o šablonu je pro tohoto kandidáta zaznamenána.",
+    request_template: "Požádat o novou šablonu",
+    template_requested: "Šablona vyžádána",
+    template_marked: "Žádost o šablonu označena pro {id}.",
+    reactivate: "Znovu aktivovat",
+    reactivating: "Aktivuji {id}…",
+    reactivate_result: "Výsledek aktivace: {r}",
+    reactivate_failed: "Aktivace selhala: {msg}",
+    deactivate: "Deaktivovat",
+    deactivating: "Deaktivuji {id}…",
+    deactivate_result: "Výsledek deaktivace: {r}",
+    deactivate_failed: "Deaktivace selhala: {msg}",
+    active: "aktivní",
+    inactive: "neaktivní",
+    loaded:
+      "Načteno: kandidáti {c}, odfiltrovaní {f}, čekající návrhy {p}, historie {h} (v {t})",
+    dedupe_batch_duplicate: "Duplicita v této dávce discovery",
+    dedupe_existing_semantic_key:
+      "Už pokryto aktivním, čekajícím nebo nedávným nápadem na pravidlo",
+    dedupe_novel: "Nový kandidát",
+    dedupe_unknown: "Neznámé",
+    status_draft: "koncept",
+    status_approved: "schváleno",
+    status_rejected: "zamítnuto",
+    status_unsupported: "nepodporováno",
+    status_covered_by_existing_rule: "pokryto existujícím pravidlem",
+  },
+};
+
 class HgaProposalsCard extends HTMLElement {
   static RULE_REQUEST_URL =
     "https://github.com/goruck/home-generative-agent/issues/new";
@@ -32,7 +176,7 @@ class HgaProposalsCard extends HTMLElement {
       <style>
         .wrap { padding: 16px; font-family: sans-serif; }
         .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
-        .meta { color: #666; font-size: 12px; }
+        .meta { color: #666; font-size: 12px; overflow-wrap: anywhere; }
         .warn { color: #b45309; font-size: 12px; margin-top: 6px; }
         .note { color: #0f766e; font-size: 12px; margin-top: 6px; }
         .row { display: flex; gap: 8px; margin-top: 8px; }
@@ -60,24 +204,24 @@ class HgaProposalsCard extends HTMLElement {
       </style>
       <div class="wrap">
         <div class="row" style="justify-content: space-between; align-items: center;">
-          <strong>HGA Rule Pipeline</strong>
-          <button id="refresh">Refresh</button>
+          <strong>${this._t("pipeline_title")}</strong>
+          <button id="refresh">${this._t("refresh")}</button>
         </div>
         <div id="status" class="meta"></div>
         <details class="section">
-          <summary>Discovery Candidates</summary>
+          <summary>${this._t("sec_discovery")}</summary>
           <div id="discovery" class="section-content"></div>
         </details>
         <details class="section">
-          <summary>Filtered Discovery Candidates</summary>
+          <summary>${this._t("sec_filtered")}</summary>
           <div id="discovery_filtered" class="section-content"></div>
         </details>
         <details class="section" open>
-          <summary>Proposal Drafts (Pending)</summary>
+          <summary>${this._t("sec_pending")}</summary>
           <div id="proposals_pending" class="section-content"></div>
         </details>
         <details class="section">
-          <summary>Proposal History</summary>
+          <summary>${this._t("sec_history")}</summary>
           <div id="proposals_history" class="section-content"></div>
         </details>
       </div>
@@ -871,12 +1015,12 @@ class HgaProposalsCard extends HTMLElement {
     const status = this.shadowRoot.getElementById("status");
     const refresh = this.shadowRoot.getElementById("refresh");
     refresh.disabled = true;
-    refresh.textContent = "Refreshing...";
+    refresh.textContent = this._t("refreshing");
     discovery.innerHTML = "";
     discoveryFiltered.innerHTML = "";
     proposalsPending.innerHTML = "";
     proposalsHistory.innerHTML = "";
-    status.textContent = "Refreshing discovery and proposals...";
+    status.textContent = this._t("refreshing_all");
     let discoveryResult;
     let proposalResult;
     let dynamicRuleResult;
@@ -897,15 +1041,17 @@ class HgaProposalsCard extends HTMLElement {
         { limit: 500 }
       );
     } catch (err) {
-      discovery.innerHTML = `<div class="meta">Failed to load discovery candidates.</div>`;
-      discoveryFiltered.innerHTML = `<div class="meta">Failed to load filtered discovery metadata.</div>`;
-      proposalsPending.innerHTML = `<div class="meta">Failed to load pending drafts.</div>`;
-      proposalsHistory.innerHTML = `<div class="meta">Failed to load proposal history.</div>`;
-      status.textContent = `Refresh failed: ${err?.message || "unknown error"}`;
+      discovery.innerHTML = `<div class="meta">${this._t("load_fail_discovery")}</div>`;
+      discoveryFiltered.innerHTML = `<div class="meta">${this._t("load_fail_filtered")}</div>`;
+      proposalsPending.innerHTML = `<div class="meta">${this._t("load_fail_pending")}</div>`;
+      proposalsHistory.innerHTML = `<div class="meta">${this._t("load_fail_history")}</div>`;
+      status.textContent = this._t("refresh_failed", {
+        msg: err?.message || this._t("unknown_error"),
+      });
       return;
     } finally {
       refresh.disabled = false;
-      refresh.textContent = "Refresh";
+      refresh.textContent = this._t("refresh");
       this._loading = false;
     }
 
@@ -980,7 +1126,7 @@ class HgaProposalsCard extends HTMLElement {
     }
 
     if (!flattenedCandidates.length) {
-      discovery.innerHTML = `<div class="meta">No discovery candidates.</div>`;
+      discovery.innerHTML = `<div class="meta">${this._t("no_discovery")}</div>`;
     } else {
       for (const candidate of flattenedCandidates) {
         const card = document.createElement("div");
@@ -988,15 +1134,15 @@ class HgaProposalsCard extends HTMLElement {
         card.innerHTML = `
           <div><strong>${this._esc(candidate.title || candidate.candidate_id)}</strong></div>
           <div>${this._esc(candidate.summary || "")}</div>
-          <div class="meta">Candidate ID: ${this._esc(candidate.candidate_id)}</div>
-          <div class="meta">Type: ${this._esc(candidate.suggested_type || "unspecified")}</div>
+          <div class="meta">${this._t("candidate_id")}: ${this._esc(candidate.candidate_id)}</div>
+          <div class="meta">${this._t("type")}: ${this._esc(candidate.suggested_type || this._t("unspecified"))}</div>
         `;
         const row = document.createElement("div");
         row.className = "row";
         const promote = document.createElement("button");
-        promote.textContent = "Promote to Draft";
+        promote.textContent = this._t("promote");
         promote.addEventListener("click", async () => {
-          status.textContent = `Promoting ${candidate.candidate_id}...`;
+          status.textContent = this._t("promoting", { id: candidate.candidate_id });
           try {
             const response = await this._callService(
               "home_generative_agent",
@@ -1005,22 +1151,22 @@ class HgaProposalsCard extends HTMLElement {
             );
             const resultStatus =
               response?.response?.status || response?.status || "ok";
-            status.textContent = `Promote result: ${resultStatus}`;
+            status.textContent = this._t("promote_result", { r: resultStatus });
             if (resultStatus === "already_active" || resultStatus === "exists") {
               this._dismissCandidate(candidate.candidate_id);
             }
             await this._load();
           } catch (err) {
-            status.textContent = `Promote failed: ${
-              err?.message || "unknown error"
-            }`;
+            status.textContent = this._t("promote_failed", {
+              msg: err?.message || this._t("unknown_error"),
+            });
           }
         });
         const rejectDiscovery = document.createElement("button");
-        rejectDiscovery.textContent = "Reject Candidate";
+        rejectDiscovery.textContent = this._t("reject_candidate");
         rejectDiscovery.addEventListener("click", async () => {
           this._dismissCandidate(candidate.candidate_id);
-          status.textContent = `Rejected discovery candidate ${candidate.candidate_id}`;
+          status.textContent = this._t("rejected_discovery", { id: candidate.candidate_id });
           await this._load();
         });
         row.appendChild(rejectDiscovery);
@@ -1031,15 +1177,15 @@ class HgaProposalsCard extends HTMLElement {
     }
 
     if (!flattenedFiltered.length) {
-      discoveryFiltered.innerHTML = `<div class="meta">No filtered discovery candidates.</div>`;
+      discoveryFiltered.innerHTML = `<div class="meta">${this._t("no_filtered")}</div>`;
     } else {
       for (const filteredCandidate of flattenedFiltered) {
         const card = document.createElement("div");
         card.className = "card";
         card.innerHTML = `
           <div><strong>${this._esc(filteredCandidate.candidate_id)}</strong></div>
-          <div class="meta">Reason: ${this._esc(this._dedupeReasonLabel(filteredCandidate.dedupe_reason))}</div>
-          <div class="meta">Semantic Key: ${this._esc(filteredCandidate.semantic_key || "-")}</div>
+          <div class="meta">${this._t("reason")}: ${this._esc(this._dedupeReasonLabel(filteredCandidate.dedupe_reason))}</div>
+          <div class="meta">${this._t("semantic_key")}: ${this._esc(filteredCandidate.semantic_key || "-")}</div>
         `;
         discoveryFiltered.appendChild(card);
       }
@@ -1093,7 +1239,7 @@ class HgaProposalsCard extends HTMLElement {
     });
 
     if (!visiblePendingProposals.length) {
-      proposalsPending.innerHTML = `<div class="meta">No pending proposal drafts.</div>`;
+      proposalsPending.innerHTML = `<div class="meta">${this._t("no_pending")}</div>`;
     } else {
       for (const rec of visiblePendingProposals) {
         const candidate = rec.candidate || {};
@@ -1103,29 +1249,29 @@ class HgaProposalsCard extends HTMLElement {
         card.className = "card";
         card.innerHTML = `
           <div><strong>${this._esc(candidate.title || rec.candidate_id)}</strong></div>
-          <div class="meta">Status: ${this._esc(rec.status || "draft")}</div>
+          <div class="meta">${this._t("status")}: ${this._esc(this._statusLabel(rec.status || "draft"))}</div>
           <div>${this._esc(candidate.summary || "")}</div>
-          <div class="meta">Candidate ID: ${this._esc(rec.candidate_id)}</div>
-          <div class="meta">Rule ID: ${this._esc(rec.rule_id || "-")}</div>
-          <div class="meta">Covered Rule: ${this._esc(rec.covered_rule_id || "-")}</div>
+          <div class="meta">${this._t("candidate_id")}: ${this._esc(rec.candidate_id)}</div>
+          <div class="meta">${this._t("rule_id")}: ${this._esc(rec.rule_id || "-")}</div>
+          <div class="meta">${this._t("covered_rule")}: ${this._esc(rec.covered_rule_id || "-")}</div>
           ${
             isUnsupported
-              ? `<div class="warn">Unsupported: this proposal cannot be mapped to an existing deterministic template yet.</div>`
+              ? `<div class="warn">${this._t("unsupported_warn")}</div>`
               : ""
           }
           ${
             isUnsupported && templateRequested
-              ? `<div class="note">Template request recorded for this candidate.</div>`
+              ? `<div class="note">${this._t("template_recorded")}</div>`
               : ""
           }
         `;
         const row = document.createElement("div");
         row.className = "row";
         const approve = document.createElement("button");
-        approve.textContent = "Approve";
+        approve.textContent = this._t("approve");
         approve.disabled = rec.status === "approved";
         approve.addEventListener("click", async () => {
-          status.textContent = `Approving ${rec.candidate_id}...`;
+          status.textContent = this._t("approving", { id: rec.candidate_id });
           try {
             const response = await this._callService(
               "home_generative_agent",
@@ -1134,19 +1280,19 @@ class HgaProposalsCard extends HTMLElement {
             );
             const resultStatus =
               response?.response?.status || response?.status || "ok";
-            status.textContent = `Approve result: ${resultStatus}`;
+            status.textContent = this._t("approve_result", { r: resultStatus });
             await this._load();
           } catch (err) {
-            status.textContent = `Approve failed: ${
-              err?.message || "unknown error"
-            }`;
+            status.textContent = this._t("approve_failed", {
+              msg: err?.message || this._t("unknown_error"),
+            });
           }
         });
         const reject = document.createElement("button");
-        reject.textContent = "Reject";
+        reject.textContent = this._t("reject");
         reject.disabled = rec.status === "rejected";
         reject.addEventListener("click", async () => {
-          status.textContent = `Rejecting ${rec.candidate_id}...`;
+          status.textContent = this._t("rejecting", { id: rec.candidate_id });
           try {
             const response = await this._callService(
               "home_generative_agent",
@@ -1155,12 +1301,12 @@ class HgaProposalsCard extends HTMLElement {
             );
             const resultStatus =
               response?.response?.status || response?.status || "ok";
-            status.textContent = `Reject result: ${resultStatus}`;
+            status.textContent = this._t("reject_result", { r: resultStatus });
             await this._load();
           } catch (err) {
-            status.textContent = `Reject failed: ${
-              err?.message || "unknown error"
-            }`;
+            status.textContent = this._t("reject_failed", {
+              msg: err?.message || this._t("unknown_error"),
+            });
           }
         });
         if (isUnsupported) {
@@ -1170,19 +1316,18 @@ class HgaProposalsCard extends HTMLElement {
           requestLink.target = "_blank";
           requestLink.rel = "noopener noreferrer";
           requestLink.textContent = templateRequested
-            ? "Template Requested"
-            : "Request New Template";
+            ? this._t("template_requested")
+            : this._t("request_template");
           requestLink.addEventListener("click", () => {
             this._markTemplateRequested(rec.candidate_id);
-            status.textContent = `Template request marked for ${rec.candidate_id}.`;
+            status.textContent = this._t("template_marked", { id: rec.candidate_id });
             requestLink.classList.add("requested");
-            requestLink.textContent = "Template Requested";
+            requestLink.textContent = this._t("template_requested");
             const note = card.querySelector(".note");
             if (!note) {
               const requestedNote = document.createElement("div");
               requestedNote.className = "note";
-              requestedNote.textContent =
-                "Template request recorded for this candidate.";
+              requestedNote.textContent = this._t("template_recorded");
               card.insertBefore(requestedNote, row);
             }
           });
@@ -1196,7 +1341,7 @@ class HgaProposalsCard extends HTMLElement {
     }
 
     if (!historicalProposals.length) {
-      proposalsHistory.innerHTML = `<div class="meta">No proposal history.</div>`;
+      proposalsHistory.innerHTML = `<div class="meta">${this._t("no_history")}</div>`;
     } else {
       for (const rec of historicalProposals) {
         const candidate = rec.candidate || {};
@@ -1208,16 +1353,16 @@ class HgaProposalsCard extends HTMLElement {
         card.className = "card";
         card.innerHTML = `
           <div><strong>${this._esc(candidate.title || rec.candidate_id)}</strong></div>
-          <div class="meta">Status: ${this._esc(rec.status || "draft")}</div>
+          <div class="meta">${this._t("status")}: ${this._esc(this._statusLabel(rec.status || "draft"))}</div>
           <div>${this._esc(candidate.summary || "")}</div>
-          <div class="meta">Candidate ID: ${this._esc(rec.candidate_id)}</div>
-          <div class="meta">Rule ID: ${this._esc(rec.rule_id || "-")}</div>
-          <div class="meta">Covered Rule: ${this._esc(rec.covered_rule_id || "-")}</div>
-          <div class="meta">Rule State: ${
+          <div class="meta">${this._t("candidate_id")}: ${this._esc(rec.candidate_id)}</div>
+          <div class="meta">${this._t("rule_id")}: ${this._esc(rec.rule_id || "-")}</div>
+          <div class="meta">${this._t("covered_rule")}: ${this._esc(rec.covered_rule_id || "-")}</div>
+          <div class="meta">${this._t("rule_state")}: ${
             historyRuleId
               ? isRuleEnabled === false
-                ? "inactive"
-                : "active"
+                ? this._t("inactive")
+                : this._t("active")
               : "-"
           }</div>
         `;
@@ -1226,9 +1371,9 @@ class HgaProposalsCard extends HTMLElement {
           row.className = "row";
           if (isRuleEnabled === false) {
             const reactivate = document.createElement("button");
-            reactivate.textContent = "Reactivate";
+            reactivate.textContent = this._t("reactivate");
             reactivate.addEventListener("click", async () => {
-              status.textContent = `Reactivating ${historyRuleId}...`;
+              status.textContent = this._t("reactivating", { id: historyRuleId });
               try {
                 const response = await this._callService(
                   "home_generative_agent",
@@ -1237,20 +1382,20 @@ class HgaProposalsCard extends HTMLElement {
                 );
                 const resultStatus =
                   response?.response?.status || response?.status || "ok";
-                status.textContent = `Reactivate result: ${resultStatus}`;
+                status.textContent = this._t("reactivate_result", { r: resultStatus });
                 await this._load();
               } catch (err) {
-                status.textContent = `Reactivate failed: ${
-                  err?.message || "unknown error"
-                }`;
+                status.textContent = this._t("reactivate_failed", {
+              msg: err?.message || this._t("unknown_error"),
+            });
               }
             });
             row.appendChild(reactivate);
           } else {
             const deactivate = document.createElement("button");
-            deactivate.textContent = "Deactivate";
+            deactivate.textContent = this._t("deactivate");
             deactivate.addEventListener("click", async () => {
-              status.textContent = `Deactivating ${historyRuleId}...`;
+              status.textContent = this._t("deactivating", { id: historyRuleId });
               try {
                 const response = await this._callService(
                   "home_generative_agent",
@@ -1259,12 +1404,12 @@ class HgaProposalsCard extends HTMLElement {
                 );
                 const resultStatus =
                   response?.response?.status || response?.status || "ok";
-                status.textContent = `Deactivate result: ${resultStatus}`;
+                status.textContent = this._t("deactivate_result", { r: resultStatus });
                 await this._load();
               } catch (err) {
-                status.textContent = `Deactivate failed: ${
-                  err?.message || "unknown error"
-                }`;
+                status.textContent = this._t("deactivate_failed", {
+              msg: err?.message || this._t("unknown_error"),
+            });
               }
             });
             row.appendChild(deactivate);
@@ -1275,20 +1420,42 @@ class HgaProposalsCard extends HTMLElement {
       }
     }
 
-    status.textContent =
-      `Loaded ${flattenedCandidates.length} candidate(s), ` +
-      `${flattenedFiltered.length} filtered candidate(s), ` +
-      `${visiblePendingProposals.length} pending draft(s), ` +
-      `${historicalProposals.length} historical draft(s) at ${new Date().toLocaleTimeString()}`;
+    status.textContent = this._t("loaded", {
+      c: flattenedCandidates.length,
+      f: flattenedFiltered.length,
+      p: visiblePendingProposals.length,
+      h: historicalProposals.length,
+      t: new Date().toLocaleTimeString(),
+    });
+  }
+
+  _lang() {
+    const raw = this._hass?.language || this._hass?.locale?.language || "en";
+    const lang = String(raw).toLowerCase().split("-")[0];
+    return HGA_PROPOSALS_I18N[lang] ? lang : "en";
+  }
+
+  _t(key, params = {}) {
+    const dict = HGA_PROPOSALS_I18N[this._lang()];
+    let text = dict[key] ?? HGA_PROPOSALS_I18N.en[key] ?? key;
+    for (const [name, value] of Object.entries(params)) {
+      text = text.replaceAll(`{${name}}`, String(value));
+    }
+    return text;
+  }
+
+  // Known status codes are translated; anything else is shown verbatim.
+  _statusLabel(status) {
+    const key = `status_${status}`;
+    return HGA_PROPOSALS_I18N.en[key] !== undefined ? this._t(key) : status;
   }
 
   _dedupeReasonLabel(reason) {
-    const reasonMap = {
-      batch_duplicate: "Duplicate in this discovery batch",
-      existing_semantic_key: "Already covered by active/pending/recent rule idea",
-      novel: "Novel candidate",
-    };
-    return reasonMap[reason] || reason || "Unknown";
+    const key = `dedupe_${reason}`;
+    if (reason && HGA_PROPOSALS_I18N.en[key] !== undefined) {
+      return this._t(key);
+    }
+    return reason || this._t("dedupe_unknown");
   }
 
   // Candidate fields originate from LLM output — escape before any innerHTML
