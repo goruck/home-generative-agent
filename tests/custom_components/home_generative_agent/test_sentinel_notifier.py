@@ -1930,6 +1930,7 @@ def test_display_type_low_battery_template_label() -> None:
     hass.config.language = "cs"
     assert _display_type(finding, hass) == "Slabá baterie senzoru"
 
+
 # ---------------------------------------------------------------------------
 # response_language vs deterministic mobile formatters (PR #523 field report)
 # ---------------------------------------------------------------------------
