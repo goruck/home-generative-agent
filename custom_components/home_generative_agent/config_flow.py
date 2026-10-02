@@ -25,6 +25,7 @@ from homeassistant.helpers.selector import (
     ConstantSelectorConfig,
     NumberSelector,
     NumberSelectorConfig,
+    NumberSelectorMode,
     SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
@@ -66,6 +67,7 @@ from .const import (
     CONF_VIDEO_ANALYZER_EVENT_RECORDING_ENABLED,
     CONF_VIDEO_ANALYZER_MODE,
     CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP,
+    CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S,
     CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED,
     CONF_VLM_PROMPT_EXTRA,
     CONF_VLM_RESPONSE_LANGUAGE,
@@ -83,6 +85,7 @@ from .const import (
     RECOMMENDED_TOOL_RETRIEVAL_LIMIT,
     RECOMMENDED_VIDEO_ANALYZER_EVENT_RECORDING_ENABLED,
     RECOMMENDED_VIDEO_ANALYZER_MODE,
+    RECOMMENDED_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S,
     RECOMMENDED_VIDEO_ANALYZER_UNIQUENESS_ENABLED,
     RECOMMENDED_VLM_PROMPT_EXTRA,
     RECOMMENDED_VLM_RESPONSE_LANGUAGE,
@@ -95,6 +98,7 @@ from .const import (
     VIDEO_ANALYZER_MODE_ALWAYS_NOTIFY,
     VIDEO_ANALYZER_MODE_DISABLE,
     VIDEO_ANALYZER_MODE_NOTIFY_ON_ANOMALY,
+    VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_MAX_S,
     VOICE_ACK_TIMINGS,
 )
 from .core.utils import (
@@ -730,6 +734,23 @@ async def _schema_for_options(
                     custom_value=False,
                 )
             )
+        schema[
+            vol.Optional(
+                CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S,
+                default=opts.get(
+                    CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S,
+                    RECOMMENDED_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S,
+                ),
+            )
+        ] = NumberSelector(
+            NumberSelectorConfig(
+                min=0,
+                max=VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_MAX_S,
+                step=1,
+                mode=NumberSelectorMode.BOX,
+                unit_of_measurement="s",
+            )
+        )
 
     schema.update(
         {

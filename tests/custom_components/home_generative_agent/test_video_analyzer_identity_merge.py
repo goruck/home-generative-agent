@@ -175,7 +175,7 @@ async def test_merge_within_distance(va: VideoAnalyzer, entry: MagicMock) -> Non
         ],
     )
 
-    descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(2))
+    descs, recognized, _, _sole, _ = await va._process_batch(_CAMERA, _ordered(2))
 
     assert recognized == [_KNOWN]
     assert _identities(descs) == [[_KNOWN], [_KNOWN]]
@@ -197,7 +197,7 @@ async def test_refused_when_distance_beyond_bound(
         ],
     )
 
-    descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(2))
+    descs, recognized, _, _sole, _ = await va._process_batch(_CAMERA, _ordered(2))
 
     assert recognized == [_KNOWN, "Unknown Person"]
     assert _identities(descs) == [[_KNOWN], ["Unknown Person"]]
@@ -233,7 +233,7 @@ async def test_refused_merge_does_not_dedupe_into_a_phantom_frame(
         ],
     )
 
-    descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(2))
+    descs, recognized, _, _sole, _ = await va._process_batch(_CAMERA, _ordered(2))
 
     # The merge still refuses — the identity question stays open.
     assert va._metrics[_CAMERA].unknown_merged == 0
@@ -260,7 +260,7 @@ async def test_refused_on_same_frame_cooccurrence(
         ],
     )
 
-    descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(2))
+    descs, recognized, _, _sole, _ = await va._process_batch(_CAMERA, _ordered(2))
 
     assert recognized == [_KNOWN, "Unknown Person"]
     assert "Unknown Person" in _identities(descs)[0]
@@ -286,7 +286,7 @@ async def test_refused_with_two_known_names(
         ],
     )
 
-    _descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(3))
+    _descs, recognized, _, _sole, _ = await va._process_batch(_CAMERA, _ordered(3))
 
     assert recognized == ["Anna", _KNOWN, "Unknown Person"]
     entry.runtime_data.person_gallery.nearest_match.assert_not_awaited()
@@ -312,7 +312,7 @@ async def test_refused_with_zero_known_names(
         ],
     )
 
-    _descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(1))
+    _descs, recognized, _, _sole, _ = await va._process_batch(_CAMERA, _ordered(1))
 
     assert recognized == ["Unknown Person"]
     entry.runtime_data.person_gallery.nearest_match.assert_not_awaited()
@@ -334,7 +334,7 @@ async def test_all_indeterminate_increments_nothing(
         ],
     )
 
-    descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(2))
+    descs, recognized, _, _sole, _ = await va._process_batch(_CAMERA, _ordered(2))
 
     assert recognized == ["Indeterminate"]
     assert _identities(descs) == [["Indeterminate"], ["Indeterminate"]]
@@ -361,7 +361,7 @@ async def test_refused_when_person_unenrolled_mid_batch(
         ],
     )
 
-    _descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(2))
+    _descs, recognized, _, _sole, _ = await va._process_batch(_CAMERA, _ordered(2))
 
     assert recognized == [_KNOWN, "Unknown Person"]
     assert va._metrics[_CAMERA].unknown_merge_refused_no_lookup == 1
@@ -384,7 +384,7 @@ async def test_dao_error_keeps_unknown_and_batch_survives(
         ],
     )
 
-    _descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(2))
+    _descs, recognized, _, _sole, _ = await va._process_batch(_CAMERA, _ordered(2))
 
     assert recognized == [_KNOWN, "Unknown Person"]
     assert va._metrics[_CAMERA].unknown_merge_refused_no_lookup == 1
@@ -406,7 +406,7 @@ async def test_multiple_unknown_frames_all_merge(
         ],
     )
 
-    descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(3))
+    descs, recognized, _, _sole, _ = await va._process_batch(_CAMERA, _ordered(3))
 
     assert recognized == [_KNOWN]
     assert _identities(descs) == [[_KNOWN], [_KNOWN], [_KNOWN]]
@@ -436,7 +436,7 @@ async def test_alignment_vlm_error_fallback_frame_carries_embedding(
         ],
     )
 
-    descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(2))
+    descs, recognized, _, _sole, _ = await va._process_batch(_CAMERA, _ordered(2))
 
     assert recognized == [_KNOWN]
     assert _identities(descs) == [[_KNOWN], [_KNOWN]]
@@ -463,7 +463,7 @@ async def test_alignment_sentinel_keep_frame_carries_embedding(
         ],
     )
 
-    descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(2))
+    descs, recognized, _, _sole, _ = await va._process_batch(_CAMERA, _ordered(2))
 
     assert recognized == [_KNOWN]
     assert _identities(descs) == [[_KNOWN], [_KNOWN]]
@@ -695,7 +695,7 @@ async def test_refused_at_exact_threshold(va: VideoAnalyzer, entry: MagicMock) -
         ],
     )
 
-    _descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(2))
+    _descs, recognized, _, _sole, _ = await va._process_batch(_CAMERA, _ordered(2))
 
     assert recognized == [_KNOWN, "Unknown Person"]
     assert va._metrics[_CAMERA].unknown_merge_refused_distance == 1
@@ -753,7 +753,7 @@ async def test_no_dao_keeps_unknown(va: VideoAnalyzer, entry: MagicMock) -> None
         ],
     )
 
-    _descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(2))
+    _descs, recognized, _, _sole, _ = await va._process_batch(_CAMERA, _ordered(2))
 
     assert recognized == [_KNOWN, "Unknown Person"]
     assert va._metrics[_CAMERA].unknown_merge_refused_no_lookup == 1
@@ -773,7 +773,7 @@ async def test_embeddingless_unknown_keeps_unknown(
         ],
     )
 
-    _descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(2))
+    _descs, recognized, _, _sole, _ = await va._process_batch(_CAMERA, _ordered(2))
 
     assert recognized == [_KNOWN, "Unknown Person"]
     entry.runtime_data.person_gallery.nearest_match.assert_not_awaited()
@@ -794,7 +794,7 @@ async def test_two_unknowns_in_one_frame_refuse(
         ],
     )
 
-    _descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(2))
+    _descs, recognized, _, _sole, _ = await va._process_batch(_CAMERA, _ordered(2))
 
     assert "Unknown Person" in recognized
     entry.runtime_data.person_gallery.nearest_match.assert_not_awaited()
@@ -817,7 +817,7 @@ async def test_known_plus_indeterminate_frame_still_merges(
         ],
     )
 
-    _descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(2))
+    _descs, recognized, _, _sole, _ = await va._process_batch(_CAMERA, _ordered(2))
 
     assert recognized == ["Indeterminate", _KNOWN]
     assert va._metrics[_CAMERA].unknown_merged == 1
@@ -1003,7 +1003,7 @@ async def test_dropped_two_person_frame_refuses_merge(
         ],
     )
 
-    _descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(3))
+    _descs, recognized, _, _sole, _ = await va._process_batch(_CAMERA, _ordered(3))
 
     assert recognized == [_KNOWN, "Unknown Person"]
     entry.runtime_data.person_gallery.nearest_match.assert_not_awaited()
@@ -1025,7 +1025,7 @@ async def test_dropped_second_known_name_refuses_merge(
         ],
     )
 
-    _descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(3))
+    _descs, recognized, _, _sole, _ = await va._process_batch(_CAMERA, _ordered(3))
 
     assert recognized == [_KNOWN, "Unknown Person"]
     entry.runtime_data.person_gallery.nearest_match.assert_not_awaited()
@@ -1047,7 +1047,7 @@ async def test_dropped_single_unknown_does_not_refuse(
         ],
     )
 
-    _descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(3))
+    _descs, recognized, _, _sole, _ = await va._process_batch(_CAMERA, _ordered(3))
 
     assert recognized == [_KNOWN]
     assert va._metrics[_CAMERA].unknown_merged == 1
@@ -1068,7 +1068,7 @@ async def test_dao_failure_short_circuits_remaining_lookups(
         ],
     )
 
-    _descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(3))
+    _descs, recognized, _, _sole, _ = await va._process_batch(_CAMERA, _ordered(3))
 
     assert recognized == [_KNOWN, "Unknown Person"]
     assert entry.runtime_data.person_gallery.nearest_match.await_count == 1
@@ -1143,7 +1143,7 @@ async def test_refused_when_nearest_match_is_different_person(
         ],
     )
 
-    _descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(2))
+    _descs, recognized, _, _sole, _ = await va._process_batch(_CAMERA, _ordered(2))
 
     assert recognized == [_KNOWN, "Unknown Person"]
     assert va._metrics[_CAMERA].unknown_merge_refused_distance == 1
@@ -1171,7 +1171,7 @@ async def test_legacy_reserved_label_row_is_not_a_merge_target(
         ],
     )
 
-    _descs, recognized, _, _sole = await va._process_batch(_CAMERA, _ordered(2))
+    _descs, recognized, _, _sole, _ = await va._process_batch(_CAMERA, _ordered(2))
 
     assert recognized == ["Unknown Person", "unknown person"]
     entry.runtime_data.person_gallery.nearest_match.assert_not_awaited()

@@ -8,9 +8,14 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
+import voluptuous as vol
 from homeassistant.const import CONF_LLM_HASS_API
 from homeassistant.data_entry_flow import FlowResultType
-from homeassistant.helpers.selector import ConstantSelector, TextSelector
+from homeassistant.helpers.selector import (
+    ConstantSelector,
+    NumberSelector,
+    TextSelector,
+)
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.home_generative_agent.config_flow import (
@@ -23,8 +28,11 @@ from custom_components.home_generative_agent.const import (
     CONF_SCHEMA_FIRST_YAML,
     CONF_STT_HALLUCINATION_EXACT_PATTERNS,
     CONF_STT_HALLUCINATION_PATTERNS,
+    CONF_VIDEO_ANALYZER_MODE,
+    CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S,
     CONF_VOICE_TOOL_ACK,
     DOMAIN,
+    VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_MAX_S,
 )
 
 
@@ -289,3 +297,50 @@ async def test_clearing_voice_acknowledgement_turns_it_off(hass: Any) -> None:
     assert CONF_VOICE_TOOL_ACK not in await _submit_options(hass, stored, {})
     kept = await _submit_options(hass, stored, {CONF_VOICE_TOOL_ACK: "One moment."})
     assert kept[CONF_VOICE_TOOL_ACK] == "One moment."
+
+
+@pytest.mark.asyncio
+async def test_options_schema_offers_notification_cooldown_with_analyzer_on(
+    hass: Any,
+) -> None:
+    """The cooldown is a bounded number, default 0, shown with the analyzer on."""
+    schema = await _schema_for_options(
+        hass, {CONF_VIDEO_ANALYZER_MODE: "notify_on_anomaly"}
+    )
+    marker = _schema_key(schema, CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S)
+    selector = schema[marker]
+
+    assert marker.default() == 0
+    assert isinstance(selector, NumberSelector)
+    assert selector.config["min"] == 0
+    assert selector.config["max"] == VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_MAX_S
+    validate = cast("Any", selector)
+    with pytest.raises(vol.Invalid):
+        validate(-1)
+    with pytest.raises(vol.Invalid):
+        validate(VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_MAX_S + 1)
+
+
+@pytest.mark.asyncio
+async def test_options_schema_keeps_a_saved_notification_cooldown(hass: Any) -> None:
+    """A saved value comes back as the field's default."""
+    schema = await _schema_for_options(
+        hass,
+        {
+            CONF_VIDEO_ANALYZER_MODE: "always_notify",
+            CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S: 120,
+        },
+    )
+    marker = _schema_key(schema, CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S)
+
+    assert marker.default() == 120
+
+
+@pytest.mark.asyncio
+async def test_options_schema_hides_notification_cooldown_with_analyzer_off(
+    hass: Any,
+) -> None:
+    """With the analyzer disabled there are no notifications to rate-limit."""
+    schema = await _schema_for_options(hass, {CONF_VIDEO_ANALYZER_MODE: "disable"})
+
+    assert CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S not in _schema_keys(schema)

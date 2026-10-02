@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
-from time import monotonic
+from time import monotonic, time
 from typing import TYPE_CHECKING, Any, Final, Literal, cast
 from urllib.parse import urljoin
 
@@ -45,6 +45,7 @@ from ..const import (  # noqa: TID252
     CONF_VIDEO_ANALYZER_EVENT_RECORDING_ENABLED,
     CONF_VIDEO_ANALYZER_MODE,
     CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP,
+    CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S,
     CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED,
     CONF_VIDEO_MODEL_SEMAPHORE,
     CONF_VLM_PROMPT_EXTRA,
@@ -94,6 +95,14 @@ from .event_recording import (
     thin_frames,
 )
 from .fallback import ainvoke_dropping_unsupported_params
+from .notify_cooldown import (
+    CooldownAction,
+    CooldownWindow,
+    active_window,
+    decide,
+    human_level,
+    notification_tag,
+)
 from .person_gallery import FACE_EMBEDDING_DIMS
 from .utils import (
     discover_mobile_notify_service,
@@ -155,6 +164,13 @@ _VIDEO_QUEUE_BACKLOG_THRESHOLD: Final[int] = (
 _WORKER_ERROR_BACKOFF_SEC: Final[int] = 5  # pause after unexpected worker error
 _SUMMARY_MAX_FRAMES: Final[int] = 8  # kept frame descriptions fed to the summary
 _NOTIFY_PROTECT_TTL_SEC: Final[int] = 1800  # pruning protection for notified images
+# Notification cooldown (issue #672). A sounding push is awaited so a failed
+# one cannot open a window; the wait is bounded, and after a failure the camera
+# sends as if the cooldown were off for a while so a notify outage cannot stall
+# every batch behind that wait.
+_NOTIFY_ALERT_TIMEOUT_SEC: Final[int] = 10
+_NOTIFY_FAILURE_FALLBACK_SEC: Final[int] = 60
+_MOBILE_APP_SERVICE_PREFIX: Final = "mobile_app_"
 # Exact filename shape _capture_snapshot writes; the retention seed claims
 # ONLY these (user files like "snapshot_family.jpg" must never match).
 # ASCII digit class on purpose: \d is Unicode-aware and would also claim
@@ -714,6 +730,18 @@ def _pick_notify_frame(
     return paths[pool[len(pool) // 2]]
 
 
+@dataclass(frozen=True, slots=True)
+class _BatchNotifyContext:
+    """What the notification step needs to know about the batch it describes."""
+
+    # Names on the frames the summary kept (sensor, image entity, novelty).
+    recognized: list[str]
+    # Every name detected anywhere in the batch (notification cooldown).
+    batch_names: list[str]
+    # Epoch seconds of the batch's newest frame.
+    capture_ts: float
+
+
 @dataclass(frozen=True)
 class CaptionNoveltyDecision:
     """Result of _is_caption_novel."""
@@ -841,6 +869,12 @@ class VideoAnalyzer:
         self._deferred_flush_tasks: set[asyncio.Task[Any]] = set()
         self._event_recording_recent: dict[str, deque[str]] = {}
         self._event_recording_locks: dict[str, asyncio.Lock] = {}
+        # Notification cooldown state (issue #672), all keyed by camera
+        # entity id and in memory only: an options change reloads the entry.
+        self._notify_windows: dict[str, CooldownWindow] = {}
+        self._notify_locks: dict[str, asyncio.Lock] = {}
+        self._notify_fallback_until: dict[str, float] = {}
+        self._notify_cooldown_unsupported_logged = False
         self._event_recording_sem = asyncio.Semaphore(RECORDING_MAX_CONCURRENT)
         self._event_recording_warned_at: dict[str, float] = {}
         self._event_recording_ffmpeg_missing_logged = False
@@ -1069,9 +1103,11 @@ class VideoAnalyzer:
         self,
         camera_id: str,
         ordered: list[tuple[Path, int]],
-    ) -> tuple[list[dict[str, list[str]]], list[str], Path | None, str | None]:
+    ) -> tuple[
+        list[dict[str, list[str]]], list[str], Path | None, str | None, list[str]
+    ]:
         if not ordered:
-            return [], [], None, None
+            return [], [], None, None, []
 
         t0: int = ordered[0][1]
         frame_descriptions: list[dict[str, list[str]]] = []
@@ -1173,6 +1209,27 @@ class VideoAnalyzer:
         # phantom), decided over the same full pre-cap evidence the merge saw.
         sole_person = _decide_sole_person(frame_descriptions, dropped_hits)
 
+        # Every detected name in the batch, taken after the identity merge but
+        # BEFORE dedupe and the summary cap, plus the frames the VLM side
+        # dropped. `recognized` below describes only the frames the summary
+        # kept; the notification cooldown must not lose an unknown face that
+        # the cap sliced off (issue #672).
+        batch_names: list[str] = sorted(
+            {
+                name
+                for d in frame_descriptions
+                for names in d.values()
+                for name in names
+                if _is_detected_name(name)
+            }
+            | {
+                hit.name
+                for hits in dropped_hits
+                for hit in hits
+                if _is_detected_name(hit.name)
+            }
+        )
+
         # dedupe near-identical, then cap to the newest frames; both lists get
         # the same cap so descs/paths stay index-aligned for _pick_notify_frame.
         # tag_person_check keeps the path of the frame where a person was
@@ -1202,7 +1259,7 @@ class VideoAnalyzer:
                 camera_id,
             )
             notify_frame = None
-        return frame_descriptions, recognized, notify_frame, sole_person
+        return frame_descriptions, recognized, notify_frame, sole_person, batch_names
 
     async def _merge_unknown_faces(  # noqa: PLR0912
         self,
@@ -1441,26 +1498,44 @@ class VideoAnalyzer:
         batch: list[Path],
         msg: str,
         notify_frame: Path | None = None,
+        context: _BatchNotifyContext | None = None,
     ) -> None:
         # Retention registration happens at capture time (_capture_snapshot),
         # so batches that never reach this point cannot leak files — and
         # registering again here would duplicate deque entries.
-        await self._handle_notification(camera_id, msg, batch, notify_frame)
+        await self._handle_notification(camera_id, msg, batch, notify_frame, context)
         await self._store_results(camera_id, batch, msg)
 
     async def _analyze_and_finalize(
         self, camera_id: str, ordered: list[tuple[Path, int]]
     ) -> None:
-        frame_descs, recognized, notify_frame, sole_person = await self._process_batch(
-            camera_id, ordered
-        )
+        (
+            frame_descs,
+            recognized,
+            notify_frame,
+            sole_person,
+            batch_names,
+        ) = await self._process_batch(camera_id, ordered)
         if not frame_descs:
             return
         self._last_recognized[camera_id] = recognized
         msg = await self._summarize(camera_id, frame_descs, sole_person)
         if not msg:
             return
-        await self._finalize(camera_id, [p for p, _ in ordered], msg, notify_frame)
+        # Hand this batch's own names down: several batches for one camera can
+        # be in flight at once (worker, queue, event recording), so a consumer
+        # that read _last_recognized after an await could get another batch's.
+        await self._finalize(
+            camera_id,
+            [p for p, _ in ordered],
+            msg,
+            notify_frame,
+            _BatchNotifyContext(
+                recognized=recognized,
+                batch_names=batch_names,
+                capture_ts=ordered[-1][1],
+            ),
+        )
 
     async def _snapshot_worker(self, camera_id: str) -> None:
         """Consume and process snapshots for one camera."""
@@ -1504,20 +1579,42 @@ class VideoAnalyzer:
             if self._active_queue_tasks.get(camera_id) is asyncio.current_task():
                 del self._active_queue_tasks[camera_id]
 
-    async def _send_notification(
-        self, msg: str, camera_name: str, notify_img_path: Path
-    ) -> None:
+    def _resolve_notify_service(self) -> tuple[str, str] | None:
+        """Return the (domain, service) notifications go to, or None."""
         # Prefer configured option; fall back to discovery
         full_service = self.entry.runtime_data.options.get(CONF_NOTIFY_SERVICE)
         if full_service and full_service.startswith("notify."):
             domain, service = full_service.split(".", 1)
-        else:
-            service = discover_mobile_notify_service(self.hass)
-            LOGGER.debug("Discovered notify service: %s", service)
-            if not service:
-                LOGGER.warning("No notify.mobile_app_* service found.")
-                return
-            domain = "notify"
+            return domain, service
+        service = discover_mobile_notify_service(self.hass)
+        LOGGER.debug("Discovered notify service: %s", service)
+        if not service:
+            return None
+        return "notify", service
+
+    async def _send_notification(
+        self,
+        msg: str,
+        camera_name: str,
+        notify_img_path: Path,
+        *,
+        tag: str | None = None,
+        quiet: bool = False,
+    ) -> bool:
+        """
+        Send one camera notification; return False when no service exists.
+
+        With the defaults the payload and the fire-and-forget call are exactly
+        what they were before the notification cooldown existed. `tag` makes a
+        later push with the same tag replace this card; `quiet` adds the
+        companion-app fields that make such a replacement silent. A tagged
+        sounding push is awaited, so a failing notify service raises here.
+        """
+        resolved = self._resolve_notify_service()
+        if resolved is None:
+            LOGGER.warning("No notify.mobile_app_* service found.")
+            return False
+        domain, service = resolved
 
         clean_msg = msg.replace("**", "").replace("`", "")
         LOGGER.debug(
@@ -1527,16 +1624,178 @@ class VideoAnalyzer:
             service,
             clean_msg[:80],
         )
+        data: dict[str, Any] = {"image": str(notify_img_path)}
+        if tag is not None:
+            data["tag"] = tag
+        if quiet:
+            # Android: do not re-alert while the card is showing. iOS: deliver
+            # without sound or banner. Same conventions as the Sentinel notifier.
+            data["alert_once"] = True
+            data["push"] = {"interruption-level": "passive", "sound": "none"}
         await self.hass.services.async_call(
             domain,
             service,
             {
                 "message": clean_msg,
                 "title": f"Camera Alert from {camera_name}!",
-                "data": {"image": str(notify_img_path)},
+                "data": data,
             },
-            blocking=False,
+            blocking=tag is not None and not quiet,
         )
+        return True
+
+    async def _dispatch_notification(  # noqa: PLR0913
+        self,
+        camera_id: str,
+        camera_name: str,
+        msg: str,
+        notify_img: Path,
+        *,
+        batch_names: list[str],
+        capture_ts: float,
+    ) -> None:
+        """Send a push that passed the novelty check, honoring the cooldown."""
+        cooldown_s = self._notification_cooldown_s()
+        if cooldown_s <= 0:
+            await self._send_notification(msg, camera_name, notify_img)
+            return
+        try:
+            await self._dispatch_with_cooldown(
+                camera_id,
+                camera_name,
+                msg,
+                notify_img,
+                cooldown_s=cooldown_s,
+                batch_names=batch_names,
+                capture_ts=capture_ts,
+            )
+        except Exception:
+            # The cooldown is a convenience layered on the push; a bug in it
+            # must never cost the batch its stored analysis (_finalize stores
+            # after notifying). CancelledError is not an Exception and still
+            # propagates, so unload cancels the worker as before.
+            LOGGER.warning(
+                "[%s] Notification cooldown dispatch failed",
+                camera_id,
+                exc_info=True,
+            )
+
+    def _notification_cooldown_s(self) -> int:
+        """Return the configured cooldown in seconds; 0 when off or malformed."""
+        raw = self.entry.runtime_data.options.get(
+            CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S, 0
+        )
+        try:
+            return max(0, int(raw or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    async def _dispatch_with_cooldown(  # noqa: PLR0913
+        self,
+        camera_id: str,
+        camera_name: str,
+        msg: str,
+        notify_img: Path,
+        *,
+        cooldown_s: int,
+        batch_names: list[str],
+        capture_ts: float,
+    ) -> None:
+        resolved = self._resolve_notify_service()
+        if resolved is None or not resolved[1].startswith(_MOBILE_APP_SERVICE_PREFIX):
+            # Replacing a card quietly is a companion-app behavior. Any other
+            # target (a notify group, a hand-edited service) gets every push
+            # exactly as with the cooldown off; nothing is withheld.
+            if resolved is not None and not self._notify_cooldown_unsupported_logged:
+                self._notify_cooldown_unsupported_logged = True
+                LOGGER.info(
+                    "Notification cooldown does not apply to %s.%s; it needs a "
+                    "single notify.mobile_app_* target. Sending every camera "
+                    "notification as usual.",
+                    *resolved,
+                )
+            await self._send_notification(msg, camera_name, notify_img)
+            return
+
+        # Batches for one camera can overlap (worker, queue, event recording):
+        # the lock makes read-decide-send-commit one step, so two of them
+        # cannot both see "no open window" and both sound.
+        lock = self._notify_locks.setdefault(camera_id, asyncio.Lock())
+        async with lock:
+            now = monotonic()
+            if now < self._notify_fallback_until.get(camera_id, 0.0):
+                await self._send_notification(msg, camera_name, notify_img)
+                return
+
+            window = active_window(
+                self._notify_windows.get(camera_id), now=now, cooldown_s=cooldown_s
+            )
+            level = human_level(
+                batch_names,
+                caption_has_human=_caption_mentions_person(msg),
+                window_level=window.level if window is not None else None,
+            )
+            action = decide(window, level=level, capture_ts=capture_ts)
+            LOGGER.debug(
+                "[%s] notification cooldown: action=%s level=%s window_level=%s",
+                camera_id,
+                action,
+                level.name,
+                window.level.name if window is not None else "none",
+            )
+
+            if window is not None and action is CooldownAction.SKIP_STALE:
+                # An older batch finished after a newer one: the card must not
+                # go back to the older scene. Analysis and sensors are unaffected.
+                return
+            if window is not None and action is CooldownAction.QUIET:
+                if await self._send_notification(
+                    msg,
+                    camera_name,
+                    notify_img,
+                    tag=notification_tag(camera_name, window),
+                    quiet=True,
+                ):
+                    self._notify_windows[camera_id] = CooldownWindow(
+                        started=window.started,
+                        window_id=window.window_id,
+                        level=window.level,
+                        last_capture=capture_ts,
+                    )
+                return
+
+            # OPEN or BYPASS: a sounding push on a new card. Commit the new
+            # window only once the notify service accepted the push, so a
+            # failed alert never turns the pushes after it into quiet ones.
+            new_window = CooldownWindow(
+                started=now, window_id=int(time()), level=level, last_capture=capture_ts
+            )
+            try:
+                async with asyncio.timeout(_NOTIFY_ALERT_TIMEOUT_SEC):
+                    sent = await self._send_notification(
+                        msg,
+                        camera_name,
+                        notify_img,
+                        tag=notification_tag(camera_name, new_window),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                sent = False
+                # Stop awaiting sends for this camera for a while: with the
+                # service down, every batch would otherwise wait out the
+                # timeout and the queue's backlog policy would drop frames.
+                self._notify_fallback_until[camera_id] = (
+                    monotonic() + _NOTIFY_FAILURE_FALLBACK_SEC
+                )
+                LOGGER.warning(
+                    "[%s] Camera notification failed (%s: %s); sending without "
+                    "the cooldown for %d s",
+                    camera_id,
+                    type(exc).__name__,
+                    exc,
+                    _NOTIFY_FAILURE_FALLBACK_SEC,
+                )
+            if sent:
+                self._notify_windows[camera_id] = new_window
 
     async def _generate_summary(
         self,
@@ -2205,9 +2464,21 @@ class VideoAnalyzer:
         msg: str,
         batch: list[Path],
         notify_frame: Path | None = None,
+        context: _BatchNotifyContext | None = None,
     ) -> None:
-        """Decide whether to notify and send if needed."""
+        """
+        Decide whether to notify and send if needed.
+
+        `context` carries this batch's own names; _analyze_and_finalize always
+        passes it. The _last_recognized fallback only serves direct callers.
+        """
         camera_name = camera_id.rsplit(".", maxsplit=1)[-1]
+        if context is None:
+            names = list(self._last_recognized.get(camera_id, []))
+            context = _BatchNotifyContext(
+                recognized=names, batch_names=names, capture_ts=time()
+            )
+        recognized = context.recognized
         # notify_frame is the frame _process_batch judged representative of
         # the summary text. Middle-of-batch is only a legacy fallback: after
         # the sentinel drop (issue #493) the raw batch is dominated by
@@ -2237,7 +2508,7 @@ class VideoAnalyzer:
             camera_id,
             str(dst),
             msg,
-            list(self._last_recognized.get(camera_id, [])),
+            list(recognized),
             dt_util.utcnow().isoformat(),
         )
 
@@ -2246,7 +2517,7 @@ class VideoAnalyzer:
             self.hass,
             SIGNAL_HGA_RECOGNIZED,
             camera_id,
-            list(self._last_recognized.get(camera_id, [])),
+            list(recognized),
             msg,
             dt_util.utcnow().isoformat(),
             str(dst),
@@ -2276,7 +2547,7 @@ class VideoAnalyzer:
                 camera_name,
                 msg,
                 first_snapshot,
-                recognized_names=list(self._last_recognized.get(camera_id, [])),
+                recognized_names=list(recognized),
             )
             LOGGER.debug(
                 "[%s] novelty decision: notify=%s reason=%s best_score=%s "
@@ -2294,10 +2565,24 @@ class VideoAnalyzer:
             if decision.notify:
                 # Protect the chosen file from pruning for 30 minutes
                 self.protect_notify_image(chosen, ttl_sec=_NOTIFY_PROTECT_TTL_SEC)
-                await self._send_notification(msg, camera_name, notify_img)
+                await self._dispatch_notification(
+                    camera_id,
+                    camera_name,
+                    msg,
+                    notify_img,
+                    batch_names=context.batch_names,
+                    capture_ts=context.capture_ts,
+                )
         else:
             self.protect_notify_image(chosen, ttl_sec=_NOTIFY_PROTECT_TTL_SEC)
-            await self._send_notification(msg, camera_name, notify_img)
+            await self._dispatch_notification(
+                camera_id,
+                camera_name,
+                msg,
+                notify_img,
+                batch_names=context.batch_names,
+                capture_ts=context.capture_ts,
+            )
 
     async def _store_results(self, camera_id: str, batch: list[Path], msg: str) -> None:
         """Store the analysis results in the vector DB."""
