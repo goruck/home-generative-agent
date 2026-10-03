@@ -139,7 +139,7 @@ from .video_helpers import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Iterable
+    from collections.abc import Callable, Coroutine, Iterable, Sequence
 
     from homeassistant.core import Event, HomeAssistant
 
@@ -169,6 +169,16 @@ _VIDEO_QUEUE_BACKLOG_THRESHOLD: Final[int] = (
 _WORKER_ERROR_BACKOFF_SEC: Final[int] = 5  # pause after unexpected worker error
 _SUMMARY_MAX_FRAMES: Final[int] = 8  # kept frame descriptions fed to the summary
 _NOTIFY_PROTECT_TTL_SEC: Final[int] = 1800  # pruning protection for notified images
+# Captions the dedup check considers, and the rows the similarity search asks
+# for so that another camera sharing the name prefix cannot crowd them out.
+_CAPTION_SEARCH_LIMIT: Final[int] = 10
+_CAPTION_SEARCH_WIDE_LIMIT: Final[int] = 50
+# Recent-caption scan (issue #704): when a caption would re-notify as a stale
+# match, the captions notified inside the dedupe window are read newest first,
+# a page at a time, and compared with it directly.
+_RECENT_CAPTION_SCAN_PAGE: Final[int] = 50
+_RECENT_CAPTION_SCAN_MAX_PAGES: Final[int] = 4
+_RECENT_CAPTION_SCAN_TIMEOUT_SEC: Final[int] = 10
 # Exact filename shape _capture_snapshot writes; the retention seed claims
 # ONLY these (user files like "snapshot_family.jpg" must never match).
 # ASCII digit class on purpose: \d is Unicode-aware and would also claim
@@ -364,6 +374,42 @@ def _has_action(normalized: str) -> bool:
     """
     scrubbed = _STATIC_CONTEXT_RE.sub(" ", normalized)
     return bool(_ACTION_RE.search(scrubbed))
+
+
+def _caption_age_seconds(item: Any) -> int:
+    """Return how long ago a stored caption was written, in whole seconds."""
+    age = (dt_util.now() - dt_util.as_local(item.created_at)).total_seconds()
+    return max(0, int(age))
+
+
+def _caption_notified(item: Any) -> bool:
+    """
+    Return True if a stored caption was sent as a notification.
+
+    Captions stored before the flag existed carry none and count as notified.
+    """
+    return (item.value or {}).get("notified") is not False
+
+
+def _caption_anchors(item: Any, *, unknown_only: bool) -> bool:
+    """
+    Return True if a stored caption may suppress the caption being checked.
+
+    It must have been notified; and when the batch being checked holds an
+    unknown face, it must come from a batch that held one too, so a resident's
+    caption never silences a stranger's.
+    """
+    if not _caption_notified(item):
+        return False
+    return not unknown_only or (item.value or {}).get("unknown_person") is True
+
+
+def _cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
+    """Return the cosine similarity of two vectors (0.0 for a zero vector)."""
+    norm = math.hypot(*a) * math.hypot(*b)
+    if not norm:
+        return 0.0
+    return math.sumprod(a, b) / norm
 
 
 def _has_real_subject(normalized: str, recognized_names: list[str]) -> bool:
@@ -757,9 +803,12 @@ class CaptionNoveltyDecision:
         "score_none",
         "score_below_threshold",
         "score_above_threshold",
+        "recent_match",
         "artifact_bucket",
         "stale_match",
+        "renotify",
         "store_timeout",
+        "store_error",
     ]
     best_score: float | None = None
     matched_caption: str | None = None
@@ -877,6 +926,8 @@ class VideoAnalyzer:
         # and in memory only: an options change reloads the entry.
         self._notify_windows: dict[str, CooldownWindow] = {}
         self._notify_locks: dict[str, asyncio.Lock] = {}
+        # Per-camera lock making caption dedup's check, send and store one step.
+        self._finalize_locks: dict[str, asyncio.Lock] = {}
         self._notify_cooldown_unsupported_logged = False
         self._event_recording_sem = asyncio.Semaphore(RECORDING_MAX_CONCURRENT)
         self._event_recording_warned_at: dict[str, float] = {}
@@ -1506,10 +1557,24 @@ class VideoAnalyzer:
         # Retention registration happens at capture time (_capture_snapshot),
         # so batches that never reach this point cannot leak files — and
         # registering again here would duplicate deque entries.
-        await self._handle_notification(
-            camera_id, msg, batch, notify_frame, context=context
-        )
-        await self._store_results(camera_id, batch, msg)
+        # Batches for one camera can overlap (worker, queue, event recording).
+        # Caption dedup reads the stored captions and this batch's caption is
+        # stored last, so check, send and store are one step per camera: two
+        # batches with the same scene cannot both find nothing to match.
+        lock = self._finalize_locks.setdefault(camera_id, asyncio.Lock())
+        async with lock:
+            notified = await self._handle_notification(
+                camera_id, msg, batch, notify_frame, context=context
+            )
+            await self._store_results(
+                camera_id,
+                batch,
+                msg,
+                notified=notified,
+                unknown_person=has_unknown_face(
+                    (*context.recognized, *context.batch_names)
+                ),
+            )
 
     async def _analyze_and_finalize(
         self, camera_id: str, ordered: list[tuple[Path, int]]
@@ -1660,16 +1725,20 @@ class VideoAnalyzer:
         msg: str,
         notify_img: Path,
         context: _BatchNotifyContext,
-    ) -> None:
-        """Send a push that passed the novelty check, honoring the cooldown."""
+    ) -> bool:
+        """
+        Send a push that passed the novelty check, honoring the cooldown.
+
+        Returns True when a sounding push was handed to a notify service:
+        False when there was no service, and for a quiet cooldown update.
+        """
         camera_name = camera_id.rsplit(".", maxsplit=1)[-1]
         cooldown_s = self._notification_cooldown_s()
         target = self._resolve_notify_service() if cooldown_s > 0 else None
         if target is None:
             # Cooldown off, or no service at all: the unchanged send (which
             # logs the missing service itself).
-            await self._send_notification(msg, camera_name, notify_img)
-            return
+            return await self._send_notification(msg, camera_name, notify_img)
         if not target[1].startswith(MOBILE_APP_SERVICE_PREFIX):
             # Replacing a card quietly is a companion-app behavior. Any other
             # target (a notify group, a Sentinel-configured service) gets every
@@ -1682,8 +1751,9 @@ class VideoAnalyzer:
                     "Every camera notification is sent as usual.",
                     *target,
                 )
-            await self._send_notification(msg, camera_name, notify_img, target=target)
-            return
+            return await self._send_notification(
+                msg, camera_name, notify_img, target=target
+            )
 
         # Batches for one camera can overlap (worker, queue, event recording):
         # the lock makes read-decide-send-commit one step, so two of them
@@ -1712,6 +1782,9 @@ class VideoAnalyzer:
             # could not even be handed over never starts a quiet window.
             if sent and window is not None:
                 self._notify_windows[camera_id] = window
+            # A quiet replacement of the window's card is not an alert: it
+            # must not let caption dedup withhold a later, sounding one.
+            return sent and not (card is not None and card.quiet)
 
     def _plan_cooldown_push(
         self,
@@ -1877,6 +1950,8 @@ class VideoAnalyzer:
         msg: str,
         first_path: str,
         recognized_names: list[str],
+        *,
+        unknown_person_seen: bool = False,
     ) -> CaptionNoveltyDecision:
         # Decision tree: one early-return per CaptionNoveltyDecision reason code.
         # PLR0911 (too many return statements) suppressed intentionally — each
@@ -1890,17 +1965,25 @@ class VideoAnalyzer:
         if first_dt < dt_util.now() - timedelta(minutes=VIDEO_ANALYZER_TIME_OFFSET):
             return CaptionNoveltyDecision(notify=True, reason="stale_snapshot")
 
+        namespace = ("video_analysis", camera_name)
         try:
             async with asyncio.timeout(10):
-                search_results = await self.entry.runtime_data.store.asearch(
-                    ("video_analysis", camera_name), query=msg, limit=10
-                )
+                search_results = await self._search_own_captions(namespace, msg)
         except TimeoutError:
             LOGGER.warning(
                 "[%s] store.asearch timed out in _is_caption_novel; treating as novel.",
                 camera_name,
             )
             return CaptionNoveltyDecision(notify=True, reason="store_timeout")
+        except Exception:
+            # Fail open: a store or embedding error must cost the dedup, never
+            # the notification.
+            LOGGER.warning(
+                "[%s] store.asearch failed in _is_caption_novel; treating as novel.",
+                camera_name,
+                exc_info=True,
+            )
+            return CaptionNoveltyDecision(notify=True, reason="store_error")
 
         if not search_results:
             return CaptionNoveltyDecision(notify=True, reason="no_match")
@@ -1915,42 +1998,52 @@ class VideoAnalyzer:
         matched_caption = (
             best_result.value.get("content") if best_result.value else None
         )
-        matched_age_seconds = max(
-            0,
-            int(
-                (
-                    dt_util.now() - dt_util.as_local(best_result.created_at)
-                ).total_seconds()
-            ),
-        )
+        matched_age_seconds = _caption_age_seconds(best_result)
         norm_current = _normalize_caption(msg)
 
         if best_score >= VIDEO_ANALYZER_SIMILARITY_THRESHOLD:
-            # For captions with a real subject (person, vehicle, package) only suppress
-            # within the dedupe window so that a days-old match does not silence a new
-            # person or vehicle event.  Static/artifact captions continue to suppress
-            # regardless of match age to avoid empty-scene notification spam.
-            # Re-notify when the caption describes active presence/movement of a real
-            # subject and the match is outside the dedupe window.  The score=1.0 guard
-            # was removed: _has_action already filters parked cars, static houses, and
-            # passive scenes ("features", "remains", "is parked").  An exact caption
-            # recurring after the dedupe window (e.g. "unknown person on porch") is a
-            # genuine repeat event and should notify.
-            if (
-                matched_age_seconds > VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC
-                and _has_real_subject(norm_current, recognized_names)
-                and _has_action(norm_current)
-            ):
-                return CaptionNoveltyDecision(
-                    notify=True,
-                    reason="stale_match",
-                    best_score=best_score,
-                    matched_caption=matched_caption,
-                    matched_age_seconds=matched_age_seconds,
-                )
-            return CaptionNoveltyDecision(
+            window = VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC
+            suppress = CaptionNoveltyDecision(
                 notify=False,
                 reason="score_above_threshold",
+                best_score=best_score,
+                matched_caption=matched_caption,
+                matched_age_seconds=matched_age_seconds,
+            )
+            # Static/artifact captions suppress whatever the match's age, to
+            # avoid empty-scene notification spam: _has_action filters parked
+            # cars, static houses and passive scenes ("features", "remains",
+            # "is parked").
+            if not (
+                _has_real_subject(norm_current, recognized_names)
+                and _has_action(norm_current)
+            ):
+                return suppress
+            # A real subject in action is suppressed only by a matching caption
+            # that was itself sent as a notification inside the dedupe window.
+            # Anchoring on the last notification rather than the last stored
+            # caption means a scene that continues notifies again once the
+            # window has passed, instead of each suppressed caption renewing it;
+            # and a days-old match does not silence a new person or vehicle
+            # event (an exact caption recurring after the window, e.g. "unknown
+            # person on porch", is a genuine repeat event).
+            if matched_age_seconds <= window and _caption_anchors(
+                best_result, unknown_only=unknown_person_seen
+            ):
+                return suppress
+            # The best match does not suppress, but a slightly lower-scoring
+            # one sent a minute ago would (issue #704). For a batch in which
+            # face recognition saw an unknown person, only a notification of
+            # another such batch counts: caption wording cannot tell a
+            # stranger from a resident.
+            recent = await self._find_recent_caption_match(
+                namespace, msg, search_results, unknown_only=unknown_person_seen
+            )
+            if recent is not None:
+                return recent
+            return CaptionNoveltyDecision(
+                notify=True,
+                reason="stale_match" if matched_age_seconds > window else "renotify",
                 best_score=best_score,
                 matched_caption=matched_caption,
                 matched_age_seconds=matched_age_seconds,
@@ -1974,14 +2067,7 @@ class VideoAnalyzer:
                 if _in_artifact_bucket(norm_cap) and not _has_real_subject(
                     norm_cap, recognized_names
                 ):
-                    age = max(
-                        0,
-                        int(
-                            (
-                                dt_util.now() - dt_util.as_local(r.created_at)
-                            ).total_seconds()
-                        ),
-                    )
+                    age = _caption_age_seconds(r)
                     if artifact_age is None or age < artifact_age:
                         artifact_age = age
                         artifact_cap = cap
@@ -2010,6 +2096,154 @@ class VideoAnalyzer:
             matched_caption=matched_caption,
             matched_age_seconds=matched_age_seconds,
         )
+
+    async def _search_own_captions(
+        self, namespace: tuple[str, str], msg: str
+    ) -> list[Any]:
+        """
+        Return the camera's stored captions most similar to msg, best first.
+
+        The store matches namespaces by prefix, so a search for "side" also
+        returns "side_gate". The search asks for more rows than are used so
+        that other cameras' captions, dropped here, cannot crowd this camera's
+        own matches out of the results.
+        """
+        results = await self.entry.runtime_data.store.asearch(
+            namespace,
+            query=msg,
+            limit=_CAPTION_SEARCH_WIDE_LIMIT,
+            # No TTL is set on captions; refreshing one would wrap the query
+            # in a form that no longer guarantees its ordering.
+            refresh_ttl=False,
+        )
+        own = [r for r in results if r.namespace == namespace]
+        own.sort(key=lambda r: r.score if r.score is not None else -1.0, reverse=True)
+        return own[:_CAPTION_SEARCH_LIMIT]
+
+    async def _find_recent_caption_match(
+        self,
+        namespace: tuple[str, str],
+        msg: str,
+        search_results: list[Any],
+        *,
+        unknown_only: bool = False,
+    ) -> CaptionNoveltyDecision | None:
+        """
+        Return a suppress decision for a match notified inside the dedupe window.
+
+        The similarity search ranks by score alone and captions are never pruned,
+        so on a camera that sees the same scenes repeatedly, old near-duplicates
+        outrank a caption stored a minute ago, or push it out of the returned
+        results altogether. Look among the results first, then score the
+        captions notified inside the window against the current one directly.
+
+        Returns None when nothing inside the window reaches the threshold, and
+        when the scan fails: the caller then notifies, as it would have.
+        """
+        window = VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC
+        best: tuple[float, str | None, int] | None = None
+        for r in search_results:
+            if r.score is None or r.score < VIDEO_ANALYZER_SIMILARITY_THRESHOLD:
+                continue
+            age = _caption_age_seconds(r)
+            if (
+                age <= window
+                and _caption_anchors(r, unknown_only=unknown_only)
+                and (best is None or r.score > best[0])
+            ):
+                best = (r.score, (r.value or {}).get("content"), age)
+
+        if best is None:
+            embeddings = self.entry.runtime_data.store.embeddings
+            if embeddings is None:
+                return None
+            try:
+                async with asyncio.timeout(_RECENT_CAPTION_SCAN_TIMEOUT_SEC):
+                    recent = await self._recent_captions(
+                        namespace, unknown_only=unknown_only
+                    )
+                    if not recent:
+                        return None
+                    # Scored as the store scores a search: the same embedding
+                    # function over the caption text, cosine similarity.
+                    vectors = await embeddings.aembed_documents(
+                        [msg, *(cap for cap, _ in recent)]
+                    )
+                    if len(vectors) != len(recent) + 1:
+                        err = f"{len(vectors)} vectors for {len(recent) + 1} captions"
+                        raise ValueError(err)  # noqa: TRY301
+                    for (cap, age), vector in zip(recent, vectors[1:], strict=True):
+                        score = _cosine_similarity(vectors[0], vector)
+                        if score >= VIDEO_ANALYZER_SIMILARITY_THRESHOLD and (
+                            best is None or score > best[0]
+                        ):
+                            best = (score, cap, age)
+            except Exception:
+                # Fail open: an unanswered scan must cost the dedup, never the
+                # notification.
+                LOGGER.warning(
+                    "[%s] recent-caption scan failed; treating the caption as novel.",
+                    namespace[1],
+                    exc_info=True,
+                )
+                return None
+
+        if best is None:
+            return None
+        return CaptionNoveltyDecision(
+            notify=False,
+            reason="recent_match",
+            best_score=best[0],
+            matched_caption=best[1],
+            matched_age_seconds=best[2],
+        )
+
+    async def _recent_captions(
+        self, namespace: tuple[str, str], *, unknown_only: bool = False
+    ) -> list[tuple[str, int]]:
+        """
+        Return (caption, age_seconds) for captions notified inside the dedupe window.
+
+        Relies on AsyncPostgresStore ordering a search without a query by
+        updated_at, newest first; that is how the store is implemented, not
+        part of the BaseStore contract. Each caption has its own key, so it is
+        written once and updated_at equals the created_at the age is read from.
+        Captions stored before the notified flag existed are not returned; they
+        age out of the window half an hour after the upgrade.
+        """
+        store = self.entry.runtime_data.store
+        window = VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC
+        recent: dict[str, int] = {}
+        wanted: dict[str, bool] = {"notified": True}
+        if unknown_only:
+            wanted["unknown_person"] = True
+        for page in range(_RECENT_CAPTION_SCAN_MAX_PAGES):
+            # Only notified captions are asked for, so the withheld ones (most
+            # of a busy window) do not use up the pages.
+            items = await store.asearch(
+                namespace,
+                filter=wanted,
+                limit=_RECENT_CAPTION_SCAN_PAGE,
+                offset=page * _RECENT_CAPTION_SCAN_PAGE,
+                refresh_ttl=False,  # keeps the plain, ordered query
+            )
+            for r in items:
+                # Prefix match again: "side" also returns "side_gate".
+                if r.namespace != namespace or not _caption_anchors(
+                    r, unknown_only=unknown_only
+                ):
+                    continue
+                cap = (r.value or {}).get("content")
+                age = _caption_age_seconds(r)
+                if isinstance(cap, str) and cap and age <= window:
+                    # Identical captions are embedded once, at their newest age.
+                    recent.setdefault(cap, age)
+            if (
+                len(items) < _RECENT_CAPTION_SCAN_PAGE
+                or _caption_age_seconds(items[-1]) > window
+            ):
+                break
+        return list(recent.items())
 
     async def _prune_old_snapshots(self, camera_id: str, batch: list[Path]) -> None:
         retention = self._retention_deques.setdefault(camera_id, deque())
@@ -2434,8 +2668,12 @@ class VideoAnalyzer:
         notify_frame: Path | None = None,
         *,
         context: _BatchNotifyContext,
-    ) -> None:
-        """Decide whether to notify and send if needed."""
+    ) -> bool:
+        """
+        Decide whether to notify and send if needed.
+
+        Returns True only when a sounding push was handed to a notify service.
+        """
         camera_name = camera_id.rsplit(".", maxsplit=1)[-1]
         recognized = context.recognized
         # notify_frame is the frame _process_batch judged representative of
@@ -2507,6 +2745,10 @@ class VideoAnalyzer:
                 msg,
                 first_snapshot,
                 recognized_names=list(recognized),
+                # Every frame's names, not only the frames the summary kept.
+                unknown_person_seen=has_unknown_face(
+                    (*recognized, *context.batch_names)
+                ),
             )
             LOGGER.debug(
                 "[%s] novelty decision: notify=%s reason=%s best_score=%s "
@@ -2522,19 +2764,52 @@ class VideoAnalyzer:
                 (decision.matched_caption or "")[:80],
             )
             if not decision.notify:
-                return
+                return False
         # Protect the chosen file from pruning for 30 minutes
         self.protect_notify_image(chosen, ttl_sec=_NOTIFY_PROTECT_TTL_SEC)
-        await self._dispatch_notification(camera_id, msg, notify_img, context)
+        return await self._dispatch_notification(camera_id, msg, notify_img, context)
 
-    async def _store_results(self, camera_id: str, batch: list[Path], msg: str) -> None:
-        """Store the analysis results in the vector DB."""
+    async def _store_results(
+        self,
+        camera_id: str,
+        batch: list[Path],
+        msg: str,
+        *,
+        notified: bool = True,
+        unknown_person: bool = False,
+    ) -> None:
+        """
+        Store the analysis results in the vector DB.
+
+        `notified` records whether the caption sounded as a notification:
+        caption deduplication lets only notified captions suppress later ones.
+        `unknown_person` records that face recognition saw an unknown face in
+        the batch: only such a caption suppresses another unknown-face batch.
+        """
         camera_name = camera_id.rsplit(".", maxsplit=1)[-1]
+        store = self.entry.runtime_data.store
+        namespace = ("video_analysis", camera_name)
+        key = batch[0].name
         async with asyncio.timeout(10):
-            await self.entry.runtime_data.store.aput(
-                namespace=("video_analysis", camera_name),
-                key=batch[0].name,
-                value={"content": msg, "snapshots": [str(p) for p in batch]},
+            if not notified:
+                # Snapshot names have one-second precision, so two batches can
+                # share a key: a withheld caption must not erase the record
+                # that the earlier one notified.
+                existing = await store.aget(namespace, key, refresh_ttl=False)
+                if existing is not None and (existing.value or {}).get("notified"):
+                    notified = True
+                    unknown_person = (
+                        unknown_person or existing.value.get("unknown_person") is True
+                    )
+            await store.aput(
+                namespace=namespace,
+                key=key,
+                value={
+                    "content": msg,
+                    "snapshots": [str(p) for p in batch],
+                    "notified": notified,
+                    "unknown_person": unknown_person,
+                },
             )
 
     async def _process_snapshot_queue(
