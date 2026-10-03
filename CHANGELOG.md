@@ -7,6 +7,8 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+## [3.43.0] - 2026-10-03
+
 ### Added
 
 - New option **Camera notification cooldown** (`video_analyzer_notification_cooldown_s`, 0 = off, up to 600 seconds, in Global Options) for the video analyzer ([#672](https://github.com/goruck/home-generative-agent/issues/672)). A subject that lingers in view, or a camera whose motion sensor re-triggers, could produce several near-identical notifications within a minute, because the vision model words the same scene differently each time and caption deduplication compares wording. With the cooldown set, the first notification from a camera sounds and later ones from that camera within the window replace the same notification card quietly with the latest description and image. With face recognition on, the first Unknown Person reported inside the window still sounds, once; nothing else does, and without face recognition everything inside the window is a quiet update. After an Unknown Person notification, a later one that does not show an unknown person goes to a second quiet card instead of replacing it. Each camera has its own fixed-length window; analysis, sensors, events and stored results are unchanged. It needs a single companion-app notify service (`notify.mobile_app_*`), is verified on iOS and unverified on Android; see [Notification cooldown](docs/camera-entities.md#notification-cooldown) for the limits.
