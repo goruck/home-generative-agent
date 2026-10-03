@@ -257,9 +257,36 @@ Dropped sentinel frames are counted per camera in the `sentinel_dropped` field o
 
 Active only in `notify_on_anomaly` mode. Repeated low-value notifications are suppressed using two complementary mechanisms:
 
-**Semantic dedup:** The new caption is compared against recent captions using vector similarity. If the score meets or exceeds the similarity threshold (default 0.85), the notification is withheld. A 30-minute window is used; notifications for scenes with real subjects (people, vehicles, packages, animals) are always preserved. If a subject was last seen more than 30 minutes ago, notification resumes even if the similarity score is high.
+**Semantic dedup:** The new caption is compared against recent captions using vector similarity. If the score meets or exceeds the similarity threshold (default 0.85), the notification is withheld. A matching caption from the last 30 minutes suppresses the notification whatever the scene shows. Beyond 30 minutes, a matching caption that describes a real subject doing something (a person, vehicle, package or animal that walks, arrives, waits and so on) notifies again; a matching static or empty-scene caption stays suppressed.
 
 **Lexical fast path:** A 30-minute window suppresses repeated artifact captions (nighttime glare, monochrome blur, empty walkway descriptions) even when the vector score falls below the threshold.
+
+---
+
+### Notification cooldown
+
+Caption deduplication compares wording, and a vision model rarely words the same scene twice the same way: a visitor who lingers at the door, or a camera whose motion sensor re-triggers, can produce several notifications in a minute that all describe one event. The **Camera notification cooldown** (`video_analyzer_notification_cooldown_s`, Global Options, default `0` = off, up to 600 seconds) limits how often one camera makes your phone sound without discarding what the camera saw.
+
+With the cooldown set to N seconds:
+
+- The first notification from a camera sounds as usual and starts a window of N seconds for that camera. Each camera has its own window, and the window has a fixed length: nothing that happens inside it makes it longer.
+- Later notifications from that camera inside the window **replace the same notification card quietly**, with the latest description and image.
+- With [face recognition](#face-recognition) on, the first **Unknown Person** it reports inside the window still sounds, once, on a new card. That is the only thing that sounds inside a window. What a description says never decides it: wording for a person is open-ended ("a figure", "someone at the door"), and guessing from it would sometimes turn a real alert into a silent one.
+- After an Unknown Person notification has sounded, a later notification in the window that does not show an unknown person (an empty porch, a parked car, a recognized resident) does not replace its card. It goes to the window's other card, which also updates quietly: the card the window opened with if the Unknown Person arrived later, otherwise a second card. So a window shows at most two cards per camera: the one that explains the sound, and one with the rest.
+- Nothing else changes. Frames are analyzed, `sensor.*_recognized_people` and `image.*_last_event` update, `hga_last_event_frame` fires and the analysis is stored exactly as with the cooldown off.
+
+The cooldown acts only on notifications that pass [caption deduplication](#caption-deduplication) (or on every notification in `always_notify` mode); it does not bring back one that deduplication withheld.
+
+**Requirements and limits**
+
+- **Without face recognition, everything inside a window is a quiet update**, including a person who arrives after a car opened the window. Their description and image still replace the card; the phone does not sound again until the window ends. Choose a window you are comfortable with.
+- It works only when notifications go to a single Home Assistant companion-app service (`notify.mobile_app_*`). Any other target is sent every notification as if the cooldown were off, and a warning is logged once. Note that a notify service set in the Sentinel configuration takes precedence over the one in Global Options, for camera notifications too.
+- Home Assistant does not report whether a push reached the phone. If the notification that should have sounded is lost on the way (phone offline, push service outage), the ones that follow in the window are still sent quietly. This is why the window is limited to 600 seconds. A window is not started when Home Assistant refuses the notification outright, for example because the notify service no longer exists.
+- Verified on iOS. On Android the quiet update relies on the companion app's `alert_once` and has not been verified; if you dismissed the card, Android may sound again when the next update arrives.
+- An Unknown Person sounds once per window. A second, different unknown person in the same window is a quiet update, and so is a real stranger who arrives after face recognition misread a resident as Unknown Person (face turned, blur) earlier in that window.
+- An unknown face that face recognition does not detect (hood, mask, back to the camera) is a quiet update.
+- If two analyses of one camera finish out of order, the card shows whichever finished last.
+- Changing any option reloads the integration and clears every open window.
 
 ---
 
@@ -290,6 +317,7 @@ The video pipeline enforces a per-entry semaphore that limits concurrent VLM and
 | `video_analyzer_mode` | `disable` | Notification mode: disable / notify_on_anomaly / always_notify |
 | `video_analyzer_uniqueness_enabled` | `false` | Enable perceptual hash (dHash) pre-filter to skip visually identical frames before VLM analysis. **Caveat:** drops near-duplicate snapshots, removing the visual continuity the summary model uses to narrate motion. Only enable if a nearly-static scene generates excessive duplicates and you accept that motion context may be lost. Capture loops driven by a ring-mqtt `event_select` event apply the filter regardless of this setting (see [Ring cameras via ring-mqtt](#ring-cameras-via-ring-mqtt)). |
 | `video_analyzer_event_recording_enabled` | `false` | Download the event MP4 from the `recordingUrl` a ring-mqtt `event_select` entity publishes (Ring Protect) and analyze up to 8 frames from it in place of the retained snapshot. Needs ffmpeg. See [Ring cameras via ring-mqtt](#ring-cameras-via-ring-mqtt). |
+| `video_analyzer_notification_cooldown_s` | `0` | Seconds (0 to 600) after a sounding camera notification during which later ones from that camera replace the same card quietly. `0` = off. See [Notification cooldown](#notification-cooldown). |
 | `video_analyzer_motion_camera_map` | *(empty)* | Explicit `binary_sensor: camera` overrides, one per line. Use when automatic resolution picks the wrong camera. |
 
 **In the Camera Image Analysis feature subentry:**

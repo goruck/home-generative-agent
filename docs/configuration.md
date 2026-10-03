@@ -490,6 +490,7 @@ If you use a fallback chain, each member is shaped for its own provider: an Open
 - `model_provider_uncontended` — bypass all local GPU gates when the server has dedicated capacity
 - **Video analyzer mode** — disable / notify_on_anomaly / always_notify
 - **Enable perceptual-hash frame filter (dHash)** — skip visually identical frames before VLM analysis (off by default; always active for ring-mqtt `event_select` capture loops regardless of this setting; see caveat in [Camera Entities](camera-entities.md#advanced-options))
+- **Camera notification cooldown (seconds)** — `0` (off) to `600`; after a camera notification sounds, later ones from that camera within the window replace the same card quietly instead of sounding again (needs a single `notify.mobile_app_*` target; see [Notification cooldown](camera-entities.md#notification-cooldown))
 - **Motion sensor → camera overrides** — one `binary_sensor.X: camera.Y` pair per line; use when automatic resolution picks the wrong camera (see [Motion → camera resolution](camera-entities.md#motion--camera-resolution))
 
 See [Architecture](architecture.md#llm-context-management) for detail on context management parameters.
