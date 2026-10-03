@@ -139,7 +139,7 @@ from .video_helpers import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Iterable
+    from collections.abc import Callable, Coroutine, Iterable, Sequence
 
     from homeassistant.core import Event, HomeAssistant
 
@@ -169,6 +169,9 @@ _VIDEO_QUEUE_BACKLOG_THRESHOLD: Final[int] = (
 _WORKER_ERROR_BACKOFF_SEC: Final[int] = 5  # pause after unexpected worker error
 _SUMMARY_MAX_FRAMES: Final[int] = 8  # kept frame descriptions fed to the summary
 _NOTIFY_PROTECT_TTL_SEC: Final[int] = 1800  # pruning protection for notified images
+# Newest stored captions re-scored against the current one when the similarity
+# search's best match is older than the dedupe window (issue #704).
+_RECENT_CAPTION_SCAN_LIMIT: Final[int] = 50
 # Exact filename shape _capture_snapshot writes; the retention seed claims
 # ONLY these (user files like "snapshot_family.jpg" must never match).
 # ASCII digit class on purpose: \d is Unicode-aware and would also claim
@@ -364,6 +367,20 @@ def _has_action(normalized: str) -> bool:
     """
     scrubbed = _STATIC_CONTEXT_RE.sub(" ", normalized)
     return bool(_ACTION_RE.search(scrubbed))
+
+
+def _caption_age_seconds(item: Any) -> int:
+    """Return how long ago a stored caption was written, in whole seconds."""
+    age = (dt_util.now() - dt_util.as_local(item.created_at)).total_seconds()
+    return max(0, int(age))
+
+
+def _cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
+    """Return the cosine similarity of two vectors (0.0 for a zero vector)."""
+    norm = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))
+    if not norm:
+        return 0.0
+    return sum(x * y for x, y in zip(a, b, strict=True)) / norm
 
 
 def _has_real_subject(normalized: str, recognized_names: list[str]) -> bool:
@@ -1941,6 +1958,13 @@ class VideoAnalyzer:
                 and _has_real_subject(norm_current, recognized_names)
                 and _has_action(norm_current)
             ):
+                # The best match is old, but a slightly lower-scoring one may
+                # have been stored a minute ago (issue #704).
+                recent = await self._find_recent_caption_match(
+                    camera_name, msg, search_results
+                )
+                if recent is not None:
+                    return recent
                 return CaptionNoveltyDecision(
                     notify=True,
                     reason="stale_match",
@@ -2009,6 +2033,82 @@ class VideoAnalyzer:
             best_score=best_score,
             matched_caption=matched_caption,
             matched_age_seconds=matched_age_seconds,
+        )
+
+    async def _find_recent_caption_match(
+        self, camera_name: str, msg: str, search_results: list[Any]
+    ) -> CaptionNoveltyDecision | None:
+        """
+        Return a suppress decision for a match stored inside the dedupe window.
+
+        The similarity search ranks by score alone and captions are never pruned,
+        so on a camera that sees the same scenes repeatedly, old near-duplicates
+        outrank a caption stored a minute ago, or push it out of the returned
+        results altogether. Look among the results first, then score the newest
+        stored captions against the current one directly.
+
+        Returns None when nothing inside the window reaches the threshold, and
+        when the scan fails: the caller then notifies, as it would have.
+        """
+        window = VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC
+        best: tuple[float, str | None, int] | None = None
+        for r in search_results:
+            if r.score is None or r.score < VIDEO_ANALYZER_SIMILARITY_THRESHOLD:
+                continue
+            age = _caption_age_seconds(r)
+            if age <= window and (best is None or r.score > best[0]):
+                best = (r.score, (r.value or {}).get("content"), age)
+
+        if best is None:
+            store = self.entry.runtime_data.store
+            embeddings = getattr(store, "embeddings", None)
+            if embeddings is None:
+                return None
+            try:
+                async with asyncio.timeout(10):
+                    # No query: the store returns the newest items first.
+                    newest = await store.asearch(
+                        ("video_analysis", camera_name),
+                        limit=_RECENT_CAPTION_SCAN_LIMIT,
+                    )
+                    recent = [
+                        (cap, age)
+                        for r in newest
+                        if isinstance(cap := (r.value or {}).get("content"), str)
+                        and cap
+                        and (age := _caption_age_seconds(r)) <= window
+                    ]
+                    if not recent:
+                        return None
+                    vectors = await embeddings.aembed_documents(
+                        [msg, *(cap for cap, _ in recent)]
+                    )
+            except Exception:
+                # Fail open: an unanswered scan must cost the dedup, never the
+                # notification.
+                LOGGER.warning(
+                    "[%s] recent-caption scan failed; treating the caption as novel.",
+                    camera_name,
+                    exc_info=True,
+                )
+                return None
+            if len(vectors) != len(recent) + 1:
+                return None
+            for (cap, age), vector in zip(recent, vectors[1:], strict=True):
+                score = _cosine_similarity(vectors[0], vector)
+                if score >= VIDEO_ANALYZER_SIMILARITY_THRESHOLD and (
+                    best is None or score > best[0]
+                ):
+                    best = (score, cap, age)
+
+        if best is None:
+            return None
+        return CaptionNoveltyDecision(
+            notify=False,
+            reason="score_above_threshold",
+            best_score=best[0],
+            matched_caption=best[1],
+            matched_age_seconds=best[2],
         )
 
     async def _prune_old_snapshots(self, camera_id: str, batch: list[Path]) -> None:

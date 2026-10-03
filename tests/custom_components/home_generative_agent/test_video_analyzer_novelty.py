@@ -1051,3 +1051,189 @@ async def test_handle_notification_always_notifies_outside_anomaly_mode(
 
     va.protect_notify_image.assert_called_once()
     va._send_notification.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# _is_caption_novel: a recent near-duplicate outranked by an older caption (#704)
+# ---------------------------------------------------------------------------
+
+_WHITE_SHIRT_NOW = (
+    "A person in a white shirt walks toward the house. A dark gray Tesla."
+)
+_WHITE_SHIRT_RECENT = (
+    "A person in a white shirt walks toward the house. Later, a person stands near."
+)
+_WHITE_SHIRT_OLD = "A person in a white shirt walks toward the house."
+_THREE_DAYS_S = 255602
+
+
+def _recency_aware_asearch(
+    by_score: list[MagicMock], newest_first: list[MagicMock]
+) -> AsyncMock:
+    """Answer the similarity search and the newest-first scan separately."""
+
+    async def _asearch(*_args: object, **kwargs: object) -> list[MagicMock]:
+        return by_score if kwargs.get("query") else newest_first
+
+    return AsyncMock(side_effect=_asearch)
+
+
+@pytest.mark.asyncio
+async def test_recent_match_outranked_by_older_caption_suppresses(
+    va: VideoAnalyzer,
+) -> None:
+    """A 0.88 match from a minute ago suppresses despite a 0.95 match days old."""
+    results = [
+        _make_search_result(_WHITE_SHIRT_OLD, score=0.95, age_seconds=_THREE_DAYS_S),
+        _make_search_result(_WHITE_SHIRT_RECENT, score=0.88, age_seconds=64),
+    ]
+    va.entry.runtime_data.store.asearch = AsyncMock(return_value=results)
+    decision = await va._is_caption_novel(  # type: ignore[attr-defined]
+        "side", _WHITE_SHIRT_NOW, _fresh_snapshot_name(), []
+    )
+    assert decision.notify is False
+    assert decision.reason == "score_above_threshold"
+    assert decision.best_score == pytest.approx(0.88)
+    assert decision.matched_caption == _WHITE_SHIRT_RECENT
+    assert decision.matched_age_seconds is not None
+    assert decision.matched_age_seconds <= VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC
+
+
+@pytest.mark.asyncio
+async def test_recent_match_below_threshold_does_not_suppress(
+    va: VideoAnalyzer,
+) -> None:
+    """A recent caption scoring under the threshold leaves the stale match alone."""
+    results = [
+        _make_search_result(_WHITE_SHIRT_OLD, score=0.95, age_seconds=_THREE_DAYS_S),
+        _make_search_result(
+            "A dog runs across the lawn.",
+            score=VIDEO_ANALYZER_SIMILARITY_THRESHOLD - 0.01,
+            age_seconds=64,
+        ),
+    ]
+    va.entry.runtime_data.store.asearch = AsyncMock(return_value=results)
+    # The newest-first scan re-scores the in-window caption: still dissimilar.
+    va.entry.runtime_data.store.embeddings.aembed_documents = AsyncMock(
+        return_value=[[1.0, 0.0], [0.0, 1.0]]
+    )
+    decision = await va._is_caption_novel(  # type: ignore[attr-defined]
+        "side", _WHITE_SHIRT_NOW, _fresh_snapshot_name(), []
+    )
+    assert decision.notify is True
+    assert decision.reason == "stale_match"
+    assert decision.best_score == pytest.approx(0.95)
+
+
+@pytest.mark.asyncio
+async def test_recent_match_missing_from_top_results_suppresses(
+    va: VideoAnalyzer,
+) -> None:
+    """Old near-duplicates fill the top results; the newest-first scan finds it."""
+    by_score = [
+        _make_search_result(_WHITE_SHIRT_OLD, score=0.95, age_seconds=_THREE_DAYS_S + i)
+        for i in range(10)
+    ]
+    newest_first = [
+        _make_search_result("A dog runs across the lawn.", score=None, age_seconds=30),
+        _make_search_result(_WHITE_SHIRT_RECENT, score=None, age_seconds=64),
+        _make_search_result(_WHITE_SHIRT_OLD, score=None, age_seconds=_THREE_DAYS_S),
+    ]
+    store = va.entry.runtime_data.store
+    store.asearch = _recency_aware_asearch(by_score, newest_first)
+    # Current caption, then the two in-window captions, newest first.
+    store.embeddings.aembed_documents = AsyncMock(
+        return_value=[[1.0, 0.0], [0.0, 1.0], [0.9, 0.1]]
+    )
+    decision = await va._is_caption_novel(  # type: ignore[attr-defined]
+        "side", _WHITE_SHIRT_NOW, _fresh_snapshot_name(), []
+    )
+    assert decision.notify is False
+    assert decision.reason == "score_above_threshold"
+    assert decision.matched_caption == _WHITE_SHIRT_RECENT
+    assert decision.matched_age_seconds is not None
+    assert decision.matched_age_seconds <= VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC
+    assert decision.best_score == pytest.approx(0.9939, abs=1e-3)
+    # Only in-window captions are embedded, alongside the current one.
+    store.embeddings.aembed_documents.assert_awaited_once_with(
+        [_WHITE_SHIRT_NOW, "A dog runs across the lawn.", _WHITE_SHIRT_RECENT]
+    )
+
+
+@pytest.mark.asyncio
+async def test_recent_scan_dissimilar_captions_still_stale_match(
+    va: VideoAnalyzer,
+) -> None:
+    """Recent captions that do not resemble the current one do not suppress."""
+    by_score = [
+        _make_search_result(_WHITE_SHIRT_OLD, score=0.95, age_seconds=_THREE_DAYS_S)
+    ]
+    newest_first = [
+        _make_search_result("A dog runs across the lawn.", score=None, age_seconds=30),
+    ]
+    store = va.entry.runtime_data.store
+    store.asearch = _recency_aware_asearch(by_score, newest_first)
+    store.embeddings.aembed_documents = AsyncMock(return_value=[[1.0, 0.0], [0.0, 1.0]])
+    decision = await va._is_caption_novel(  # type: ignore[attr-defined]
+        "side", _WHITE_SHIRT_NOW, _fresh_snapshot_name(), []
+    )
+    assert decision.notify is True
+    assert decision.reason == "stale_match"
+
+
+@pytest.mark.asyncio
+async def test_lone_old_match_skips_embedding(va: VideoAnalyzer) -> None:
+    """With nothing stored inside the window there is nothing to embed."""
+    results = [
+        _make_search_result(_WHITE_SHIRT_OLD, score=0.95, age_seconds=_THREE_DAYS_S)
+    ]
+    store = va.entry.runtime_data.store
+    store.asearch = AsyncMock(return_value=results)
+    store.embeddings.aembed_documents = AsyncMock()
+    decision = await va._is_caption_novel(  # type: ignore[attr-defined]
+        "side", _WHITE_SHIRT_NOW, _fresh_snapshot_name(), []
+    )
+    assert decision.notify is True
+    assert decision.reason == "stale_match"
+    store.embeddings.aembed_documents.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [TimeoutError(), RuntimeError("embedding down")])
+async def test_recent_scan_failure_notifies(
+    va: VideoAnalyzer, error: Exception
+) -> None:
+    """A failed recent scan must not swallow the notification."""
+    by_score = [
+        _make_search_result(_WHITE_SHIRT_OLD, score=0.95, age_seconds=_THREE_DAYS_S)
+    ]
+    newest_first = [
+        _make_search_result(_WHITE_SHIRT_RECENT, score=None, age_seconds=64),
+    ]
+    store = va.entry.runtime_data.store
+    store.asearch = _recency_aware_asearch(by_score, newest_first)
+    store.embeddings.aembed_documents = AsyncMock(side_effect=error)
+    decision = await va._is_caption_novel(  # type: ignore[attr-defined]
+        "side", _WHITE_SHIRT_NOW, _fresh_snapshot_name(), []
+    )
+    assert decision.notify is True
+    assert decision.reason == "stale_match"
+
+
+@pytest.mark.asyncio
+async def test_recent_scan_without_embeddings_notifies(va: VideoAnalyzer) -> None:
+    """A store with no embedding function cannot score; the stale match stands."""
+    by_score = [
+        _make_search_result(_WHITE_SHIRT_OLD, score=0.95, age_seconds=_THREE_DAYS_S)
+    ]
+    newest_first = [
+        _make_search_result(_WHITE_SHIRT_RECENT, score=None, age_seconds=64),
+    ]
+    store = va.entry.runtime_data.store
+    store.asearch = _recency_aware_asearch(by_score, newest_first)
+    store.embeddings = None
+    decision = await va._is_caption_novel(  # type: ignore[attr-defined]
+        "side", _WHITE_SHIRT_NOW, _fresh_snapshot_name(), []
+    )
+    assert decision.notify is True
+    assert decision.reason == "stale_match"

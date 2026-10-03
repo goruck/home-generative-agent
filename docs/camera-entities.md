@@ -257,7 +257,7 @@ Dropped sentinel frames are counted per camera in the `sentinel_dropped` field o
 
 Active only in `notify_on_anomaly` mode. Repeated low-value notifications are suppressed using two complementary mechanisms:
 
-**Semantic dedup:** The new caption is compared against recent captions using vector similarity. If the score meets or exceeds the similarity threshold (default 0.85), the notification is withheld. A matching caption from the last 30 minutes suppresses the notification whatever the scene shows. Beyond 30 minutes, a matching caption that describes a real subject doing something (a person, vehicle, package or animal that walks, arrives, waits and so on) notifies again; a matching static or empty-scene caption stays suppressed.
+**Semantic dedup:** The new caption is compared against recent captions using vector similarity. If the score meets or exceeds the similarity threshold (default 0.85), the notification is withheld. A matching caption from the last 30 minutes suppresses the notification whatever the scene shows. This holds even when an older caption matches more closely: any match stored in the last 30 minutes counts, not only the closest one. Beyond 30 minutes, a matching caption that describes a real subject doing something (a person, vehicle, package or animal that walks, arrives, waits and so on) notifies again; a matching static or empty-scene caption stays suppressed.
 
 **Lexical fast path:** A 30-minute window suppresses repeated artifact captions (nighttime glare, monochrome blur, empty walkway descriptions) even when the vector score falls below the threshold.
 
