@@ -7,9 +7,11 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+## [3.43.1] - 2026-10-03
+
 ### Fixed
 
-- Reloading the integration could hang and leave every HGA entity unavailable until Home Assistant was restarted: the conversation agent, speech-to-text and text-to-speech all showed as missing, an Assist pipeline listed its conversation agent as `__NONE_OPTION__`, and a voice satellite reported `stt-provider-missing`. Saving the Sentinel options was the easiest way to hit it, because that reloads the entry twice in a row and the second reload lands while the first one's tool index is still being written. The unload cancels that write and then waited, with no time limit, for the database store's background worker to stop; when the cancel reached the worker in the middle of a database batch it could come out as an ordinary error, which the worker catches and survives, so the wait never ended and the entry stayed in "unloading". The unload now repeats the cancel and gives up on a task that will not stop after 10 seconds (two tasks are cancelled this way, so about 20 seconds at worst), with a warning in the log that names the task. Regression in 3.43.0.
+- Reloading the integration could hang and leave every HGA entity unavailable until Home Assistant was restarted: the conversation agent, speech-to-text and text-to-speech all showed as missing, an Assist pipeline listed its conversation agent as `__NONE_OPTION__`, and a voice satellite reported `stt-provider-missing`. Saving the Sentinel options was the easiest way to hit it, because that reloads the entry twice in a row and the second reload lands while the first one's tool index is still being written. The unload cancels that write and then waited, with no time limit, for the database store's background worker to stop; when the cancel reached the worker in the middle of a database batch it could come out as an ordinary error, which the worker catches and survives, so the wait never ended and the entry stayed in "unloading". The unload now repeats the cancel and gives up on a task that will not stop after 10 seconds (two tasks are cancelled this way, so about 20 seconds at worst), with a warning in the log that names the task. Regression in 3.43.0. ([#710](https://github.com/goruck/home-generative-agent/pull/710))
 
 ## [3.43.0] - 2026-10-03
 
