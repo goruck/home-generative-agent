@@ -1035,6 +1035,16 @@ RECOMMENDED_VIDEO_ANALYZER_UNIQUENESS_ENABLED = False
 # official Home Assistant image ships.
 CONF_VIDEO_ANALYZER_EVENT_RECORDING_ENABLED = "video_analyzer_event_recording_enabled"
 RECOMMENDED_VIDEO_ANALYZER_EVENT_RECORDING_ENABLED = False
+# Opt-in per-camera notification cooldown (issue #672), in seconds; 0 disables
+# it. After a sounding push for a camera, later pushes from that camera inside
+# the window replace the same notification card quietly instead of sounding
+# again. Only applies to a single companion-app target (notify.mobile_app_*).
+# The maximum is deliberately short: Home Assistant does not report whether a
+# push reached the phone, so the window length is how long quiet updates can
+# follow an alert that was lost on the way.
+CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S = "video_analyzer_notification_cooldown_s"
+RECOMMENDED_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S = 0
+VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_MAX_S = 600
 
 # Stable “latest” file publication
 VIDEO_ANALYZER_SAVE_LATEST = True

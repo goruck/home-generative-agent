@@ -76,6 +76,7 @@ from custom_components.home_generative_agent.core.video_analyzer import (
     _VIDEO_QUEUE_BACKLOG_THRESHOLD,
     FaceHit,
     VideoAnalyzer,
+    _BatchNotifyContext,
     _SnapshotItem,
 )
 from custom_components.home_generative_agent.core.video_helpers import (
@@ -2189,7 +2190,11 @@ async def test_finalize_does_not_reregister_batch_for_retention(
 
     with patch.object(va, "_prune_old_snapshots", new=AsyncMock()) as mock_prune:
         await va._finalize(  # type: ignore[attr-defined]
-            "camera.front_door", [Path("snap_0.jpg")], "a summary", None
+            "camera.front_door",
+            [Path("snap_0.jpg")],
+            "a summary",
+            None,
+            context=_BatchNotifyContext(recognized=[], batch_names=[]),
         )
 
     mock_prune.assert_not_awaited()

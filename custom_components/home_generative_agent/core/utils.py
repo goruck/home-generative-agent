@@ -542,13 +542,17 @@ async def generate_embeddings(
     return await emb.aembed_documents(texts_list)
 
 
+# Service-name prefix of a Home Assistant companion-app notify service.
+MOBILE_APP_SERVICE_PREFIX = "mobile_app_"
+
+
 def discover_mobile_notify_service(hass: HomeAssistant) -> str | None:
     """Return the name of a mobile_app notify service if available."""
     # Returns just the service *name* (e.g., "mobile_app_lindos_iphone")
     services = hass.services.async_services().get("notify", {})
     # `services` is a dict mapping service_name -> Service object
     for svc_name in services:
-        if svc_name.startswith("mobile_app_"):
+        if svc_name.startswith(MOBILE_APP_SERVICE_PREFIX):
             return svc_name
     return None
 
@@ -557,7 +561,9 @@ def list_mobile_notify_services(hass: HomeAssistant) -> list[str]:
     """Return a sorted list like ['notify.mobile_app_xxx', ...]."""
     services = hass.services.async_services().get("notify", {}) or {}
     return sorted(
-        f"notify.{name}" for name in services if name.startswith("mobile_app_")
+        f"notify.{name}"
+        for name in services
+        if name.startswith(MOBILE_APP_SERVICE_PREFIX)
     )
 
 
