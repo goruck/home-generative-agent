@@ -737,6 +737,8 @@ If you install `hga-proposals-card.js`, the card drives the full review flow:
 - Deactivate/reactivate controls for approved rules
 - "Request New Template" shortcut that opens a prefilled GitHub issue form
 
+The card's own labels follow the Home Assistant profile language (English and Czech today; any other language shows English). Candidate titles and summaries are shown as the discovery model wrote them, untranslated, and the GitHub rule-request prefill stays English.
+
 **Installation:**
 1. Go to **Settings → Dashboards → Resources → Add Resource**.
 2. Add URL: `/hga-card/hga-proposals-card.js`, Type: `JavaScript Module`.

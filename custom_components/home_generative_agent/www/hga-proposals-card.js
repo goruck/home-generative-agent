@@ -158,8 +158,14 @@ class HgaProposalsCard extends HTMLElement {
     if (!this._hass) {
       this._hass = hass;
       this._init();
+      return;
     }
+    const previousLang = this._lang();
     this._hass = hass;
+    if (this._lang() !== previousLang) {
+      this._applyChromeLanguage();
+      this._load();
+    }
   }
 
   setConfig(config) {
@@ -176,6 +182,7 @@ class HgaProposalsCard extends HTMLElement {
       <style>
         .wrap { padding: 16px; font-family: sans-serif; }
         .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+        .card strong { overflow-wrap: anywhere; }
         .meta { color: #666; font-size: 12px; overflow-wrap: anywhere; }
         .warn { color: #b45309; font-size: 12px; margin-top: 6px; }
         .note { color: #0f766e; font-size: 12px; margin-top: 6px; }
@@ -204,24 +211,24 @@ class HgaProposalsCard extends HTMLElement {
       </style>
       <div class="wrap">
         <div class="row" style="justify-content: space-between; align-items: center;">
-          <strong>${this._t("pipeline_title")}</strong>
+          <strong id="title">${this._t("pipeline_title")}</strong>
           <button id="refresh">${this._t("refresh")}</button>
         </div>
         <div id="status" class="meta"></div>
         <details class="section">
-          <summary>${this._t("sec_discovery")}</summary>
+          <summary id="summary_discovery">${this._t("sec_discovery")}</summary>
           <div id="discovery" class="section-content"></div>
         </details>
         <details class="section">
-          <summary>${this._t("sec_filtered")}</summary>
+          <summary id="summary_discovery_filtered">${this._t("sec_filtered")}</summary>
           <div id="discovery_filtered" class="section-content"></div>
         </details>
         <details class="section" open>
-          <summary>${this._t("sec_pending")}</summary>
+          <summary id="summary_proposals_pending">${this._t("sec_pending")}</summary>
           <div id="proposals_pending" class="section-content"></div>
         </details>
         <details class="section">
-          <summary>${this._t("sec_history")}</summary>
+          <summary id="summary_proposals_history">${this._t("sec_history")}</summary>
           <div id="proposals_history" class="section-content"></div>
         </details>
       </div>
@@ -1386,8 +1393,8 @@ class HgaProposalsCard extends HTMLElement {
                 await this._load();
               } catch (err) {
                 status.textContent = this._t("reactivate_failed", {
-              msg: err?.message || this._t("unknown_error"),
-            });
+                  msg: err?.message || this._t("unknown_error"),
+                });
               }
             });
             row.appendChild(reactivate);
@@ -1408,8 +1415,8 @@ class HgaProposalsCard extends HTMLElement {
                 await this._load();
               } catch (err) {
                 status.textContent = this._t("deactivate_failed", {
-              msg: err?.message || this._t("unknown_error"),
-            });
+                  msg: err?.message || this._t("unknown_error"),
+                });
               }
             });
             row.appendChild(deactivate);
@@ -1429,6 +1436,34 @@ class HgaProposalsCard extends HTMLElement {
     });
   }
 
+  // The title, Refresh button and section titles are written once by
+  // _init(); the lists re-render through _t() on every load. On a profile
+  // language switch, re-label the static chrome and reload the lists so the
+  // card does not sit half translated until the next Refresh.
+  _applyChromeLanguage() {
+    const root = this.shadowRoot;
+    if (!root) {
+      return;
+    }
+    const labels = {
+      title: "pipeline_title",
+      summary_discovery: "sec_discovery",
+      summary_discovery_filtered: "sec_filtered",
+      summary_proposals_pending: "sec_pending",
+      summary_proposals_history: "sec_history",
+    };
+    for (const [id, key] of Object.entries(labels)) {
+      const el = root.getElementById(id);
+      if (el) {
+        el.textContent = this._t(key);
+      }
+    }
+    const refresh = root.getElementById("refresh");
+    if (refresh) {
+      refresh.textContent = this._t(refresh.disabled ? "refreshing" : "refresh");
+    }
+  }
+
   _lang() {
     const raw = this._hass?.language || this._hass?.locale?.language || "en";
     const lang = String(raw).toLowerCase().split("-")[0];
@@ -1439,7 +1474,9 @@ class HgaProposalsCard extends HTMLElement {
     const dict = HGA_PROPOSALS_I18N[this._lang()];
     let text = dict[key] ?? HGA_PROPOSALS_I18N.en[key] ?? key;
     for (const [name, value] of Object.entries(params)) {
-      text = text.replaceAll(`{${name}}`, String(value));
+      // Function replacer: a string replacement would expand $&, $$, $'
+      // and $` found in untrusted values (candidate ids, error text).
+      text = text.replaceAll(`{${name}}`, () => String(value));
     }
     return text;
   }
