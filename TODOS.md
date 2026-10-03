@@ -2203,6 +2203,58 @@ This is the same allowlist-omission class as #480 and as the triage options fixe
 
 ---
 
+### A store worker abandoned by the unload keeps its connection and can still write
+
+**What:** `_cancel_and_wait` (`__init__.py`) gives up on a task that outlives five cancels, logs a warning, and lets `async_unload_entry` close the pool and return. psycopg's `pool.close()` does not close checked-out connections, so an abandoned langgraph batch worker keeps its connection and, if it later resumes, can upsert tool-index rows computed by the old entry over the reloaded entry's rows; the new entry's cached hashes would still describe its own data and hide the stale index. The index runner has the same shape: `rd.tool_index_task = None` runs even when the wait gave up, dropping the only handle to a task that can still set `tool_index_ready` and send `SIGNAL_TOOL_INDEX_UPDATED` (not entry-scoped).
+
+**Why:** Codex adversarial pass ([P2]) and the Claude adversarial pass during the review of the unload-hang fix (2026-10-03). Deferred by user decision: the give-up path replaces a permanent hang, the worker observed in the field died on the second cancel, and containing a task that ignores cancellation needs its own design.
+
+**How to apply:** Have `_cancel_and_wait` report whether it gave up; on give-up keep the task reference and fence its writes (a generation or stopped flag checked by `_run_tool_index_background` before it publishes, and a way to revoke or close the connection the worker holds), and add a test that drives the abandoned worker to completion after a reload.
+
+**Effort:** M
+**Priority:** P2
+
+---
+
+### Cancelling the store worker strands every other caller waiting on the store
+
+**What:** langgraph's batch worker (`_run` in `store/base/batch.py`) fails a batch's futures only under `except Exception`, so the clean cancel the unload sends (`_cancel_tool_index`) leaves the in-flight batch's futures, and anything still queued, unresolved. Any other coroutine awaiting `store.aget/asearch/aput` at that moment waits forever with nothing logged. Separately, every store call runs `_ensure_task()`, so a call that lands during the bounded wait or before `rd.pool.close()` starts a new worker the unload never cancels, which then fails on the closed pool. The index runner has the same gap: a conversation turn still in tool discovery can create a new `rd.tool_index_task` (`conversation.py`, guarded only by `pool.closed`) during the wait, which is then overwritten with None or never looked at, fails on the closed pool, and sends the non-entry-scoped "failed" signal.
+
+**Why:** Claude adversarial pass during the review of the unload-hang fix (2026-10-03); both predate that fix (the worker cancel shipped in v3.43.0). Deferred by user decision: platforms and engines are stopped before this step, so the remaining store callers are few, and the in-batch futures are not reachable from outside the worker.
+
+**How to apply:** After the worker is done, drain `rd.store._aqueue` and fail each pending future; decide whether to stop cancelling the worker and let the closed pool fail the batch instead (which resolves the in-batch futures); re-read `rd.store._task` after the wait and cancel a worker started meanwhile; have the runner guard check an unloading flag set before the cancel step instead of `pool.closed`. Test with a second caller parked on the store during the unload.
+
+**Effort:** M
+**Priority:** P2
+
+---
+
+### A cancel of the unload itself skips the pool close
+
+**What:** `_teardown` in `async_unload_entry` contains `Exception` only, so a `CancelledError` delivered to the unload (Home Assistant shutdown, a cancelled reload) propagates out of whichever step is running and skips `rd.pool.close()` and the repair-issue clears. The tool-index step can now wait up to about 20 seconds, so a cancel is more likely to land there than before.
+
+**Why:** Claude adversarial pass during the review of the unload-hang fix (2026-10-03); pre-existing. Deferred by user decision: it needs a decision on what a cancelled unload should still guarantee.
+
+**How to apply:** Run the pool close (and the issue clears) in a `finally`, shielded or re-raising the cancel afterwards, and test by cancelling the unload while it waits on a stubborn task.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
+### Saving the Sentinel options reloads the entry twice
+
+**What:** `SentinelSubentryFlow._schedule_reload` (`flows/sentinel_subentry_flow.py`) schedules a reload, and the `SIGNAL_CONFIG_ENTRY_CHANGED` listener `_on_entry_changed` (`__init__.py`) schedules another for the same subentry change. The reloads run one after the other, so the second unload lands just after the first reload's setup completes, while its background tool-index write is still running; that is the race behind the unload hang.
+
+**Why:** Found while investigating the unload hang (2026-10-03). Deferred by user decision with the other unload follow-ups: harmless once the unload is bounded, but it doubles the reload cost and widens every reload race.
+
+**How to apply:** Keep one trigger (the listener covers UI deletion too) and add a test that a Sentinel options save produces exactly one reload.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
 ## Completed
 
 ### `replace_partial` drops tool calls when it re-commits the last entry
