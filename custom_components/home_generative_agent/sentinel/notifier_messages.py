@@ -146,7 +146,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "Pohyb venku při vypnutém alarmu"
         ),
         "type_appliance_power_duration": "Doba provozu spotřebiče",
-        "type_low_battery_sensors": "Slabá baterie senzoru",
+        "type_low_battery_sensors": "Slabá baterie",
         "type_ha_sensitive_entity_exposed_without_pin": (
             "Citlivá entita zpřístupněna bez PIN"
         ),
