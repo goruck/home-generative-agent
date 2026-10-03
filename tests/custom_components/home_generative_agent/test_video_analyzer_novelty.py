@@ -14,6 +14,7 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from unittest.mock import ANY, AsyncMock, MagicMock, call
 
@@ -1169,7 +1170,7 @@ async def test_recent_match_missing_from_top_results_suppresses(
     # The scan reads this camera's captions, newest first, one page.
     assert store.asearch.await_count == 2
     assert store.asearch.await_args_list[1] == call(
-        ("video_analysis", "side"), limit=50, offset=0
+        ("video_analysis", "side"), filter={"notified": True}, limit=50, offset=0
     )
 
 
@@ -1422,7 +1423,7 @@ async def test_recent_scan_pages_past_a_busy_window(va: VideoAnalyzer) -> None:
     assert decision.reason == "recent_match"
     assert decision.matched_caption == _WHITE_SHIRT_RECENT
     assert store.asearch.await_args_list[2] == call(
-        ("video_analysis", "side"), limit=50, offset=50
+        ("video_analysis", "side"), filter={"notified": True}, limit=50, offset=50
     )
     assert store.asearch.await_count == 3
 
@@ -1662,7 +1663,7 @@ async def _run_handle_notification(
     va.entry.runtime_data.options = {"video_analyzer_mode": "notify_on_anomaly"}
     va._is_caption_novel = AsyncMock(return_value=decision)  # type: ignore[method-assign]
     va.protect_notify_image = MagicMock()  # type: ignore[method-assign]
-    va._send_notification = AsyncMock()  # type: ignore[method-assign]
+    va._send_notification = AsyncMock(return_value=True)  # type: ignore[method-assign]
     module = "custom_components.home_generative_agent.core.video_analyzer"
     with (
         patch(f"{module}.latest_target", return_value=MagicMock()),
@@ -1733,3 +1734,183 @@ async def test_finalize_stores_whether_the_caption_notified(
             "notified": notified,
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Cameras sharing a name prefix, scan paging, the sent flag, the finalize lock
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_other_cameras_captions_do_not_crowd_out_own_match(
+    va: VideoAnalyzer,
+) -> None:
+    """Ten "side_gate" captions outrank the camera's own: the search widens."""
+    foreign = [
+        _make_search_result(
+            _WHITE_SHIRT_RECENT, 0.99, age_seconds=i, camera="side_gate"
+        )
+        for i in range(10)
+    ]
+    own = _make_search_result(_WHITE_SHIRT_RECENT, 0.9, age_seconds=64, camera="side")
+
+    async def _asearch(*_args: object, **kwargs: object) -> list[MagicMock]:
+        return foreign if kwargs["limit"] == 10 else [*foreign, own]
+
+    store = va.entry.runtime_data.store
+    store.asearch = AsyncMock(side_effect=_asearch)
+    decision = await va._is_caption_novel(  # type: ignore[attr-defined]
+        "side", _WHITE_SHIRT_NOW, _fresh_snapshot_name(), []
+    )
+    assert decision.notify is False
+    assert decision.reason == "score_above_threshold"
+    assert decision.best_score == pytest.approx(0.9)
+    assert [c.kwargs["limit"] for c in store.asearch.await_args_list] == [10, 50]
+
+
+@pytest.mark.asyncio
+async def test_search_is_not_repeated_without_foreign_rows(va: VideoAnalyzer) -> None:
+    results = [
+        _make_search_result(_WHITE_SHIRT_RECENT, 0.9, age_seconds=64, camera="side")
+    ]
+    store = va.entry.runtime_data.store
+    store.asearch = AsyncMock(return_value=results)
+    await va._is_caption_novel(  # type: ignore[attr-defined]
+        "side", _WHITE_SHIRT_NOW, _fresh_snapshot_name(), []
+    )
+    store.asearch.assert_awaited_once()
+
+
+def _scan_store(va: VideoAnalyzer, pages: list[list[MagicMock]]) -> MagicMock:
+    """Store whose similarity search finds one old match and whose scan pages."""
+    by_score = [
+        _make_search_result(
+            _WHITE_SHIRT_OLD, score=0.95, age_seconds=_THREE_DAYS_S, camera="side"
+        )
+    ]
+
+    async def _asearch(*_args: object, **kwargs: object) -> list[MagicMock]:
+        if kwargs.get("query"):
+            return by_score
+        index = int(str(kwargs["offset"])) // 50
+        return pages[index] if index < len(pages) else []
+
+    async def _embed(texts: list[str]) -> list[list[float]]:
+        return [[1.0, 0.0], *([[0.0, 1.0]] * (len(texts) - 1))]
+
+    store = va.entry.runtime_data.store
+    store.asearch = AsyncMock(side_effect=_asearch)
+    store.embeddings.aembed_documents = AsyncMock(side_effect=_embed)
+    return store
+
+
+def _scan_calls(store: MagicMock) -> int:
+    return sum(1 for c in store.asearch.await_args_list if "query" not in c.kwargs)
+
+
+@pytest.mark.asyncio
+async def test_recent_scan_stops_at_the_page_reaching_past_the_window(
+    va: VideoAnalyzer,
+) -> None:
+    """A full page whose oldest row is outside the window ends the scan."""
+    page = [
+        _make_search_result(f"A dog runs {i}.", None, age_seconds=i, camera="side")
+        for i in range(49)
+    ]
+    page.append(
+        _make_search_result("old", None, age_seconds=_THREE_DAYS_S, camera="side")
+    )
+    store = _scan_store(va, [page, page])
+    decision = await va._is_caption_novel(  # type: ignore[attr-defined]
+        "side", _WHITE_SHIRT_NOW, _fresh_snapshot_name(), []
+    )
+    assert decision.reason == "stale_match"
+    assert _scan_calls(store) == 1
+
+
+@pytest.mark.asyncio
+async def test_recent_scan_is_capped(va: VideoAnalyzer) -> None:
+    """Full pages of in-window rows from another camera: four pages, then stop."""
+    page = [
+        _make_search_result(f"A dog {i}.", None, age_seconds=i, camera="side_gate")
+        for i in range(50)
+    ]
+    store = _scan_store(va, [page] * 10)
+    decision = await va._is_caption_novel(  # type: ignore[attr-defined]
+        "side", _WHITE_SHIRT_NOW, _fresh_snapshot_name(), []
+    )
+    assert decision.notify is True
+    assert decision.reason == "stale_match"
+    assert _scan_calls(store) == 4
+    store.embeddings.aembed_documents.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_notification_without_a_notify_service_is_not_notified(
+    va: VideoAnalyzer,
+) -> None:
+    """A push with nowhere to go must not anchor the dedupe window."""
+    va.entry.runtime_data.options = {"video_analyzer_mode": "notify_on_anomaly"}
+    va._is_caption_novel = AsyncMock(  # type: ignore[method-assign]
+        return_value=CaptionNoveltyDecision(notify=True, reason="no_match")
+    )
+    va.protect_notify_image = MagicMock()  # type: ignore[method-assign]
+    va._send_notification = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    module = "custom_components.home_generative_agent.core.video_analyzer"
+    with (
+        patch(f"{module}.latest_target", return_value=MagicMock()),
+        patch(f"{module}.publish_latest_atomic", new_callable=AsyncMock),
+        patch(f"{module}.dispatch_on_loop"),
+    ):
+        sent = await va._handle_notification(  # type: ignore[attr-defined]
+            "camera.frontporch", "a person walks", _make_batch(), context=_NO_NAMES
+        )
+    assert sent is False
+
+
+@pytest.mark.asyncio
+async def test_unknown_person_spelling_variant_is_seen(va: VideoAnalyzer) -> None:
+    await _run_handle_notification(
+        va,
+        CaptionNoveltyDecision(notify=True, reason="stale_match"),
+        _BatchNotifyContext(recognized=[], batch_names=[" unknown person "]),
+    )
+    kwargs = va._is_caption_novel.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["unknown_person_seen"] is True
+
+
+@pytest.mark.asyncio
+async def test_finalize_is_one_step_per_camera(va: VideoAnalyzer) -> None:
+    """A second batch's novelty check waits for the first batch's caption store."""
+    events: list[str] = []
+    first_checking = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _handle(_camera: str, msg: str, *_a: object, **_k: object) -> bool:
+        events.append(f"check {msg}")
+        if msg == "first":
+            first_checking.set()
+            await release.wait()
+        return True
+
+    async def _store(_camera: str, _batch: object, msg: str, **_k: object) -> None:
+        events.append(f"store {msg}")
+
+    va._handle_notification = _handle  # type: ignore[method-assign]
+    va._store_results = _store  # type: ignore[method-assign]
+    batch = _make_batch()
+    first = asyncio.create_task(
+        va._finalize("camera.side", batch, "first", context=_NO_NAMES)  # type: ignore[attr-defined]
+    )
+    await first_checking.wait()
+    second = asyncio.create_task(
+        va._finalize("camera.side", batch, "second", context=_NO_NAMES)  # type: ignore[attr-defined]
+    )
+    other = asyncio.create_task(
+        va._finalize("camera.back", batch, "other", context=_NO_NAMES)  # type: ignore[attr-defined]
+    )
+    await other  # another camera is not held up
+    assert events == ["check first", "check other", "store other"]
+    release.set()
+    await asyncio.gather(first, second)
+    assert events[3:] == ["store first", "check second", "store second"]

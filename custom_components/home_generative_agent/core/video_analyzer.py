@@ -169,9 +169,13 @@ _VIDEO_QUEUE_BACKLOG_THRESHOLD: Final[int] = (
 _WORKER_ERROR_BACKOFF_SEC: Final[int] = 5  # pause after unexpected worker error
 _SUMMARY_MAX_FRAMES: Final[int] = 8  # kept frame descriptions fed to the summary
 _NOTIFY_PROTECT_TTL_SEC: Final[int] = 1800  # pruning protection for notified images
+# Similarity search size for caption dedup, and the wider retry used when
+# another camera sharing the name prefix took some of the results.
+_CAPTION_SEARCH_LIMIT: Final[int] = 10
+_CAPTION_SEARCH_WIDE_LIMIT: Final[int] = 50
 # Recent-caption scan (issue #704): when a caption would re-notify as a stale
-# match, the camera's captions stored inside the dedupe window are read newest
-# first, a page at a time, and compared with it directly.
+# match, the captions notified inside the dedupe window are read newest first,
+# a page at a time, and compared with it directly.
 _RECENT_CAPTION_SCAN_PAGE: Final[int] = 50
 _RECENT_CAPTION_SCAN_MAX_PAGES: Final[int] = 4
 _RECENT_CAPTION_SCAN_TIMEOUT_SEC: Final[int] = 10
@@ -909,6 +913,8 @@ class VideoAnalyzer:
         # and in memory only: an options change reloads the entry.
         self._notify_windows: dict[str, CooldownWindow] = {}
         self._notify_locks: dict[str, asyncio.Lock] = {}
+        # Per-camera lock making caption dedup's check, send and store one step.
+        self._finalize_locks: dict[str, asyncio.Lock] = {}
         self._notify_cooldown_unsupported_logged = False
         self._event_recording_sem = asyncio.Semaphore(RECORDING_MAX_CONCURRENT)
         self._event_recording_warned_at: dict[str, float] = {}
@@ -1538,10 +1544,16 @@ class VideoAnalyzer:
         # Retention registration happens at capture time (_capture_snapshot),
         # so batches that never reach this point cannot leak files — and
         # registering again here would duplicate deque entries.
-        notified = await self._handle_notification(
-            camera_id, msg, batch, notify_frame, context=context
-        )
-        await self._store_results(camera_id, batch, msg, notified=notified)
+        # Batches for one camera can overlap (worker, queue, event recording).
+        # Caption dedup reads the stored captions and this batch's caption is
+        # stored last, so check, send and store are one step per camera: two
+        # batches with the same scene cannot both find nothing to match.
+        lock = self._finalize_locks.setdefault(camera_id, asyncio.Lock())
+        async with lock:
+            notified = await self._handle_notification(
+                camera_id, msg, batch, notify_frame, context=context
+            )
+            await self._store_results(camera_id, batch, msg, notified=notified)
 
     async def _analyze_and_finalize(
         self, camera_id: str, ordered: list[tuple[Path, int]]
@@ -1692,16 +1704,19 @@ class VideoAnalyzer:
         msg: str,
         notify_img: Path,
         context: _BatchNotifyContext,
-    ) -> None:
-        """Send a push that passed the novelty check, honoring the cooldown."""
+    ) -> bool:
+        """
+        Send a push that passed the novelty check, honoring the cooldown.
+
+        Returns False when there was no notify service to hand the push to.
+        """
         camera_name = camera_id.rsplit(".", maxsplit=1)[-1]
         cooldown_s = self._notification_cooldown_s()
         target = self._resolve_notify_service() if cooldown_s > 0 else None
         if target is None:
             # Cooldown off, or no service at all: the unchanged send (which
             # logs the missing service itself).
-            await self._send_notification(msg, camera_name, notify_img)
-            return
+            return await self._send_notification(msg, camera_name, notify_img)
         if not target[1].startswith(MOBILE_APP_SERVICE_PREFIX):
             # Replacing a card quietly is a companion-app behavior. Any other
             # target (a notify group, a Sentinel-configured service) gets every
@@ -1714,8 +1729,9 @@ class VideoAnalyzer:
                     "Every camera notification is sent as usual.",
                     *target,
                 )
-            await self._send_notification(msg, camera_name, notify_img, target=target)
-            return
+            return await self._send_notification(
+                msg, camera_name, notify_img, target=target
+            )
 
         # Batches for one camera can overlap (worker, queue, event recording):
         # the lock makes read-decide-send-commit one step, so two of them
@@ -1744,6 +1760,7 @@ class VideoAnalyzer:
             # could not even be handed over never starts a quiet window.
             if sent and window is not None:
                 self._notify_windows[camera_id] = window
+            return sent
 
     def _plan_cooldown_push(
         self,
@@ -1927,9 +1944,7 @@ class VideoAnalyzer:
         namespace = ("video_analysis", camera_name)
         try:
             async with asyncio.timeout(10):
-                search_results = await self.entry.runtime_data.store.asearch(
-                    namespace, query=msg, limit=10
-                )
+                search_results = await self._search_own_captions(namespace, msg)
         except TimeoutError:
             LOGGER.warning(
                 "[%s] store.asearch timed out in _is_caption_novel; treating as novel.",
@@ -1946,9 +1961,6 @@ class VideoAnalyzer:
             )
             return CaptionNoveltyDecision(notify=True, reason="store_error")
 
-        # The store matches namespaces by prefix, so a search for "side" also
-        # returns "side_gate": keep this camera's captions only.
-        search_results = [r for r in search_results if r.namespace == namespace]
         if not search_results:
             return CaptionNoveltyDecision(notify=True, reason="no_match")
 
@@ -2059,6 +2071,27 @@ class VideoAnalyzer:
             matched_age_seconds=matched_age_seconds,
         )
 
+    async def _search_own_captions(
+        self, namespace: tuple[str, str], msg: str
+    ) -> list[Any]:
+        """
+        Return the camera's stored captions most similar to msg, best first.
+
+        The store matches namespaces by prefix, so a search for "side" also
+        returns "side_gate". Other cameras' captions are dropped; when any
+        were, the search is repeated with room for them so they cannot crowd
+        this camera's own matches out of the results.
+        """
+        store = self.entry.runtime_data.store
+        results = await store.asearch(namespace, query=msg, limit=_CAPTION_SEARCH_LIMIT)
+        own = [r for r in results if r.namespace == namespace]
+        if len(own) < len(results):
+            results = await store.asearch(
+                namespace, query=msg, limit=_CAPTION_SEARCH_WIDE_LIMIT
+            )
+            own = [r for r in results if r.namespace == namespace]
+        return own[:_CAPTION_SEARCH_LIMIT]
+
     async def _find_recent_caption_match(
         self, namespace: tuple[str, str], msg: str, search_results: list[Any]
     ) -> CaptionNoveltyDecision | None:
@@ -2140,13 +2173,18 @@ class VideoAnalyzer:
         updated_at, newest first; that is how the store is implemented, not
         part of the BaseStore contract. Each caption has its own key, so it is
         written once and updated_at equals the created_at the age is read from.
+        Captions stored before the notified flag existed are not returned; they
+        age out of the window half an hour after the upgrade.
         """
         store = self.entry.runtime_data.store
         window = VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC
         recent: dict[str, int] = {}
         for page in range(_RECENT_CAPTION_SCAN_MAX_PAGES):
+            # Only notified captions are asked for, so the withheld ones (most
+            # of a busy window) do not use up the pages.
             items = await store.asearch(
                 namespace,
+                filter={"notified": True},
                 limit=_RECENT_CAPTION_SCAN_PAGE,
                 offset=page * _RECENT_CAPTION_SCAN_PAGE,
             )
@@ -2590,7 +2628,11 @@ class VideoAnalyzer:
         *,
         context: _BatchNotifyContext,
     ) -> bool:
-        """Decide whether to notify and send if needed; return True if it sent."""
+        """
+        Decide whether to notify and send if needed.
+
+        Returns True only when a push was handed to a notify service.
+        """
         camera_name = camera_id.rsplit(".", maxsplit=1)[-1]
         recognized = context.recognized
         # notify_frame is the frame _process_batch judged representative of
@@ -2663,8 +2705,9 @@ class VideoAnalyzer:
                 first_snapshot,
                 recognized_names=list(recognized),
                 # Every frame's names, not only the frames the summary kept.
-                unknown_person_seen="Unknown Person"
-                in (*recognized, *context.batch_names),
+                unknown_person_seen=has_unknown_face(
+                    (*recognized, *context.batch_names)
+                ),
             )
             LOGGER.debug(
                 "[%s] novelty decision: notify=%s reason=%s best_score=%s "
@@ -2683,8 +2726,7 @@ class VideoAnalyzer:
                 return False
         # Protect the chosen file from pruning for 30 minutes
         self.protect_notify_image(chosen, ttl_sec=_NOTIFY_PROTECT_TTL_SEC)
-        await self._dispatch_notification(camera_id, msg, notify_img, context)
-        return True
+        return await self._dispatch_notification(camera_id, msg, notify_img, context)
 
     async def _store_results(
         self, camera_id: str, batch: list[Path], msg: str, *, notified: bool = True

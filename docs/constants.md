@@ -611,8 +611,10 @@ These constants live outside `const.py` in individual modules. They affect runti
 | `_VIDEO_QUEUE_BACKLOG_THRESHOLD` | `2` | Drop oldest queued frames when the backlog exceeds this depth |
 | `_SUMMARY_MAX_FRAMES` | `8` | Maximum deduplicated frame descriptions fed to the summary model (newest kept). The notification reference image is chosen from these frames. |
 | `_NOTIFY_PROTECT_TTL_SEC` | `1800` (s) | How long a snapshot attached to a notification is protected from retention pruning. Also the fresh protection window granted at startup to pre-restart snapshots younger than this when they are seeded into retention. |
+| `_CAPTION_SEARCH_LIMIT` | `10` | Stored captions returned by the caption-deduplication similarity search. |
+| `_CAPTION_SEARCH_WIDE_LIMIT` | `50` | Size of the repeated search when another camera sharing the name prefix (`side` / `side_gate`) took some of the results; only the camera's own captions are kept. |
 | `_RECENT_CAPTION_SCAN_PAGE` | `50` | Page size of the recent-caption scan ([#704](https://github.com/goruck/home-generative-agent/issues/704)). When a caption with a real subject in action would re-notify as a stale match and no match inside the dedupe window is among the similarity search's results, the camera's stored captions are read newest first and those notified inside the window are compared with it directly, so a recent near-duplicate outranked or crowded out by older captions still suppresses (`recent_match`). |
-| `_RECENT_CAPTION_SCAN_MAX_PAGES` | `4` | Upper bound on pages read by the recent-caption scan (200 stored captions). The scan stops earlier at the first page that reaches past the dedupe window. |
+| `_RECENT_CAPTION_SCAN_MAX_PAGES` | `4` | Upper bound on pages read by the recent-caption scan (200 notified captions, counted across cameras whose names share this camera's name as a prefix). The scan stops earlier at the first page that reaches past the dedupe window. |
 | `_RECENT_CAPTION_SCAN_TIMEOUT_SEC` | `10` (s) | Budget for the recent-caption scan (store read plus one embedding call). On timeout or any error the notification is sent. |
 | `_METRICS_REPORT_INTERVAL_SEC` | `3600` (s) | How often the per-camera metrics line (counters plus latency percentiles) is logged |
 
