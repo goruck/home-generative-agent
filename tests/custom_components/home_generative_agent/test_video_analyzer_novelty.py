@@ -88,6 +88,7 @@ def entry() -> MagicMock:
     e = MagicMock()
     e.runtime_data.options = {}
     e.runtime_data.store.asearch = AsyncMock(return_value=[])
+    e.runtime_data.store.aget = AsyncMock(return_value=None)
     return e
 
 
@@ -1599,38 +1600,102 @@ async def test_static_caption_suppressed_by_unnotified_match(va: VideoAnalyzer) 
 
 
 # ---------------------------------------------------------------------------
-# A batch with an unknown face is never suppressed by the recent-match check
+# A batch with an unknown face is suppressed only by another unknown-face batch
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_unknown_person_skips_recent_match(va: VideoAnalyzer) -> None:
-    """Caption wording cannot tell a stranger from the resident seen a minute ago."""
-    results = [
-        _make_search_result(_WHITE_SHIRT_OLD, score=0.95, age_seconds=_THREE_DAYS_S),
-        _make_search_result(_WHITE_SHIRT_RECENT, score=0.88, age_seconds=64),
-    ]
-    store = va.entry.runtime_data.store
-    store.asearch = AsyncMock(return_value=results)
-    decision = await va._is_caption_novel(  # type: ignore[attr-defined]
+def _unknown(item: MagicMock) -> MagicMock:
+    """Mark a stored caption as coming from a batch that held an unknown face."""
+    item.value["unknown_person"] = True
+    return item
+
+
+async def _novel_with_unknown_face(
+    va: VideoAnalyzer, results: list[MagicMock]
+) -> CaptionNoveltyDecision:
+    va.entry.runtime_data.store.asearch = AsyncMock(return_value=results)
+    return await va._is_caption_novel(  # type: ignore[attr-defined]
         "side",
         _WHITE_SHIRT_NOW,
         _fresh_snapshot_name(),
         ["Unknown Person"],
         unknown_person_seen=True,
     )
-    assert decision.notify is True
-    assert decision.reason == "stale_match"
-    store.asearch.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_unknown_person_recent_best_match_still_suppresses(
+async def test_unknown_person_not_suppressed_by_a_residents_recent_match(
     va: VideoAnalyzer,
 ) -> None:
-    """Unchanged: a notified best match inside the window suppresses, as before."""
-    results = [_make_search_result(_WHITE_SHIRT_RECENT, score=0.95, age_seconds=64)]
-    va.entry.runtime_data.store.asearch = AsyncMock(return_value=results)
+    """Caption wording cannot tell a stranger from the resident seen a minute ago."""
+    decision = await _novel_with_unknown_face(
+        va,
+        [
+            _make_search_result(_WHITE_SHIRT_OLD, 0.95, age_seconds=_THREE_DAYS_S),
+            _make_search_result(_WHITE_SHIRT_RECENT, score=0.88, age_seconds=64),
+        ],
+    )
+    assert decision.notify is True
+    assert decision.reason == "stale_match"
+
+
+@pytest.mark.asyncio
+async def test_unknown_person_not_suppressed_by_a_residents_best_match(
+    va: VideoAnalyzer,
+) -> None:
+    """Even the closest match, notified a minute ago, does not silence a stranger."""
+    decision = await _novel_with_unknown_face(
+        va, [_make_search_result(_WHITE_SHIRT_RECENT, score=0.95, age_seconds=64)]
+    )
+    assert decision.notify is True
+    assert decision.reason == "renotify"
+
+
+@pytest.mark.asyncio
+async def test_unknown_person_suppressed_by_an_unknown_face_notification(
+    va: VideoAnalyzer,
+) -> None:
+    """A stranger who lingers is deduplicated against their own notification."""
+    decision = await _novel_with_unknown_face(
+        va,
+        [
+            _unnotified(
+                _unknown(_make_search_result(_WHITE_SHIRT_RECENT, 0.97, age_seconds=60))
+            ),
+            _unknown(_make_search_result(_WHITE_SHIRT_OLD, 0.9, age_seconds=600)),
+        ],
+    )
+    assert decision.notify is False
+    assert decision.reason == "recent_match"
+    assert decision.matched_caption == _WHITE_SHIRT_OLD
+
+
+@pytest.mark.asyncio
+async def test_unknown_person_best_match_from_an_unknown_face_batch_suppresses(
+    va: VideoAnalyzer,
+) -> None:
+    decision = await _novel_with_unknown_face(
+        va, [_unknown(_make_search_result(_WHITE_SHIRT_RECENT, 0.95, age_seconds=64))]
+    )
+    assert decision.notify is False
+    assert decision.reason == "score_above_threshold"
+
+
+@pytest.mark.asyncio
+async def test_unknown_person_scan_asks_for_unknown_face_notifications(
+    va: VideoAnalyzer,
+) -> None:
+    by_score = [
+        _make_search_result(_WHITE_SHIRT_OLD, score=0.95, age_seconds=_THREE_DAYS_S)
+    ]
+    newest_first = [
+        # A resident's notification: returned by a fake store, dropped here.
+        _make_search_result(_WHITE_SHIRT_RECENT, score=None, age_seconds=30),
+        _unknown(_make_search_result(_WHITE_SHIRT_RECENT, score=None, age_seconds=64)),
+    ]
+    store = va.entry.runtime_data.store
+    store.asearch = _recency_aware_asearch(by_score, newest_first)
+    store.embeddings.aembed_documents = AsyncMock(return_value=[[1.0, 0.0], [1.0, 0.0]])
     decision = await va._is_caption_novel(  # type: ignore[attr-defined]
         "side",
         _WHITE_SHIRT_NOW,
@@ -1639,7 +1704,13 @@ async def test_unknown_person_recent_best_match_still_suppresses(
         unknown_person_seen=True,
     )
     assert decision.notify is False
-    assert decision.reason == "score_above_threshold"
+    assert decision.reason == "recent_match"
+    assert decision.matched_age_seconds is not None
+    assert decision.matched_age_seconds >= 60
+    assert store.asearch.await_args_list[1].kwargs["filter"] == {
+        "notified": True,
+        "unknown_person": True,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1722,16 +1793,26 @@ async def test_handle_notification_passes_unknown_person_seen(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("notified", [True, False])
+@pytest.mark.parametrize(
+    ("notified", "batch_names", "unknown_person"),
+    [
+        (True, [], False),
+        (False, [], False),
+        (True, ["Lindo", "Unknown Person"], True),
+    ],
+)
 async def test_finalize_stores_whether_the_caption_notified(
-    va: VideoAnalyzer, notified: object
+    va: VideoAnalyzer, notified: object, batch_names: list[str], unknown_person: object
 ) -> None:
     va._handle_notification = AsyncMock(return_value=notified)  # type: ignore[method-assign]
     store = va.entry.runtime_data.store
     store.aput = AsyncMock()
     batch = _make_batch()
     await va._finalize(  # type: ignore[attr-defined]
-        "camera.frontporch", batch, "a person walks up the path", context=_NO_NAMES
+        "camera.frontporch",
+        batch,
+        "a person walks up the path",
+        context=_BatchNotifyContext(recognized=[], batch_names=batch_names),
     )
     store.aput.assert_awaited_once_with(
         namespace=("video_analysis", "frontporch"),
@@ -1740,8 +1821,41 @@ async def test_finalize_stores_whether_the_caption_notified(
             "content": "a person walks up the path",
             "snapshots": [str(batch[0])],
             "notified": notified,
+            "unknown_person": unknown_person,
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_withheld_caption_does_not_erase_a_notified_one_under_the_same_key(
+    va: VideoAnalyzer,
+) -> None:
+    """Two batches can share a key (one-second snapshot names)."""
+    store = va.entry.runtime_data.store
+    earlier = MagicMock()
+    earlier.value = {"content": "first", "notified": True, "unknown_person": True}
+    store.aget = AsyncMock(return_value=earlier)
+    store.aput = AsyncMock()
+    batch = _make_batch()
+    await va._store_results(  # type: ignore[attr-defined]
+        "camera.frontporch", batch, "second", notified=False
+    )
+    value = store.aput.await_args_list[0].kwargs["value"]
+    assert value["notified"] is True
+    assert value["unknown_person"] is True
+    assert value["content"] == "second"
+
+
+@pytest.mark.asyncio
+async def test_notified_caption_is_stored_without_reading_first(
+    va: VideoAnalyzer,
+) -> None:
+    store = va.entry.runtime_data.store
+    store.aput = AsyncMock()
+    await va._store_results(  # type: ignore[attr-defined]
+        "camera.frontporch", _make_batch(), "first", notified=True
+    )
+    store.aget.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

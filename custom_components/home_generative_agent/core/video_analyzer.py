@@ -391,6 +391,19 @@ def _caption_notified(item: Any) -> bool:
     return (item.value or {}).get("notified") is not False
 
 
+def _caption_anchors(item: Any, *, unknown_only: bool) -> bool:
+    """
+    Return True if a stored caption may suppress the caption being checked.
+
+    It must have been notified; and when the batch being checked holds an
+    unknown face, it must come from a batch that held one too, so a resident's
+    caption never silences a stranger's.
+    """
+    if not _caption_notified(item):
+        return False
+    return not unknown_only or (item.value or {}).get("unknown_person") is True
+
+
 def _cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
     """Return the cosine similarity of two vectors (0.0 for a zero vector)."""
     norm = math.hypot(*a) * math.hypot(*b)
@@ -1553,7 +1566,15 @@ class VideoAnalyzer:
             notified = await self._handle_notification(
                 camera_id, msg, batch, notify_frame, context=context
             )
-            await self._store_results(camera_id, batch, msg, notified=notified)
+            await self._store_results(
+                camera_id,
+                batch,
+                msg,
+                notified=notified,
+                unknown_person=has_unknown_face(
+                    (*context.recognized, *context.batch_names)
+                ),
+            )
 
     async def _analyze_and_finalize(
         self, camera_id: str, ordered: list[tuple[Path, int]]
@@ -1708,7 +1729,8 @@ class VideoAnalyzer:
         """
         Send a push that passed the novelty check, honoring the cooldown.
 
-        Returns False when there was no notify service to hand the push to.
+        Returns True when a sounding push was handed to a notify service:
+        False when there was no service, and for a quiet cooldown update.
         """
         camera_name = camera_id.rsplit(".", maxsplit=1)[-1]
         cooldown_s = self._notification_cooldown_s()
@@ -1760,7 +1782,9 @@ class VideoAnalyzer:
             # could not even be handed over never starts a quiet window.
             if sent and window is not None:
                 self._notify_windows[camera_id] = window
-            return sent
+            # A quiet replacement of the window's card is not an alert: it
+            # must not let caption dedup withhold a later, sounding one.
+            return sent and not (card is not None and card.quiet)
 
     def _plan_cooldown_push(
         self,
@@ -2003,18 +2027,20 @@ class VideoAnalyzer:
             # and a days-old match does not silence a new person or vehicle
             # event (an exact caption recurring after the window, e.g. "unknown
             # person on porch", is a genuine repeat event).
-            if matched_age_seconds <= window and _caption_notified(best_result):
+            if matched_age_seconds <= window and _caption_anchors(
+                best_result, unknown_only=unknown_person_seen
+            ):
                 return suppress
             # The best match does not suppress, but a slightly lower-scoring
-            # one sent a minute ago would (issue #704). A batch in which face
-            # recognition saw an unknown person is never suppressed this way:
-            # caption wording cannot tell a stranger from a resident.
-            if not unknown_person_seen:
-                recent = await self._find_recent_caption_match(
-                    namespace, msg, search_results
-                )
-                if recent is not None:
-                    return recent
+            # one sent a minute ago would (issue #704). For a batch in which
+            # face recognition saw an unknown person, only a notification of
+            # another such batch counts: caption wording cannot tell a
+            # stranger from a resident.
+            recent = await self._find_recent_caption_match(
+                namespace, msg, search_results, unknown_only=unknown_person_seen
+            )
+            if recent is not None:
+                return recent
             return CaptionNoveltyDecision(
                 notify=True,
                 reason="stale_match" if matched_age_seconds > window else "renotify",
@@ -2095,7 +2121,12 @@ class VideoAnalyzer:
         return own[:_CAPTION_SEARCH_LIMIT]
 
     async def _find_recent_caption_match(
-        self, namespace: tuple[str, str], msg: str, search_results: list[Any]
+        self,
+        namespace: tuple[str, str],
+        msg: str,
+        search_results: list[Any],
+        *,
+        unknown_only: bool = False,
     ) -> CaptionNoveltyDecision | None:
         """
         Return a suppress decision for a match notified inside the dedupe window.
@@ -2117,7 +2148,7 @@ class VideoAnalyzer:
             age = _caption_age_seconds(r)
             if (
                 age <= window
-                and _caption_notified(r)
+                and _caption_anchors(r, unknown_only=unknown_only)
                 and (best is None or r.score > best[0])
             ):
                 best = (r.score, (r.value or {}).get("content"), age)
@@ -2128,7 +2159,9 @@ class VideoAnalyzer:
                 return None
             try:
                 async with asyncio.timeout(_RECENT_CAPTION_SCAN_TIMEOUT_SEC):
-                    recent = await self._recent_captions(namespace)
+                    recent = await self._recent_captions(
+                        namespace, unknown_only=unknown_only
+                    )
                     if not recent:
                         return None
                     # Scored as the store scores a search: the same embedding
@@ -2166,7 +2199,7 @@ class VideoAnalyzer:
         )
 
     async def _recent_captions(
-        self, namespace: tuple[str, str]
+        self, namespace: tuple[str, str], *, unknown_only: bool = False
     ) -> list[tuple[str, int]]:
         """
         Return (caption, age_seconds) for captions notified inside the dedupe window.
@@ -2181,19 +2214,24 @@ class VideoAnalyzer:
         store = self.entry.runtime_data.store
         window = VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC
         recent: dict[str, int] = {}
+        wanted: dict[str, bool] = {"notified": True}
+        if unknown_only:
+            wanted["unknown_person"] = True
         for page in range(_RECENT_CAPTION_SCAN_MAX_PAGES):
             # Only notified captions are asked for, so the withheld ones (most
             # of a busy window) do not use up the pages.
             items = await store.asearch(
                 namespace,
-                filter={"notified": True},
+                filter=wanted,
                 limit=_RECENT_CAPTION_SCAN_PAGE,
                 offset=page * _RECENT_CAPTION_SCAN_PAGE,
                 refresh_ttl=False,  # keeps the plain, ordered query
             )
             for r in items:
                 # Prefix match again: "side" also returns "side_gate".
-                if r.namespace != namespace or not _caption_notified(r):
+                if r.namespace != namespace or not _caption_anchors(
+                    r, unknown_only=unknown_only
+                ):
                     continue
                 cap = (r.value or {}).get("content")
                 age = _caption_age_seconds(r)
@@ -2634,7 +2672,7 @@ class VideoAnalyzer:
         """
         Decide whether to notify and send if needed.
 
-        Returns True only when a push was handed to a notify service.
+        Returns True only when a sounding push was handed to a notify service.
         """
         camera_name = camera_id.rsplit(".", maxsplit=1)[-1]
         recognized = context.recognized
@@ -2732,23 +2770,45 @@ class VideoAnalyzer:
         return await self._dispatch_notification(camera_id, msg, notify_img, context)
 
     async def _store_results(
-        self, camera_id: str, batch: list[Path], msg: str, *, notified: bool = True
+        self,
+        camera_id: str,
+        batch: list[Path],
+        msg: str,
+        *,
+        notified: bool = True,
+        unknown_person: bool = False,
     ) -> None:
         """
         Store the analysis results in the vector DB.
 
-        `notified` records whether the caption was sent as a notification:
+        `notified` records whether the caption sounded as a notification:
         caption deduplication lets only notified captions suppress later ones.
+        `unknown_person` records that face recognition saw an unknown face in
+        the batch: only such a caption suppresses another unknown-face batch.
         """
         camera_name = camera_id.rsplit(".", maxsplit=1)[-1]
+        store = self.entry.runtime_data.store
+        namespace = ("video_analysis", camera_name)
+        key = batch[0].name
         async with asyncio.timeout(10):
-            await self.entry.runtime_data.store.aput(
-                namespace=("video_analysis", camera_name),
-                key=batch[0].name,
+            if not notified:
+                # Snapshot names have one-second precision, so two batches can
+                # share a key: a withheld caption must not erase the record
+                # that the earlier one notified.
+                existing = await store.aget(namespace, key, refresh_ttl=False)
+                if existing is not None and (existing.value or {}).get("notified"):
+                    notified = True
+                    unknown_person = (
+                        unknown_person or existing.value.get("unknown_person") is True
+                    )
+            await store.aput(
+                namespace=namespace,
+                key=key,
                 value={
                     "content": msg,
                     "snapshots": [str(p) for p in batch],
                     "notified": notified,
+                    "unknown_person": unknown_person,
                 },
             )
 
