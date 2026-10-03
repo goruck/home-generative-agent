@@ -168,12 +168,16 @@ def test_card_language_resolution_and_fallbacks() -> None:
             ("_statusLabel", ["approved"]),
             ("_statusLabel", ["weird_new"]),
             ("_dedupeReasonLabel", [None]),
+            ("_dedupeReasonLabel", ["not_a_real_reason"]),
             ("_dedupeReasonLabel", ["cumulative_energy_sensor"]),
+            ("_statusLabel", ["already_active"]),
         ],
     )
     assert out["results"] == [
         "schváleno",
         "weird_new",
         "Neznámé",
-        "cumulative_energy_sensor",
+        "not_a_real_reason",
+        "kumulativní senzor energie",
+        "už aktivní",
     ]

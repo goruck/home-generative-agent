@@ -61,6 +61,14 @@ const HGA_PROPOSALS_I18N = {
       "Loaded {c} candidate(s), {f} filtered candidate(s), {p} pending draft(s), {h} historical draft(s) at {t}",
     dedupe_batch_duplicate: "Duplicate in this discovery batch",
     dedupe_existing_semantic_key: "Already covered by active/pending/recent rule idea",
+    dedupe_existing_identity_hash:
+      "Already covered by active/pending/recent rule idea (matched by identity)",
+    dedupe_derived_only_paths: "Cites only derived values, no concrete entity",
+    dedupe_entity_text_mismatch: "Text names an entity that its evidence does not cite",
+    dedupe_cumulative_energy_sensor:
+      "Cumulative energy sensor (kWh total), cannot become a rule",
+    dedupe_unknown_network_key:
+      "Refers to a network device or setting missing from the router data",
     dedupe_novel: "Novel candidate",
     dedupe_unknown: "Unknown",
     status_draft: "draft",
@@ -68,13 +76,18 @@ const HGA_PROPOSALS_I18N = {
     status_rejected: "rejected",
     status_unsupported: "unsupported",
     status_covered_by_existing_rule: "covered_by_existing_rule",
+    status_ok: "ok",
+    status_already_active: "already_active",
+    status_exists: "exists",
+    status_not_found: "not_found",
+    status_error: "error",
   },
   cs: {
     pipeline_title: "HGA – pipeline pravidel",
     refresh: "Obnovit",
     refreshing: "Obnovuji…",
     refreshing_all: "Obnovuji kandidáty a návrhy…",
-    sec_discovery: "Kandidáti z discovery",
+    sec_discovery: "Kandidáti ze zjišťování",
     sec_filtered: "Odfiltrovaní kandidáti",
     sec_pending: "Návrhy pravidel (čekající)",
     sec_history: "Historie návrhů",
@@ -129,9 +142,14 @@ const HGA_PROPOSALS_I18N = {
     inactive: "neaktivní",
     loaded:
       "Načteno: kandidáti {c}, odfiltrovaní {f}, čekající návrhy {p}, historie {h} (v {t})",
-    dedupe_batch_duplicate: "Duplicita v této dávce discovery",
+    dedupe_batch_duplicate: "Duplicita v této dávce zjišťování",
     dedupe_existing_semantic_key:
       "Už pokryto aktivním, čekajícím nebo nedávným nápadem na pravidlo",
+    dedupe_existing_identity_hash: "hash stávající identity",
+    dedupe_derived_only_paths: "pouze odvozené cesty",
+    dedupe_entity_text_mismatch: "nesoulad textu entity",
+    dedupe_cumulative_energy_sensor: "kumulativní senzor energie",
+    dedupe_unknown_network_key: "neznámý síťový klíč",
     dedupe_novel: "Nový kandidát",
     dedupe_unknown: "Neznámé",
     status_draft: "koncept",
@@ -139,6 +157,11 @@ const HGA_PROPOSALS_I18N = {
     status_rejected: "zamítnuto",
     status_unsupported: "nepodporováno",
     status_covered_by_existing_rule: "pokryto existujícím pravidlem",
+    status_ok: "v pořádku",
+    status_already_active: "už aktivní",
+    status_exists: "už existuje",
+    status_not_found: "nenalezeno",
+    status_error: "chyba",
   },
 };
 
@@ -1158,7 +1181,7 @@ class HgaProposalsCard extends HTMLElement {
             );
             const resultStatus =
               response?.response?.status || response?.status || "ok";
-            status.textContent = this._t("promote_result", { r: resultStatus });
+            status.textContent = this._t("promote_result", { r: this._statusLabel(resultStatus) });
             if (resultStatus === "already_active" || resultStatus === "exists") {
               this._dismissCandidate(candidate.candidate_id);
             }
@@ -1287,7 +1310,7 @@ class HgaProposalsCard extends HTMLElement {
             );
             const resultStatus =
               response?.response?.status || response?.status || "ok";
-            status.textContent = this._t("approve_result", { r: resultStatus });
+            status.textContent = this._t("approve_result", { r: this._statusLabel(resultStatus) });
             await this._load();
           } catch (err) {
             status.textContent = this._t("approve_failed", {
@@ -1308,7 +1331,7 @@ class HgaProposalsCard extends HTMLElement {
             );
             const resultStatus =
               response?.response?.status || response?.status || "ok";
-            status.textContent = this._t("reject_result", { r: resultStatus });
+            status.textContent = this._t("reject_result", { r: this._statusLabel(resultStatus) });
             await this._load();
           } catch (err) {
             status.textContent = this._t("reject_failed", {
@@ -1389,7 +1412,7 @@ class HgaProposalsCard extends HTMLElement {
                 );
                 const resultStatus =
                   response?.response?.status || response?.status || "ok";
-                status.textContent = this._t("reactivate_result", { r: resultStatus });
+                status.textContent = this._t("reactivate_result", { r: this._statusLabel(resultStatus) });
                 await this._load();
               } catch (err) {
                 status.textContent = this._t("reactivate_failed", {
@@ -1411,7 +1434,7 @@ class HgaProposalsCard extends HTMLElement {
                 );
                 const resultStatus =
                   response?.response?.status || response?.status || "ok";
-                status.textContent = this._t("deactivate_result", { r: resultStatus });
+                status.textContent = this._t("deactivate_result", { r: this._statusLabel(resultStatus) });
                 await this._load();
               } catch (err) {
                 status.textContent = this._t("deactivate_failed", {
