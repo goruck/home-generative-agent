@@ -169,8 +169,8 @@ _VIDEO_QUEUE_BACKLOG_THRESHOLD: Final[int] = (
 _WORKER_ERROR_BACKOFF_SEC: Final[int] = 5  # pause after unexpected worker error
 _SUMMARY_MAX_FRAMES: Final[int] = 8  # kept frame descriptions fed to the summary
 _NOTIFY_PROTECT_TTL_SEC: Final[int] = 1800  # pruning protection for notified images
-# Similarity search size for caption dedup, and the wider retry used when
-# another camera sharing the name prefix took some of the results.
+# Captions the dedup check considers, and the rows the similarity search asks
+# for so that another camera sharing the name prefix cannot crowd them out.
 _CAPTION_SEARCH_LIMIT: Final[int] = 10
 _CAPTION_SEARCH_WIDE_LIMIT: Final[int] = 50
 # Recent-caption scan (issue #704): when a caption would re-notify as a stale
@@ -2078,18 +2078,20 @@ class VideoAnalyzer:
         Return the camera's stored captions most similar to msg, best first.
 
         The store matches namespaces by prefix, so a search for "side" also
-        returns "side_gate". Other cameras' captions are dropped; when any
-        were, the search is repeated with room for them so they cannot crowd
-        this camera's own matches out of the results.
+        returns "side_gate". The search asks for more rows than are used so
+        that other cameras' captions, dropped here, cannot crowd this camera's
+        own matches out of the results.
         """
-        store = self.entry.runtime_data.store
-        results = await store.asearch(namespace, query=msg, limit=_CAPTION_SEARCH_LIMIT)
+        results = await self.entry.runtime_data.store.asearch(
+            namespace,
+            query=msg,
+            limit=_CAPTION_SEARCH_WIDE_LIMIT,
+            # No TTL is set on captions; refreshing one would wrap the query
+            # in a form that no longer guarantees its ordering.
+            refresh_ttl=False,
+        )
         own = [r for r in results if r.namespace == namespace]
-        if len(own) < len(results):
-            results = await store.asearch(
-                namespace, query=msg, limit=_CAPTION_SEARCH_WIDE_LIMIT
-            )
-            own = [r for r in results if r.namespace == namespace]
+        own.sort(key=lambda r: r.score if r.score is not None else -1.0, reverse=True)
         return own[:_CAPTION_SEARCH_LIMIT]
 
     async def _find_recent_caption_match(
@@ -2187,6 +2189,7 @@ class VideoAnalyzer:
                 filter={"notified": True},
                 limit=_RECENT_CAPTION_SCAN_PAGE,
                 offset=page * _RECENT_CAPTION_SCAN_PAGE,
+                refresh_ttl=False,  # keeps the plain, ordered query
             )
             for r in items:
                 # Prefix match again: "side" also returns "side_gate".

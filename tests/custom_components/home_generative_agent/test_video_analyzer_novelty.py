@@ -1170,7 +1170,11 @@ async def test_recent_match_missing_from_top_results_suppresses(
     # The scan reads this camera's captions, newest first, one page.
     assert store.asearch.await_count == 2
     assert store.asearch.await_args_list[1] == call(
-        ("video_analysis", "side"), filter={"notified": True}, limit=50, offset=0
+        ("video_analysis", "side"),
+        filter={"notified": True},
+        limit=50,
+        offset=0,
+        refresh_ttl=False,
     )
 
 
@@ -1423,7 +1427,11 @@ async def test_recent_scan_pages_past_a_busy_window(va: VideoAnalyzer) -> None:
     assert decision.reason == "recent_match"
     assert decision.matched_caption == _WHITE_SHIRT_RECENT
     assert store.asearch.await_args_list[2] == call(
-        ("video_analysis", "side"), filter={"notified": True}, limit=50, offset=50
+        ("video_analysis", "side"),
+        filter={"notified": True},
+        limit=50,
+        offset=50,
+        refresh_ttl=False,
     )
     assert store.asearch.await_count == 3
 
@@ -1745,40 +1753,45 @@ async def test_finalize_stores_whether_the_caption_notified(
 async def test_other_cameras_captions_do_not_crowd_out_own_match(
     va: VideoAnalyzer,
 ) -> None:
-    """Ten "side_gate" captions outrank the camera's own: the search widens."""
+    """Ten "side_gate" captions outrank the camera's own; its own is still found."""
     foreign = [
         _make_search_result(
             _WHITE_SHIRT_RECENT, 0.99, age_seconds=i, camera="side_gate"
         )
         for i in range(10)
     ]
+    weaker = _make_search_result("A person walks.", 0.86, age_seconds=30, camera="side")
     own = _make_search_result(_WHITE_SHIRT_RECENT, 0.9, age_seconds=64, camera="side")
-
-    async def _asearch(*_args: object, **kwargs: object) -> list[MagicMock]:
-        return foreign if kwargs["limit"] == 10 else [*foreign, own]
-
     store = va.entry.runtime_data.store
-    store.asearch = AsyncMock(side_effect=_asearch)
+    # Returned out of score order: the camera's own rows are ranked here.
+    store.asearch = AsyncMock(return_value=[*foreign, weaker, own])
     decision = await va._is_caption_novel(  # type: ignore[attr-defined]
         "side", _WHITE_SHIRT_NOW, _fresh_snapshot_name(), []
     )
     assert decision.notify is False
     assert decision.reason == "score_above_threshold"
     assert decision.best_score == pytest.approx(0.9)
-    assert [c.kwargs["limit"] for c in store.asearch.await_args_list] == [10, 50]
+    store.asearch.assert_awaited_once_with(
+        ("video_analysis", "side"),
+        query=_WHITE_SHIRT_NOW,
+        limit=50,
+        refresh_ttl=False,
+    )
 
 
 @pytest.mark.asyncio
-async def test_search_is_not_repeated_without_foreign_rows(va: VideoAnalyzer) -> None:
-    results = [
-        _make_search_result(_WHITE_SHIRT_RECENT, 0.9, age_seconds=64, camera="side")
+async def test_search_keeps_the_ten_best_own_captions(va: VideoAnalyzer) -> None:
+    """Rows beyond the ten best of the camera's own are not considered."""
+    rows = [
+        _make_search_result(f"A dog {i}.", 0.5 - i / 100, age_seconds=_THREE_DAYS_S)
+        for i in range(10)
     ]
-    store = va.entry.runtime_data.store
-    store.asearch = AsyncMock(return_value=results)
-    await va._is_caption_novel(  # type: ignore[attr-defined]
-        "side", _WHITE_SHIRT_NOW, _fresh_snapshot_name(), []
+    eleventh = _make_search_result(_WHITE_SHIRT_RECENT, 0.1, age_seconds=64)
+    va.entry.runtime_data.store.asearch = AsyncMock(return_value=[*rows, eleventh])
+    own = await va._search_own_captions(  # type: ignore[attr-defined]
+        ("video_analysis", "side"), _WHITE_SHIRT_NOW
     )
-    store.asearch.assert_awaited_once()
+    assert own == rows
 
 
 def _scan_store(va: VideoAnalyzer, pages: list[list[MagicMock]]) -> MagicMock:
