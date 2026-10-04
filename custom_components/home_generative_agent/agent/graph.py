@@ -1717,6 +1717,9 @@ def _sanitize_any_of_required(schema: dict[str, Any]) -> dict[str, Any]:
     Whatever it has to drop is restated in the description so the constraint
     survives as guidance even though it cannot survive in the proto schema.
     """
+    if not isinstance(schema, dict):
+        # A boolean schema (``"freeform": true``) is valid JSON Schema.
+        return schema
     if isinstance(schema.get("anyOf"), list):
         variants: list[Any] = []
         dropped: list[list[str]] = []
@@ -1921,10 +1924,22 @@ def _tools_for_chain_member(model: Any, tools: list[Any]) -> list[Any]:
         if not isinstance(function, dict) or not isinstance(parameters, dict):
             adapted.append(tool)
             continue
-        parameters = _flatten_union_for_provider(
-            parameters, provider, str(function.get("name"))
-        )
-        parameters = _sanitize_for_gemini(parameters, provider)
+        name = str(function.get("name"))
+        try:
+            parameters = _flatten_union_for_provider(parameters, provider, name)
+            parameters = _sanitize_for_gemini(parameters, provider)
+        except Exception:
+            # Binding runs for every chain member on every turn, so a schema
+            # one member's pass cannot digest must not cost a healthy primary
+            # the turn. Bind it as-is; the provider's own rejection is handled
+            # by the drop-and-retry in _invoke_chat_model_with_schema_recovery.
+            LOGGER.exception(
+                "Could not shape the schema of tool %s for %s; binding it unchanged",
+                sanitize_tool_text(name, limit=200),
+                provider,
+            )
+            adapted.append(tool)
+            continue
         adapted.append({**tool, "function": {**function, "parameters": parameters}})
     return adapted
 

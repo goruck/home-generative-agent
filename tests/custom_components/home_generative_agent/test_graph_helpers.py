@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import copy
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
+from custom_components.home_generative_agent.agent import graph as graph_module
 from custom_components.home_generative_agent.agent.graph import (
     _bind_model_tools,
     _determine_model_name,
@@ -25,6 +26,9 @@ from custom_components.home_generative_agent.agent.graph import (
 )
 from custom_components.home_generative_agent.const import CONF_ANTHROPIC_CHAT_MODEL
 from custom_components.home_generative_agent.core.fallback import FallbackChatModel
+
+if TYPE_CHECKING:
+    import pytest
 
 
 def test_format_and_dedupe_tools_injects_type_object_when_missing() -> None:
@@ -1139,6 +1143,49 @@ def test_tools_for_chain_member_sanitizes_for_gemini_fallback() -> None:
     ollama = ChatOllama(model="x")
     assert _tools_for_chain_member(ollama, tools) is tools, "Ollama keeps the union"
     assert "anyOf" in tools[0]["function"]["parameters"], "input not mutated"
+
+
+def test_tools_for_chain_member_survives_boolean_schema_nodes() -> None:
+    """A boolean property schema must not abort binding for the whole chain."""
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "freeform_tool",
+                "description": "d",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "x": {
+                            "anyOf": [
+                                {"type": "object", "properties": {"freeform": True}},
+                                {"type": "string"},
+                            ]
+                        }
+                    },
+                },
+            },
+        }
+    ]
+    gemini = ChatGoogleGenerativeAI(model="gemini-x", api_key=SecretStr("k"))
+    adapted = _tools_for_chain_member(gemini, tools)
+    variant = adapted[0]["function"]["parameters"]["properties"]["x"]["anyOf"][0]
+    assert variant["properties"]["freeform"] is True
+
+
+def test_tools_for_chain_member_binds_unchanged_when_a_pass_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pass that raises costs that member the reshaping, not the turn."""
+
+    def _boom(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        msg = "unexpected schema"
+        raise ValueError(msg)
+
+    tools = _target_union_tools()
+    monkeypatch.setattr(graph_module, "_sanitize_for_gemini", _boom)
+    gemini = ChatGoogleGenerativeAI(model="gemini-x", api_key=SecretStr("k"))
+    assert _tools_for_chain_member(gemini, tools) == tools
 
 
 def test_tools_for_chain_member_flattens_for_openai_fallback() -> None:
