@@ -56,6 +56,7 @@ from custom_components.home_generative_agent.const import (
     CONF_TOOL_RELEVANCE_THRESHOLD,
     CONF_TOOL_RETRIEVAL_LIMIT,
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
+    HISTORY_INTENT_REGEX,
     MAX_AFFIRMATIVE_FOLLOW_UP_WORDS,
     MAX_REFERENTIAL_FOLLOW_UP_WORDS,
     NON_OPEN_ACTUATION_KEYWORDS_REGEX,
@@ -1243,6 +1244,38 @@ async def _append_security_audit_tool(  # noqa: PLR0913
         return candidates
     fetched = await _get_tool_by_name(
         store, config, "audit_home_security", allowed_api_ids, live_tool_ids
+    )
+    return candidates if fetched is None else [*candidates, fetched]
+
+
+def _query_wants_history(query: str) -> bool:
+    """Return True when the query asks about past entity states or activity."""
+    return bool(re.search(HISTORY_INTENT_REGEX, query[:_MAX_INTENT_SCAN_CHARS]))
+
+
+async def _append_history_tool(  # noqa: PLR0913
+    candidates: list[RawTool],
+    store: BaseStore,
+    config: RunnableConfig,
+    query: str,
+    allowed_api_ids: set[str],
+    live_tool_ids: set[tuple[str, str]] | None,
+) -> list[RawTool]:
+    """
+    Force-bind ``get_entity_history`` when the query asks about the past.
+
+    A history question phrased around the device ("when did the mudroom
+    lights turn off today?") ranks entity-control and date/time tools above
+    the history tool, and a model that is not handed the tool tells the user
+    it has no access to history (issue #715). Appended outside the limit like
+    ``audit_home_security``, so it never evicts a RAG/safety selection.
+    """
+    if not _query_wants_history(query) or any(
+        t["name"] == "get_entity_history" for t in candidates
+    ):
+        return candidates
+    fetched = await _get_tool_by_name(
+        store, config, "get_entity_history", allowed_api_ids, live_tool_ids
     )
     return candidates if fetched is None else [*candidates, fetched]
 
@@ -2489,6 +2522,11 @@ async def _retrieve_tools(  # noqa: PLR0915
 
     # 3f. Force-bind audit_home_security for security-posture questions.
     all_candidates = await _append_security_audit_tool(
+        all_candidates, store, config, query, allowed_api_ids, live_tool_ids
+    )
+
+    # 3g. Force-bind get_entity_history for questions about past states.
+    all_candidates = await _append_history_tool(
         all_candidates, store, config, query, allowed_api_ids, live_tool_ids
     )
 

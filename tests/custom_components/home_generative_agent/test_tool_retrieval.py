@@ -29,6 +29,7 @@ from custom_components.home_generative_agent.agent.graph import (
     _open_state_live_context_normalization_context,
     _query_needs_actuation_safety,
     _query_wants_automation,
+    _query_wants_history,
     _query_wants_security_audit,
     _retrieval_query,
     _retrieve_tools,
@@ -2535,6 +2536,138 @@ async def test_retrieve_tools_does_not_bind_audit_when_sentinel_is_off() -> None
         store=_security_store(indexed=True),
     )
     assert "audit_home_security" not in result["tool_routing_map"]
+
+
+# ---------------------------------------------------------------------------
+# History intent: _query_wants_history + get_entity_history force-bind (#715)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "When did the mudroom lights turn off today?",
+        "when was the front door last opened",
+        "What time did the garage door close?",
+        "How many times was the fridge opened yesterday?",
+        "how long has the porch light been on",
+        "How often does the sump pump run?",
+        "When was the last time the dryer ran?",
+        "Did anyone open the back door overnight?",
+        "Has the washer run this week?",
+        "show me the history of the hallway motion sensor",
+        "Was the thermostat changed 2 hours ago?",
+    ],
+)
+def test_query_wants_history_positive(query: str) -> None:
+    assert _query_wants_history(query)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "turn on the porch light",
+        "what is the temperature in the garage",
+        "is the front door locked",
+        "set a timer for 5 minutes",
+        "turn off the mudroom lights today at noon",
+        "Is it going to rain tonight?",
+    ],
+)
+def test_query_wants_history_negative(query: str) -> None:
+    assert not _query_wants_history(query)
+
+
+def _history_store(*, ranked: bool) -> MagicMock:
+    """Store replicating the #715 log: the history tool is indexed, not ranked."""
+    store = MagicMock()
+    results = [
+        _make_search_item("GetDateTime", score=0.288),
+        _make_search_item("HassTurnOff", score=0.245, is_actuation=True),
+    ]
+    if ranked:
+        results.insert(
+            0, _make_search_item("get_entity_history", score=0.426, api_id="hga_local")
+        )
+    store.asearch = AsyncMock(return_value=results)
+    history_item = _make_search_item(
+        "get_entity_history", score=0.0, api_id="hga_local"
+    )
+
+    async def aget(namespace: Any, key: str = "", **_kwargs: Any) -> Any:  # noqa: ARG001
+        return history_item if key.endswith("::get_entity_history") else None
+
+    store.aget = AsyncMock(side_effect=aget)
+    return store
+
+
+def _history_state(query: str) -> State:
+    return {
+        "messages": [MagicMock(content=query)],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+    }
+
+
+def _history_config(*, registered: bool = True) -> RunnableConfig:
+    return {
+        "configurable": {
+            "options": {"llm_hass_api": ["assist"], "tool_relevance_threshold": 0.15},
+            "tool_index_ready": True,
+            "langchain_tools": (
+                {"get_entity_history": MagicMock()} if registered else {}
+            ),
+            "ha_llm_api": _live_llm_api("GetDateTime", "HassTurnOff"),
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_force_binds_history_when_ranking_misses_it() -> None:
+    """Issue #715: a device-phrased history question must still get the tool."""
+    result = await _retrieve_tools(
+        _history_state("When did the mudroom lights turn off today?"),
+        _history_config(),
+        store=_history_store(ranked=False),
+    )
+    assert result["tool_routing_map"]["get_entity_history"] == "hga_local"
+    # Appended outside the limit: the ranked selection is still bound.
+    assert "GetDateTime" in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_does_not_bind_history_without_history_intent() -> None:
+    result = await _retrieve_tools(
+        _history_state("turn off the mudroom lights"),
+        _history_config(),
+        store=_history_store(ranked=False),
+    )
+    assert "get_entity_history" not in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_binds_history_once_when_already_ranked() -> None:
+    result = await _retrieve_tools(
+        _history_state("When did the mudroom lights turn off today?"),
+        _history_config(),
+        store=_history_store(ranked=True),
+    )
+    names = [t["function"]["name"] for t in result["selected_tools"]]
+    assert names.count("get_entity_history") == 1
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_does_not_bind_history_when_tool_is_not_live() -> None:
+    """Excluded or unregistered means not live, so the index entry is ignored."""
+    result = await _retrieve_tools(
+        _history_state("When did the mudroom lights turn off today?"),
+        _history_config(registered=False),
+        store=_history_store(ranked=False),
+    )
+    assert "get_entity_history" not in result["tool_routing_map"]
 
 
 # ---------------------------------------------------------------------------
