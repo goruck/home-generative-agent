@@ -5,8 +5,16 @@ from __future__ import annotations
 
 import copy
 import json
+from typing import TYPE_CHECKING, Any
 
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_ollama import ChatOllama
+from langchain_openai import ChatOpenAI
+from pydantic import SecretStr
+
+from custom_components.home_generative_agent.agent import graph as graph_module
 from custom_components.home_generative_agent.agent.graph import (
+    _bind_model_tools,
     _determine_model_name,
     _ensure_array_items,
     _flatten_top_level_union,
@@ -14,8 +22,13 @@ from custom_components.home_generative_agent.agent.graph import (
     _rejected_tool_index,
     _rejected_tool_name,
     _sanitize_any_of_required,
+    _tools_for_chain_member,
 )
 from custom_components.home_generative_agent.const import CONF_ANTHROPIC_CHAT_MODEL
+from custom_components.home_generative_agent.core.fallback import FallbackChatModel
+
+if TYPE_CHECKING:
+    import pytest
 
 
 def test_format_and_dedupe_tools_injects_type_object_when_missing() -> None:
@@ -1072,6 +1085,166 @@ def test_rejected_tool_index_reads_gemini_position() -> None:
         ".any_of[0].required: only allowed for OBJECT type; invalid schema"
     )
     assert _rejected_tool_index(err) == 1
+
+
+def test_rejected_tool_index_reads_real_gemini_400() -> None:
+    """Gemini's actual 400 never says "schema"; the net must still catch it."""
+    err = Exception(
+        "Invalid argument provided to Gemini: 400 * GenerateContentRequest."
+        "tools[0].function_declarations[4].parameters.any_of[0].required: "
+        "only allowed for OBJECT type"
+    )
+    assert _rejected_tool_index(err) == 4
+
+
+def _target_union_tools() -> list[dict[str, Any]]:
+    """Tools as formatted for an Ollama primary: unions left intact."""
+    raw: list = [
+        {
+            "name": "HassStartTimer",
+            "api_id": "assist",
+            "description": "Start a timer",
+            "parameters": json.dumps(
+                {
+                    "type": "object",
+                    "properties": {
+                        "hours": {"type": "integer"},
+                        "minutes": {"type": "integer"},
+                    },
+                    "anyOf": [{"required": ["hours"]}, {"required": ["minutes"]}],
+                    "additionalProperties": False,
+                }
+            ),
+            "is_actuation": False,
+        }
+    ]
+    selected, _ = _format_and_dedupe_tools(raw, provider="ollama")
+    return selected
+
+
+def test_tools_for_chain_member_sanitizes_for_gemini_fallback() -> None:
+    """
+    An Ollama-shaped tool list is re-normalised for a Gemini chain member.
+
+    Field failure: Ollama primary down, Gemini fallback 400'd on
+    "any_of[0].required: only allowed for OBJECT type".
+    """
+    tools = _target_union_tools()
+    assert "anyOf" in tools[0]["function"]["parameters"]
+
+    gemini = ChatGoogleGenerativeAI(model="gemini-x", api_key="k").with_config(
+        config={"configurable": {}}
+    )
+    params = _tools_for_chain_member(gemini, tools)[0]["function"]["parameters"]
+    assert "anyOf" not in params, "bare-required variants must not reach Gemini"
+    assert "additionalProperties" not in params
+    assert "hours" in params["description"], "dropped constraint restated as a hint"
+
+    ollama = ChatOllama(model="x")
+    assert _tools_for_chain_member(ollama, tools) is tools, "Ollama keeps the union"
+    assert "anyOf" in tools[0]["function"]["parameters"], "input not mutated"
+
+
+def test_tools_for_chain_member_survives_boolean_schema_nodes() -> None:
+    """A boolean property schema must not abort binding for the whole chain."""
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "freeform_tool",
+                "description": "d",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "x": {
+                            "anyOf": [
+                                {"type": "object", "properties": {"freeform": True}},
+                                {"type": "string"},
+                            ]
+                        }
+                    },
+                },
+            },
+        }
+    ]
+    gemini = ChatGoogleGenerativeAI(model="gemini-x", api_key=SecretStr("k"))
+    adapted = _tools_for_chain_member(gemini, tools)
+    variant = adapted[0]["function"]["parameters"]["properties"]["x"]["anyOf"][0]
+    assert variant["properties"]["freeform"] is True
+
+
+def test_tools_for_chain_member_binds_unchanged_when_a_pass_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pass that raises costs that member the reshaping, not the turn."""
+
+    def _boom(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        msg = "unexpected schema"
+        raise ValueError(msg)
+
+    tools = _target_union_tools()
+    monkeypatch.setattr(graph_module, "_sanitize_for_gemini", _boom)
+    gemini = ChatGoogleGenerativeAI(model="gemini-x", api_key=SecretStr("k"))
+    assert _tools_for_chain_member(gemini, tools) == tools
+
+
+def test_tools_for_chain_member_flattens_for_openai_fallback() -> None:
+    """The same list is flattened for an OpenAI/Anthropic chain member."""
+    tools = _target_union_tools()
+    openai = ChatOpenAI(model="x", api_key=SecretStr("k"))
+    params = _tools_for_chain_member(openai, tools)[0]["function"]["parameters"]
+    assert "anyOf" not in params
+    assert params["type"] == "object"
+
+
+def test_bind_model_tools_shapes_tools_per_chain_member() -> None:
+    """A fallback chain binds each member its own provider-shaped list."""
+
+    class _Recorder:
+        def __init__(self, inner: Any) -> None:
+            self.default = inner  # unwrapped by concrete_chat_model
+            self.bound_tools: list[Any] | None = None
+
+        def bind_tools(self, tools: list[Any], **_kwargs: Any) -> Any:
+            self.bound_tools = tools
+            return self
+
+    primary = _Recorder(ChatOllama(model="x"))
+    fallback = _Recorder(ChatGoogleGenerativeAI(model="gemini-x", api_key="k"))
+    chain = FallbackChatModel([(primary, "edge", "p1"), (fallback, "cloud", "p2")])
+
+    _bind_model_tools(chain, _target_union_tools(), disable_reasoning=False)
+
+    assert primary.bound_tools is not None
+    assert fallback.bound_tools is not None
+    assert "anyOf" in primary.bound_tools[0]["function"]["parameters"]
+    assert "anyOf" not in fallback.bound_tools[0]["function"]["parameters"]
+
+
+def test_bind_model_tools_shapes_tools_for_setup_selected_fallback() -> None:
+    """
+    A bare fallback model gets its own provider's schema shape too.
+
+    With the primary down at setup the chain collapses to the fallback model
+    alone (no FallbackChatModel), yet tools are still formatted for the
+    configured primary.
+    """
+
+    class _Recorder:
+        def __init__(self, inner: Any) -> None:
+            self.default = inner
+            self.bound_tools: list[Any] = []
+
+        def bind_tools(self, tools: list[Any], **_kwargs: Any) -> Any:
+            self.bound_tools = tools
+            return self
+
+    gemini = _Recorder(ChatGoogleGenerativeAI(model="gemini-x", api_key="k"))
+    _bind_model_tools(gemini, _target_union_tools(), disable_reasoning=False)
+
+    params = gemini.bound_tools[0]["function"]["parameters"]
+    assert "anyOf" not in params
+    assert "additionalProperties" not in params
 
 
 def test_rejected_tool_index_walks_the_cause_chain() -> None:

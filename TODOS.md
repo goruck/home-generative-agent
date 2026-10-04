@@ -348,17 +348,17 @@ validation.
 
 ---
 
-### Provider-gated schema normalisation vs mixed-provider fallback chains
+### Mixed-provider fallback chains: lossy schema for capable fallbacks, schema 400s do not advance the chain
 
-**What:** `_format_and_dedupe_tools` gates its subtractive schema passes (OpenAI top-level-union flatten, Gemini anyOf-required sanitizer) on the statically configured primary provider, but `FallbackChatModel.bind_tools` (`core/fallback.py`) binds the same formatted tool list to every model in the chain. In a mixed-provider chain (e.g. Ollama primary with an OpenAI fallback), runtime failover hands the un-flattened top-level `anyOf` to OpenAI and reproduces the `HassStartTimer` schema 400 — and `_is_retryable` does not classify schema 400s as chain-advance errors, so the turn hard-fails instead of falling through. Symmetric mild case: an OpenAI primary that fails over hands the lossy flattened schema to a union-capable fallback.
+**What:** `_bind_model_tools` now re-runs the provider-gated schema passes per chain member (`_tools_for_chain_member`, `agent/graph.py`), which fixed the field failure (Ollama primary, Gemini fallback, `any_of[0].required` 400, 2026-10-03). Two leftovers: (1) the passes are subtractive and run on the primary's already-shaped list, so an OpenAI/Anthropic/Gemini primary still hands its lossy flattened or sanitized schema to a union-capable fallback (Ollama); (2) `_is_retryable` (`core/fallback.py`) does not classify an invalid-function-schema 400 as a chain-advance error, so a novel rejected shape on a middle member hard-fails the wrapper and relies on the graph-level drop-and-retry, which re-walks the chain from the primary.
 
-**Why:** Found by red-team review during the v3.28.1 ship. The same latent pattern has existed for the Gemini sanitizer since v3.26.1 (#536); no field report yet, because it requires a mixed-provider chain plus (for the OpenAI leg) a timer-capable voice device. Fixing it properly is a `FallbackChatModel` restructuring, out of scope for the v3.28.1 fix.
+**Why:** Neither breaks a turn today: (1) loses a constraint the model still sees as a description hint; (2) costs a retry. Members are identified by `_llm_type`, so a new provider class needs an entry in `_LLM_TYPE_PROVIDERS`.
 
-**How to apply:** Format tools per chain member — have `FallbackChatModel.bind_tools` re-run the provider-gated normalisation per member provider type (chain entries already carry provider entry ids), or bind provider-specific tool lists when building the chain. Minimum viable: extend `_is_retryable` to treat invalid-function-schema 400s as chain-advance errors.
+**How to apply:** For (1), keep the un-normalised schema in graph state and normalise from it per member. For (2), treat a schema 400 as retryable in `_is_retryable`.
 
-**Effort:** M
-**Priority:** P2
-**Depends on:** v3.28.1
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
 
 ---
 
