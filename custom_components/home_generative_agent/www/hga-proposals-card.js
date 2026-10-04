@@ -154,7 +154,7 @@ const HGA_PROPOSALS_I18N = {
     dedupe_cumulative_energy_sensor:
       "Kumulativní senzor energie (celkem kWh), nemůže se stát pravidlem",
     dedupe_unknown_network_key:
-      "Odkazuje na síťové zařízení nebo nastavení, které v datech routeru chybí",
+      "Odkazuje na klíč síťového klienta nebo nastavení, který v datech routeru není",
     dedupe_novel: "Nový kandidát",
     dedupe_unknown: "Neznámé",
     status_draft: "koncept",
