@@ -7,9 +7,11 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+## [3.43.2] - 2026-10-03
+
 ### Fixed
 
-- A fallback chain that mixes providers failed the turn when it failed over, instead of answering from the fallback. With a local primary (Ollama) and Gemini as the fallback, an unreachable primary produced "Invalid argument provided to Gemini: 400 ... any_of[0].required: only allowed for OBJECT type": tool schemas were shaped for the primary provider only and the same list was handed to every provider in the chain. The same happened, along with a log warning per tool ("Key 'additionalProperties' is not supported in schema"), when the primary was already down at startup and the fallback was selected at setup. Each provider now gets tool schemas shaped for it (Gemini, OpenAI, OpenAI-compatible and Anthropic fallbacks are all covered). The safety net that drops a tool a provider rejects also now recognises Gemini's real error text, which it previously missed.
+- A fallback chain that mixes providers failed the turn when it failed over, instead of answering from the fallback. With a local primary (Ollama) and Gemini as the fallback, an unreachable primary produced "Invalid argument provided to Gemini: 400 ... any_of[0].required: only allowed for OBJECT type": tool schemas were shaped for the primary provider only and the same list was handed to every provider in the chain. The same happened, along with a log warning per tool ("Key 'additionalProperties' is not supported in schema"), when the primary was already down at startup and the fallback was selected at setup. Each provider now gets tool schemas shaped for it (Gemini, OpenAI, OpenAI-compatible and Anthropic fallbacks are all covered). The safety net that drops a tool a provider rejects also now recognises Gemini's real error text, which it previously missed ([#712](https://github.com/goruck/home-generative-agent/pull/712)).
 
 ## [3.43.1] - 2026-10-03
 
