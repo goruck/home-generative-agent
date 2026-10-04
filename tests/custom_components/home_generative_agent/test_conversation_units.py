@@ -34,6 +34,7 @@ from custom_components.home_generative_agent.const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
     CONF_NOTIFY_SERVICE,
     CONF_TOOL_EXCLUSIONS,
+    TOOL_SUBSET_PROMPT,
 )
 from custom_components.home_generative_agent.core.utils import (
     gather_store_puts_in_chunks,
@@ -1961,7 +1962,13 @@ def test_render_system_prompt_says_the_tools_are_a_subset(
     stable, _ = _render_entity({})._async_render_system_prompt(
         MagicMock(), None, llm_api, has_tools=True
     )
-    assert "could not find a suitable tool" in stable
+    assert TOOL_SUBSET_PROMPT.strip() in stable
+    assert "Never say you\nhave no access to device history." in stable
+    # Scoped to a missing tool: tool errors stay under the retry rule.
+    assert (
+        "It does\nnot apply when a tool you called returned an error or no data."
+        in stable
+    )
     assert stable.index("small subset picked") < stable.index("Always call tools again")
 
     stable, _ = _render_entity({})._async_render_system_prompt(
