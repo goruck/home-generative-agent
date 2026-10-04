@@ -843,6 +843,7 @@ _KNOWN_TYPE_LABEL_KEYS = {
     "zwave_inclusion_active": "type_zwave_inclusion_active",
     "radio_coordinator_update_pending": "type_radio_coordinator_update_pending",
     "appliance_power_duration": "type_appliance_power_duration",
+    "low_battery_sensors": "type_low_battery_sensors",
 }
 
 

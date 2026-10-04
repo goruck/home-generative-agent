@@ -7,6 +7,10 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- Sentinel pushes for a low-battery rule approved from discovery now carry a readable subtitle, "Low battery" (Czech: "Slabá baterie"), in place of the rule's internal id ("V1 subject sensor predicate low battery night any"). The `low_battery_sensors` template had no curated label, so the subtitle, the batch summary, the snooze confirmation, and the explanation text used as the push body when the model call fails fell back to the slugified rule id ([#696](https://github.com/goruck/home-generative-agent/pull/696), @hruba202).
+
 ## [3.43.2] - 2026-10-03
 
 ### Fixed
