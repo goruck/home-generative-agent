@@ -74,12 +74,15 @@ from custom_components.home_generative_agent.const import (
 
 from ..core.fallback import (  # noqa: TID252
     DROPPABLE_SAMPLING_PARAMS,
+    FallbackChatModel,
     ainvoke_dropping_unsupported_params,
     unsupported_sampling_param_in_chain,
 )
 from ..core.prompt_cache import (  # noqa: TID252
+    ANTHROPIC_LLM_TYPE,
     adapt_system_message_for_model,
     build_system_message,
+    concrete_chat_model,
 )
 from ..core.utils import extract_final  # noqa: TID252
 from .automation_targets import AUTOMATION_REFUSAL_PREFIX
@@ -1864,6 +1867,68 @@ def _flatten_top_level_union(schema: dict[str, Any]) -> dict[str, Any]:
     return schema
 
 
+def _flatten_union_for_provider(
+    parameters: dict[str, Any], provider: str | None, name: str
+) -> dict[str, Any]:
+    """Flatten a top-level union for the providers that reject one."""
+    if provider not in _FLATTEN_UNION_PROVIDERS:
+        return parameters
+    flattened = _flatten_top_level_union(parameters)
+    if flattened is not parameters:
+        LOGGER.debug(
+            "Flattened top-level union in %s tool schema for %s", name, provider
+        )
+    return flattened
+
+
+def _sanitize_for_gemini(
+    parameters: dict[str, Any], provider: str | None
+) -> dict[str, Any]:
+    """Apply the Gemini-only subtractive schema passes."""
+    if provider != "gemini":
+        return parameters
+    return _strip_additional_properties(_sanitize_any_of_required(parameters))
+
+
+# ``_llm_type`` of each chat model class the integration builds, mapped to the
+# provider name the schema passes are gated on. ``openai_compatible`` shares
+# ChatOpenAI and the same passes, so it needs no entry of its own.
+_LLM_TYPE_PROVIDERS = {
+    "chat-google-generative-ai": "gemini",
+    "openai-chat": "openai",
+    ANTHROPIC_LLM_TYPE: "anthropic",
+}
+
+
+def _tools_for_chain_member(model: Any, tools: list[Any]) -> list[Any]:
+    """
+    Re-normalise formatted tools for the model they are about to be bound to.
+
+    ``_format_and_dedupe_tools()`` shapes schemas for the configured primary
+    provider, but a mixed-provider chain binds the list to every member: an
+    Ollama primary failing over to Gemini handed Gemini the un-sanitized
+    ``anyOf`` and the turn died on a 400. Both passes are idempotent, so
+    running them on the primary's own list changes nothing.
+    """
+    concrete = concrete_chat_model(model)
+    provider = _LLM_TYPE_PROVIDERS.get(getattr(concrete, "_llm_type", ""))
+    if provider is None:
+        return tools
+    adapted: list[Any] = []
+    for tool in tools:
+        function = tool.get("function") if isinstance(tool, dict) else None
+        parameters = function.get("parameters") if isinstance(function, dict) else None
+        if not isinstance(function, dict) or not isinstance(parameters, dict):
+            adapted.append(tool)
+            continue
+        parameters = _flatten_union_for_provider(
+            parameters, provider, str(function.get("name"))
+        )
+        parameters = _sanitize_for_gemini(parameters, provider)
+        adapted.append({**tool, "function": {**function, "parameters": parameters}})
+    return adapted
+
+
 def _format_and_dedupe_tools(
     raw_tools: list[RawTool],
     provider: str | None = None,
@@ -1901,15 +1966,7 @@ def _format_and_dedupe_tools(
             # level of `parameters` (HassStartTimer / HassDecreaseTimer).
             # Subtractive, so gated — Ollama honours the union and keeps it,
             # and the Gemini pass below needs the anyOf intact to restate it.
-            if provider in _FLATTEN_UNION_PROVIDERS:
-                flattened = _flatten_top_level_union(parameters)
-                if flattened is not parameters:
-                    LOGGER.debug(
-                        "Flattened top-level union in %s tool schema for %s",
-                        name,
-                        provider,
-                    )
-                parameters = flattened
+            parameters = _flatten_union_for_provider(parameters, provider, name)
             if not parameters.get("type"):
                 parameters["type"] = "object"
         # OpenAI requires 'properties' on all type:object schemas.
@@ -1920,9 +1977,7 @@ def _format_and_dedupe_tools(
         # Gemini alone rejects 'required' inside anyOf branches. This pass is
         # subtractive — it would delete HA's "at least one target" constraint
         # for providers that can honour it — so it is gated on the provider.
-        if provider == "gemini":
-            parameters = _sanitize_any_of_required(parameters)
-            parameters = _strip_additional_properties(parameters)
+        parameters = _sanitize_for_gemini(parameters, provider)
         selected_tools.append(
             {
                 "type": "function",
@@ -2652,7 +2707,11 @@ def _rejected_tool_index(err: BaseException, max_depth: int = 10) -> int | None:
         if current is None:
             return None
         message = str(current)
-        if "schema" in message and (match := _TOOL_SCHEMA_REJECTION_RE.search(message)):
+        match = _TOOL_SCHEMA_REJECTION_RE.search(message)
+        # "tools.N." is loose enough to need the word "schema" beside it;
+        # Gemini's "function_declarations[N]" only ever addresses a tool
+        # declaration, and its real 400 never says "schema".
+        if match and (match.group(2) or "schema" in message):
             index = match.group(1) or match.group(2)
             if len(index) <= _MAX_TOOL_INDEX_DIGITS:
                 return int(index)
@@ -2755,7 +2814,14 @@ def _bind_model_tools(
     """Bind tools to a model in a worker thread."""
     if disable_reasoning:
         model = model.with_config(config={"configurable": {"reasoning": False}})
-    return model.bind_tools(selected_tools)
+    if isinstance(model, FallbackChatModel):
+        return model.bind_tools(
+            selected_tools, tools_for_member=_tools_for_chain_member
+        )
+    # Not only chains: when the primary is down at setup the chat model IS the
+    # fallback provider, unwrapped, while tools are still shaped for the
+    # configured primary.
+    return model.bind_tools(_tools_for_chain_member(model, selected_tools))
 
 
 async def _search_memories(store: BaseStore, user_id: str, query: str | None) -> list:
