@@ -15,8 +15,12 @@ import httpx
 import openai
 import psycopg
 import pytest
+from homeassistant.components.homeassistant.exposed_entities import (
+    async_expose_entity,
+)
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.setup import async_setup_component
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -64,6 +68,11 @@ async def test_get_existing_entity_id_prefers_canonical_over_numbered_duplicate(
     hass.states.async_set(
         "binary_sensor.haustur_2", "off", {"friendly_name": "Haustür"}
     )
+    # Only Assist-exposed entities resolve (issue #716); a binary_sensor
+    # without a device class is not auto-exposed.
+    assert await async_setup_component(hass, "homeassistant", {})
+    for eid in ("binary_sensor.haustur", "binary_sensor.haustur_2"):
+        async_expose_entity(hass, "conversation", eid, should_expose=True)
 
     result = await agent_tools._get_existing_entity_id("Haustür", hass, "binary_sensor")
     assert result == "binary_sensor.haustur"
@@ -80,6 +89,9 @@ async def test_get_entity_history_returns_error_dict_on_genuinely_ambiguous_enti
     hass.states.async_set(
         "binary_sensor.front_door_b", "off", {"friendly_name": "Front Door"}
     )
+    assert await async_setup_component(hass, "homeassistant", {})
+    for eid in ("binary_sensor.front_door_a", "binary_sensor.front_door_b"):
+        async_expose_entity(hass, "conversation", eid, should_expose=True)
 
     config = {"configurable": {"hass": hass}}
     result = await history_tool(
@@ -91,7 +103,7 @@ async def test_get_entity_history_returns_error_dict_on_genuinely_ambiguous_enti
     )
 
     assert "error" in result
-    assert "Front Door" in result["error"]
+    assert "Multiple 'binary_sensor' entities found for 'Front Door'" in result["error"]
 
 
 @pytest.mark.asyncio

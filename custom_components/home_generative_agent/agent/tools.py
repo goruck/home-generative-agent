@@ -96,6 +96,8 @@ from .automation_pin import find_critical_automation_calls
 from .automation_targets import (
     AUTOMATION_REFUSAL_PREFIX,
     describe_missing_targets,
+    exposed_to_assist,
+    exposure_available,
     find_missing_automation_targets,
     normalize_notify_service,
     service_exists,
@@ -141,10 +143,19 @@ async def resolve_entity_ids(  # noqa: D417
         return {}
 
     hass: HomeAssistant = config["configurable"]["hass"]
+    # A fuzzy match may only name an entity exposed to Assist (issue #716),
+    # like add_automation's suggestions: otherwise a near-miss id would
+    # confirm that a hidden device exists. Without the exposure registry no
+    # entity can be shown to be exposed, so no fuzzy match is offered.
+    can_check_exposure = exposure_available(hass)
+
+    def _allow(entity_id: str) -> bool:
+        return can_check_exposure and exposed_to_assist(hass, entity_id)
+
     resolved: dict[str, str] = {}
     for entity_id in entity_ids:
         if isinstance(entity_id, str):
-            resolved[entity_id] = _resolve_entity_id(entity_id, hass)
+            resolved[entity_id] = _resolve_entity_id(entity_id, hass, _allow)
     return resolved
 
 
@@ -1388,6 +1399,13 @@ async def _get_existing_entity_id(
     """
     Lookup an existing entity by its friendly name.
 
+    Only entities exposed to Assist resolve (issue #716): exposure is the
+    user's control over what the assistant may read, and a caller at a voice
+    satellite can name an entity the model was never shown. A hidden entity
+    raises the same "not found" error as a nonexistent one, so the reply does
+    not confirm it exists. Without Home Assistant's exposure registry nothing
+    can be shown to be exposed, so nothing resolves.
+
     Raises ValueError if not found, ambiguous, or invalid domain/entity_id.
     """
     if not isinstance(name, str) or not name.strip():
@@ -1400,13 +1418,24 @@ async def _get_existing_entity_id(
     target = name.strip().lower()
     prefix = f"{domain}."
     candidates: list[str] = []
+    can_check_exposure = exposure_available(hass)
+    if not can_check_exposure:
+        LOGGER.warning(
+            "Assist exposure registry unavailable; entity history lookups "
+            "resolve nothing until it is"
+        )
 
     for state in hass.states.async_all():
         eid = state.entity_id
         if not eid.startswith(prefix):
             continue
         fn = state.attributes.get(ATTR_FRIENDLY_NAME, "")
-        if isinstance(fn, str) and fn.strip().lower() == target:
+        if (
+            isinstance(fn, str)
+            and fn.strip().lower() == target
+            and can_check_exposure
+            and exposed_to_assist(hass, eid)
+        ):
             candidates.append(eid)
 
     if not candidates:
