@@ -1928,7 +1928,7 @@ def test_display_type_low_battery_template_label() -> None:
     assert _display_type(finding) == "Low battery"
     hass = DummyHass()
     hass.config.language = "cs"
-    assert _display_type(finding, hass) == "Slabá baterie"
+    assert _display_type(finding, hass) == "Slabá baterie"  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
