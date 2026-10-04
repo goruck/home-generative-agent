@@ -178,6 +178,6 @@ def test_card_language_resolution_and_fallbacks() -> None:
         "weird_new",
         "Neznámé",
         "not_a_real_reason",
-        "kumulativní senzor energie",
+        "Kumulativní senzor energie (celkem kWh), nemůže se stát pravidlem",
         "už aktivní",
     ]

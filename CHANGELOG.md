@@ -11,6 +11,10 @@ their own. See [RELEASING.md](RELEASING.md).
 
 - The Sentinel proposals card now follows your Home Assistant profile language: Czech when the profile is set to Czech, English otherwise (other languages fall back to English). Section titles, buttons, field labels, progress and error messages, the dedupe reasons, and the known proposal statuses are translated at display time; unknown statuses and reasons are shown as they are. Candidate titles and summaries are shown as the discovery model wrote them, untranslated, and the text pre-filled into a GitHub rule request stays English. Long candidate ids now wrap inside the card instead of overflowing a narrow panel. The browser caches the card for up to a month, so after updating, bump the query string on the card's dashboard resource URL (or hard-refresh) to see the change ([#697](https://github.com/goruck/home-generative-agent/pull/697), @hruba202).
 
+### Changed
+
+- The Czech wording of five dedupe reasons on the Sentinel proposals card (Filtered Discovery Candidates) now explains why a candidate was filtered, matching the English text, instead of being a short translation of the reason code. Affects `existing_identity_hash`, `derived_only_paths`, `entity_text_mismatch`, `cumulative_energy_sensor` and `unknown_network_key`. As with any card change, bump the query string on the card's dashboard resource URL (or hard-refresh) after updating.
+
 ### Fixed
 
 - Sentinel pushes for a low-battery rule approved from discovery now carry a readable subtitle, "Low battery" (Czech: "Slabá baterie"), in place of the rule's internal id ("V1 subject sensor predicate low battery night any"). The `low_battery_sensors` template had no curated label, so the subtitle, the batch summary, the snooze confirmation, and the explanation text used as the push body when the model call fails fell back to the slugified rule id ([#696](https://github.com/goruck/home-generative-agent/pull/696), @hruba202).

@@ -145,11 +145,16 @@ const HGA_PROPOSALS_I18N = {
     dedupe_batch_duplicate: "Duplicita v této dávce zjišťování",
     dedupe_existing_semantic_key:
       "Už pokryto aktivním, čekajícím nebo nedávným nápadem na pravidlo",
-    dedupe_existing_identity_hash: "hash stávající identity",
-    dedupe_derived_only_paths: "pouze odvozené cesty",
-    dedupe_entity_text_mismatch: "nesoulad textu entity",
-    dedupe_cumulative_energy_sensor: "kumulativní senzor energie",
-    dedupe_unknown_network_key: "neznámý síťový klíč",
+    dedupe_existing_identity_hash:
+      "Už pokryto aktivním, čekajícím nebo nedávným nápadem na pravidlo (shoda podle identity)",
+    dedupe_derived_only_paths:
+      "Odkazuje jen na odvozené hodnoty, žádnou konkrétní entitu",
+    dedupe_entity_text_mismatch:
+      "Text jmenuje entitu, kterou její podklady neuvádějí",
+    dedupe_cumulative_energy_sensor:
+      "Kumulativní senzor energie (celkem kWh), nemůže se stát pravidlem",
+    dedupe_unknown_network_key:
+      "Odkazuje na síťové zařízení nebo nastavení, které v datech routeru chybí",
     dedupe_novel: "Nový kandidát",
     dedupe_unknown: "Neznámé",
     status_draft: "koncept",
