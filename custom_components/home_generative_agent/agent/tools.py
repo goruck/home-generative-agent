@@ -1344,7 +1344,14 @@ async def _fetch_data_from_long_term_stats(
 
 def _as_utc(dattim: str, default: datetime, error_message: str) -> datetime:
     """
-    Convert a string representing a datetime into a datetime.datetime.
+    Convert a local wall-clock datetime string into a UTC datetime.datetime.
+
+    The string is read as Home Assistant's local time and any UTC offset in it
+    is ignored. The model sees only the local wall-clock time and a timezone
+    name, never an offset, so an offset it writes is a guess: on a
+    America/Los_Angeles install qwen3.8 labelled local times "+00:00" in 4 of
+    14 calls, which moved the window seven hours and missed a morning
+    departure. Reading the wall clock locally also gets DST right.
 
     Args:
         dattim: String representing a datetime.
@@ -1365,7 +1372,8 @@ def _as_utc(dattim: str, default: datetime, error_message: str) -> datetime:
     if parsed_datetime is None:
         raise HomeAssistantError(error_message)
 
-    return dt_util.as_utc(parsed_datetime)
+    local = parsed_datetime.replace(tzinfo=dt_util.get_default_time_zone())
+    return dt_util.as_utc(local)
 
 
 # Allow domains like "sensor", "binary_sensor", "camera", etc.
@@ -1443,8 +1451,10 @@ async def get_entity_history(  # noqa: D417
         domains: List of Home Assistant domains associated with the friendly names,
             for example, ["binary_sensor", "light"]. These must be in the same order as
             friendly_names.
-        local_start_time: Start of local time history period in "%Y-%m-%dT%H:%M:%S%z".
-        local_end_time: End of local time history period in "%Y-%m-%dT%H:%M:%S%z".
+        local_start_time: Start of the period in "%Y-%m-%dT%H:%M:%S" local time.
+            Use the home's local wall-clock time and no UTC offset.
+        local_end_time: End of the period in "%Y-%m-%dT%H:%M:%S" local time.
+            Use the home's local wall-clock time and no UTC offset.
 
     Returns:
         Entity histories in local time format, for example:
