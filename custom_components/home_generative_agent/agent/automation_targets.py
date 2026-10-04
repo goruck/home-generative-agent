@@ -329,7 +329,7 @@ def _without_disabled(node: Any, depth: int = 0) -> Any:
     return node
 
 
-def _exposure_available(hass: HomeAssistant) -> bool:
+def exposure_available(hass: HomeAssistant) -> bool:
     """Return True if Home Assistant's exposure registry is up."""
     from homeassistant.components.homeassistant.const import (  # noqa: PLC0415
         DATA_EXPOSED_ENTITIES,
@@ -341,7 +341,7 @@ def _exposure_available(hass: HomeAssistant) -> bool:
     return DATA_EXPOSED_ENTITIES in hass.data
 
 
-def _exposed(hass: HomeAssistant, entity_id: str) -> bool:
+def exposed_to_assist(hass: HomeAssistant, entity_id: str) -> bool:
     """
     Return True if the conversation assistant may see this entity.
 
@@ -369,7 +369,7 @@ class _SuggestionIndex:
     def _is_exposed(self, entity_id: str) -> bool:
         """Memoised exposure lookup: HA writes an option on a first ask."""
         if entity_id not in self._exposed:
-            self._exposed[entity_id] = _exposed(self.hass, entity_id)
+            self._exposed[entity_id] = exposed_to_assist(self.hass, entity_id)
         return self._exposed[entity_id]
 
     def _domain(self, domain: str) -> list[tuple[str, str, str]]:
@@ -405,7 +405,7 @@ class _SuggestionIndex:
         Returns None once the per-call budget is spent, which is not the
         same as finding nothing.
         """
-        if self.lookups_left <= 0 or not _exposure_available(self.hass):
+        if self.lookups_left <= 0 or not exposure_available(self.hass):
             return None
         self.lookups_left -= 1
 

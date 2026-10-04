@@ -131,7 +131,7 @@ The agent has access to HA LLM API tools and the following custom LangChain tool
 | `write_yaml_file` | Write YAML to `/config/www/` and return a `/local/...` URL |
 | `confirm_sensitive_action` | Confirm and execute a pending critical action with a PIN |
 | `alarm_control` | Arm or disarm an alarm control panel with the alarm code |
-| `get_entity_history` | Query HA database for entity history |
+| `get_entity_history` | Query HA database for entity history. Resolves only entities exposed to Assist; a hidden entity answers like a nonexistent one, so its existence is not confirmed |
 | `resolve_entity_ids` | Resolve entity IDs from friendly names, areas, labels, and domains |
 | ~~`get_current_device_state`~~ | ~~Get the current state of one or more HA devices~~ (deprecated; replaced by native HA GetLiveContext tool) |
 
