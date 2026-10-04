@@ -496,6 +496,19 @@ validation.
 
 ---
 
+### A refused history lookup is logged at ERROR with a traceback
+
+**What:** `get_entity_history` (`agent/tools.py`) catches the `ValueError` from `_get_existing_entity_id` and logs it with `LOGGER.exception("Invalid name %s or domain: %s", ...)`, which writes an ERROR line and a full traceback. Since [#718](https://github.com/goruck/home-generative-agent/pull/718) that path is also the normal answer for an entity hidden from Assist, and it was already the answer for a misheard or mistyped name, so expected refusals now show up in the HA log as errors with stack traces. The live box logged one for a deliberate hidden-light test on 2026-10-04.
+
+**Why:** Left out of #718 to keep that PR to the exposure gate. Nothing breaks: the tool still returns `{"error": ...}` to the model. The cost is log noise that looks like a fault, and a user or reviewer reading the log can mistake a privacy refusal for a crash.
+
+**How to apply:** Log the `ValueError` branch at WARNING (or DEBUG) with the message only, no traceback, and keep `exception` for unexpected errors. Pin it with a `caplog` test that a hidden entity produces no ERROR record and no `exc_info`.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
 ### Sentinel sync sampling-retry can outlive the triage timeout
 
 **What:** `run_sentinel_model_call`'s executor leg now runs `invoke_dropping_unsupported_params` in the worker thread. The thread already outlives `asyncio.timeout` cancellation (threads can't be cancelled); the drop-retry can add up to two more provider HTTP calls after the sentinel caller has timed out and moved on.
