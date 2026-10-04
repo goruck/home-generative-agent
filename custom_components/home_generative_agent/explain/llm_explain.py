@@ -179,6 +179,8 @@ _KNOWN_TYPE_LABELS = {
     "zigbee_permit_join_open": "Zigbee pairing is open",
     "zwave_inclusion_active": "Z-Wave inclusion is active",
     "radio_coordinator_update_pending": "Radio coordinator update available",
+    "appliance_power_duration": "Appliance power duration",
+    "low_battery_sensors": "Low battery",
 }
 
 

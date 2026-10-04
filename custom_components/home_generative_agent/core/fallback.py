@@ -345,16 +345,30 @@ class FallbackChatModel:
         """Return internal config dict (for video_analyzer compat)."""
         return self._config
 
-    def bind_tools(self, tools: list[Any], **kwargs: Any) -> FallbackChatModel:
-        """Return a new FallbackChatModel with tools bound to each model."""
+    def bind_tools(
+        self,
+        tools: list[Any],
+        *,
+        tools_for_member: Callable[[Any, list[Any]], list[Any]] | None = None,
+        **kwargs: Any,
+    ) -> FallbackChatModel:
+        """
+        Return a new FallbackChatModel with tools bound to each model.
+
+        Members can be different providers with different schema rules, so
+        ``tools_for_member(model, tools)`` may reshape the list per member.
+        """
         bound_chain: list[tuple[Any, str, str]] = []
         rebind_sources: list[tuple[Any, list[Any], dict[str, Any]] | None] = []
         for model, deployment, provider_id in self.chain:
             if hasattr(model, "bind_tools"):
-                bound_chain.append(
-                    (model.bind_tools(tools, **kwargs), deployment, provider_id)
+                member_tools = (
+                    tools_for_member(model, tools) if tools_for_member else tools
                 )
-                rebind_sources.append((model, list(tools), dict(kwargs)))
+                bound_chain.append(
+                    (model.bind_tools(member_tools, **kwargs), deployment, provider_id)
+                )
+                rebind_sources.append((model, list(member_tools), dict(kwargs)))
             else:
                 bound_chain.append((model, deployment, provider_id))
                 rebind_sources.append(None)

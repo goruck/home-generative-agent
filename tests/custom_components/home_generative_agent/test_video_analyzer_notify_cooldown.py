@@ -741,3 +741,19 @@ async def test_overlapping_analyses_each_keep_their_own_names(
         _BatchNotifyContext(recognized=["Sam"], batch_names=["Sam", "Unknown Person"]),
         _BatchNotifyContext(recognized=["Lindo"], batch_names=["Lindo"]),
     ]
+
+
+@pytest.mark.asyncio
+async def test_only_a_sounding_push_counts_as_notified(
+    va: VideoAnalyzer, clock: _Clock
+) -> None:
+    """A quiet card update must not anchor caption dedup (it is not an alert)."""
+    context = _context()
+    first = await va._dispatch_notification(_CAMERA, "first", _IMG, context)
+    clock.advance(10)
+    second = await va._dispatch_notification(_CAMERA, "second", _IMG, context)
+
+    assert _sounds(_calls(va)[0])
+    assert not _sounds(_calls(va)[1])
+    assert first is True
+    assert second is False

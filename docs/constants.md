@@ -243,7 +243,7 @@ This document covers the named constants that affect integration behaviour, orga
 | `VIDEO_ANALYZER_SCAN_INTERVAL` | `const.py` | `1.5` (s) | Queue polling interval for the video analysis loop |
 | `VIDEO_ANALYZER_SNAPSHOT_ROOT` | `const.py` | `/media/snapshots` | Root directory for saved camera snapshots |
 | `VIDEO_ANALYZER_TIME_OFFSET` | `const.py` | `15` (min) | Lookback window for fetching recent camera activity when building a video batch |
-| `VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC` | `const.py` | `1800` (s, 30 min) | Lexical deduplication window. Artifact captions within this window are suppressed even when the vector score is below threshold. |
+| `VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC` | `const.py` | `1800` (s, 30 min) | Caption deduplication window. A caption of a real subject in action is suppressed when a match at or above the similarity threshold was sent as a notification within this window, and notifies again otherwise. Artifact captions within this window are suppressed even when the vector score is below threshold. |
 | `VIDEO_ANALYZER_SIMILARITY_THRESHOLD` | `const.py` | `0.85` | Cosine similarity threshold for caption deduplication. Captions above this score are considered duplicates and suppressed. |
 | `RECOMMENDED_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S` | `const.py` | `0` (s, off) | Default for the per-camera notification cooldown option (`video_analyzer_notification_cooldown_s`). |
 | `VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_MAX_S` | `const.py` | `600` (s) | Largest value the notification cooldown option accepts. Kept short because push delivery cannot be confirmed: it bounds how long quiet updates can follow a lost alert. |
@@ -611,6 +611,11 @@ These constants live outside `const.py` in individual modules. They affect runti
 | `_VIDEO_QUEUE_BACKLOG_THRESHOLD` | `2` | Drop oldest queued frames when the backlog exceeds this depth |
 | `_SUMMARY_MAX_FRAMES` | `8` | Maximum deduplicated frame descriptions fed to the summary model (newest kept). The notification reference image is chosen from these frames. |
 | `_NOTIFY_PROTECT_TTL_SEC` | `1800` (s) | How long a snapshot attached to a notification is protected from retention pruning. Also the fresh protection window granted at startup to pre-restart snapshots younger than this when they are seeded into retention. |
+| `_CAPTION_SEARCH_LIMIT` | `10` | The camera's best-scoring stored captions the caption-deduplication check considers. |
+| `_CAPTION_SEARCH_WIDE_LIMIT` | `50` | Rows the similarity search asks the store for. The store matches camera names by prefix (`side` also returns `side_gate`); only the camera's own captions are kept, and the extra rows make it less likely that another camera's crowd them out (they still can when that camera has many closer matches; the notification is then sent). |
+| `_RECENT_CAPTION_SCAN_PAGE` | `50` | Page size of the recent-caption scan ([#704](https://github.com/goruck/home-generative-agent/issues/704)). When a caption with a real subject in action would re-notify as a stale match and no match inside the dedupe window is among the similarity search's results, the camera's stored captions are read newest first and those notified inside the window are compared with it directly, so a recent near-duplicate outranked or crowded out by older captions still suppresses (`recent_match`). |
+| `_RECENT_CAPTION_SCAN_MAX_PAGES` | `4` | Upper bound on pages read by the recent-caption scan (200 notified captions, counted across cameras whose names share this camera's name as a prefix). The scan stops earlier at the first page that reaches past the dedupe window. |
+| `_RECENT_CAPTION_SCAN_TIMEOUT_SEC` | `10` (s) | Budget for the recent-caption scan (store read plus one embedding call). On timeout or any error the notification is sent. |
 | `_METRICS_REPORT_INTERVAL_SEC` | `3600` (s) | How often the per-camera metrics line (counters plus latency percentiles) is logged |
 
 ### `core/video_helpers.py`

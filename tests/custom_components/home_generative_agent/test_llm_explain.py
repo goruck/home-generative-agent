@@ -12,6 +12,7 @@ import pytest
 
 from custom_components.home_generative_agent.core.utils import SentinelLLMDeferredError
 from custom_components.home_generative_agent.explain.llm_explain import (
+    _KNOWN_TYPE_LABELS,
     LLMExplainer,
     _display_type,
     _friendly_type,
@@ -25,7 +26,11 @@ from custom_components.home_generative_agent.explain.prompts import (
 )
 from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
 from custom_components.home_generative_agent.sentinel.notifier import (
+    _KNOWN_TYPE_LABEL_KEYS,
     _redact_if_sensitive,
+)
+from custom_components.home_generative_agent.sentinel.notifier_messages import (
+    notif_msg,
 )
 
 
@@ -278,6 +283,40 @@ def test_display_type_prefers_template_label_for_slug_rule_ids() -> None:
         is_sensitive=False,
     )
     assert _display_type(finding) == "Motion at night while away"
+
+
+def test_explain_labels_match_notifier_label_keys() -> None:
+    """
+    The explainer's own English label table must mirror the notifier's.
+
+    A key present only in the notifier table means the push subtitle is
+    curated while the explainer prompt and its ``_compact_fallback`` body
+    (used as the push text when the model call fails) still show the raw
+    slugified rule id; a key present only in the explainer table is the
+    same bug on the push subtitle, batch summary, and snooze confirmation.
+    The English text must agree too, so one notification never carries two
+    names for the same rule (PR #696 review).
+    """
+    assert set(_KNOWN_TYPE_LABEL_KEYS) == set(_KNOWN_TYPE_LABELS)
+    for anomaly_type, message_key in _KNOWN_TYPE_LABEL_KEYS.items():
+        assert notif_msg(None, message_key) == _KNOWN_TYPE_LABELS[anomaly_type], (
+            anomaly_type
+        )
+
+
+def test_display_type_low_battery_template_label() -> None:
+    """A dynamic low-battery rule explains as 'Low battery', not its slug."""
+    finding = AnomalyFinding(
+        anomaly_id="slug-battery",
+        type="v1_subject_sensor_predicate_low_battery_night_any",
+        severity="low",
+        confidence=0.7,
+        triggering_entities=["sensor.hall_battery"],
+        evidence={"template_id": "low_battery_sensors"},
+        suggested_actions=["check_sensor"],
+        is_sensitive=False,
+    )
+    assert _display_type(finding) == "Low battery"
 
 
 def test_friendly_type_motion_while_away() -> None:
