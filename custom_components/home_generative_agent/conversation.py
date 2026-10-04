@@ -94,6 +94,7 @@ from .const import (
     SIGNAL_TOOL_INDEX_UPDATED,
     SUBENTRY_TYPE_MODEL_PROVIDER,
     TOOL_CALL_ERROR_SYSTEM_MESSAGE,
+    TOOL_SUBSET_PROMPT,
     VOICE_ACK_TIMING_TOOL_CALL,
     VOICE_ACK_TIMING_TURN_START,
     VOICE_ACK_TIMINGS,
@@ -1376,12 +1377,12 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         Render the system instructions as a (stable, volatile) pair.
 
         The stable part — instructions, timezone, the PIN and YAML-mode
-        guidance, the tool-error rule, the LLM APIs' exposed-entity context —
-        is identical from one turn to the next and forms the prefix a cloud
-        provider can serve from cache. The volatile part is Home Assistant's
-        date/time line, which changes every second and therefore must come
-        *after* the stable part (issue #617); the graph appends the other
-        per-turn context (memories, summary) behind it.
+        guidance, the tool-subset and tool-error rules, the LLM APIs'
+        exposed-entity context — is identical from one turn to the next and
+        forms the prefix a cloud provider can serve from cache. The volatile
+        part is Home Assistant's date/time line, which changes every second and
+        therefore must come *after* the stable part (issue #617); the graph
+        appends the other per-turn context (memories, summary) behind it.
         """
         options = self.entry.runtime_data.options
 
@@ -1393,6 +1394,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             else ""
         )
         tool_error_prompt = TOOL_CALL_ERROR_SYSTEM_MESSAGE if has_tools else ""
+        tool_subset_prompt = TOOL_SUBSET_PROMPT if has_tools else ""
         push_service = str(options.get(CONF_NOTIFY_SERVICE) or "").strip()
         push_prompt = (
             AUTOMATION_PUSH_SERVICE_PROMPT.format(
@@ -1419,6 +1421,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     + critical_prompt
                     + schema_prompt
                     + audit_prompt
+                    + tool_subset_prompt
                     + tool_error_prompt
                     + push_prompt
                 ),

@@ -56,6 +56,7 @@ from custom_components.home_generative_agent.const import (
     CONF_TOOL_RELEVANCE_THRESHOLD,
     CONF_TOOL_RETRIEVAL_LIMIT,
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
+    HISTORY_INTENT_REGEX,
     MAX_AFFIRMATIVE_FOLLOW_UP_WORDS,
     MAX_REFERENTIAL_FOLLOW_UP_WORDS,
     NON_OPEN_ACTUATION_KEYWORDS_REGEX,
@@ -1243,6 +1244,80 @@ async def _append_security_audit_tool(  # noqa: PLR0913
         return candidates
     fetched = await _get_tool_by_name(
         store, config, "audit_home_security", allowed_api_ids, live_tool_ids
+    )
+    return candidates if fetched is None else [*candidates, fetched]
+
+
+def _query_wants_history(query: str) -> bool:
+    """Return True when the query asks about past entity states or activity."""
+    return bool(re.search(HISTORY_INTENT_REGEX, query[:_MAX_INTENT_SCAN_CHARS]))
+
+
+# Trailing HUMAN turns that keep get_entity_history bound: the current message
+# plus the previous exchange. A follow-up ("and yesterday?", "the mudroom
+# lights") carries no history signal of its own and ranks on two words.
+_HISTORY_CONTEXT_HUMAN_TURNS = 2
+
+
+def _conversation_has_history_context(messages: Sequence[BaseMessage]) -> bool:
+    """
+    Return True when the previous turn was about past states.
+
+    Covers the second question of a history conversation, which issue #715
+    would otherwise reach again: the previous turn asked a history question or
+    called ``get_entity_history``, and the follow-up does not say so itself.
+    The tool call keeps a chain going ("and yesterday?", then "and the day
+    before?"). The current message is the caller's ``_query_wants_history``
+    check, so it is not scanned again here.
+    """
+    human_turns = 0
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            human_turns += 1
+            if human_turns >= _HISTORY_CONTEXT_HUMAN_TURNS and _query_wants_history(
+                _message_text(msg)
+            ):
+                return True
+            if human_turns >= _HISTORY_CONTEXT_HUMAN_TURNS:
+                return False
+        elif (isinstance(msg, ToolMessage) and msg.name == "get_entity_history") or (
+            isinstance(msg, AIMessage)
+            and any(
+                tc.get("name") == "get_entity_history"
+                for tc in [*msg.tool_calls, *msg.invalid_tool_calls]
+            )
+        ):
+            return True
+    return False
+
+
+async def _append_history_tool(  # noqa: PLR0913
+    candidates: list[RawTool],
+    store: BaseStore,
+    config: RunnableConfig,
+    query: str,
+    messages: Sequence[BaseMessage],
+    live_tool_ids: set[tuple[str, str]] | None,
+) -> list[RawTool]:
+    """
+    Force-bind ``get_entity_history`` when the conversation asks about the past.
+
+    A history question phrased around the device ("when did the mudroom
+    lights turn off today?") ranks entity-control and date/time tools above
+    the history tool, and a model that is not handed the tool tells the user
+    it has no access to history (issue #715). Appended outside the limit like
+    ``audit_home_security``, so it never evicts a RAG/safety selection. The
+    lookup is pinned to ``hga_local``: dispatch routes this name to the local
+    implementation, so the force-bind must not pull in another API's
+    same-named tool. A same-named tool that ranking already bound is left as
+    is, as before this step existed.
+    """
+    if any(t["name"] == "get_entity_history" for t in candidates) or not (
+        _query_wants_history(query) or _conversation_has_history_context(messages)
+    ):
+        return candidates
+    fetched = await _get_tool_by_name(
+        store, config, "get_entity_history", {"hga_local"}, live_tool_ids
     )
     return candidates if fetched is None else [*candidates, fetched]
 
@@ -2490,6 +2565,12 @@ async def _retrieve_tools(  # noqa: PLR0915
     # 3f. Force-bind audit_home_security for security-posture questions.
     all_candidates = await _append_security_audit_tool(
         all_candidates, store, config, query, allowed_api_ids, live_tool_ids
+    )
+
+    # 3g. Force-bind get_entity_history for questions about past states,
+    # including follow-ups to one. Before 3e so inclusions dedupe against it.
+    all_candidates = await _append_history_tool(
+        all_candidates, store, config, query, state["messages"], live_tool_ids
     )
 
     # 3e. Force-bind the user's always-included tools (issue #579). A
