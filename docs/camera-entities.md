@@ -257,7 +257,13 @@ Dropped sentinel frames are counted per camera in the `sentinel_dropped` field o
 
 Active only in `notify_on_anomaly` mode. Repeated low-value notifications are suppressed using two complementary mechanisms:
 
-**Semantic dedup:** The new caption is compared against recent captions using vector similarity. If the score meets or exceeds the similarity threshold (default 0.85), the notification is withheld. A matching caption from the last 30 minutes suppresses the notification whatever the scene shows. Beyond 30 minutes, a matching caption that describes a real subject doing something (a person, vehicle, package or animal that walks, arrives, waits and so on) notifies again; a matching static or empty-scene caption stays suppressed.
+**Semantic dedup:** The new caption is compared against the camera's stored captions using vector similarity. A match is a stored caption whose score meets or exceeds the similarity threshold (default 0.85).
+
+- A caption that describes a static or empty scene (a parked car, an empty porch) is withheld whenever it has a match, however old.
+- A caption that describes a real subject doing something (a person, vehicle, package or animal that walks, arrives, waits and so on) is withheld only when a matching caption was **sent as a notification in the last 30 minutes**. An older caption that matches more closely does not change that: any notified match in the window counts, not only the closest one (up to the 200 most recently notified captions are checked). A scene that continues therefore notifies again once 30 minutes have passed since its last notification, rather than staying quiet for as long as it lasts.
+- When face recognition reports an **Unknown Person** anywhere in the batch, the caption is withheld only when the matching notification in the last 30 minutes was itself for a batch with an Unknown Person. A stranger who lingers is deduplicated against their own notification; a resident who walked the same path a minute earlier never silences a stranger, because wording alone cannot tell them apart.
+- With the [notification cooldown](#notification-cooldown) on, only a notification that sounded counts. A quiet card update does not withhold a later caption.
+- Only the camera's own captions are compared. If the comparison cannot be completed (the database or the embedding model does not answer), the notification is sent.
 
 **Lexical fast path:** A 30-minute window suppresses repeated artifact captions (nighttime glare, monochrome blur, empty walkway descriptions) even when the vector score falls below the threshold.
 

@@ -348,17 +348,17 @@ validation.
 
 ---
 
-### Provider-gated schema normalisation vs mixed-provider fallback chains
+### Mixed-provider fallback chains: lossy schema for capable fallbacks, schema 400s do not advance the chain
 
-**What:** `_format_and_dedupe_tools` gates its subtractive schema passes (OpenAI top-level-union flatten, Gemini anyOf-required sanitizer) on the statically configured primary provider, but `FallbackChatModel.bind_tools` (`core/fallback.py`) binds the same formatted tool list to every model in the chain. In a mixed-provider chain (e.g. Ollama primary with an OpenAI fallback), runtime failover hands the un-flattened top-level `anyOf` to OpenAI and reproduces the `HassStartTimer` schema 400 — and `_is_retryable` does not classify schema 400s as chain-advance errors, so the turn hard-fails instead of falling through. Symmetric mild case: an OpenAI primary that fails over hands the lossy flattened schema to a union-capable fallback.
+**What:** `_bind_model_tools` now re-runs the provider-gated schema passes per chain member (`_tools_for_chain_member`, `agent/graph.py`), which fixed the field failure (Ollama primary, Gemini fallback, `any_of[0].required` 400, 2026-10-03). Two leftovers: (1) the passes are subtractive and run on the primary's already-shaped list, so an OpenAI/Anthropic/Gemini primary still hands its lossy flattened or sanitized schema to a union-capable fallback (Ollama); (2) `_is_retryable` (`core/fallback.py`) does not classify an invalid-function-schema 400 as a chain-advance error, so a novel rejected shape on a middle member hard-fails the wrapper and relies on the graph-level drop-and-retry, which re-walks the chain from the primary.
 
-**Why:** Found by red-team review during the v3.28.1 ship. The same latent pattern has existed for the Gemini sanitizer since v3.26.1 (#536); no field report yet, because it requires a mixed-provider chain plus (for the OpenAI leg) a timer-capable voice device. Fixing it properly is a `FallbackChatModel` restructuring, out of scope for the v3.28.1 fix.
+**Why:** Neither breaks a turn today: (1) loses a constraint the model still sees as a description hint; (2) costs a retry. Members are identified by `_llm_type`, so a new provider class needs an entry in `_LLM_TYPE_PROVIDERS`.
 
-**How to apply:** Format tools per chain member — have `FallbackChatModel.bind_tools` re-run the provider-gated normalisation per member provider type (chain entries already carry provider entry ids), or bind provider-specific tool lists when building the chain. Minimum viable: extend `_is_retryable` to treat invalid-function-schema 400s as chain-advance errors.
+**How to apply:** For (1), keep the un-normalised schema in graph state and normalise from it per member. For (2), treat a schema 400 as retryable in `_is_retryable`.
 
-**Effort:** M
-**Priority:** P2
-**Depends on:** v3.28.1
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
 
 ---
 
@@ -2213,6 +2213,58 @@ This is the same allowlist-omission class as #480 and as the triage options fixe
 
 **Effort:** M
 **Priority:** P2
+
+---
+
+### A store worker abandoned by the unload keeps its connection and can still write
+
+**What:** `_cancel_and_wait` (`__init__.py`) gives up on a task that outlives five cancels, logs a warning, and lets `async_unload_entry` close the pool and return. psycopg's `pool.close()` does not close checked-out connections, so an abandoned langgraph batch worker keeps its connection and, if it later resumes, can upsert tool-index rows computed by the old entry over the reloaded entry's rows; the new entry's cached hashes would still describe its own data and hide the stale index. The index runner has the same shape: `rd.tool_index_task = None` runs even when the wait gave up, dropping the only handle to a task that can still set `tool_index_ready` and send `SIGNAL_TOOL_INDEX_UPDATED` (not entry-scoped).
+
+**Why:** Codex adversarial pass ([P2]) and the Claude adversarial pass during the review of the unload-hang fix (2026-10-03). Deferred by user decision: the give-up path replaces a permanent hang, the worker observed in the field died on the second cancel, and containing a task that ignores cancellation needs its own design.
+
+**How to apply:** Have `_cancel_and_wait` report whether it gave up; on give-up keep the task reference and fence its writes (a generation or stopped flag checked by `_run_tool_index_background` before it publishes, and a way to revoke or close the connection the worker holds), and add a test that drives the abandoned worker to completion after a reload.
+
+**Effort:** M
+**Priority:** P2
+
+---
+
+### Cancelling the store worker strands every other caller waiting on the store
+
+**What:** langgraph's batch worker (`_run` in `store/base/batch.py`) fails a batch's futures only under `except Exception`, so the clean cancel the unload sends (`_cancel_tool_index`) leaves the in-flight batch's futures, and anything still queued, unresolved. Any other coroutine awaiting `store.aget/asearch/aput` at that moment waits forever with nothing logged. Separately, every store call runs `_ensure_task()`, so a call that lands during the bounded wait or before `rd.pool.close()` starts a new worker the unload never cancels, which then fails on the closed pool. The index runner has the same gap: a conversation turn still in tool discovery can create a new `rd.tool_index_task` (`conversation.py`, guarded only by `pool.closed`) during the wait, which is then overwritten with None or never looked at, fails on the closed pool, and sends the non-entry-scoped "failed" signal.
+
+**Why:** Claude adversarial pass during the review of the unload-hang fix (2026-10-03); both predate that fix (the worker cancel shipped in v3.43.0). Deferred by user decision: platforms and engines are stopped before this step, so the remaining store callers are few, and the in-batch futures are not reachable from outside the worker.
+
+**How to apply:** After the worker is done, drain `rd.store._aqueue` and fail each pending future; decide whether to stop cancelling the worker and let the closed pool fail the batch instead (which resolves the in-batch futures); re-read `rd.store._task` after the wait and cancel a worker started meanwhile; have the runner guard check an unloading flag set before the cancel step instead of `pool.closed`. Test with a second caller parked on the store during the unload.
+
+**Effort:** M
+**Priority:** P2
+
+---
+
+### A cancel of the unload itself skips the pool close
+
+**What:** `_teardown` in `async_unload_entry` contains `Exception` only, so a `CancelledError` delivered to the unload (Home Assistant shutdown, a cancelled reload) propagates out of whichever step is running and skips `rd.pool.close()` and the repair-issue clears. The tool-index step can now wait up to about 20 seconds, so a cancel is more likely to land there than before.
+
+**Why:** Claude adversarial pass during the review of the unload-hang fix (2026-10-03); pre-existing. Deferred by user decision: it needs a decision on what a cancelled unload should still guarantee.
+
+**How to apply:** Run the pool close (and the issue clears) in a `finally`, shielded or re-raising the cancel afterwards, and test by cancelling the unload while it waits on a stubborn task.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
+### Saving the Sentinel options reloads the entry twice
+
+**What:** `SentinelSubentryFlow._schedule_reload` (`flows/sentinel_subentry_flow.py`) schedules a reload, and the `SIGNAL_CONFIG_ENTRY_CHANGED` listener `_on_entry_changed` (`__init__.py`) schedules another for the same subentry change. The reloads run one after the other, so the second unload lands just after the first reload's setup completes, while its background tool-index write is still running; that is the race behind the unload hang.
+
+**Why:** Found while investigating the unload hang (2026-10-03). Deferred by user decision with the other unload follow-ups: harmless once the unload is bounded, but it doubles the reload cost and widens every reload race.
+
+**How to apply:** Keep one trigger (the listener covers UI deletion too) and add a test that a Sentinel options save produces exactly one reload.
+
+**Effort:** S
+**Priority:** P3
 
 ---
 
