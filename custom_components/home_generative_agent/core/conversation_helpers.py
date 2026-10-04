@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Any, cast
 import yaml
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
@@ -85,8 +87,19 @@ def _load_json_payload(content: str) -> tuple[Any | None, str | None]:
         return None, candidate
 
 
-def _resolve_entity_id(entity_id: str, hass: HomeAssistant) -> str:
-    """Try to resolve a suggested entity_id to an existing entity_id."""
+def _resolve_entity_id(
+    entity_id: str,
+    hass: HomeAssistant,
+    allow: Callable[[str], bool] | None = None,
+) -> str:
+    """
+    Try to resolve a suggested entity_id to an existing entity_id.
+
+    ``allow`` limits which entities a fuzzy match may return. An exact id is
+    returned unchanged either way, which is also what an unknown id gets, so
+    it reveals nothing; a fuzzy match is the only answer that names an entity
+    the caller did not.
+    """
     if not _ENTITY_ID_PATTERN.match(entity_id):
         return entity_id
     if hass.states.get(entity_id):
@@ -98,6 +111,7 @@ def _resolve_entity_id(entity_id: str, hass: HomeAssistant) -> str:
         state.entity_id
         for state in hass.states.async_all()
         if state.entity_id.startswith(prefix)
+        and (allow is None or allow(state.entity_id))
     ]
     if not candidates:
         return entity_id
