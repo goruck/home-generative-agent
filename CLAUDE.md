@@ -61,6 +61,20 @@ service you can't reach; HACS only offers those to users who opted into betas.
 When closing an issue whose fix is bundled, tell the reporter it's merged, name the release it
 ships in, and offer the pre-release.
 
+## Follow-ups: GitHub Issue or TODOS.md
+
+Deferred work goes in exactly one place, never both:
+
+- **GitHub issue** — anything a user could observe or report (bugs, missing or misbehaving
+  features), or that a fix PR should close. Issues are searchable by users, auto-close from the
+  fix, and give the close-out a place to name the release.
+- **`TODOS.md`** — internal hardening, refactors, test gaps, and review findings left unfixed,
+  where the context is code-level and no user would search for it. Use the existing entry format
+  (What / Why / How to apply / Effort / Priority) under the matching section.
+
+The test: *would a user ever notice this, or look for it?* If yes, file an issue. If a `TODOS.md`
+entry turns out to be user-visible, move it to an issue and delete the entry.
+
 ## Architecture
 
 ### Module Map
