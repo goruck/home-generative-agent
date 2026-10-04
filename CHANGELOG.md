@@ -9,11 +9,7 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ### Added
 
-- The Sentinel proposals card now follows your Home Assistant profile language: Czech when the profile is set to Czech, English otherwise (other languages fall back to English). Section titles, buttons, field labels, progress and error messages, the dedupe reasons, and the known proposal statuses are translated at display time; unknown statuses and reasons are shown as they are. Candidate titles and summaries are shown as the discovery model wrote them, untranslated, and the text pre-filled into a GitHub rule request stays English. Long candidate ids now wrap inside the card instead of overflowing a narrow panel. The browser caches the card for up to a month, so after updating, bump the query string on the card's dashboard resource URL (or hard-refresh) to see the change ([#697](https://github.com/goruck/home-generative-agent/pull/697), @hruba202).
-
-### Changed
-
-- The Czech wording of five dedupe reasons on the Sentinel proposals card (Filtered Discovery Candidates) now explains why a candidate was filtered, matching the English text, instead of being a short translation of the reason code. Affects `existing_identity_hash`, `derived_only_paths`, `entity_text_mismatch`, `cumulative_energy_sensor` and `unknown_network_key`. As with any card change, bump the query string on the card's dashboard resource URL (or hard-refresh) after updating.
+- The Sentinel proposals card now follows your Home Assistant profile language: Czech when the profile is set to Czech, English otherwise (other languages fall back to English). Section titles, buttons, field labels, progress and error messages, the dedupe reasons, and the known proposal statuses are translated at display time; unknown statuses and reasons are shown as they are. Candidate titles and summaries are shown as the discovery model wrote them, untranslated, and the text pre-filled into a GitHub rule request stays English. Long candidate ids now wrap inside the card instead of overflowing a narrow panel. The browser caches the card for up to a month, so after updating, bump the query string on the card's dashboard resource URL (or hard-refresh) to see the change ([#697](https://github.com/goruck/home-generative-agent/pull/697), [#714](https://github.com/goruck/home-generative-agent/pull/714), @hruba202).
 
 ### Fixed
 
