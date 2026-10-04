@@ -130,16 +130,15 @@ Integration uses HA config flow subentries (not the legacy single-entry flow). F
 
 ## Skill routing
 
-When the user's request matches an available skill, ALWAYS invoke it using the Skill
+When the user's request matches a routing rule below, invoke that skill using the Skill
 tool as your FIRST action. Do NOT answer directly, do NOT use other tools first.
 The skill has specialized workflows that produce better results than ad-hoc answers.
+Reviews and PRs are the exception: they are sized to the change, see the two sections below.
 
 Key routing rules:
 - Product ideas, "is this worth building", brainstorming → invoke office-hours
 - Bugs, errors, "why is this broken", 500 errors → invoke investigate
-- Ship, deploy, push, create PR → invoke ship
 - QA, test the site, find bugs → invoke qa
-- Code review, check my diff → invoke review
 - Update docs after shipping → invoke document-release
 - Weekly retro → invoke retro
 - Design system, brand → invoke design-consultation
@@ -147,3 +146,25 @@ Key routing rules:
 - Architecture review → invoke plan-eng-review
 - Save progress, checkpoint, resume → invoke checkpoint
 - Code quality, health check → invoke health
+
+### Reviews
+
+Pick the review by the size and risk of the diff, not by which skill matches first:
+
+- **Docs-only or trivial** (nothing under `custom_components/`) — no review skill; `make lint`.
+- **Small code diff** (roughly under 100 changed lines) that is not on a safety path — the
+  built-in `code-review` skill.
+- **Larger diffs, or anything touching Sentinel, the critical-action PIN gate, config flows,
+  migrations, or model-provider plumbing** — the gstack `review` skill.
+
+If the user names a skill, use the one they named.
+
+### PRs and releases
+
+Do **not** invoke the gstack `ship` skill in this repo. It bumps a `VERSION` file and writes a
+CHANGELOG release entry on every PR; this repo has no `VERSION` file and bundles releases.
+
+- **Open a PR** — branch, commit, push, `gh pr create`. Add the `## [Unreleased]` CHANGELOG entry
+  when behavior is user-visible. Run `make lint` and, for code changes, `make test` and
+  `make typecheck` first.
+- **Cut a release** — follow "Cutting a release" in [RELEASING.md](RELEASING.md).
