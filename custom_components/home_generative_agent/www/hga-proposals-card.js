@@ -144,9 +144,9 @@ const HGA_PROPOSALS_I18N = {
       "Načteno: kandidáti {c}, odfiltrovaní {f}, čekající návrhy {p}, historie {h} (v {t})",
     dedupe_batch_duplicate: "Duplicita v této dávce zjišťování",
     dedupe_existing_semantic_key:
-      "Už pokryto aktivním, čekajícím nebo nedávným nápadem na pravidlo",
+      "Už pokryto aktivním, čekajícím nebo nedávným návrhem pravidla",
     dedupe_existing_identity_hash:
-      "Už pokryto aktivním, čekajícím nebo nedávným nápadem na pravidlo (shoda podle identity)",
+      "Už pokryto aktivním, čekajícím nebo nedávným návrhem pravidla (shoda podle identity)",
     dedupe_derived_only_paths:
       "Odkazuje jen na odvozené hodnoty, žádnou konkrétní entitu",
     dedupe_entity_text_mismatch:
