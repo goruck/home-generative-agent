@@ -939,6 +939,7 @@ def _eval_entity_state_duration(
         "state": entity.get("state"),
         "target_state": target_state,
         "threshold_hours": threshold_hours,
+        # Grows every cycle; DISPLAY_ONLY_EVIDENCE_KEYS keeps it out of the id.
         "duration_hours": (now - last_changed).total_seconds() / 3600,
         "last_changed": entity.get("last_changed"),
     }
@@ -1013,6 +1014,7 @@ def _eval_entity_staleness(
         "friendly_name": entity.get("friendly_name") or None,
         "state": entity.get("state"),
         "max_stale_hours": max_stale_hours,
+        # Grows every cycle; DISPLAY_ONLY_EVIDENCE_KEYS keeps it out of the id.
         "age_hours": age_hours,
         "last_changed": entity.get("last_changed"),
     }

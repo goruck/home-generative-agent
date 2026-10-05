@@ -105,7 +105,7 @@ from .execution import (
 )
 from .lock_enrichment import async_enrich_lock_last_changed
 from .logging_utils import RepeatingLogLimiter
-from .models import AnomalyFinding, CompoundFinding
+from .models import SEVERITY_RANK, AnomalyFinding, CompoundFinding
 from .network_audit import NetworkAuditReport, build_report, empty_report
 from .network_inventory import (
     ROUTER_SOURCE,
@@ -1900,7 +1900,12 @@ class SentinelEngine:
         A compound finding is suppressed only when **all** of its constituents
         would individually be suppressed.  When at least one constituent passes
         the suppression check, the compound is dispatched and all passing
-        constituents are registered for cooldown tracking.
+        constituents are registered for cooldown tracking.  Only the
+        constituent the push shows is registered as a pending prompt, so one
+        the user never saw comes due again after its cooldown instead of
+        waiting out the prompt TTL behind its partner (issue #723).  It is
+        shown then unless a more severe partner is due again or the push is
+        policy-blocked.
         """
         suppress_kwargs = _build_suppress_kwargs(self._options, snapshot)
         effective_autonomy = (
@@ -1935,7 +1940,15 @@ class SentinelEngine:
             )
             return False
 
-        best = max(compound.constituent_findings, key=lambda f: f.confidence)
+        # The push shows one finding, so show one that is due: picking from
+        # every constituent re-sent a finding still under its own cooldown or
+        # pending prompt whenever a partner came due, while the due one went
+        # unseen (issue #723).  Severity first, so a confident low-severity
+        # finding never hides a high-severity one.
+        best = max(
+            (constituent for constituent, _reason in passing),
+            key=lambda f: (SEVERITY_RANK.get(f.severity, 0), f.confidence),
+        )
 
         canary_mode = bool(
             self._options.get(
@@ -1969,8 +1982,7 @@ class SentinelEngine:
             )
             return False
 
-        for constituent, _reason in passing:
-            register_prompt(self._suppression.state, constituent, now)
+        register_prompt(self._suppression.state, best, now)
         await self._suppression.async_save()
 
         canary_would_execute: bool | None = None

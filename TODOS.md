@@ -513,11 +513,37 @@ validation.
 
 **What:** `SentinelNotifier.async_notify` (`sentinel/notifier.py`) holds non-high findings past the rate limit in `_held_batch` and returns True, so the engine audits them `not_suppressed`. `stop()` cancels the batch timer without flushing, so findings held when the entry unloads or reloads are never pushed, yet they stay counted in the daily digest and the health sensor's notification KPIs, and are protected from eviction. A batch summary that does go out also carries no per-finding action buttons.
 
-**Why:** Pre-existing; found in the review of the audit store fix (Claude adversarial and Codex both flagged it). Rare: it needs a reload inside the 30-second batch window after a rate-limit burst.
+**Why:** Pre-existing; found in the review of the audit store fix (Claude adversarial and Codex both flagged it). Rare: it needs a reload inside the 30-second batch window after a rate-limit burst. The engine also persists the finding's pending prompt before the push, so the lost finding stays held for the prompt TTL (4 h) instead of retrying after its cooldown; since #723 made `entity_state_duration` / `entity_staleness` ids stable within an episode, those standing conditions are held this way too (Codex, #723 review).
 
-**How to apply:** Either flush `_held_batch` from `stop()` (schedule `_async_flush_batch` before clearing the handle), or return a third state for held findings and audit them under a distinct reason code that the batch flush settles. Pin it with a test that reloads with a held batch.
+**How to apply:** Either flush `_held_batch` from `stop()` (schedule `_async_flush_batch` before clearing the handle), or return a third state for held findings and audit them under a distinct reason code that the batch flush settles; either way, resolve the pending prompt of a finding whose push never left. Pin it with a test that reloads with a held batch.
 
 **Effort:** S
+**Priority:** P3
+
+---
+
+### A response to one push can land on a later compound record
+
+**What:** `AuditStore.async_update_response` (`audit/store.py`) matches a response to the newest `not_suppressed` record whose finding, or any compound constituent, carries the anomaly id. A compound record stores every constituent, including partners still pending from an earlier push, so answering the earlier push for A writes the response (and any action outcome) onto the later record that showed B. Answering both pushes then writes the same record twice and loses one response.
+
+**Why:** Pre-existing; Codex flagged it in the #723 review. Since #723 the compound push shows only a constituent that came due, so the record that showed B routinely also lists A.
+
+**How to apply:** Store the anomaly id of the constituent the push showed on each audit record (for example `notification.shown_anomaly_id`) and match responses against it, falling back to the constituent scan only for records written before the field existed. Pin it with a test that answers two pushes whose records share a constituent.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
+### Sensor-threshold dynamic rules mint a new anomaly id for every reading
+
+**What:** `_eval_sensor_threshold_condition` (`sentinel/dynamic_rules.py`) hashes the live `sensor_value` into the anomaly id, so a sensor hovering above its threshold produces a new id for each new reading. That bypasses the pending prompt, the notifier's per-id cooldown and execution idempotency, and re-alerts every type cooldown, the same shape #723 fixed for `duration_hours` and `age_hours`. The baseline-deviation evaluators (`current_value`, `deviation_pct`) and `last_changed` on frequently updating sensors behave the same way.
+
+**Why:** Found in the #723 review (Claude adversarial). Unlike the elapsed-time fields, the reading has no episode marker in the evidence, so dropping it from the hash would merge separate episodes; it needs an episode notion (for example, the time the value first crossed the threshold) rather than a key exclusion.
+
+**How to apply:** Track when each threshold rule's sensor first crossed the threshold (as `appliance_power_duration` tracks its episode start), hash that instead of the reading, and exclude the reading from the id. Measure on the box first: count distinct ids per rule and entity in the audit store.
+
+**Effort:** M
 **Priority:** P3
 
 ---
