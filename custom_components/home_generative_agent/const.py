@@ -1045,6 +1045,17 @@ RECOMMENDED_VIDEO_ANALYZER_EVENT_RECORDING_ENABLED = False
 CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S = "video_analyzer_notification_cooldown_s"
 RECOMMENDED_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S = 0
 VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_MAX_S = 600
+# Opt-in house-level notification cooldown (issue #721), in seconds; 0 disables
+# it. One event seen by several cameras makes each camera's first push sound;
+# after a sounding push, a push from any camera that would sound inside this
+# window posts its card quietly instead. The first face-confirmed unknown
+# person in the window still sounds. Meant to be a few seconds: it groups one
+# event crossing cameras, not a lingering subject (the per-camera cooldown).
+CONF_VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_S = (
+    "video_analyzer_house_notification_cooldown_s"
+)
+RECOMMENDED_VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_S = 0
+VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_MAX_S = 60
 
 # Stable “latest” file publication
 VIDEO_ANALYZER_SAVE_LATEST = True

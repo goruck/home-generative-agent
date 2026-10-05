@@ -1,5 +1,5 @@
 # ruff: noqa: S101
-"""Tests for the pure notification cooldown policy (issue #672)."""
+"""Tests for the pure notification cooldown policy (issues #672 and #721)."""
 
 from __future__ import annotations
 
@@ -8,10 +8,13 @@ import pytest
 from custom_components.home_generative_agent.core.notify_cooldown import (
     CooldownAction,
     CooldownWindow,
+    HouseWindow,
     active_window,
     card_id_after,
     decide,
     has_unknown_face,
+    house_hushes,
+    house_window_after_sound,
     notification_tag,
     opened_window,
     window_after_unknown_face,
@@ -173,3 +176,60 @@ def test_notification_tag_fits_the_apns_collapse_id_limit() -> None:
     tag = notification_tag(camera, _window(), follow_up=True)
 
     assert len(tag.encode()) <= 64
+
+
+# ---------------------------------------------------------------------------
+# House window (issue #721)
+# ---------------------------------------------------------------------------
+
+
+def _house(*, unknown_face: bool = False, started: float = 100.0) -> HouseWindow:
+    return HouseWindow(started=started, target=_TARGET, unknown_face=unknown_face)
+
+
+def test_house_window_expires_and_belongs_to_its_target() -> None:
+    house = _house(started=100.0)
+    assert active_window(house, now=104.9, cooldown_s=5, target=_TARGET) is house
+    assert active_window(house, now=105.0, cooldown_s=5, target=_TARGET) is None
+    assert (
+        active_window(house, now=101.0, cooldown_s=5, target="notify.mobile_app_x")
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("house", "unknown_in_batch", "expected"),
+    [
+        # No open house window: nothing to hush.
+        (None, False, False),
+        (None, True, False),
+        # Open window: everything is hushed except its first unknown face.
+        (_house(), False, True),
+        (_house(), True, False),
+        (_house(unknown_face=True), False, True),
+        (_house(unknown_face=True), True, True),
+    ],
+)
+def test_house_hushes(
+    house: HouseWindow | None,
+    unknown_in_batch: bool,  # noqa: FBT001
+    expected: bool,  # noqa: FBT001
+) -> None:
+    assert house_hushes(house, unknown_in_batch=unknown_in_batch) is expected
+
+
+def test_sound_opens_a_house_window() -> None:
+    assert house_window_after_sound(
+        None, now=200.0, target=_TARGET, unknown_face=False
+    ) == HouseWindow(started=200.0, target=_TARGET, unknown_face=False)
+
+
+def test_unknown_face_sound_keeps_the_house_window_start() -> None:
+    after = house_window_after_sound(
+        _house(started=100.0), now=103.0, target=_TARGET, unknown_face=True
+    )
+    assert after == HouseWindow(started=100.0, target=_TARGET, unknown_face=True)
+    # Once set, a later sound in the window never clears it.
+    assert house_window_after_sound(
+        after, now=104.0, target=_TARGET, unknown_face=False
+    ).unknown_face

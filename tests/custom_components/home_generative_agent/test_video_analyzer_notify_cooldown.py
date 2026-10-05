@@ -1,6 +1,6 @@
 # ruff: noqa: S101
 """
-Tests for the video analyzer's per-camera notification cooldown (issue #672).
+Tests for the video analyzer's notification cooldowns (issues #672 and #721).
 
 The pure decision table is covered in test_notify_cooldown.py. These tests
 cover what the analyzer adds around it: the notify payloads, the per-camera
@@ -20,8 +20,10 @@ from homeassistant.exceptions import ServiceNotFound
 
 from custom_components.home_generative_agent.const import (
     CONF_NOTIFY_SERVICE,
+    CONF_VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_S,
     CONF_VIDEO_ANALYZER_MODE,
     CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S,
+    VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_MAX_S,
     VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_MAX_S,
 )
 from custom_components.home_generative_agent.core import video_analyzer as va_mod
@@ -542,13 +544,23 @@ async def test_discovered_companion_app_service_gets_the_cooldown(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cooldowns", [(_COOLDOWN, 0), (0, 5)], ids=["camera", "house_only"]
+)
+@pytest.mark.asyncio
 async def test_non_companion_target_is_sent_as_if_the_cooldown_were_off(
     va: VideoAnalyzer,
     entry: MagicMock,
     clock: _Clock,
     caplog: pytest.LogCaptureFixture,
+    cooldowns: tuple[int, int],
 ) -> None:
+    camera_s, house_s = cooldowns
     entry.runtime_data.options[CONF_NOTIFY_SERVICE] = "notify.family_group"
+    entry.runtime_data.options[CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S] = camera_s
+    entry.runtime_data.options[CONF_VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_S] = (
+        house_s
+    )
 
     await _push(va)
     clock.advance(5)
@@ -566,6 +578,8 @@ async def test_non_companion_target_is_sent_as_if_the_cooldown_were_off(
         if "does not apply" in r.getMessage() and r.levelname == "WARNING"
     ]
     assert len(notices) == 1
+    # The service name can carry a device name: it is never logged.
+    assert "family_group" not in notices[0].getMessage()
 
 
 @pytest.mark.asyncio
@@ -757,3 +771,343 @@ async def test_only_a_sounding_push_counts_as_notified(
     assert not _sounds(_calls(va)[1])
     assert first is True
     assert second is False
+
+
+# ---------------------------------------------------------------------------
+# House window across cameras (issue #721)
+# ---------------------------------------------------------------------------
+
+_THIRD_CAMERA = "camera.front"
+_HOUSE = 5
+
+
+@pytest.fixture
+def house(entry: MagicMock) -> None:
+    entry.runtime_data.options[CONF_VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_S] = (
+        _HOUSE
+    )
+
+
+@pytest.mark.parametrize("value", [0, None, "", "abc", -5, "inf"])
+@pytest.mark.asyncio
+async def test_house_cooldown_off_leaves_cameras_independent(
+    va: VideoAnalyzer, entry: MagicMock, clock: _Clock, value: object
+) -> None:
+    entry.runtime_data.options[CONF_VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_S] = (
+        value
+    )
+    await _push(va)
+    clock.advance(1)
+    await _push(va, camera_id=_OTHER_CAMERA)
+
+    assert [_sounds(c) for c in _calls(va)] == [True, True]
+    assert va._house_window is None
+
+
+@pytest.mark.parametrize("value", [0, None, "abc"])
+@pytest.mark.asyncio
+async def test_both_cooldowns_off_send_the_unchanged_payload(
+    va: VideoAnalyzer, entry: MagicMock, value: object
+) -> None:
+    entry.runtime_data.options[CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S] = 0
+    entry.runtime_data.options[CONF_VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_S] = (
+        value
+    )
+    await _push(va)
+    await _push(va, camera_id=_OTHER_CAMERA)
+
+    assert [_data(c) for c in _calls(va)] == [{"image": str(_IMG)}] * 2
+
+
+def test_house_cooldown_is_clamped_to_the_documented_maximum(
+    va: VideoAnalyzer, entry: MagicMock
+) -> None:
+    entry.runtime_data.options[CONF_VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_S] = 999
+    assert (
+        va._house_notification_cooldown_s()
+        == VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_MAX_S
+    )
+
+
+@pytest.mark.usefixtures("house")
+@pytest.mark.asyncio
+async def test_one_event_across_cameras_sounds_once(
+    va: VideoAnalyzer, clock: _Clock
+) -> None:
+    """The reporter's burst: three cameras' first pushes a second apart."""
+    context = _context()
+    sent = [await va._dispatch_notification(_CAMERA, "side", _IMG, context)]
+    clock.advance(1)
+    sent.append(await va._dispatch_notification(_OTHER_CAMERA, "door", _IMG, context))
+    clock.advance(1)
+    sent.append(await va._dispatch_notification(_THIRD_CAMERA, "front", _IMG, context))
+
+    calls = _calls(va)
+    assert [_sounds(c) for c in calls] == [True, False, False]
+    # Every camera still posts its own card, with its own text.
+    assert len({_tag(c) for c in calls}) == 3
+    assert [c.args[2]["message"] for c in calls] == ["side", "door", "front"]
+    assert _data(calls[1])["push"] == _QUIET_PUSH
+    # Only the sounding push counts as notified for caption dedup.
+    assert sent == [True, False, False]
+
+
+@pytest.mark.usefixtures("house")
+@pytest.mark.asyncio
+async def test_house_window_has_a_fixed_length(
+    va: VideoAnalyzer, clock: _Clock
+) -> None:
+    await _push(va)
+    clock.advance(4)
+    await _push(va, camera_id=_OTHER_CAMERA)  # hushed: does not extend it
+    clock.advance(1)  # 5 s after the sound
+    await _push(va, camera_id=_THIRD_CAMERA)
+
+    assert [_sounds(c) for c in _calls(va)] == [True, False, True]
+
+
+@pytest.mark.usefixtures("house")
+@pytest.mark.asyncio
+async def test_hushed_camera_window_counts_from_the_sound_that_covered_it(
+    va: VideoAnalyzer, clock: _Clock
+) -> None:
+    await _push(va)
+    clock.advance(1)
+    await _push(va, camera_id=_OTHER_CAMERA)
+    clock.advance(100)
+    await _push(va, camera_id=_OTHER_CAMERA)  # inside its window: replaces
+    clock.advance(19)  # 120 s after the sound on the first camera
+    await _push(va, camera_id=_OTHER_CAMERA)
+
+    _, hushed, update, after = _calls(va)
+    assert not _sounds(hushed)
+    assert not _sounds(update)
+    assert _tag(update) == _tag(hushed)
+    assert _sounds(after)
+
+
+@pytest.mark.usefixtures("house")
+@pytest.mark.asyncio
+async def test_quiet_camera_update_does_not_open_a_house_window(
+    va: VideoAnalyzer, clock: _Clock
+) -> None:
+    await _push(va)
+    clock.advance(30)
+    await _push(va)  # quiet update of the first camera's card
+    clock.advance(1)
+    await _push(va, camera_id=_OTHER_CAMERA)
+
+    assert [_sounds(c) for c in _calls(va)] == [True, False, True]
+
+
+@pytest.mark.usefixtures("house")
+@pytest.mark.asyncio
+async def test_first_unknown_face_in_the_house_window_sounds_once(
+    va: VideoAnalyzer, clock: _Clock
+) -> None:
+    await _push(va, names=["Lindo"])
+    clock.advance(1)
+    await _push(va, names=_UNKNOWN, camera_id=_OTHER_CAMERA)
+    clock.advance(1)
+    await _push(va, names=_UNKNOWN, camera_id=_THIRD_CAMERA)
+
+    assert [_sounds(c) for c in _calls(va)] == [True, True, False]
+
+
+@pytest.mark.usefixtures("house")
+@pytest.mark.asyncio
+async def test_unknown_face_crossing_cameras_sounds_once_per_house_window(
+    va: VideoAnalyzer, clock: _Clock
+) -> None:
+    """
+    One intruder crossing cameras sounds once inside the house window.
+
+    The hushed camera's own escalation is not spent: its first unknown face
+    after the house window still sounds, once.
+    """
+    await _push(va, names=_UNKNOWN)
+    clock.advance(1)
+    await _push(va, names=_UNKNOWN, camera_id=_OTHER_CAMERA)
+    clock.advance(30)
+    await _push(va, names=_UNKNOWN, camera_id=_OTHER_CAMERA)
+    clock.advance(10)
+    await _push(va, names=_UNKNOWN, camera_id=_OTHER_CAMERA)
+
+    assert [_sounds(c) for c in _calls(va)] == [True, False, True, False]
+
+
+@pytest.mark.usefixtures("house")
+@pytest.mark.asyncio
+async def test_camera_unknown_face_escalation_is_hushed_inside_the_house_window(
+    va: VideoAnalyzer, clock: _Clock
+) -> None:
+    """A camera window's escalation also asks the house window."""
+    await _push(va, names=_UNKNOWN)
+    clock.advance(1)
+    await _push(va, camera_id=_OTHER_CAMERA)  # hushed, opens its window
+    clock.advance(1)
+    await _push(va, names=_UNKNOWN, camera_id=_OTHER_CAMERA)
+
+    clock.advance(5)  # the house window is over
+    await _push(va, names=_UNKNOWN, camera_id=_OTHER_CAMERA)
+
+    _, hushed, escalation, after = _calls(va)
+    # A hushed escalation is a quiet update of the camera's card...
+    assert not _sounds(escalation)
+    assert _tag(escalation) == _tag(hushed)
+    # ...and does not spend it: after the house window it still sounds.
+    assert _sounds(after)
+    assert _tag(after) != _tag(hushed)
+
+
+@pytest.mark.usefixtures("house")
+@pytest.mark.asyncio
+async def test_house_cooldown_alone_quiets_every_camera_for_its_length(
+    va: VideoAnalyzer, entry: MagicMock, clock: _Clock
+) -> None:
+    entry.runtime_data.options[CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S] = 0
+    await _push(va)
+    clock.advance(2)
+    await _push(va)  # the camera that sounded is quiet too
+    clock.advance(1)
+    await _push(va, camera_id=_OTHER_CAMERA)
+    clock.advance(2)  # 5 s after the sound: both windows over
+    await _push(va, camera_id=_OTHER_CAMERA)
+
+    calls = _calls(va)
+    assert [_sounds(c) for c in calls] == [True, False, False, True]
+    assert _tag(calls[1]) == _tag(calls[0])
+
+
+@pytest.mark.usefixtures("house")
+@pytest.mark.asyncio
+async def test_refused_push_opens_no_house_window(
+    va: VideoAnalyzer, clock: _Clock
+) -> None:
+    _service(va).side_effect = [ServiceNotFound("notify", "mobile_app_phone"), None]
+
+    with pytest.raises(ServiceNotFound):
+        await _push(va)
+    assert va._house_window is None
+
+    clock.advance(1)
+    await _push(va, camera_id=_OTHER_CAMERA)
+    assert _sounds(_calls(va)[1])
+
+
+@pytest.mark.usefixtures("house")
+@pytest.mark.asyncio
+async def test_a_different_notify_target_starts_its_own_house_window(
+    va: VideoAnalyzer, entry: MagicMock, clock: _Clock
+) -> None:
+    await _push(va)
+    entry.runtime_data.options[CONF_NOTIFY_SERVICE] = "notify.mobile_app_other"
+    clock.advance(1)
+    await _push(va, camera_id=_OTHER_CAMERA)
+
+    assert _sounds(_calls(va)[1])
+
+
+@pytest.mark.usefixtures("house")
+@pytest.mark.asyncio
+async def test_overlapping_batches_on_different_cameras_sound_once(
+    va: VideoAnalyzer,
+) -> None:
+    """With the house window on, one lock covers every camera."""
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def _slow_first(*_args: Any, **_kwargs: Any) -> None:
+        if not started.is_set():
+            started.set()
+            await release.wait()
+
+    _service(va).side_effect = _slow_first
+
+    first = asyncio.create_task(_push(va))
+    await started.wait()
+    second = asyncio.create_task(_push(va, camera_id=_OTHER_CAMERA))
+    await asyncio.sleep(0)
+    assert len(_calls(va)) == 1
+    release.set()
+    await asyncio.gather(first, second)
+
+    assert [_sounds(c) for c in _calls(va)] == [True, False]
+
+
+@pytest.mark.usefixtures("house")
+@pytest.mark.asyncio
+async def test_camera_window_shorter_than_the_house_window_still_replaces_its_card(
+    va: VideoAnalyzer, entry: MagicMock, clock: _Clock
+) -> None:
+    """A camera window is never shorter than the house window."""
+    entry.runtime_data.options[CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S] = 2
+    await _push(va)
+    clock.advance(3)
+    await _push(va, camera_id=_OTHER_CAMERA)
+    clock.advance(1)
+    await _push(va, camera_id=_OTHER_CAMERA)
+
+    _, hushed, repeat = _calls(va)
+    assert not _sounds(hushed)
+    assert not _sounds(repeat)
+    assert _tag(repeat) == _tag(hushed)
+
+
+@pytest.mark.usefixtures("house")
+@pytest.mark.asyncio
+async def test_refused_hushed_push_commits_no_camera_window(
+    va: VideoAnalyzer, clock: _Clock
+) -> None:
+    _service(va).side_effect = [None, ServiceNotFound("notify", "mobile_app_phone")]
+    await _push(va)
+    house = va._house_window
+    clock.advance(1)
+
+    with pytest.raises(ServiceNotFound):
+        await _push(va, camera_id=_OTHER_CAMERA)
+    assert _OTHER_CAMERA not in va._notify_windows
+    assert va._house_window == house
+
+
+@pytest.mark.usefixtures("house")
+@pytest.mark.asyncio
+async def test_hushed_stranger_card_is_replaced_by_the_next_quiet_update(
+    va: VideoAnalyzer, clock: _Clock
+) -> None:
+    """Accepted trade-off: only a sounded unknown face keeps its card apart."""
+    await _push(va, names=_UNKNOWN)
+    clock.advance(1)
+    await _push(va, names=_UNKNOWN, camera_id=_OTHER_CAMERA)
+    clock.advance(1)
+    await _push(va, camera_id=_OTHER_CAMERA)
+
+    _, stranger, empty = _calls(va)
+    assert not _sounds(empty)
+    assert _tag(empty) == _tag(stranger)
+
+
+@pytest.mark.usefixtures("house")
+@pytest.mark.asyncio
+async def test_hushed_camera_window_still_shows_at_most_two_cards(
+    va: VideoAnalyzer, clock: _Clock
+) -> None:
+    await _push(va, names=_UNKNOWN)  # the house window's unknown face sounded
+    clock.advance(1)
+    await _push(va, camera_id=_OTHER_CAMERA)  # hushed: opening card
+    clock.advance(1)
+    await _push(va, names=_UNKNOWN, camera_id=_OTHER_CAMERA)  # hushed escalation
+    clock.advance(10)
+    await _push(va, names=_UNKNOWN, camera_id=_OTHER_CAMERA)  # sounds
+    clock.advance(1)
+    await _push(va, camera_id=_OTHER_CAMERA)  # follow-up
+    clock.advance(1)
+    await _push(va, names=_UNKNOWN, camera_id=_OTHER_CAMERA)  # already sounded
+
+    other = [c for c in _calls(va) if c.args[2]["title"].endswith("side!")]
+    assert [_sounds(c) for c in other] == [False, False, True, False, False]
+    opening, escalation, alert, follow_up, repeat = (_tag(c) for c in other)
+    assert escalation == opening
+    assert follow_up == opening
+    assert repeat == alert
+    assert len({opening, alert}) == 2
