@@ -19,7 +19,10 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS,
 )
-from custom_components.home_generative_agent.sentinel.engine import SentinelEngine
+from custom_components.home_generative_agent.sentinel.engine import (
+    SentinelEngine,
+    _delivered_reason,
+)
 from custom_components.home_generative_agent.sentinel.execution import (
     ActionPolicyResult,
 )
@@ -165,6 +168,86 @@ async def test_sentinel_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
     assert notifier.calls
     assert audit_store.calls
     assert audit_store.calls[0]["suppression_reason_code"] == "not_suppressed"
+
+
+def test_delivered_reason_keeps_the_code_unless_the_push_was_dropped() -> None:
+    assert _delivered_reason("not_suppressed", sent=True) == "not_suppressed"
+    assert _delivered_reason("not_suppressed", sent=None) == "not_suppressed"
+    assert _delivered_reason("not_suppressed", sent=False) == "notifier_duplicate"
+    assert _delivered_reason("type_cooldown", sent=False) == "notifier_duplicate"
+
+
+class _DroppingNotifier(DummyNotifier):
+    """A notifier that drops every push as a repeat within its cooldown."""
+
+    async def async_notify(self, finding, snapshot, explanation) -> bool:  # type: ignore[no-untyped-def]
+        await super().async_notify(finding, snapshot, explanation)
+        return False
+
+
+@pytest.mark.asyncio
+async def test_sentinel_audits_a_notifier_dropped_repeat_as_not_delivered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A push the notifier drops as a repeat is not audited as reaching the user."""
+    snapshot: FullStateSnapshot = validate_snapshot(
+        {
+            "schema_version": 1,
+            "generated_at": "2025-01-01T00:00:00+00:00",
+            "entities": [
+                {
+                    "entity_id": "binary_sensor.front_door",
+                    "domain": "binary_sensor",
+                    "state": "on",
+                    "friendly_name": "Front Door",
+                    "area": "Front",
+                    "attributes": {"device_class": "door"},
+                    "last_changed": "2025-01-01T00:00:00+00:00",
+                    "last_updated": "2025-01-01T00:00:00+00:00",
+                }
+            ],
+            "camera_activity": [],
+            "derived": {
+                "now": "2025-01-01T00:00:00+00:00",
+                "timezone": "UTC",
+                "is_night": False,
+                "anyone_home": False,
+                "people_home": [],
+                "people_away": [],
+                "last_motion_by_area": {},
+            },
+        }
+    )
+
+    async def _fake_build(_hass: HomeAssistant, **_kwargs: Any) -> FullStateSnapshot:
+        return snapshot
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.sentinel.engine.async_build_full_state_snapshot",
+        _fake_build,
+    )
+
+    engine = SentinelEngine(
+        hass=cast("HomeAssistant", object()),
+        options={
+            "sentinel_cooldown_minutes": 0,
+            "sentinel_entity_cooldown_minutes": 0,
+            "sentinel_interval_seconds": 60,
+            "explain_enabled": False,
+        },
+        suppression=DummySuppression(),
+        notifier=cast("SentinelNotifier", _DroppingNotifier()),
+        audit_store=cast("AuditStore", DummyAudit()),
+        explainer=None,
+    )
+
+    await engine._run_once()
+
+    notifier = cast("_DroppingNotifier", cast("Any", engine)._notifier)
+    audit_store = cast("DummyAudit", cast("Any", engine)._audit_store)
+    assert notifier.calls
+    assert audit_store.calls
+    assert audit_store.calls[0]["suppression_reason_code"] == "notifier_duplicate"
 
 
 @pytest.mark.asyncio
@@ -785,6 +868,49 @@ async def test_compound_blocked_finding_audit_reason(
         audit.calls[0]["suppression_reason_code"] == SUPPRESSION_REASON_POLICY_BLOCKED
     )
     assert audit.calls[0]["action_policy_path"] == ACTION_POLICY_BLOCKED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("notifier_factory", "expected"),
+    [
+        (_DroppingNotifier, "notifier_duplicate"),
+        (DummyNotifier, "not_suppressed"),
+    ],
+)
+async def test_compound_audit_reason_follows_the_notifier(
+    monkeypatch: pytest.MonkeyPatch, notifier_factory: Any, expected: str
+) -> None:
+    """The compound path labels a dropped repeat the same way as a plain one."""
+    snapshot = _make_snapshot()
+    engine, _notifier, audit = _make_engine(monkeypatch, snapshot, cooldown_minutes=0)
+    notifier = notifier_factory()
+    cast("Any", engine)._notifier = notifier
+
+    finding = AnomalyFinding(
+        anomaly_id="test-compound-dup",
+        type="open_entry_when_home_window",
+        severity="medium",
+        confidence=0.9,
+        triggering_entities=["binary_sensor.kitchen_window"],
+        evidence={"state": "on"},
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+    compound = CompoundFinding.from_findings([finding])
+
+    await engine._dispatch_compound(
+        compound,
+        snapshot,
+        datetime.now(UTC),
+        timedelta(minutes=0),
+        timedelta(minutes=0),
+        False,  # noqa: FBT003
+    )
+
+    assert len(notifier.calls) == 1
+    assert len(audit.calls) == 1
+    assert audit.calls[0]["suppression_reason_code"] == expected
 
 
 @pytest.mark.asyncio

@@ -4198,6 +4198,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
         await _teardown("baseline_updater.stop", rd.baseline_updater.stop)
     if rd.notifier is not None:
         await _teardown("notifier.stop", rd.notifier.stop)
+    if (audit_store := rd.audit_store) is not None:
+        # Saves are delayed; write now and close the store, so a reload's
+        # fresh store loads the newest records and no late write from this
+        # one can overwrite them. The lambda keeps the attribute lookup inside
+        # the contained step.
+        await _teardown(
+            "audit_store.async_close",
+            lambda: audit_store.async_close(),  # noqa: PLW0108
+        )
 
     async def _cancel_tool_index() -> None:
         # The index write runs on the pool closed next; a reload that raced

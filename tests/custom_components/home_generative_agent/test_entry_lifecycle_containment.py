@@ -248,6 +248,36 @@ async def test_platform_allows_the_add_while_setup_is_still_in_progress(
 
 
 @pytest.mark.asyncio
+async def test_unload_closes_the_audit_store(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Audit saves are delayed, so unload must write the store and close it.
+
+    Otherwise a reload loads the file before the old store's pending write
+    lands, and a late write from the old store overwrites the new one's.
+    """
+    entry, _sentinel, _discovery, _client = await _setup_with_deferred_sentinel_start(
+        hass, monkeypatch
+    )
+
+    class _RecordingAudit:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        async def async_close(self) -> None:
+            self.close_calls += 1
+
+    audit = _RecordingAudit()
+    entry.runtime_data.audit_store = audit
+
+    result = await cast("Any", hga_component).async_unload_entry(hass, entry)
+
+    assert result is True
+    assert audit.close_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_a_raising_teardown_step_does_not_abort_the_unload(
     hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

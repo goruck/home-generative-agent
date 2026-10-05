@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import fields
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -11,6 +12,7 @@ import pytest
 
 from custom_components.home_generative_agent.audit.models import AuditRecord
 from custom_components.home_generative_agent.audit.store import (
+    AUDIT_SAVE_DELAY_SECS,
     AuditStore,
     _migrate_record,
 )
@@ -640,3 +642,243 @@ async def test_flood_survival_exact_count() -> None:
         if r.get("suppression_reason_code") == "not_suppressed"
     ]
     assert len(not_suppressed) == 2  # exact count preserved
+
+
+# ---------------------------------------------------------------------------
+# Steady state at capacity: debounced saves, one log line
+# ---------------------------------------------------------------------------
+
+
+def _notified_finding(anomaly_id: str) -> MagicMock:
+    finding = MagicMock()
+    finding.as_dict.return_value = {"anomaly_id": anomaly_id, "type": "t"}
+    return finding
+
+
+def _snapshot() -> MagicMock:
+    snapshot = MagicMock()
+    snapshot.get = MagicMock(return_value=None)
+    return snapshot
+
+
+@pytest.mark.asyncio
+async def test_a_burst_shares_one_write_window() -> None:
+    """
+    The first unsaved change schedules the write; later ones ride along.
+
+    Scheduling again on every append would postpone Home Assistant's delayed
+    write for as long as findings keep arriving.
+    """
+    store = _make_store()
+    ha_store = cast("MagicMock", store._store)
+
+    for i in range(3):
+        await store.async_append_finding(
+            _snapshot(),
+            _notified_finding(f"a{i}"),
+            None,
+            suppression_reason_code="not_suppressed",
+        )
+
+    ha_store.async_save.assert_not_awaited()
+    ha_store.async_delay_save.assert_called_once()
+    data_func, delay = ha_store.async_delay_save.call_args.args
+    assert delay == AUDIT_SAVE_DELAY_SECS
+    # The write serialises the records as they are when it fires.
+    assert [r["finding"]["anomaly_id"] for r in data_func()] == ["a0", "a1", "a2"]
+
+    # Once that write has run, the next change opens a new window.
+    await store.async_append_finding(
+        _snapshot(),
+        _notified_finding("a3"),
+        None,
+        suppression_reason_code="not_suppressed",
+    )
+    assert ha_store.async_delay_save.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_an_actuation_record_is_written_immediately() -> None:
+    store = _make_store()
+    ha_store = cast("MagicMock", store._store)
+
+    await store.async_append_finding(
+        _snapshot(),
+        _notified_finding("lock"),
+        None,
+        suppression_reason_code="not_suppressed",
+        action_outcome={"status": "success"},
+    )
+
+    ha_store.async_save.assert_awaited_once()
+    ha_store.async_delay_save.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_user_response_is_written_immediately() -> None:
+    store = _make_store()
+    ha_store = cast("MagicMock", store._store)
+    store._records = [_record_with_code("a1", "not_suppressed")]
+
+    await store.async_update_response("a1", {"false_positive": True}, None)
+
+    ha_store.async_save.assert_awaited_once()
+    assert ha_store.async_save.call_args.args[0][0]["user_response"] == {
+        "false_positive": True
+    }
+    ha_store.async_delay_save.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_closed_store_drops_late_writes() -> None:
+    """After unload, a late change must not schedule a write over the reload."""
+    store = _make_store()
+    ha_store = cast("MagicMock", store._store)
+
+    await store.async_close()
+    ha_store.async_save.assert_awaited_once()
+
+    await store.async_append_finding(
+        _snapshot(),
+        _notified_finding("late"),
+        None,
+        suppression_reason_code="not_suppressed",
+    )
+    await store.async_append_finding(
+        _snapshot(),
+        _notified_finding("late_action"),
+        None,
+        suppression_reason_code="not_suppressed",
+        action_outcome={"status": "success"},
+    )
+
+    ha_store.async_delay_save.assert_not_called()
+    ha_store.async_save.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_save_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    store = _make_store()
+    cast("MagicMock", store._store).async_save = AsyncMock(
+        side_effect=OSError("disk full")
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await store.async_save()
+
+    assert "Could not save the Sentinel audit store: disk full" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_actuation_record_is_not_evicted_before_notified_ones() -> None:
+    """A dropped repeat that still actuated keeps its record at capacity."""
+    store = _make_store()
+    store._max_records = 2
+    acted = _record_with_code("acted", "notifier_duplicate")
+    acted["action_outcome"] = {"status": "success"}
+    store._records = [acted, _record_with_code("n1", "not_suppressed")]
+
+    await store.async_append_finding(
+        _snapshot(),
+        _notified_finding("n2"),
+        None,
+        suppression_reason_code="not_suppressed",
+    )
+
+    ids = [r["finding"]["anomaly_id"] for r in store._records]
+    assert "acted" in ids
+    assert ids == ["acted", "n2"]
+
+
+@pytest.mark.asyncio
+async def test_dismissals_do_not_crowd_out_new_findings() -> None:
+    """
+    A dismissal sets action_outcome but did nothing to the home.
+
+    Protecting it let dismissed records fill the store until each new finding
+    was the only unprotected record and was dropped on arrival.
+    """
+    store = _make_store()
+    store._max_records = 3
+    dismissed = []
+    for i in range(3):
+        r = _record_with_code(f"d{i}", "not_suppressed")
+        r["action_outcome"] = {"status": "dismissed"}
+        dismissed.append(r)
+    store._records = dismissed
+
+    await store.async_append_finding(
+        _snapshot(),
+        _notified_finding("new"),
+        None,
+        suppression_reason_code="not_suppressed",
+    )
+
+    assert [r["finding"]["anomaly_id"] for r in store._records] == ["d1", "d2", "new"]
+
+
+@pytest.mark.asyncio
+async def test_a_store_full_of_actions_still_keeps_the_new_finding() -> None:
+    store = _make_store()
+    store._max_records = 2
+    acted = []
+    for i in range(2):
+        r = _record_with_code(f"a{i}", "not_suppressed")
+        r["action_outcome"] = {"status": "success"}
+        acted.append(r)
+    store._records = acted
+
+    await store.async_append_finding(
+        _snapshot(),
+        _notified_finding("new"),
+        None,
+        suppression_reason_code="not_suppressed",
+    )
+
+    assert [r["finding"]["anomaly_id"] for r in store._records] == ["a1", "new"]
+
+
+@pytest.mark.asyncio
+async def test_a_notifier_duplicate_is_evicted_before_notified_ones() -> None:
+    store = _make_store()
+    store._max_records = 3
+    store._records = [
+        _record_with_code("n1", "not_suppressed"),
+        _record_with_code("dup", "notifier_duplicate"),
+        _record_with_code("n2", "not_suppressed"),
+    ]
+
+    await store.async_append_finding(
+        _snapshot(),
+        _notified_finding("n3"),
+        None,
+        suppression_reason_code="not_suppressed",
+    )
+
+    assert [r["finding"]["anomaly_id"] for r in store._records] == ["n1", "n2", "n3"]
+
+
+@pytest.mark.asyncio
+async def test_full_of_notified_records_logs_once_at_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A store full of notified findings is the steady state, not a warning."""
+    store = _make_store()
+    store._max_records = 2
+    snapshot = _snapshot()
+
+    with caplog.at_level(logging.DEBUG):
+        for i in range(6):
+            await store.async_append_finding(
+                snapshot,
+                _notified_finding(f"n{i}"),
+                None,
+                suppression_reason_code="not_suppressed",
+            )
+
+    assert len(store._records) == 2
+    assert [r["finding"]["anomaly_id"] for r in store._records] == ["n4", "n5"]
+    full = [r for r in caplog.records if "notified findings" in r.getMessage()]
+    assert len(full) == 1
+    assert full[0].levelno == logging.INFO
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]

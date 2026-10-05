@@ -268,13 +268,19 @@ class SentinelNotifier:
         finding: AnomalyFinding,
         snapshot: FullStateSnapshot,
         explanation: str | None,
-    ) -> None:
+    ) -> bool:
         """
         Send a proactive notification for *finding*.
 
         * Adds snooze action buttons.
         * Redacts person names when ``finding.is_sensitive`` is True.
         * Routes to a per-area notify service when configured.
+
+        Returns False when the push was dropped as a repeat of the same
+        anomaly within the per-finding cooldown, so the audit does not count
+        it as reaching the user. True when it was sent or held for the next
+        batch; a batch still held when ``stop`` runs is not sent (see
+        TODOS.md).
         """
         # Register finding with the action handler so execute/handoff work.
         self._action_handler.register_finding(finding)
@@ -318,7 +324,7 @@ class SentinelNotifier:
                     finding.anomaly_id,
                     _FINDING_COOLDOWN_SECS,
                 )
-                return
+                return False
             # Record cooldown before the batch check so that batched findings
             # also consume their cooldown slot (prevents re-fire after flush).
             self._cooldown_times[finding.anomaly_id] = now_dt
@@ -346,7 +352,7 @@ class SentinelNotifier:
                         _BATCH_FLUSH_DELAY_SECS,
                         self._async_flush_batch,
                     )
-                return
+                return True
             self._notification_times.append(now_dt)
 
         if target_service:
@@ -379,6 +385,7 @@ class SentinelNotifier:
                 },
                 blocking=False,
             )
+        return True
 
     # ---------------------------------------------------------------------- #
     # Action event handling
