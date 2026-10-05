@@ -791,6 +791,54 @@ async def test_an_actuation_record_is_not_evicted_before_notified_ones() -> None
 
 
 @pytest.mark.asyncio
+async def test_dismissals_do_not_crowd_out_new_findings() -> None:
+    """
+    A dismissal sets action_outcome but did nothing to the home.
+
+    Protecting it let dismissed records fill the store until each new finding
+    was the only unprotected record and was dropped on arrival.
+    """
+    store = _make_store()
+    store._max_records = 3
+    dismissed = []
+    for i in range(3):
+        r = _record_with_code(f"d{i}", "not_suppressed")
+        r["action_outcome"] = {"status": "dismissed"}
+        dismissed.append(r)
+    store._records = dismissed
+
+    await store.async_append_finding(
+        _snapshot(),
+        _notified_finding("new"),
+        None,
+        suppression_reason_code="not_suppressed",
+    )
+
+    assert [r["finding"]["anomaly_id"] for r in store._records] == ["d1", "d2", "new"]
+
+
+@pytest.mark.asyncio
+async def test_a_store_full_of_actions_still_keeps_the_new_finding() -> None:
+    store = _make_store()
+    store._max_records = 2
+    acted = []
+    for i in range(2):
+        r = _record_with_code(f"a{i}", "not_suppressed")
+        r["action_outcome"] = {"status": "success"}
+        acted.append(r)
+    store._records = acted
+
+    await store.async_append_finding(
+        _snapshot(),
+        _notified_finding("new"),
+        None,
+        suppression_reason_code="not_suppressed",
+    )
+
+    assert [r["finding"]["anomaly_id"] for r in store._records] == ["a1", "new"]
+
+
+@pytest.mark.asyncio
 async def test_a_notifier_duplicate_is_evicted_before_notified_ones() -> None:
     store = _make_store()
     store._max_records = 3

@@ -71,6 +71,23 @@ def _now_iso() -> str:
     return dt_util.as_utc(dt_util.utcnow()).isoformat()
 
 
+# action_outcome statuses that mean something was done to the home: an
+# auto-executed service call (success, partial, or a failed attempt), a user's
+# Execute tap that reached the agent or fired the event, or a device the user
+# trusted. A dismissal or a refused tap also sets action_outcome but changes
+# nothing, so it gets no extra protection; protecting those let them pile up
+# until every new finding was dropped on arrival.
+_ACTED_STATUSES = frozenset(
+    {"success", "partial", "error", "agent_called", "event_fired", "trusted"}
+)
+
+
+def _acted(record: dict[str, Any]) -> bool:
+    """Return True when the record's action changed something in the home."""
+    outcome = record.get("action_outcome")
+    return isinstance(outcome, dict) and outcome.get("status") in _ACTED_STATUSES
+
+
 def _is_evictable(record: dict[str, Any]) -> bool:
     """
     Return True when *record* may be evicted to make room for a newer entry.
@@ -80,8 +97,8 @@ def _is_evictable(record: dict[str, Any]) -> bool:
     Records missing the field (e.g. migrated v1 records) are treated as
     evictable — we don't know whether they were user-facing.
     """
-    if record.get("action_outcome") is not None:
-        # An actuation happened; keep its record whatever the push did.
+    if _acted(record):
+        # Something was done to the home; keep the record whatever the push did.
         return False
     return record.get("suppression_reason_code") != "not_suppressed"
 
@@ -254,15 +271,12 @@ class AuditStore:
                     self._max_records,
                 )
                 self._logged_full = True
-            # Still keep actuation records over plain notifications: drop the
-            # oldest record that did not act, and only if every record acted,
-            # the oldest of all.
+            # Still keep records of actions over plain notifications: drop the
+            # oldest older record that did not act, and if every older record
+            # acted, the oldest of all. The record just appended is never the
+            # one dropped, so a store full of actions still keeps new findings.
             drop_idx = next(
-                (
-                    i
-                    for i, r in enumerate(self._records)
-                    if r.get("action_outcome") is None
-                ),
+                (i for i, r in enumerate(self._records[:-1]) if not _acted(r)),
                 0,
             )
             self._records.pop(drop_idx)
