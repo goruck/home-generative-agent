@@ -53,6 +53,9 @@ SUPPRESSION_REASON_USER_SNOOZE_PERMANENT = "user_snooze_permanent"
 # so the audit store's eviction logic can correctly treat them as evictable.
 SUPPRESSION_REASON_TRIAGE_SUPPRESSED = "triage_suppressed"
 SUPPRESSION_REASON_POLICY_BLOCKED = "policy_blocked"
+# The notifier dropped the push as a repeat of the same anomaly within its own
+# cooldown, so this finding did not reach the user (the earlier push did).
+SUPPRESSION_REASON_NOTIFIER_DUPLICATE = "notifier_duplicate"
 PENDING_PROMPT_DEFAULT_TTL = timedelta(hours=4)
 
 # Finding types considered presence-sensitive.  These are suppressed when a

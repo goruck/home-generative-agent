@@ -875,15 +875,18 @@ async def test_async_notify_batching_holds_after_rate_limit() -> None:
     original = _notifier_mod.async_call_later
     _notifier_mod.async_call_later = _fake_async_call_later  # type: ignore[assignment]
     try:
+        results = []
         for i in range(4):
             f = _finding_with_severity("low", anomaly_id=f"batch{i}")
-            await notifier.async_notify(f, snapshot, f"msg {i}")  # type: ignore[arg-type]
+            results.append(await notifier.async_notify(f, snapshot, f"msg {i}"))  # type: ignore[arg-type]
     finally:
         _notifier_mod.async_call_later = original  # type: ignore[assignment]
 
     # First 3 dispatched, 4th held.
     assert len(hass.services.calls) == 3
     assert len(notifier._held_batch) == 1
+    # A held finding still reaches the user in the batch summary.
+    assert results == [True, True, True, True]
 
 
 @pytest.mark.asyncio
@@ -981,11 +984,14 @@ async def test_async_notify_cooldown_suppresses_duplicate() -> None:
     snapshot = _minimal_snapshot()
 
     f = _finding_with_severity("medium", anomaly_id="fridge_abc")
-    await notifier.async_notify(f, snapshot, "Fridge running high.")  # type: ignore[arg-type]
+    first = await notifier.async_notify(f, snapshot, "Fridge running high.")  # type: ignore[arg-type]
     # Second call with the same anomaly_id should be silently dropped.
-    await notifier.async_notify(f, snapshot, "Fridge still running high.")  # type: ignore[arg-type]
+    second = await notifier.async_notify(f, snapshot, "Fridge still running high.")  # type: ignore[arg-type]
 
     assert len(hass.services.calls) == 1
+    # The engine audits a dropped repeat as not delivered.
+    assert first is True
+    assert second is False
 
 
 @pytest.mark.asyncio

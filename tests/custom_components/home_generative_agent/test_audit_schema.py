@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import fields
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -11,6 +12,7 @@ import pytest
 
 from custom_components.home_generative_agent.audit.models import AuditRecord
 from custom_components.home_generative_agent.audit.store import (
+    AUDIT_SAVE_DELAY_SECS,
     AuditStore,
     _migrate_record,
 )
@@ -640,3 +642,77 @@ async def test_flood_survival_exact_count() -> None:
         if r.get("suppression_reason_code") == "not_suppressed"
     ]
     assert len(not_suppressed) == 2  # exact count preserved
+
+
+# ---------------------------------------------------------------------------
+# Steady state at capacity: debounced saves, one log line
+# ---------------------------------------------------------------------------
+
+
+def _notified_finding(anomaly_id: str) -> MagicMock:
+    finding = MagicMock()
+    finding.as_dict.return_value = {"anomaly_id": anomaly_id, "type": "t"}
+    return finding
+
+
+@pytest.mark.asyncio
+async def test_append_debounces_the_save() -> None:
+    """A burst of findings shares one delayed write instead of one write each."""
+    store = _make_store()
+    snapshot = MagicMock()
+    snapshot.get = MagicMock(return_value=None)
+
+    for i in range(3):
+        await store.async_append_finding(
+            snapshot,
+            _notified_finding(f"a{i}"),
+            None,
+            suppression_reason_code="not_suppressed",
+        )
+
+    ha_store = cast("MagicMock", store._store)
+    ha_store.async_save.assert_not_awaited()
+    assert ha_store.async_delay_save.call_count == 3
+    data_func, delay = ha_store.async_delay_save.call_args.args
+    assert delay == AUDIT_SAVE_DELAY_SECS
+    # The delayed write serialises the records as they are when it fires.
+    assert len(data_func()) == 3
+
+
+@pytest.mark.asyncio
+async def test_update_response_debounces_the_save() -> None:
+    store = _make_store()
+    store._records = [_record_with_code("a1", "not_suppressed")]
+
+    await store.async_update_response("a1", {"false_positive": True}, None)
+
+    ha_store = cast("MagicMock", store._store)
+    ha_store.async_save.assert_not_awaited()
+    ha_store.async_delay_save.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_full_of_notified_records_logs_once_at_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A store full of notified findings is the steady state, not a warning."""
+    store = _make_store()
+    store._max_records = 2
+    snapshot = MagicMock()
+    snapshot.get = MagicMock(return_value=None)
+
+    with caplog.at_level(logging.DEBUG):
+        for i in range(6):
+            await store.async_append_finding(
+                snapshot,
+                _notified_finding(f"n{i}"),
+                None,
+                suppression_reason_code="not_suppressed",
+            )
+
+    assert len(store._records) == 2
+    assert [r["finding"]["anomaly_id"] for r in store._records] == ["n4", "n5"]
+    full = [r for r in caplog.records if "notified findings" in r.getMessage()]
+    assert len(full) == 1
+    assert full[0].levelno == logging.INFO
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]

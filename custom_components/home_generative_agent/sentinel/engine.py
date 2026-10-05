@@ -167,6 +167,7 @@ from .rules.zwave_inclusion_active import ZwaveInclusionActiveRule
 from .rules.zwave_insecure_security_class import ZwaveInsecureSecurityClassRule
 from .suppression import (
     SUPPRESSION_REASON_NOT_SUPPRESSED,
+    SUPPRESSION_REASON_NOTIFIER_DUPLICATE,
     SUPPRESSION_REASON_POLICY_BLOCKED,
     SUPPRESSION_REASON_TRIAGE_SUPPRESSED,
     SUPPRESSION_REASON_USER_SNOOZE_7D,
@@ -1857,13 +1858,13 @@ class SentinelEngine:
         if (explainer := self._explainer_for(explain_enabled, finding)) is not None:
             explanation = await explainer.async_explain(finding)
 
-        await self._notifier.async_notify(finding, snapshot, explanation)
+        sent = await self._notifier.async_notify(finding, snapshot, explanation)
         await _append_finding_audit(
             self._audit_store,
             snapshot,
             finding,
             explanation,
-            suppression_decision.reason_code,
+            _delivered_reason(suppression_decision.reason_code, sent=sent),
             triage_decision=triage_decision_value,
             triage_reason_code=triage_reason_code_value,
             triage_confidence=triage_confidence_value,
@@ -1995,13 +1996,13 @@ class SentinelEngine:
         if (explainer := self._explainer_for(explain_enabled, best)) is not None:
             explanation = await explainer.async_explain(best)
 
-        await self._notifier.async_notify(best, snapshot, explanation)
+        sent = await self._notifier.async_notify(best, snapshot, explanation)
         await _append_finding_audit(
             self._audit_store,
             snapshot,
             compound,
             explanation,
-            SUPPRESSION_REASON_NOT_SUPPRESSED,
+            _delivered_reason(SUPPRESSION_REASON_NOT_SUPPRESSED, sent=sent),
             triage_decision=None,
             triage_reason_code=None,
             triage_confidence=None,
@@ -2276,6 +2277,19 @@ def _build_suppress_kwargs(
         "quiet_hours_end": quiet_end,
         "quiet_hours_severities": quiet_severities,
     }
+
+
+def _delivered_reason(reason_code: str, *, sent: bool | None) -> str:
+    """
+    Return the audit reason code for a finding handed to the notifier.
+
+    The notifier drops a repeat of the same anomaly within its own cooldown;
+    such a finding never reached the user, so it must not be audited as
+    ``not_suppressed`` (that label protects a record from eviction and counts
+    it as a notification). ``None`` keeps the passed code for notifiers that
+    report nothing.
+    """
+    return SUPPRESSION_REASON_NOTIFIER_DUPLICATE if sent is False else reason_code
 
 
 async def _append_finding_audit(  # noqa: PLR0913
