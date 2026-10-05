@@ -655,40 +655,159 @@ def _notified_finding(anomaly_id: str) -> MagicMock:
     return finding
 
 
-@pytest.mark.asyncio
-async def test_append_debounces_the_save() -> None:
-    """A burst of findings shares one delayed write instead of one write each."""
-    store = _make_store()
+def _snapshot() -> MagicMock:
     snapshot = MagicMock()
     snapshot.get = MagicMock(return_value=None)
+    return snapshot
+
+
+@pytest.mark.asyncio
+async def test_a_burst_shares_one_write_window() -> None:
+    """
+    The first unsaved change schedules the write; later ones ride along.
+
+    Scheduling again on every append would postpone Home Assistant's delayed
+    write for as long as findings keep arriving.
+    """
+    store = _make_store()
+    ha_store = cast("MagicMock", store._store)
 
     for i in range(3):
         await store.async_append_finding(
-            snapshot,
+            _snapshot(),
             _notified_finding(f"a{i}"),
             None,
             suppression_reason_code="not_suppressed",
         )
 
-    ha_store = cast("MagicMock", store._store)
     ha_store.async_save.assert_not_awaited()
-    assert ha_store.async_delay_save.call_count == 3
+    ha_store.async_delay_save.assert_called_once()
     data_func, delay = ha_store.async_delay_save.call_args.args
     assert delay == AUDIT_SAVE_DELAY_SECS
-    # The delayed write serialises the records as they are when it fires.
-    assert len(data_func()) == 3
+    # The write serialises the records as they are when it fires.
+    assert [r["finding"]["anomaly_id"] for r in data_func()] == ["a0", "a1", "a2"]
+
+    # Once that write has run, the next change opens a new window.
+    await store.async_append_finding(
+        _snapshot(),
+        _notified_finding("a3"),
+        None,
+        suppression_reason_code="not_suppressed",
+    )
+    assert ha_store.async_delay_save.call_count == 2
 
 
 @pytest.mark.asyncio
-async def test_update_response_debounces_the_save() -> None:
+async def test_an_actuation_record_is_written_immediately() -> None:
     store = _make_store()
+    ha_store = cast("MagicMock", store._store)
+
+    await store.async_append_finding(
+        _snapshot(),
+        _notified_finding("lock"),
+        None,
+        suppression_reason_code="not_suppressed",
+        action_outcome={"status": "success"},
+    )
+
+    ha_store.async_save.assert_awaited_once()
+    ha_store.async_delay_save.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_user_response_is_written_immediately() -> None:
+    store = _make_store()
+    ha_store = cast("MagicMock", store._store)
     store._records = [_record_with_code("a1", "not_suppressed")]
 
     await store.async_update_response("a1", {"false_positive": True}, None)
 
+    ha_store.async_save.assert_awaited_once()
+    assert ha_store.async_save.call_args.args[0][0]["user_response"] == {
+        "false_positive": True
+    }
+    ha_store.async_delay_save.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_closed_store_drops_late_writes() -> None:
+    """After unload, a late change must not schedule a write over the reload."""
+    store = _make_store()
     ha_store = cast("MagicMock", store._store)
-    ha_store.async_save.assert_not_awaited()
-    ha_store.async_delay_save.assert_called_once()
+
+    await store.async_close()
+    ha_store.async_save.assert_awaited_once()
+
+    await store.async_append_finding(
+        _snapshot(),
+        _notified_finding("late"),
+        None,
+        suppression_reason_code="not_suppressed",
+    )
+    await store.async_append_finding(
+        _snapshot(),
+        _notified_finding("late_action"),
+        None,
+        suppression_reason_code="not_suppressed",
+        action_outcome={"status": "success"},
+    )
+
+    ha_store.async_delay_save.assert_not_called()
+    ha_store.async_save.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_save_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    store = _make_store()
+    cast("MagicMock", store._store).async_save = AsyncMock(
+        side_effect=OSError("disk full")
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await store.async_save()
+
+    assert "Could not save the Sentinel audit store: disk full" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_actuation_record_is_not_evicted_before_notified_ones() -> None:
+    """A dropped repeat that still actuated keeps its record at capacity."""
+    store = _make_store()
+    store._max_records = 2
+    acted = _record_with_code("acted", "notifier_duplicate")
+    acted["action_outcome"] = {"status": "success"}
+    store._records = [acted, _record_with_code("n1", "not_suppressed")]
+
+    await store.async_append_finding(
+        _snapshot(),
+        _notified_finding("n2"),
+        None,
+        suppression_reason_code="not_suppressed",
+    )
+
+    ids = [r["finding"]["anomaly_id"] for r in store._records]
+    assert "acted" in ids
+    assert ids == ["acted", "n2"]
+
+
+@pytest.mark.asyncio
+async def test_a_notifier_duplicate_is_evicted_before_notified_ones() -> None:
+    store = _make_store()
+    store._max_records = 3
+    store._records = [
+        _record_with_code("n1", "not_suppressed"),
+        _record_with_code("dup", "notifier_duplicate"),
+        _record_with_code("n2", "not_suppressed"),
+    ]
+
+    await store.async_append_finding(
+        _snapshot(),
+        _notified_finding("n3"),
+        None,
+        suppression_reason_code="not_suppressed",
+    )
+
+    assert [r["finding"]["anomaly_id"] for r in store._records] == ["n1", "n2", "n3"]
 
 
 @pytest.mark.asyncio
@@ -698,8 +817,7 @@ async def test_full_of_notified_records_logs_once_at_info(
     """A store full of notified findings is the steady state, not a warning."""
     store = _make_store()
     store._max_records = 2
-    snapshot = MagicMock()
-    snapshot.get = MagicMock(return_value=None)
+    snapshot = _snapshot()
 
     with caplog.at_level(logging.DEBUG):
         for i in range(6):

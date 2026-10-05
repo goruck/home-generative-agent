@@ -248,14 +248,14 @@ async def test_platform_allows_the_add_while_setup_is_still_in_progress(
 
 
 @pytest.mark.asyncio
-async def test_unload_writes_the_audit_store_now(
+async def test_unload_closes_the_audit_store(
     hass: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    Audit saves are debounced, so unload must write the store immediately.
+    Audit saves are delayed, so unload must write the store and close it.
 
     Otherwise a reload loads the file before the old store's pending write
-    lands, and the old write later overwrites the new store's records.
+    lands, and a late write from the old store overwrites the new one's.
     """
     entry, _sentinel, _discovery, _client = await _setup_with_deferred_sentinel_start(
         hass, monkeypatch
@@ -263,10 +263,10 @@ async def test_unload_writes_the_audit_store_now(
 
     class _RecordingAudit:
         def __init__(self) -> None:
-            self.save_calls = 0
+            self.close_calls = 0
 
-        async def async_save(self) -> None:
-            self.save_calls += 1
+        async def async_close(self) -> None:
+            self.close_calls += 1
 
     audit = _RecordingAudit()
     entry.runtime_data.audit_store = audit
@@ -274,7 +274,7 @@ async def test_unload_writes_the_audit_store_now(
     result = await cast("Any", hga_component).async_unload_entry(hass, entry)
 
     assert result is True
-    assert audit.save_calls == 1
+    assert audit.close_calls == 1
 
 
 @pytest.mark.asyncio

@@ -19,7 +19,10 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS,
 )
-from custom_components.home_generative_agent.sentinel.engine import SentinelEngine
+from custom_components.home_generative_agent.sentinel.engine import (
+    SentinelEngine,
+    _delivered_reason,
+)
 from custom_components.home_generative_agent.sentinel.execution import (
     ActionPolicyResult,
 )
@@ -165,6 +168,13 @@ async def test_sentinel_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
     assert notifier.calls
     assert audit_store.calls
     assert audit_store.calls[0]["suppression_reason_code"] == "not_suppressed"
+
+
+def test_delivered_reason_keeps_the_code_unless_the_push_was_dropped() -> None:
+    assert _delivered_reason("not_suppressed", sent=True) == "not_suppressed"
+    assert _delivered_reason("not_suppressed", sent=None) == "not_suppressed"
+    assert _delivered_reason("not_suppressed", sent=False) == "notifier_duplicate"
+    assert _delivered_reason("type_cooldown", sent=False) == "notifier_duplicate"
 
 
 class _DroppingNotifier(DummyNotifier):
@@ -858,6 +868,49 @@ async def test_compound_blocked_finding_audit_reason(
         audit.calls[0]["suppression_reason_code"] == SUPPRESSION_REASON_POLICY_BLOCKED
     )
     assert audit.calls[0]["action_policy_path"] == ACTION_POLICY_BLOCKED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("notifier_factory", "expected"),
+    [
+        (_DroppingNotifier, "notifier_duplicate"),
+        (DummyNotifier, "not_suppressed"),
+    ],
+)
+async def test_compound_audit_reason_follows_the_notifier(
+    monkeypatch: pytest.MonkeyPatch, notifier_factory: Any, expected: str
+) -> None:
+    """The compound path labels a dropped repeat the same way as a plain one."""
+    snapshot = _make_snapshot()
+    engine, _notifier, audit = _make_engine(monkeypatch, snapshot, cooldown_minutes=0)
+    notifier = notifier_factory()
+    cast("Any", engine)._notifier = notifier
+
+    finding = AnomalyFinding(
+        anomaly_id="test-compound-dup",
+        type="open_entry_when_home_window",
+        severity="medium",
+        confidence=0.9,
+        triggering_entities=["binary_sensor.kitchen_window"],
+        evidence={"state": "on"},
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+    compound = CompoundFinding.from_findings([finding])
+
+    await engine._dispatch_compound(
+        compound,
+        snapshot,
+        datetime.now(UTC),
+        timedelta(minutes=0),
+        timedelta(minutes=0),
+        False,  # noqa: FBT003
+    )
+
+    assert len(notifier.calls) == 1
+    assert len(audit.calls) == 1
+    assert audit.calls[0]["suppression_reason_code"] == expected
 
 
 @pytest.mark.asyncio

@@ -509,6 +509,19 @@ validation.
 
 ---
 
+### A Sentinel batch held at unload is never sent but is audited as delivered
+
+**What:** `SentinelNotifier.async_notify` (`sentinel/notifier.py`) holds non-high findings past the rate limit in `_held_batch` and returns True, so the engine audits them `not_suppressed`. `stop()` cancels the batch timer without flushing, so findings held when the entry unloads or reloads are never pushed, yet they stay counted in the daily digest and the health sensor's notification KPIs, and are protected from eviction. A batch summary that does go out also carries no per-finding action buttons.
+
+**Why:** Pre-existing; found in the review of the audit store fix (Claude adversarial and Codex both flagged it). Rare: it needs a reload inside the 30-second batch window after a rate-limit burst.
+
+**How to apply:** Either flush `_held_batch` from `stop()` (schedule `_async_flush_batch` before clearing the handle), or return a third state for held findings and audit them under a distinct reason code that the batch flush settles. Pin it with a test that reloads with a held batch.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
 ### Sentinel sync sampling-retry can outlive the triage timeout
 
 **What:** `run_sentinel_model_call`'s executor leg now runs `invoke_dropping_unsupported_params` in the worker thread. The thread already outlives `asyncio.timeout` cancellation (threads can't be cancelled); the drop-retry can add up to two more provider HTTP calls after the sentinel caller has timed out and moved on.

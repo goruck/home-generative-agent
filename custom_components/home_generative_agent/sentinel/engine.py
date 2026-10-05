@@ -1710,6 +1710,9 @@ class SentinelEngine:
         Returns True when the notifier was handed the finding (delivered), False
         when suppression, triage, or policy stopped it; callers that must know
         whether an alert reached the user (the auth inventory commit) rely on it.
+        A push the notifier drops as a repeat still returns True: the same
+        anomaly reached the user within its cooldown. Only the audit label
+        (``notifier_duplicate``) says this finding's own push was not sent.
         """
         if isinstance(item, CompoundFinding):
             return await self._dispatch_compound(

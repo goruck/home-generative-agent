@@ -277,8 +277,10 @@ class SentinelNotifier:
         * Routes to a per-area notify service when configured.
 
         Returns False when the push was dropped as a repeat of the same
-        anomaly within the per-finding cooldown, True when it was sent or held
-        for the next batch, so the audit records what reached the user.
+        anomaly within the per-finding cooldown, so the audit does not count
+        it as reaching the user. True when it was sent or held for the next
+        batch; a batch still held when ``stop`` runs is not sent (see
+        TODOS.md).
         """
         # Register finding with the action handler so execute/handoff work.
         self._action_handler.register_finding(finding)

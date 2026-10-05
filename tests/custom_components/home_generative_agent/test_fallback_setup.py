@@ -107,8 +107,8 @@ class NoopAsyncStore:
     async def async_load(self) -> None:
         """Load no state."""
 
-    async def async_save(self) -> None:
-        """Save no state."""
+    async def async_close(self) -> None:
+        """Close with no state."""
 
     def start(self) -> None:
         """Start no background work."""

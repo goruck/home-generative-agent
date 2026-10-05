@@ -29,9 +29,13 @@ STORE_VERSION = 1
 STORE_KEY = "home_generative_agent_audit"
 # Findings arrive in bursts (one Sentinel run, one camera event), and the
 # store is rewritten whole on every save: about 8 MB at 500 records on a busy
-# home. Debouncing lets a burst share one write instead of one write per
-# finding; Home Assistant flushes a pending write on shutdown, and the entry's
-# unload flushes it on reload.
+# home. A fixed window lets a burst share one write: the first unsaved change
+# schedules it, later ones ride along, so nothing waits more than this long.
+# (Home Assistant's delayed save alone is a trailing debounce, which a steady
+# stream of findings would postpone indefinitely.) Records of an actuation and
+# user responses are low volume and the trail most worth keeping, so they are
+# written immediately. Home Assistant flushes a pending write on shutdown, and
+# the entry's unload closes the store.
 AUDIT_SAVE_DELAY_SECS = 15
 
 # v2 fields that must be present after migration; maps field name -> default
@@ -76,6 +80,9 @@ def _is_evictable(record: dict[str, Any]) -> bool:
     Records missing the field (e.g. migrated v1 records) are treated as
     evictable — we don't know whether they were user-facing.
     """
+    if record.get("action_outcome") is not None:
+        # An actuation happened; keep its record whatever the push did.
+        return False
     return record.get("suppression_reason_code") != "not_suppressed"
 
 
@@ -120,6 +127,8 @@ class AuditStore:
         self._records: list[dict[str, Any]] = []
         self._max_records = max_records
         self._logged_full = False
+        self._save_pending = False
+        self._closed = False
 
     async def async_load(self) -> None:
         """Load audit records from storage, migrating old records on the fly."""
@@ -132,14 +141,42 @@ class AuditStore:
 
     async def async_save(self) -> None:
         """Persist audit records now, superseding any pending delayed save."""
+        self._save_pending = False
         try:
             await self._store.async_save(self._records)
-        except (HomeAssistantError, OSError, ValueError):
-            return
+        except (HomeAssistantError, OSError, ValueError) as err:
+            LOGGER.warning("Could not save the Sentinel audit store: %s", err)
 
-    def _schedule_save(self) -> None:
-        """Persist audit records after a short delay, coalescing bursts."""
-        self._store.async_delay_save(lambda: self._records, AUDIT_SAVE_DELAY_SECS)
+    async def async_close(self) -> None:
+        """
+        Write the store and refuse later writes.
+
+        Called on entry unload. A Sentinel run or a notification action still
+        in flight can append to this store after the unload; scheduling a
+        write then would let this instance's stale list overwrite the file
+        the reloaded entry's store has written since. Such a late record is
+        dropped instead, as it was before saves were delayed.
+        """
+        self._closed = True
+        await self.async_save()
+
+    def _records_for_write(self) -> list[dict[str, Any]]:
+        """Return the records for a delayed write and open the next window."""
+        self._save_pending = False
+        return self._records
+
+    async def _async_persist(self, *, now: bool = False) -> None:
+        """Write now, or schedule one write per window for a burst."""
+        if self._closed:
+            LOGGER.debug("Audit store closed; not writing a late change")
+            return
+        if now:
+            await self.async_save()
+            return
+        if self._save_pending:
+            return
+        self._save_pending = True
+        self._store.async_delay_save(self._records_for_write, AUDIT_SAVE_DELAY_SECS)
 
     async def async_append_finding(  # noqa: PLR0913
         self,
@@ -186,7 +223,7 @@ class AuditStore:
         self._records.append(record.__dict__)
         if len(self._records) > self._max_records:
             self._evict_one()
-        self._schedule_save()
+        await self._async_persist(now=action_outcome is not None)
 
     def _evict_one(self) -> None:
         """
@@ -217,7 +254,18 @@ class AuditStore:
                     self._max_records,
                 )
                 self._logged_full = True
-            self._records.pop(0)
+            # Still keep actuation records over plain notifications: drop the
+            # oldest record that did not act, and only if every record acted,
+            # the oldest of all.
+            drop_idx = next(
+                (
+                    i
+                    for i, r in enumerate(self._records)
+                    if r.get("action_outcome") is None
+                ),
+                0,
+            )
+            self._records.pop(drop_idx)
 
     async def async_update_response(
         self, anomaly_id: str, response: dict[str, Any], outcome: dict[str, Any] | None
@@ -263,7 +311,7 @@ class AuditStore:
         match["user_response"] = response
         match["action_outcome"] = outcome
         match.setdefault("notification", {})["responded_at"] = _now_iso()
-        self._schedule_save()
+        await self._async_persist(now=True)
 
     async def async_get_latest(self, limit: int) -> list[dict[str, Any]]:
         """Return the latest audit records, newest first."""
