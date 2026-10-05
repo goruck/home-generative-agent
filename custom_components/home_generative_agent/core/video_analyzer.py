@@ -43,6 +43,7 @@ from ..const import (  # noqa: TID252
     CONF_MODEL_PROVIDER_UNCONTENDED,
     CONF_NOTIFY_SERVICE,
     CONF_VIDEO_ANALYZER_EVENT_RECORDING_ENABLED,
+    CONF_VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_S,
     CONF_VIDEO_ANALYZER_MODE,
     CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP,
     CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S,
@@ -50,6 +51,7 @@ from ..const import (  # noqa: TID252
     CONF_VIDEO_MODEL_SEMAPHORE,
     CONF_VLM_PROMPT_EXTRA,
     CONF_VLM_RESPONSE_LANGUAGE,
+    RECOMMENDED_VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_S,
     RECOMMENDED_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S,
     RECOMMENDED_VIDEO_MODEL_SEMAPHORE,
     RECOMMENDED_VLM_PROMPT_EXTRA,
@@ -62,6 +64,7 @@ from ..const import (  # noqa: TID252
     VIDEO_ANALYZER_EVENT_SELECT_WINDOW,
     VIDEO_ANALYZER_FACE_CROP,
     VIDEO_ANALYZER_FACE_MERGE_THRESHOLD,
+    VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_MAX_S,
     VIDEO_ANALYZER_LATEST_NAME,
     VIDEO_ANALYZER_LATEST_SUBFOLDER,
     VIDEO_ANALYZER_MOTION_CAMERA_MAP,
@@ -100,9 +103,12 @@ from .fallback import ainvoke_dropping_unsupported_params
 from .notify_cooldown import (
     CooldownAction,
     CooldownWindow,
+    HouseWindow,
     active_window,
     decide,
     has_unknown_face,
+    house_hushes,
+    house_window_after_sound,
     notification_tag,
     opened_window,
     window_after_unknown_face,
@@ -792,6 +798,17 @@ class _NotifyCard:
     quiet: bool
 
 
+@dataclass(frozen=True, slots=True)
+class _CooldownPlan:
+    """A planned cooldown push and the state to commit once it is sent."""
+
+    card: _NotifyCard
+    # The camera window to store, or None to leave it as it is.
+    window: CooldownWindow | None
+    # The house window to store, or None to leave it as it is.
+    house: HouseWindow | None = None
+
+
 @dataclass(frozen=True)
 class CaptionNoveltyDecision:
     """Result of _is_caption_novel."""
@@ -926,6 +943,10 @@ class VideoAnalyzer:
         # and in memory only: an options change reloads the entry.
         self._notify_windows: dict[str, CooldownWindow] = {}
         self._notify_locks: dict[str, asyncio.Lock] = {}
+        # The house window across all cameras (issue #721), and the one lock
+        # every camera's cooldown push takes while it is on.
+        self._house_window: HouseWindow | None = None
+        self._house_lock = asyncio.Lock()
         # Per-camera lock making caption dedup's check, send and store one step.
         self._finalize_locks: dict[str, asyncio.Lock] = {}
         self._notify_cooldown_unsupported_logged = False
@@ -1706,18 +1727,31 @@ class VideoAnalyzer:
         )
         return True
 
-    def _notification_cooldown_s(self) -> int:
-        """Return the configured cooldown in seconds; 0 when off or malformed."""
-        raw = self.entry.runtime_data.options.get(
-            CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S,
-            RECOMMENDED_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S,
-        )
+    def _cooldown_option_s(self, key: str, default: int, maximum: int) -> int:
+        """Return a cooldown option in seconds; 0 when off or malformed."""
+        raw = self.entry.runtime_data.options.get(key, default)
         try:
             seconds = int(float(raw or 0))
         except (TypeError, ValueError, OverflowError):
             # OverflowError: a stored "inf" or "1e999"; junk like any other.
             return 0
-        return min(VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_MAX_S, max(0, seconds))
+        return min(maximum, max(0, seconds))
+
+    def _notification_cooldown_s(self) -> int:
+        """Return the per-camera cooldown in seconds; 0 when off or malformed."""
+        return self._cooldown_option_s(
+            CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S,
+            RECOMMENDED_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S,
+            VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_MAX_S,
+        )
+
+    def _house_notification_cooldown_s(self) -> int:
+        """Return the house cooldown in seconds; 0 when off or malformed."""
+        return self._cooldown_option_s(
+            CONF_VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_S,
+            RECOMMENDED_VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_S,
+            VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_MAX_S,
+        )
 
     async def _dispatch_notification(
         self,
@@ -1727,16 +1761,21 @@ class VideoAnalyzer:
         context: _BatchNotifyContext,
     ) -> bool:
         """
-        Send a push that passed the novelty check, honoring the cooldown.
+        Send a push that passed the novelty check, honoring the cooldowns.
 
         Returns True when a sounding push was handed to a notify service:
         False when there was no service, and for a quiet cooldown update.
         """
         camera_name = camera_id.rsplit(".", maxsplit=1)[-1]
-        cooldown_s = self._notification_cooldown_s()
+        house_s = self._house_notification_cooldown_s()
+        # A camera window is never shorter than the house window: with only
+        # the house cooldown on, the camera that sounded is quiet for it too,
+        # and a camera the house window hushed keeps replacing one card
+        # instead of starting a new one on every push.
+        cooldown_s = max(self._notification_cooldown_s(), house_s)
         target = self._resolve_notify_service() if cooldown_s > 0 else None
         if target is None:
-            # Cooldown off, or no service at all: the unchanged send (which
+            # Cooldowns off, or no service at all: the unchanged send (which
             # logs the missing service itself).
             return await self._send_notification(msg, camera_name, notify_img)
         if not target[1].startswith(MOBILE_APP_SERVICE_PREFIX):
@@ -1745,11 +1784,13 @@ class VideoAnalyzer:
             # push exactly as with the cooldown off; nothing is withheld.
             if not self._notify_cooldown_unsupported_logged:
                 self._notify_cooldown_unsupported_logged = True
+                # The service name is deliberately not logged: it can carry a
+                # device name, which code scanning treats as private data.
                 LOGGER.warning(
-                    "The camera notification cooldown is set but does not apply "
-                    "to %s.%s: it needs a single notify.mobile_app_* target. "
-                    "Every camera notification is sent as usual.",
-                    *target,
+                    "A camera notification cooldown is set but does not apply: "
+                    "it needs a single notify.mobile_app_* service, and the "
+                    "configured notify service is not one. Every camera "
+                    "notification is sent as usual.",
                 )
             return await self._send_notification(
                 msg, camera_name, notify_img, target=target
@@ -1757,12 +1798,21 @@ class VideoAnalyzer:
 
         # Batches for one camera can overlap (worker, queue, event recording):
         # the lock makes read-decide-send-commit one step, so two of them
-        # cannot both see "no open window" and both sound.
-        lock = self._notify_locks.setdefault(camera_id, asyncio.Lock())
+        # cannot both see "no open window" and both sound. The house window
+        # is shared by every camera, so while it is on one lock covers all.
+        lock = (
+            self._house_lock
+            if house_s > 0
+            else self._notify_locks.setdefault(camera_id, asyncio.Lock())
+        )
         async with lock:
             try:
-                card, window = self._plan_cooldown_push(
-                    camera_id, f"{target[0]}.{target[1]}", context, cooldown_s
+                plan: _CooldownPlan | None = self._plan_cooldown_push(
+                    camera_id,
+                    f"{target[0]}.{target[1]}",
+                    context,
+                    cooldown_s,
+                    house_s,
                 )
             except Exception:
                 # The cooldown is a convenience layered on the alert: a bug in
@@ -1770,7 +1820,8 @@ class VideoAnalyzer:
                 LOGGER.exception(
                     "[%s] Notification cooldown failed; sending without it", camera_id
                 )
-                card, window = None, None
+                plan = None
+            card = plan.card if plan is not None else None
             # A send the notify service refuses raises out of here exactly as
             # it does with the cooldown off: no window is committed, and the
             # batch's caption is not stored, so caption dedup cannot suppress
@@ -1780,8 +1831,11 @@ class VideoAnalyzer:
             )
             # Commit only a push the notify service accepted, so a push that
             # could not even be handed over never starts a quiet window.
-            if sent and window is not None:
-                self._notify_windows[camera_id] = window
+            if sent and plan is not None:
+                if plan.window is not None:
+                    self._notify_windows[camera_id] = plan.window
+                if plan.house is not None:
+                    self._house_window = plan.house
             # A quiet replacement of the window's card is not an alert: it
             # must not let caption dedup withhold a later, sounding one.
             return sent and not (card is not None and card.quiet)
@@ -1792,16 +1846,24 @@ class VideoAnalyzer:
         target: str,
         context: _BatchNotifyContext,
         cooldown_s: int,
-    ) -> tuple[_NotifyCard, CooldownWindow | None]:
+        house_s: int,
+    ) -> _CooldownPlan:
         """
         Decide which card this push lands on and whether it sounds.
 
-        Returns the card and, for a sounding push, the window to commit once
-        the push has been handed to the notify service.
+        Returns the card and the camera and house windows to commit once the
+        push has been handed to the notify service.
         """
         now = monotonic()
         previous = self._notify_windows.get(camera_id)
         window = active_window(previous, now=now, cooldown_s=cooldown_s, target=target)
+        house = (
+            active_window(
+                self._house_window, now=now, cooldown_s=house_s, target=target
+            )
+            if house_s > 0
+            else None
+        )
         # Escalation looks at every frame of the batch; which card a quiet
         # update lands on looks only at the frames its text and image show.
         unknown_in_batch = has_unknown_face(context.batch_names)
@@ -1810,33 +1872,55 @@ class VideoAnalyzer:
             unknown_in_batch=unknown_in_batch,
             unknown_displayed=has_unknown_face(context.recognized),
         )
+        # Only a push the camera window would sound reaches the house window.
+        hushed = action in {
+            CooldownAction.OPEN,
+            CooldownAction.UNKNOWN_FACE,
+        } and house_hushes(house, unknown_in_batch=unknown_in_batch)
         LOGGER.debug(
-            "[%s] notification cooldown: action=%s unknown_face=%s window=%s",
+            "[%s] notification cooldown: action=%s unknown_face=%s window=%s "
+            "house_window=%s hushed=%s",
             camera_id,
             action,
             unknown_in_batch,
             "open" if window is not None else "none",
+            "off" if house_s <= 0 else ("open" if house is not None else "none"),
+            hushed,
         )
         if window is None:
             new_window = opened_window(
                 previous,
-                now=now,
+                # A hushed window counts from the sound that covered it, so
+                # no camera stays quiet longer than its window after a sound.
+                now=house.started if hushed and house is not None else now,
                 wall_time=time(),
                 target=target,
-                unknown_face=unknown_in_batch,
+                # Only an unknown face that sounded spends the camera's
+                # escalation: a hushed one leaves the camera's first unknown
+                # face after the house window free to sound.
+                unknown_face=unknown_in_batch and not hushed,
             )
-        elif action is CooldownAction.UNKNOWN_FACE:
+        elif action is CooldownAction.UNKNOWN_FACE and not hushed:
             new_window = window_after_unknown_face(window, wall_time=time())
         else:
+            # A quiet update of the window's card. A hushed escalation lands
+            # here too and changes no state, so it is not spent.
             tag = notification_tag(
                 camera_id, window, follow_up=action is CooldownAction.FOLLOW_UP
             )
-            return _NotifyCard(tag=tag, quiet=True), None
-        # A sounding push on a new card; commit its window once it is sent.
-        return (
-            _NotifyCard(tag=notification_tag(camera_id, new_window), quiet=False),
-            new_window,
+            return _CooldownPlan(card=_NotifyCard(tag=tag, quiet=True), window=None)
+        # A push on a new card: it sounds unless the house window hushed it.
+        # Either way its window is committed once it is sent, so the camera's
+        # later pushes replace this card.
+        card = _NotifyCard(tag=notification_tag(camera_id, new_window), quiet=hushed)
+        new_house = (
+            house_window_after_sound(
+                house, now=now, target=target, unknown_face=unknown_in_batch
+            )
+            if house_s > 0 and not hushed
+            else None
         )
+        return _CooldownPlan(card=card, window=new_window, house=new_house)
 
     async def _generate_summary(
         self,

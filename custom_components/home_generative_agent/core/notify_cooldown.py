@@ -1,9 +1,9 @@
 """
-Per-camera notification cooldown policy for the video analyzer (issue #672).
+Notification cooldown policy for the video analyzer (issues #672 and #721).
 
 Pure decision logic: no Home Assistant objects, no I/O, no clock reads. The
-analyzer owns the per-camera lock, the state dict and the dispatch; this module
-only answers "what should this push do to the camera's notification cards".
+analyzer owns the locks, the camera and house window state and the dispatch;
+this module only answers "what should this push do to the notification cards".
 
 A window opens with a sounding push and runs for a fixed time. Later pushes
 inside it replace that card quietly. The one exception is face recognition
@@ -13,6 +13,12 @@ Captions deliberately decide nothing here. Guessing "a new person appeared"
 from free text was tried and is unsafe for a security alert: a model's wording
 for a person is open-ended ("a figure", "someone"), and a wrong guess means a
 silent notification. Face recognition gives a result, not a guess.
+
+The house window (issue #721) sits above the camera windows: one real event
+seen by several cameras makes each camera's FIRST push, which no camera window
+can hush. A sounding push opens a short house window; a push from any camera
+that would sound inside it posts its card quietly instead, unless it carries
+the house window's first unknown face.
 """
 
 from __future__ import annotations
@@ -21,7 +27,7 @@ import dataclasses
 import hashlib
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from ..const import UNKNOWN_PERSON_LABEL  # noqa: TID252
 
@@ -30,6 +36,13 @@ if TYPE_CHECKING:
 
 _UNKNOWN_PERSON: str = UNKNOWN_PERSON_LABEL.lower()
 _CAMERA_HASH_CHARS = 12
+
+
+class _Window(Protocol):
+    @property
+    def started(self) -> float: ...
+    @property
+    def target(self) -> str: ...
 
 
 class CooldownAction(StrEnum):
@@ -52,8 +65,10 @@ class CooldownAction(StrEnum):
 class CooldownWindow:
     """One camera's open notification window."""
 
-    # Monotonic seconds at the push that opened the window. Never moved: the
-    # window has a fixed length, so nothing can stay quiet longer than that.
+    # Monotonic seconds at the sound the window counts from: its own opening
+    # push, or, when the house window hushed that push, the house window's
+    # start. Never moved: the window has a fixed length, so nothing can stay
+    # quiet longer than that after a sound.
     started: float
     # Identifies the window's current alert card; see card_id_after.
     card_id: int
@@ -67,14 +82,26 @@ class CooldownWindow:
     opening_card_id: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class HouseWindow:
+    """The open window across all cameras (issue #721)."""
+
+    # Monotonic seconds at the sounding push that opened it. Never moved.
+    started: float
+    # The notify service ("domain.service") that sounded.
+    target: str
+    # A face-confirmed unknown person has already sounded in this window.
+    unknown_face: bool
+
+
 def has_unknown_face(names: Iterable[str]) -> bool:
     """Return True when face recognition reported an unknown person."""
     return any(name.strip().lower() == _UNKNOWN_PERSON for name in names)
 
 
-def active_window(
-    window: CooldownWindow | None, *, now: float, cooldown_s: float, target: str
-) -> CooldownWindow | None:
+def active_window[W: _Window](
+    window: W | None, *, now: float, cooldown_s: float, target: str
+) -> W | None:
     """
     Return `window` while it is open at monotonic `now` for this `target`.
 
@@ -109,6 +136,28 @@ def decide(
     return CooldownAction.QUIET
 
 
+def house_hushes(window: HouseWindow | None, *, unknown_in_batch: bool) -> bool:
+    """
+    Return True when the ACTIVE house window turns a sounding push quiet.
+
+    Only a push that would sound is asked: a quiet camera update stays quiet.
+    """
+    if window is None:
+        return False
+    return not (unknown_in_batch and not window.unknown_face)
+
+
+def house_window_after_sound(
+    window: HouseWindow | None, *, now: float, target: str, unknown_face: bool
+) -> HouseWindow:
+    """Return the house window once a push has sounded at monotonic `now`."""
+    if window is None:
+        return HouseWindow(started=now, target=target, unknown_face=unknown_face)
+    # Inside an open window only its first unknown face sounds; the window
+    # keeps its start, so its length stays fixed.
+    return dataclasses.replace(window, unknown_face=window.unknown_face or unknown_face)
+
+
 def card_id_after(previous: CooldownWindow | None, *, wall_time: float) -> int:
     """
     Return an id for a new alert card, unique per camera.
@@ -131,7 +180,12 @@ def opened_window(
     target: str,
     unknown_face: bool,
 ) -> CooldownWindow:
-    """Build the window an OPEN push starts."""
+    """
+    Build the window an OPEN push starts.
+
+    `now` is when the window counts from: the push itself when it sounds, the
+    house window's start when the house window hushed it.
+    """
     return CooldownWindow(
         started=now,
         card_id=card_id_after(previous, wall_time=wall_time),

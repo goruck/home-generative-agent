@@ -28,10 +28,12 @@ from custom_components.home_generative_agent.const import (
     CONF_SCHEMA_FIRST_YAML,
     CONF_STT_HALLUCINATION_EXACT_PATTERNS,
     CONF_STT_HALLUCINATION_PATTERNS,
+    CONF_VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_S,
     CONF_VIDEO_ANALYZER_MODE,
     CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S,
     CONF_VOICE_TOOL_ACK,
     DOMAIN,
+    VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_MAX_S,
     VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_MAX_S,
 )
 
@@ -299,48 +301,86 @@ async def test_clearing_voice_acknowledgement_turns_it_off(hass: Any) -> None:
     assert kept[CONF_VOICE_TOOL_ACK] == "One moment."
 
 
+@pytest.mark.parametrize(
+    ("key", "maximum"),
+    [
+        (
+            CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S,
+            VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_MAX_S,
+        ),
+        (
+            CONF_VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_S,
+            VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_MAX_S,
+        ),
+    ],
+)
 @pytest.mark.asyncio
 async def test_options_schema_offers_notification_cooldown_with_analyzer_on(
-    hass: Any,
+    hass: Any, key: str, maximum: int
 ) -> None:
     """The cooldown is a bounded number, default 0, shown with the analyzer on."""
     schema = await _schema_for_options(
         hass, {CONF_VIDEO_ANALYZER_MODE: "notify_on_anomaly"}
     )
-    marker = _schema_key(schema, CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S)
+    marker = _schema_key(schema, key)
     selector = schema[marker]
 
     assert marker.default() == 0
     assert isinstance(selector, NumberSelector)
     assert selector.config["min"] == 0
-    assert selector.config["max"] == VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_MAX_S
+    assert selector.config["max"] == maximum
     validate = cast("Any", selector)
     with pytest.raises(vol.Invalid):
         validate(-1)
     with pytest.raises(vol.Invalid):
-        validate(VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_MAX_S + 1)
+        validate(maximum + 1)
 
 
+@pytest.mark.parametrize(
+    ("key", "maximum"),
+    [
+        (
+            CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S,
+            VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_MAX_S,
+        ),
+        (
+            CONF_VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_S,
+            VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_MAX_S,
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_options_schema_keeps_a_saved_notification_cooldown(hass: Any) -> None:
+async def test_options_schema_keeps_a_saved_notification_cooldown(
+    hass: Any, key: str, maximum: int
+) -> None:
     """A saved value comes back as the field's default."""
     schema = await _schema_for_options(
-        hass,
-        {
-            CONF_VIDEO_ANALYZER_MODE: "always_notify",
-            CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S: 120,
-        },
+        hass, {CONF_VIDEO_ANALYZER_MODE: "always_notify", key: maximum}
     )
-    marker = _schema_key(schema, CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S)
+    marker = _schema_key(schema, key)
 
-    assert marker.default() == 120
+    assert marker.default() == maximum
 
 
+@pytest.mark.parametrize(
+    ("key", "maximum"),
+    [
+        (
+            CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S,
+            VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_MAX_S,
+        ),
+        (
+            CONF_VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_S,
+            VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_MAX_S,
+        ),
+    ],
+)
 @pytest.mark.asyncio
 async def test_options_schema_hides_notification_cooldown_with_analyzer_off(
-    hass: Any,
+    hass: Any, key: str, maximum: int
 ) -> None:
     """With the analyzer disabled there are no notifications to rate-limit."""
+    del maximum
     schema = await _schema_for_options(hass, {CONF_VIDEO_ANALYZER_MODE: "disable"})
 
-    assert CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S not in _schema_keys(schema)
+    assert key not in _schema_keys(schema)

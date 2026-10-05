@@ -294,6 +294,27 @@ The cooldown acts only on notifications that pass [caption deduplication](#capti
 - If two analyses of one camera finish out of order, the card shows whichever finished last.
 - Changing any option reloads the integration and clears every open window.
 
+### House notification cooldown
+
+The notification cooldown works one camera at a time, so one real event seen by several cameras (a group walking past the house) still makes each camera's first notification sound, a second or two apart. The **House notification cooldown** (`video_analyzer_house_notification_cooldown_s`, Global Options, default `0` = off, up to 60 seconds) groups those into one sound.
+
+With the house cooldown set to N seconds:
+
+- A camera notification that sounds starts a house window of N seconds, for all cameras. Like a camera window, it has a fixed length.
+- A notification from any camera that would sound inside the house window still posts **its own card, quietly**, with that camera's description and image.
+- With [face recognition](#face-recognition) on, the first **Unknown Person** inside the house window still sounds, once, whichever camera reports it. One stranger crossing three cameras sounds once. A camera whose Unknown Person was made quiet this way has not used up its own: its first Unknown Person after the house window ends still sounds. A camera's quiet card that shows the stranger is replaced by that camera's next quiet notification, like any quiet card; the card that sounded keeps its image.
+- A camera whose notification was made quiet this way starts its camera window, counted from the sound that covered it. Its later notifications replace its card quietly until that window ends. **That is the camera cooldown's length (or N, if longer), not just N**: with a 120-second camera cooldown, a camera made quiet by another camera's sound stays quiet (Unknown Person aside) for up to 120 seconds after that sound.
+- It only acts on notifications that would sound. A quiet update of a camera's card does not start or extend a house window.
+- It works with the camera cooldown on or off. A camera window is never shorter than the house window: with the camera cooldown at `0` (or below N), each camera uses N for its own window, so the camera that sounded is quiet for N seconds too and its repeats replace its card.
+
+Keep N to a few seconds. It is a time window only: nothing compares what the cameras saw, so two separate events on different cameras within N seconds sound once.
+
+**Limits** (on top of the camera cooldown's):
+
+- It needs a single `notify.mobile_app_*` target, like the camera cooldown.
+- Home Assistant does not report whether a push reached the phone. If the notification that sounded is lost on the way, every camera made quiet by it stays quiet for its camera window (up to the larger of the two cooldowns), not only for N seconds.
+- Verified on iOS only. A notification made quiet by the house window is a **new** card on that camera, and Android's `alert_once` only quiets updates to a card already showing, so on Android these notifications may still sound.
+
 ---
 
 ### VLM quality requirement
@@ -324,6 +345,7 @@ The video pipeline enforces a per-entry semaphore that limits concurrent VLM and
 | `video_analyzer_uniqueness_enabled` | `false` | Enable perceptual hash (dHash) pre-filter to skip visually identical frames before VLM analysis. **Caveat:** drops near-duplicate snapshots, removing the visual continuity the summary model uses to narrate motion. Only enable if a nearly-static scene generates excessive duplicates and you accept that motion context may be lost. Capture loops driven by a ring-mqtt `event_select` event apply the filter regardless of this setting (see [Ring cameras via ring-mqtt](#ring-cameras-via-ring-mqtt)). |
 | `video_analyzer_event_recording_enabled` | `false` | Download the event MP4 from the `recordingUrl` a ring-mqtt `event_select` entity publishes (Ring Protect) and analyze up to 8 frames from it in place of the retained snapshot. Needs ffmpeg. See [Ring cameras via ring-mqtt](#ring-cameras-via-ring-mqtt). |
 | `video_analyzer_notification_cooldown_s` | `0` | Seconds (0 to 600) after a sounding camera notification during which later ones from that camera replace the same card quietly. `0` = off. See [Notification cooldown](#notification-cooldown). |
+| `video_analyzer_house_notification_cooldown_s` | `0` | Seconds (0 to 60) after a sounding camera notification during which a notification from any camera posts its card quietly; that camera then stays quiet for its camera cooldown (or the house cooldown, if longer). The first Unknown Person still sounds. `0` = off. See [House notification cooldown](#house-notification-cooldown). |
 | `video_analyzer_motion_camera_map` | *(empty)* | Explicit `binary_sensor: camera` overrides, one per line. Use when automatic resolution picks the wrong camera. |
 
 **In the Camera Image Analysis feature subentry:**
