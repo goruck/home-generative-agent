@@ -100,6 +100,11 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "subtitle_entry_open_alarm_disarmed": "{entry_name} open, alarm disarmed",
         "subtitle_power_deviation": "{appliance}: power {direction} than expected",
         "subtitle_reading_deviation": "{appliance}: reading {direction} than expected",
+        "subtitle_state_open_for": "{entity} open for {duration}",
+        "subtitle_state_unlocked_for": "{entity} unlocked for {duration}",
+        "subtitle_state_unchanged_for": "{entity} unchanged for {duration}",
+        "duration_hours_short": "{hours} h",
+        "duration_minutes_short": "{minutes} min",
         "direction_lower": "lower",
         "direction_higher": "higher",
         "fallback_entry": "Entry",
@@ -207,6 +212,11 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "subtitle_reading_deviation": (
             "{appliance}: hodnota {direction}, než se čekalo"
         ),
+        "subtitle_state_open_for": "{entity}: otevřeno {duration}",
+        "subtitle_state_unlocked_for": "{entity}: odemčeno {duration}",
+        "subtitle_state_unchanged_for": "{entity}: beze změny {duration}",
+        "duration_hours_short": "{hours} h",
+        "duration_minutes_short": "{minutes} min",
         "direction_lower": "nižší",
         "direction_higher": "vyšší",
         "fallback_entry": "Vstup",

@@ -1955,6 +1955,64 @@ def test_display_type_bare_candidate_id_uses_template_label() -> None:
     assert _display_type(finding, hass) == "Příliš dlouho beze změny"  # type: ignore[arg-type]
 
 
+def _duration_finding(evidence: dict[str, Any]) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id="slug-duration",
+        type="candidate_1",
+        severity="medium",
+        confidence=0.8,
+        triggering_entities=[str(evidence.get("entity_id") or "")],
+        evidence={"template_id": "entity_state_duration", **evidence},
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("evidence", "english", "czech"),
+    [
+        (
+            {
+                "entity_id": "binary_sensor.breakfast_nook_side_right_window",
+                "state": "on",
+                "duration_hours": 3.7,
+            },
+            "Breakfast Nook Side Right Window open for 3 h",
+            "Breakfast Nook Side Right Window: otevřeno 3 h",
+        ),
+        (
+            {
+                "entity_id": "lock.garage_door_lock",
+                "state": "unlocked",
+                "duration_hours": 2.0,
+            },
+            "Garage Door Lock unlocked for 2 h",
+            "Garage Door Lock: odemčeno 2 h",
+        ),
+        (
+            {"entity_id": "light.porch", "state": "off", "duration_hours": 0.5},
+            "Porch unchanged for 30 min",
+            "Porch: beze změny 30 min",
+        ),
+    ],
+)
+def test_state_duration_subtitle_names_device_state_and_duration(
+    evidence: dict[str, Any], english: str, czech: str
+) -> None:
+    """An entity_state_duration push says what is open, and for how long."""
+    finding = _duration_finding(evidence)
+    assert _build_subtitle(finding) == english
+    hass = DummyHass()
+    hass.config.language = "cs"
+    assert _build_subtitle(finding, hass) == czech  # type: ignore[arg-type]
+
+
+def test_state_duration_subtitle_without_duration_uses_template_label() -> None:
+    """Evidence without a usable duration falls back to the template label."""
+    finding = _duration_finding({"entity_id": "lock.garage_door_lock"})
+    assert _build_subtitle(finding) == "Unchanged too long"
+
+
 def test_friendly_type_with_no_words_falls_back_to_generic_label() -> None:
     """A rule id that prettifies to a bare number never reaches the push."""
     assert _friendly_type("candidate_101") == "Sentinel alert"

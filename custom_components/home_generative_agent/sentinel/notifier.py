@@ -1037,7 +1037,47 @@ def _build_subtitle(finding: AnomalyFinding, hass: HomeAssistant | None = None) 
             else "subtitle_reading_deviation"
         )
         return notif_msg(hass, subtitle_key, appliance=appliance, direction=direction)
+    if finding.evidence.get("template_id") == "entity_state_duration":
+        duration_subtitle = _state_duration_subtitle(finding, hass)
+        if duration_subtitle:
+            return duration_subtitle
     return _display_type(finding, hass)
+
+
+# entity_state_duration states with a curated word; "on" is how an open
+# window or door binary sensor reports.
+_STATE_DURATION_KEYS = {
+    "on": "subtitle_state_open_for",
+    "open": "subtitle_state_open_for",
+    "unlocked": "subtitle_state_unlocked_for",
+}
+
+
+def _state_duration_subtitle(
+    finding: AnomalyFinding, hass: HomeAssistant | None = None
+) -> str | None:
+    """
+    Return "<device> open for 3 h" for an entity_state_duration finding.
+
+    Returns None when the evidence lacks the device or a usable duration, so
+    the caller falls back to the template label.
+    """
+    entity_id = str(finding.evidence.get("entity_id") or "")
+    hours = finding.evidence.get("duration_hours")
+    if not isinstance(hours, (int, float)):
+        return None
+    if not entity_id or hours <= 0:
+        return None
+    raw_name = str(finding.evidence.get("friendly_name") or "").strip()
+    entity = raw_name or _friendly_entity(entity_id)
+    duration = (
+        notif_msg(hass, "duration_hours_short", hours=int(hours))
+        if hours >= 1
+        else notif_msg(hass, "duration_minutes_short", minutes=max(int(hours * 60), 1))
+    )
+    state = str(finding.evidence.get("state") or "")
+    key = _STATE_DURATION_KEYS.get(state, "subtitle_state_unchanged_for")
+    return notif_msg(hass, key, entity=entity, duration=duration)
 
 
 def _fallback_message(
