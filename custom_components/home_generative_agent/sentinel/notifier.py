@@ -1545,9 +1545,26 @@ def _batch_body(
     return header + "\n\n" + "\n".join(f"\u2022 {line}" for line in shown)
 
 
-def _entity_display_name(entity_id: str, names: Mapping[str, str]) -> str:
-    """Return the snapshot friendly name of *entity_id*, else one from its id."""
-    return names.get(entity_id) or _friendly_entity(entity_id)
+def _entity_display_name(entity_id: str, names: Mapping[str, str]) -> str | None:
+    """
+    Return the name the also line shows for *entity_id*, or None.
+
+    Friendly names are untrusted entity attributes: control and format
+    characters (bidi overrides, zero-width spaces) are dropped and whitespace
+    collapsed, so a name can neither fake a line nor render as nothing. None
+    when no visible name is left, or the name holds the list separator, since
+    such a device cannot be named recognizably.
+    """
+    raw = names.get(entity_id) or _friendly_entity(entity_id)
+    name = " ".join(
+        "".join(
+            ch if not unicodedata.category(ch).startswith("C") or ch.isspace() else ""
+            for ch in raw
+        ).split()
+    )
+    if "," in name or not any(ch.isalnum() for ch in name):
+        return None
+    return name
 
 
 def related_findings_line(
@@ -1569,9 +1586,12 @@ def related_findings_line(
     * every one of its devices is on the line, even one *shown* is about, so
       nothing is held without a mention;
     * each device name on the line belongs to one device: a device sharing
-      its name with another device in the push cannot be told apart;
-    * it is the same kind of finding as *shown*, or not high severity: a
-      different high-severity alert is never reduced to a device name;
+      its name (ignoring case) with another device in the push, under either
+      the name the line shows or the one the body may derive from the entity
+      id, cannot be told apart;
+    * it is the same type of finding as *shown*: a device name says what is
+      wrong only when the condition is the one the push describes, so a
+      stranger on camera or an unlocked lock is never reduced to a name;
     * it is routed to the same notify service as *shown*, so a finding for
       another area's phone is not held after reaching the wrong one.
 
@@ -1583,10 +1603,16 @@ def related_findings_line(
         if entity.get("entity_id")
     }
     # Which device each name on the push stands for, to catch collisions.
-    name_owner = {
-        _entity_display_name(entity_id, names): entity_id
-        for entity_id in shown.triggering_entities
-    }
+    # The body may name a shown device by its friendly name or by a name
+    # derived from its id, so both are taken.
+    name_owner: dict[str, str] = {}
+    for entity_id in shown.triggering_entities:
+        for name in (
+            _entity_display_name(entity_id, names),
+            _friendly_entity(entity_id),
+        ):
+            if name:
+                name_owner.setdefault(name.casefold(), entity_id)
     target = _resolve_notify_service(shown, snapshot, options)
     ordered = sorted(
         related,
@@ -1604,7 +1630,7 @@ def related_findings_line(
     for finding in ordered:
         if (
             not finding.triggering_entities
-            or (finding.severity == "high" and finding.type != shown.type)
+            or finding.type != shown.type
             or _resolve_notify_service(finding, snapshot, options) != target
         ):
             continue
@@ -1616,16 +1642,21 @@ def related_findings_line(
         owners = dict(name_owner)
         ambiguous = False
         for entity_id, name in new.items():
-            if owners.setdefault(name, entity_id) != entity_id:
+            if name is None or owners.setdefault(name.casefold(), entity_id) != (
+                entity_id
+            ):
                 ambiguous = True
         if ambiguous:
             left_out.update(new)
             continue
-        candidate = [*listed.values(), *new.values()]
+        shown_new = {
+            entity_id: name for entity_id, name in new.items() if name is not None
+        }
+        candidate = [*listed.values(), *shown_new.values()]
         if new and len(_also_text(candidate, 0, hass)) > budget:
             left_out.update(new)
             continue
-        listed.update(new)
+        listed.update(shown_new)
         name_owner = owners
         named.append(finding)
     left_out.difference_update(listed)

@@ -2014,12 +2014,19 @@ class SentinelEngine:
         if (explainer := self._explainer_for(explain_enabled, best)) is not None:
             explanation = await explainer.async_explain(best)
 
+        # A partner the policy would auto-execute or block is never named:
+        # holding it would delay its action by the prompt TTL, or announce a
+        # finding the policy keeps from the user.  It is shown on its own.
         also_line, named = related_findings_line(
             best,
             [
                 constituent
                 for constituent, _reason in passing
                 if constituent is not best
+                and self._execution_service.evaluate_canary(
+                    constituent, snapshot, effective_autonomy, now
+                ).action_policy_path
+                not in {ACTION_POLICY_AUTO_EXECUTE, ACTION_POLICY_BLOCKED}
             ],
             snapshot,
             self._options,

@@ -3260,7 +3260,7 @@ def test_related_line_lists_a_shared_device_once() -> None:
 def test_related_line_repeats_the_shown_device_rather_than_hold_silently() -> None:
     """A partner on the shown finding's own device is still named on the line."""
     shown = _finding("shown")
-    same_device = _finding("same", ftype="alarm_disarmed_open_entry")
+    same_device = _finding("same")
 
     line, named = _also(shown, [same_device])
 
@@ -3275,13 +3275,24 @@ def test_related_line_never_names_a_finding_without_devices() -> None:
     assert named == []
 
 
-def test_related_line_keeps_a_different_high_severity_alert_due() -> None:
-    """A different kind of high-severity alert is never reduced to a name."""
+def test_related_line_names_only_the_shown_findings_type() -> None:
+    """
+    A device name says what is wrong only for the condition the push shows.
+
+    A stranger on camera is low severity and pairs with an open door while
+    away; reduced to "Also: Driveway Camera" it was held without being
+    described.  Any severity of a different type keeps its own push.
+    """
     shown = _high("shown", "open_entry_while_away", ["binary_sensor.front_door"])
-    lock = _high("lock", "unlocked_lock_at_night", ["lock.front_door"])
+    lock = _high("lock", "unlocked_lock_at_night", ["lock.back_door"])
+    stranger = _finding(
+        "stranger",
+        ftype="unknown_person_camera_no_home",
+        triggering_entities=["camera.driveway"],
+    )
     same_kind = _high("door2", "open_entry_while_away", ["binary_sensor.back_door"])
 
-    line, named = _also(shown, [lock, same_kind])
+    line, named = _also(shown, [lock, stranger, same_kind])
 
     assert line == "Also: Back Door"
     assert named == [same_kind]
@@ -3305,6 +3316,48 @@ def test_related_line_does_not_name_a_device_sharing_another_devices_name() -> N
 
     assert line is None
     assert named == []
+
+
+def test_related_line_checks_collisions_against_the_id_derived_name() -> None:
+    """
+    The body may name the shown device from its id ("Front Door").
+
+    A second device whose friendly name is "Front Door" cannot be told apart
+    from it, even when the shown device's own friendly name differs.
+    """
+    shown = _finding("shown", triggering_entities=["binary_sensor.front_door"])
+    other = _finding("other", triggering_entities=["binary_sensor.side_contact"])
+    snapshot = _named_snapshot(
+        ("binary_sensor.front_door", "Entry contact"),
+        ("binary_sensor.side_contact", "front door"),
+    )
+
+    line, named = _also(shown, [other], snapshot)
+
+    assert line is None
+    assert named == []
+
+
+@pytest.mark.parametrize("raw", ["\u200b", "\u202e\u200b ", "Hall, Upstairs"])
+def test_related_line_never_names_an_invisible_or_ambiguous_name(raw: str) -> None:
+    shown = _finding("shown")
+    hidden = _finding("hidden", triggering_entities=["binary_sensor.hall"])
+    snapshot = _named_snapshot(("binary_sensor.hall", raw))
+
+    line, named = _also(shown, [hidden], snapshot)
+
+    assert line is None
+    assert named == []
+
+
+def test_related_line_strips_control_characters_from_names() -> None:
+    shown = _finding("shown")
+    window = _finding("w", triggering_entities=["binary_sensor.w"])
+    snapshot = _named_snapshot(("binary_sensor.w", "Kitchen\u202e\nWindow"))
+
+    line, _named = _also(shown, [window], snapshot)
+
+    assert line == "Also: Kitchen Window"
 
 
 def test_related_line_leaves_out_a_partner_routed_to_another_phone() -> None:

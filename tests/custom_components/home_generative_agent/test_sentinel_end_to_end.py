@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from custom_components.home_generative_agent.const import (
+    ACTION_POLICY_AUTO_EXECUTE,
     ACTION_POLICY_BLOCKED,
     CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
     CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
@@ -1079,29 +1080,37 @@ def _window(
     )
 
 
+def _open_door(
+    anomaly_id: str, entity_id: str, *, confidence: float = 0.9
+) -> AnomalyFinding:
+    return _standing_finding(
+        anomaly_id,
+        "open_entry_while_away",
+        severity="high",
+        confidence=confidence,
+        entities=[entity_id],
+    )
+
+
 @pytest.mark.asyncio
 async def test_grouped_push_names_its_due_partners_and_prompts_them(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    One push covers the group: due partners are named and wait out the TTL.
+    One push covers the same condition: due partners are named and held.
 
     Issue #727: a 15-finding away group sent a push every 10-30 minutes, one
-    per finding.  The push now names the others by device, and each named one
-    gets the pending-prompt hold its own push would have given it.
+    per finding.  The push now names the other open entries by device, and
+    each named one gets the pending-prompt hold its own push would have given
+    it.  A different kind of finding is never reduced to a device name: it
+    keeps its own push.
     """
     engine, notifier, audit = _make_engine(monkeypatch, _make_snapshot())
     suppression = cast("DummySuppression", cast("Any", engine)._suppression)
     t0 = datetime(2025, 1, 1, 12, 0, tzinfo=UTC)
-    door = _standing_finding(
-        "door-id",
-        "open_entry_while_away",
-        severity="high",
-        entities=["binary_sensor.front_door"],
-    )
-    kitchen = _window("kitchen-id", "binary_sensor.kitchen_window")
-    landing = _window("landing-id", "binary_sensor.landing_window", confidence=0.7)
-    # Same device as the shown finding: named too, never held silently.
+    door = _open_door("door-id", "binary_sensor.front_door")
+    kitchen = _open_door("kitchen-id", "binary_sensor.kitchen_door", confidence=0.5)
+    landing = _open_door("landing-id", "binary_sensor.landing_door", confidence=0.7)
     disarmed = _standing_finding(
         "disarmed-id",
         "alarm_disarmed_open_entry",
@@ -1112,28 +1121,56 @@ async def test_grouped_push_names_its_due_partners_and_prompts_them(
     assert await _dispatch_group(engine, door, kitchen, landing, disarmed, at=t0)
 
     assert notifier.calls[0]["finding"] is door
-    # Front Door has a snapshot friendly name; the others fall back to the id.
     # Most severe, then most confident, first.
-    assert notifier.calls[0]["also_line"] == (
-        "Also: Landing Window, Kitchen Window, Front Door"
-    )
+    assert notifier.calls[0]["also_line"] == "Also: Landing Door, Kitchen Door"
     assert set(suppression.state.pending_prompts) == {
         "door-id",
         "kitchen-id",
         "landing-id",
-        "disarmed-id",
     }
     assert audit.calls[-1]["shown_anomaly_id"] == "door-id"
-    assert audit.calls[-1]["named_anomaly_ids"] == [
-        "landing-id",
-        "kitchen-id",
-        "disarmed-id",
-    ]
-    # Every named finding is held, so the group stays quiet after the cooldown.
-    assert not await _dispatch_group(
+    assert audit.calls[-1]["named_anomaly_ids"] == ["landing-id", "kitchen-id"]
+
+    # After the cooldown only the alarm finding the push did not describe is
+    # due, and it is shown itself.
+    assert await _dispatch_group(
         engine, door, kitchen, landing, disarmed, at=t0 + timedelta(minutes=31)
     )
-    assert len(notifier.calls) == 1
+    assert notifier.calls[1]["finding"] is disarmed
+    assert notifier.calls[1]["also_line"] is None
+
+
+@pytest.mark.asyncio
+async def test_grouped_push_never_names_a_partner_the_policy_acts_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A partner bound for auto-execution is shown itself, not held for 4 h."""
+    engine, notifier, _audit = _make_engine(monkeypatch, _make_snapshot())
+    suppression = cast("DummySuppression", cast("Any", engine)._suppression)
+    door = _open_door("door-id", "binary_sensor.front_door")
+    kitchen = _open_door("kitchen-id", "binary_sensor.kitchen_door", confidence=0.5)
+    real = cast("Any", engine)._execution_service.evaluate_canary
+
+    def _evaluate(finding: AnomalyFinding, *args: Any) -> ActionPolicyResult:
+        result = real(finding, *args)
+        if finding is kitchen:
+            return ActionPolicyResult(
+                action_policy_path=ACTION_POLICY_AUTO_EXECUTE,
+                data_quality=result.data_quality,
+                data_quality_details={},
+                execution_id=None,
+                block_reason=None,
+            )
+        return result
+
+    monkeypatch.setattr(
+        cast("Any", engine)._execution_service, "evaluate_canary", _evaluate
+    )
+
+    await _dispatch_group(engine, door, kitchen, at=datetime(2025, 1, 1, tzinfo=UTC))
+
+    assert notifier.calls[0]["also_line"] is None
+    assert "kitchen-id" not in suppression.state.pending_prompts
 
 
 @pytest.mark.asyncio
@@ -1145,14 +1182,12 @@ async def test_grouped_push_dropped_as_repeat_names_nothing(
     notifier = _DroppingNotifier()
     cast("Any", engine)._notifier = notifier
     suppression = cast("DummySuppression", cast("Any", engine)._suppression)
-    door = _standing_finding(
-        "door-id", "open_entry_while_away", entities=["binary_sensor.front_door"]
-    )
-    kitchen = _window("kitchen-id", "binary_sensor.kitchen_window")
+    door = _open_door("door-id", "binary_sensor.front_door")
+    kitchen = _open_door("kitchen-id", "binary_sensor.kitchen_door", confidence=0.5)
 
     await _dispatch_group(engine, door, kitchen, at=datetime(2025, 1, 1, tzinfo=UTC))
 
-    assert notifier.calls[0]["also_line"] == "Also: Kitchen Window"
+    assert notifier.calls[0]["also_line"] == "Also: Kitchen Door"
     assert "kitchen-id" not in suppression.state.pending_prompts
     assert audit.calls[-1]["named_anomaly_ids"] == []
 
@@ -1170,38 +1205,32 @@ async def test_grouped_push_leaves_out_what_does_not_fit_and_keeps_it_due(
     engine, notifier, _audit = _make_engine(monkeypatch, _make_snapshot())
     suppression = cast("DummySuppression", cast("Any", engine)._suppression)
     t0 = datetime(2025, 1, 1, 12, 0, tzinfo=UTC)
-    door = _standing_finding(
-        "door-id",
-        "open_entry_while_away",
-        severity="high",
-        entities=["binary_sensor.front_door"],
-    )
     windows = [
         _window(
             f"w{i}-id",
             f"binary_sensor.upstairs_guest_bedroom_window_{i}",
             confidence=0.9 - i / 100,
         )
-        for i in range(8)
+        for i in range(9)
     ]
+    shown, partners = windows[0], windows[1:]
 
-    assert await _dispatch_group(engine, door, *windows, at=t0)
+    assert await _dispatch_group(engine, *windows, at=t0)
 
+    assert notifier.calls[0]["finding"] is shown
     also_line = cast("str", notifier.calls[0]["also_line"])
     assert len(also_line) <= MAX_ALSO_LINE_CHARS
-    named = [w for w in windows if w.anomaly_id in suppression.state.pending_prompts]
-    left_out = [w for w in windows if w not in named]
+    named = [w for w in partners if w.anomaly_id in suppression.state.pending_prompts]
+    left_out = [w for w in partners if w not in named]
     assert named
     assert left_out
     assert also_line.endswith(f"+{len(left_out)} more")
     for window in named:
-        assert (
-            window.triggering_entities[0].split(".")[1].replace("_", " ").title()
-            in also_line
-        )
+        name = window.triggering_entities[0].split(".")[1].replace("_", " ").title()
+        assert name in also_line
 
     # After its cooldown the first one left out is shown itself.
-    assert await _dispatch_group(engine, door, *windows, at=t0 + timedelta(minutes=31))
+    assert await _dispatch_group(engine, *windows, at=t0 + timedelta(minutes=31))
     assert notifier.calls[1]["finding"] is left_out[0]
 
 

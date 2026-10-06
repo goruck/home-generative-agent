@@ -522,6 +522,19 @@ validation.
 
 ---
 
+### A grouped push that fails to deliver still holds every finding it named
+
+**What:** `_dispatch_compound` (`sentinel/engine.py`) registers the shown finding and every finding the "Also: ..." line named as pending prompts once `SentinelNotifier.async_notify` returns. The notifier calls the notify service with `blocking=False` and returns True once the call is scheduled, and the mobile_app notify service swallows push errors, so a push that never reached the phone still holds all of them for the prompt TTL (4 h) with nothing logged.
+
+**Why:** Found by both adversarial passes in the #727 review. Before #727 an undelivered push cost only the shown finding; a grouped push now multiplies that by the number of named findings.
+
+**How to apply:** There is no delivery receipt from mobile_app today, so a fix needs one: either a blocking call that surfaces service exceptions (catches a missing or misconfigured service, not a failed APNs/FCM push), or the companion app's notification-received event where it exists. Until then, keep the hold for named findings at the same footing as the shown one.
+
+**Effort:** M
+**Priority:** P3
+
+---
+
 ### Sensor-threshold dynamic rules mint a new anomaly id for every reading
 
 **What:** `_eval_sensor_threshold_condition` (`sentinel/dynamic_rules.py`) hashes the live `sensor_value` into the anomaly id, so a sensor hovering above its threshold produces a new id for each new reading. That bypasses the pending prompt, the notifier's per-id cooldown and execution idempotency, and re-alerts every type cooldown, the same shape #723 fixed for `duration_hours` and `age_hours`. The baseline-deviation evaluators (`current_value`, `deviation_pct`) and `last_changed` on frequently updating sensors behave the same way.
