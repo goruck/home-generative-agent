@@ -3284,7 +3284,7 @@ def test_related_line_names_only_the_shown_findings_type() -> None:
     described.  Any severity of a different type keeps its own push.
     """
     shown = _high("shown", "open_entry_while_away", ["binary_sensor.front_door"])
-    lock = _high("lock", "unlocked_lock_at_night", ["lock.back_door"])
+    lock = _high("lock", "unlocked_lock_at_night", ["lock.back_door_lock"])
     stranger = _finding(
         "stranger",
         ftype="unknown_person_camera_no_home",
@@ -3330,6 +3330,64 @@ def test_related_line_checks_collisions_against_the_id_derived_name() -> None:
     snapshot = _named_snapshot(
         ("binary_sensor.front_door", "Entry contact"),
         ("binary_sensor.side_contact", "front door"),
+    )
+
+    line, named = _also(shown, [other], snapshot)
+
+    assert line is None
+    assert named == []
+
+
+def test_related_line_refuses_both_partners_sharing_a_name() -> None:
+    """
+    Two partners called "Door" are both refused, not just the second.
+
+    The first used to win and be held as "Also: Door +1 more" though nothing
+    said which lock it was.
+    """
+    shown = _finding("shown", triggering_entities=["lock.front"])
+    first = _finding("first", triggering_entities=["lock.garage"])
+    second = _finding("second", triggering_entities=["lock.shed"])
+    snapshot = _named_snapshot(
+        ("lock.front", "Front Door"),
+        ("lock.garage", "Door"),
+        ("lock.shed", "Door"),
+    )
+
+    line, named = _also(shown, [first, second], snapshot)
+
+    assert line is None
+    assert named == []
+
+
+def test_related_line_refuses_a_name_another_device_in_the_home_has() -> None:
+    """A device sharing its name with one outside the push cannot be told apart."""
+    shown = _finding("shown", triggering_entities=["binary_sensor.front_door"])
+    window = _finding("w", triggering_entities=["binary_sensor.window_1"])
+    snapshot = _named_snapshot(
+        ("binary_sensor.front_door", "Front Door"),
+        ("binary_sensor.window_1", "Window Sensor"),
+        ("binary_sensor.window_2", "Window Sensor"),
+    )
+
+    line, named = _also(shown, [window], snapshot)
+
+    assert line is None
+    assert named == []
+
+
+def test_related_line_refuses_the_appliance_name_the_body_shows() -> None:
+    """
+    The appliance copy calls "Dishwasher Power" "Dishwasher".
+
+    A second sensor named "Dishwasher" read as the shown appliance on the
+    also line, while it was held.
+    """
+    shown = _finding("shown", triggering_entities=["sensor.dishwasher_power"])
+    other = _finding("other", triggering_entities=["sensor.kitchen_plug"])
+    snapshot = _named_snapshot(
+        ("sensor.dishwasher_power", "Dishwasher Power"),
+        ("sensor.kitchen_plug", "Dishwasher"),
     )
 
     line, named = _also(shown, [other], snapshot)

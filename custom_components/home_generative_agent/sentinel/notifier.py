@@ -1585,10 +1585,9 @@ def related_findings_line(
 
     * every one of its devices is on the line, even one *shown* is about, so
       nothing is held without a mention;
-    * each device name on the line belongs to one device: a device sharing
-      its name (ignoring case) with another device in the push, under either
-      the name the line shows or the one the body may derive from the entity
-      id, cannot be told apart;
+    * each device name on the line belongs to one device in the home: a
+      name (ignoring case) that another device also goes by, under any name
+      a notification may show for it, cannot be told apart;
     * it is the same type of finding as *shown*: a device name says what is
       wrong only when the condition is the one the push describes, so a
       stranger on camera or an unlocked lock is never reduced to a name;
@@ -1602,17 +1601,7 @@ def related_findings_line(
         for entity in snapshot.get("entities", [])
         if entity.get("entity_id")
     }
-    # Which device each name on the push stands for, to catch collisions.
-    # The body may name a shown device by its friendly name or by a name
-    # derived from its id, so both are taken.
-    name_owner: dict[str, str] = {}
-    for entity_id in shown.triggering_entities:
-        for name in (
-            _entity_display_name(entity_id, names),
-            _friendly_entity(entity_id),
-        ):
-            if name:
-                name_owner.setdefault(name.casefold(), entity_id)
+    owners = _name_owners(shown, related, names)
     target = _resolve_notify_service(shown, snapshot, options)
     ordered = sorted(
         related,
@@ -1639,14 +1628,10 @@ def related_findings_line(
             for entity_id in finding.triggering_entities
             if entity_id not in listed
         }
-        owners = dict(name_owner)
-        ambiguous = False
-        for entity_id, name in new.items():
-            if name is None or owners.setdefault(name.casefold(), entity_id) != (
-                entity_id
-            ):
-                ambiguous = True
-        if ambiguous:
+        if any(
+            name is None or owners.get(name.casefold()) != {entity_id}
+            for entity_id, name in new.items()
+        ):
             left_out.update(new)
             continue
         shown_new = {
@@ -1657,12 +1642,71 @@ def related_findings_line(
             left_out.update(new)
             continue
         listed.update(shown_new)
-        name_owner = owners
         named.append(finding)
     left_out.difference_update(listed)
     if not listed:
         return None, []
     return _also_text(list(listed.values()), len(left_out), hass), named
+
+
+def _name_aliases(entity_id: str, names: Mapping[str, str]) -> set[str]:
+    """
+    Return every name a notification may show for *entity_id*, casefolded.
+
+    The friendly name, the name derived from the id (the fallback copy), and
+    the appliance copy's forms of both without a "Power"-style suffix.
+    """
+    aliases: set[str] = set()
+    for name in (_entity_display_name(entity_id, names), _friendly_entity(entity_id)):
+        if name:
+            aliases.update(
+                alias.casefold() for alias in (name, _strip_power_suffix(name)) if alias
+            )
+    return aliases
+
+
+def _name_owners(
+    shown: AnomalyFinding,
+    related: Sequence[AnomalyFinding],
+    names: Mapping[str, str],
+) -> dict[str, set[str]]:
+    """
+    Map each casefolded name to the devices that may go by it.
+
+    Covers every device in the snapshot and in the push, so a name shared
+    with a device elsewhere in the home is caught, plus the names the shown
+    finding's own copy takes from its evidence (the appliance name, the
+    entry an alarm finding is about).
+    """
+    owners: dict[str, set[str]] = {}
+    entity_ids = {
+        *names,
+        *shown.triggering_entities,
+        *(
+            entity_id
+            for finding in related
+            for entity_id in finding.triggering_entities
+        ),
+    }
+    entry_id = str(shown.evidence.get("entry_entity_id") or "")
+    if entry_id:
+        entity_ids.add(entry_id)
+    for entity_id in entity_ids:
+        for alias in _name_aliases(entity_id, names):
+            owners.setdefault(alias, set()).add(entity_id)
+    evidence_name = str(shown.evidence.get("friendly_name") or "").strip()
+    if evidence_name:
+        # Belongs to the shown device when there is one; otherwise to no
+        # device, so every partner going by it is refused.
+        owner = (
+            shown.triggering_entities[0]
+            if len(shown.triggering_entities) == 1
+            else "\0shown"
+        )
+        for alias in {evidence_name, _strip_power_suffix(evidence_name)}:
+            if alias:
+                owners.setdefault(alias.casefold(), set()).add(owner)
+    return owners
 
 
 def _also_text(names: list[str], more: int, hass: HomeAssistant | None) -> str:
