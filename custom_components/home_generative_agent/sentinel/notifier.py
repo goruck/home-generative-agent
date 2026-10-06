@@ -52,6 +52,7 @@ from custom_components.home_generative_agent.const import (
 )
 from custom_components.home_generative_agent.core.utils import extract_final
 from custom_components.home_generative_agent.sentinel.models import (
+    SEVERITY_RANK,
     enrolled_people,
     trust_device_ids,
 )
@@ -77,7 +78,7 @@ from custom_components.home_generative_agent.snapshot.network import sanitize_la
 
 if TYPE_CHECKING:
     import asyncio
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Mapping, Sequence
 
     from homeassistant.core import Event, HomeAssistant
 
@@ -95,6 +96,11 @@ LOGGER = logging.getLogger(__name__)
 MAX_MOBILE_MESSAGE_CHARS = 220
 # Ceiling for the burst-batch digest body (header plus per-finding lines).
 MAX_BATCH_BODY_CHARS = 1200
+# Ceiling for the "Also: ..." line a grouped push adds under its body. It has
+# its own budget so the body's figures and call to action are never cut.
+MAX_ALSO_LINE_CHARS = 120
+# Widest "+N more" count the also line keeps room for.
+_ALSO_MORE_COUNT_WIDTH = 99
 _AUDIT_FETCH_LIMIT = 1000
 
 _SEVERITY_INTERRUPT_LEVEL: dict[str, str] = {
@@ -192,7 +198,9 @@ class SentinelNotifier:
         self._pending_always_snooze: dict[str, str] = {}
         # Notification batching state.
         self._notification_times: list[datetime] = []
-        self._held_batch: list[tuple[AnomalyFinding, str | None, str | None]] = []
+        self._held_batch: list[
+            tuple[AnomalyFinding, str | None, str | None, str | None]
+        ] = []
         self._batch_cancel: Callable[[], None] | None = None
         # Per-finding cooldown: anomaly_id -> time of last dispatch.
         self._cooldown_times: dict[str, datetime] = {}
@@ -269,6 +277,8 @@ class SentinelNotifier:
         finding: AnomalyFinding,
         snapshot: FullStateSnapshot,
         explanation: str | None,
+        *,
+        also_line: str | None = None,
     ) -> bool:
         """
         Send a proactive notification for *finding*.
@@ -276,6 +286,8 @@ class SentinelNotifier:
         * Adds snooze action buttons.
         * Redacts person names when ``finding.is_sensitive`` is True.
         * Routes to a per-area notify service when configured.
+        * Appends *also_line* (see ``related_findings_line``) under the body
+          of a grouped push; the buttons still act on *finding* alone.
 
         Returns False when the push was dropped as a repeat of the same
         anomaly within the per-finding cooldown, so the audit does not count
@@ -304,6 +316,9 @@ class SentinelNotifier:
             self._hass,
         )
         persistent_msg = _persistent_message(clean_explanation, finding, self._hass)
+        if also_line:
+            mobile_msg = f"{mobile_msg}\n{also_line}"
+            persistent_msg = f"{persistent_msg}\n\n{escape_markdown(also_line)}"
         actions = _build_actions(finding)
 
         # Per-area routing.
@@ -346,7 +361,9 @@ class SentinelNotifier:
                 # explanation, never the raw one: the flush discards it today,
                 # but storing the unredacted text would silently bypass
                 # _redact_if_sensitive the moment anyone renders it.
-                self._held_batch.append((finding, clean_explanation, target_service))
+                self._held_batch.append(
+                    (finding, clean_explanation, target_service, also_line)
+                )
                 if self._batch_cancel is None:
                     self._batch_cancel = async_call_later(
                         self._hass,
@@ -474,7 +491,7 @@ class SentinelNotifier:
             return
 
         count = len(held)
-        types = list({_display_type(f, self._hass) for f, _, _svc in held})
+        types = list({_display_type(f, self._hass) for f, _e, _svc, _also in held})
         type_summary = ", ".join(types)
         header = notif_msg(
             self._hass,
@@ -489,7 +506,7 @@ class SentinelNotifier:
         # Use the first non-None resolved service from the held batch (which
         # already incorporated the area map), then fall back to the global service.
         target_service = next(
-            (svc for _f, _e, svc in held if svc is not None), None
+            (svc for _f, _e, svc, _also in held if svc is not None), None
         ) or self._options.get(CONF_NOTIFY_SERVICE)
         if target_service and isinstance(target_service, str):
             domain, _, service = target_service.partition(".")
@@ -1493,7 +1510,7 @@ def _deterministic_mobile_message(finding: AnomalyFinding) -> str | None:
 
 def _batch_body(
     header: str,
-    held: list[tuple[AnomalyFinding, str | None, str | None]],
+    held: list[tuple[AnomalyFinding, str | None, str | None, str | None]],
     options: Mapping[str, Any],
     hass: HomeAssistant | None,
 ) -> str:
@@ -1504,13 +1521,16 @@ def _batch_body(
     finding delayed by the rate limiter still names its devices, ports, or
     figures instead of collapsing to a bare type label (a four-device
     ``network_unconfigured_discovered_device`` finding once reached the phone
-    as "1 home update: Unconfigured device discovered."). Duplicate bodies
-    are listed once.
+    as "1 home update: Unconfigured device discovered."). A grouped push
+    keeps its "Also: ..." line, since the engine counts the findings it names
+    as alerted. Duplicate bodies are listed once.
     """
     response_language = str(options.get(CONF_SENTINEL_RESPONSE_LANGUAGE, "") or "")
     lines: list[str] = []
-    for finding, explanation, _svc in held:
+    for finding, explanation, _svc, also_line in held:
         body = _mobile_message(explanation, finding, response_language, hass).strip()
+        if body and also_line:
+            body = f"{body} {also_line}"
         if body and body not in lines:
             lines.append(body)
     if not lines:
@@ -1527,6 +1547,83 @@ def _batch_body(
     if omitted:
         shown.append(notif_msg(hass, "batch_more", count=omitted))
     return header + "\n\n" + "\n".join(f"\u2022 {line}" for line in shown)
+
+
+def _entity_display_name(entity_id: str, names: Mapping[str, str]) -> str:
+    """Return the snapshot friendly name of *entity_id*, else one from its id."""
+    return names.get(entity_id) or _friendly_entity(entity_id)
+
+
+def related_findings_line(
+    shown: AnomalyFinding,
+    related: Sequence[AnomalyFinding],
+    snapshot: FullStateSnapshot,
+    hass: HomeAssistant | None = None,
+) -> tuple[str | None, list[AnomalyFinding]]:
+    """
+    Return the "Also: ..." line for a grouped push and the findings it names.
+
+    A grouped push shows *shown*; the other due constituents in *related* are
+    named by their devices (issue #727), most severe first, until the line
+    reaches ``MAX_ALSO_LINE_CHARS``. A finding counts as named only when every
+    one of its devices is on the line or is a device of *shown*, which the
+    push is about. A finding with no devices, or one whose devices no longer
+    fit, is left out of the returned list, so the caller keeps it due and it
+    gets a push of its own: only the named findings may be marked as alerted.
+
+    The line is ``None`` when nothing beyond *shown*'s devices needs naming.
+    """
+    names = {
+        str(entity["entity_id"]): str(entity.get("friendly_name") or "").strip()
+        for entity in snapshot.get("entities", [])
+        if entity.get("entity_id")
+    }
+    shown_names = {
+        _entity_display_name(entity_id, names)
+        for entity_id in shown.triggering_entities
+    }
+    ordered = sorted(
+        related,
+        key=lambda f: (SEVERITY_RANK.get(f.severity, 0), f.confidence),
+        reverse=True,
+    )
+    # Room for the "+N more" suffix is kept from the start: it can only grow
+    # as later findings fail to fit.
+    budget = MAX_ALSO_LINE_CHARS - len(
+        " " + notif_msg(hass, "also_more", count=_ALSO_MORE_COUNT_WIDTH)
+    )
+    listed_names: list[str] = []
+    left_out: set[str] = set()
+    named: list[AnomalyFinding] = []
+    for finding in ordered:
+        if not finding.triggering_entities:
+            continue
+        new = [
+            name
+            for name in dict.fromkeys(
+                _entity_display_name(entity_id, names)
+                for entity_id in finding.triggering_entities
+            )
+            if name not in shown_names and name not in listed_names
+        ]
+        candidate = listed_names + new
+        if new and len(_also_text(candidate, 0, hass)) > budget:
+            left_out.update(new)
+            continue
+        listed_names = candidate
+        named.append(finding)
+    left_out.difference_update(listed_names)
+    if not listed_names:
+        return None, named
+    return _also_text(listed_names, len(left_out), hass), named
+
+
+def _also_text(names: list[str], more: int, hass: HomeAssistant | None) -> str:
+    """Render the also line for *names*, plus a count of devices left out."""
+    text = notif_msg(hass, "also_line", names=", ".join(names))
+    if more:
+        text = f"{text} {notif_msg(hass, 'also_more', count=more)}"
+    return text
 
 
 def _mobile_message(

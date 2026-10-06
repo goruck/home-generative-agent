@@ -24,6 +24,7 @@ _DUMMY_KWARGS: dict[str, Any] = {
     "summary": "Motion while away",
     "entity": "Front Door",
     "entities": "Front Door, Back Door",
+    "names": "Kitchen Window, Landing Window",
     "action_hint": "Review when convenient.",
     "hint": "Review when convenient.",
     "severity": "high",
@@ -158,6 +159,8 @@ _CALL_SITE_KWARGS: dict[str, set[str]] = {
     "persistent_fallback": {"summary", "severity", "entities", "hint"},
     "batch_message": {"count", "plural", "type_summary"},
     "batch_more": {"count"},
+    "also_line": {"names"},
+    "also_more": {"count"},
     "digest_message": {"count", "plural", "sev_summary"},
     "snooze_confirm_message": {"friendly"},
 }

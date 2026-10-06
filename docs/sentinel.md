@@ -213,6 +213,8 @@ When Sentinel notifications are enabled:
 | `Snooze 24 h` | Suppresses this finding type for 24 hours. |
 | `Snooze Always` | Suppresses this finding type permanently. A confirmation notification is sent first; the snooze is written only after the user taps **Confirm**. |
 
+**Grouped findings:** Related findings from one run (same area, a shared device, or a known pairing such as an open door while away and a stranger on camera) are grouped into one push. The push shows the most severe finding that is due, and its last line names the devices of the group's other due findings, most severe first: *"Also: Kitchen Window, Landing Window +2 more"* (Czech: *"Také: …"*). The line is capped at 120 characters, separate from the body, so the body is never cut. A finding counts as alerted, and waits out the pending-prompt hold (`sentinel_pending_prompt_ttl_minutes`, 4 h) like the shown one, only when the push named every one of its devices or it is on the shown finding's own device. A finding the line could not name (no device, or no room left) becomes due again after its cooldown and gets its own push. The buttons act on the shown finding only: **False Alarm** and the snoozes do not touch the named ones.
+
 **Per-area routing:** When `sentinel_area_notify_map` maps an area name to a notify service, findings whose triggering entities belong to that area are routed to that service instead of the global `notify_service`.
 
 **Quiet hours:** Configure in the Sentinel subentry (Advanced setup) to suppress notifications for selected severities during a nightly window:

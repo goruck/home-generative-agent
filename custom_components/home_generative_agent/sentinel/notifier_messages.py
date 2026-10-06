@@ -116,6 +116,8 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "batch_title": "Home Update",
         "batch_message": "{count} home update{plural}: {type_summary}.",
         "batch_more": "\u2026and {count} more",
+        "also_line": "Also: {names}",
+        "also_more": "+{count} more",
         "digest_title": "Sentinel Daily Digest",
         "digest_message": (
             "Sentinel: {count} alert{plural} in the last 24 h ({sev_summary})."
@@ -231,6 +233,8 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "batch_title": "Novinka z domova",
         "batch_message": "{count} novinek z domova: {type_summary}.",
         "batch_more": "\u2026a dal\u0161\u00edch {count}",
+        "also_line": "Také: {names}",
+        "also_more": "+{count} další",
         "digest_title": "Denní přehled Sentinelu",
         "digest_message": (
             "Sentinel: {count} upozornění za posledních 24 h ({sev_summary})."

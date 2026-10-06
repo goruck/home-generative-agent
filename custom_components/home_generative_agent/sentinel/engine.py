@@ -113,7 +113,7 @@ from .network_inventory import (
     client_key,
     client_observation,
 )
-from .notifier import is_security_copy
+from .notifier import is_security_copy, related_findings_line
 from .power_enrichment import async_enrich_power_last_changed
 from .rules.alarm_disarmed_external_threat import AlarmDisarmedDuringExternalThreatRule
 from .rules.appliance_power_duration import AppliancePowerDurationRule
@@ -1900,12 +1900,14 @@ class SentinelEngine:
         A compound finding is suppressed only when **all** of its constituents
         would individually be suppressed.  When at least one constituent passes
         the suppression check, the compound is dispatched and all passing
-        constituents are registered for cooldown tracking.  Only the
-        constituent the push shows is registered as a pending prompt, so one
-        the user never saw comes due again after its cooldown instead of
-        waiting out the prompt TTL behind its partner (issue #723).  It is
-        shown then unless a more severe partner is due again or the push is
-        policy-blocked.
+        constituents are registered for cooldown tracking.  The push shows
+        one constituent and names the other passing ones by device on an
+        "Also: ..." line (issue #727).  Only the shown constituent and the
+        ones that line named are registered as pending prompts, and the named
+        ones only once the push went out.  A constituent the user never saw
+        comes due again after its cooldown instead of waiting out the prompt
+        TTL behind its partner (issue #723); it is shown or named then unless
+        the push is policy-blocked.
         """
         suppress_kwargs = _build_suppress_kwargs(self._options, snapshot)
         effective_autonomy = (
@@ -2011,13 +2013,37 @@ class SentinelEngine:
         if (explainer := self._explainer_for(explain_enabled, best)) is not None:
             explanation = await explainer.async_explain(best)
 
-        sent = await self._notifier.async_notify(best, snapshot, explanation)
+        also_line, named = related_findings_line(
+            best,
+            [
+                constituent
+                for constituent, _reason in passing
+                if constituent is not best
+            ],
+            snapshot,
+            self._hass,
+        )
+        sent = await self._notifier.async_notify(
+            best, snapshot, explanation, also_line=also_line
+        )
+        # A push the notifier dropped as a repeat named nothing, so its named
+        # partners stay due.
+        if sent is not False and named:
+            for constituent in named:
+                register_prompt(self._suppression.state, constituent, now)
+            await self._suppression.async_save()
         await _append_finding_audit(
             self._audit_store,
             snapshot,
             compound,
             explanation,
             _delivered_reason(SUPPRESSION_REASON_NOT_SUPPRESSED, sent=sent),
+            shown_anomaly_id=best.anomaly_id,
+            named_anomaly_ids=(
+                [constituent.anomaly_id for constituent in named]
+                if sent is not False
+                else []
+            ),
             triage_decision=None,
             triage_reason_code=None,
             triage_confidence=None,
@@ -2324,6 +2350,8 @@ async def _append_finding_audit(  # noqa: PLR0913
     action_outcome: dict | None = None,
     autonomy_level_at_decision: int | None = None,
     trigger_source: str | None = None,
+    shown_anomaly_id: str | None = None,
+    named_anomaly_ids: list[str] | None = None,
 ) -> None:
     """Append a finding to audit with suppression reason and execution metadata."""
     await audit_store.async_append_finding(
@@ -2345,4 +2373,6 @@ async def _append_finding_audit(  # noqa: PLR0913
             else None
         ),
         trigger_source=trigger_source,
+        shown_anomaly_id=shown_anomaly_id,
+        named_anomaly_ids=named_anomaly_ids,
     )

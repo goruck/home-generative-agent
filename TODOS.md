@@ -522,19 +522,6 @@ validation.
 
 ---
 
-### A response to one push can land on a later compound record
-
-**What:** `AuditStore.async_update_response` (`audit/store.py`) matches a response to the newest `not_suppressed` record whose finding, or any compound constituent, carries the anomaly id. A compound record stores every constituent, including partners still pending from an earlier push, so answering the earlier push for A writes the response (and any action outcome) onto the later record that showed B. Answering both pushes then writes the same record twice and loses one response.
-
-**Why:** Pre-existing; Codex flagged it in the #723 review. Since #723 the compound push shows only a constituent that came due, so the record that showed B routinely also lists A.
-
-**How to apply:** Store the anomaly id of the constituent the push showed on each audit record (for example `notification.shown_anomaly_id`) and match responses against it, falling back to the constituent scan only for records written before the field existed. Pin it with a test that answers two pushes whose records share a constituent.
-
-**Effort:** S
-**Priority:** P3
-
----
-
 ### Sensor-threshold dynamic rules mint a new anomaly id for every reading
 
 **What:** `_eval_sensor_threshold_condition` (`sentinel/dynamic_rules.py`) hashes the live `sensor_value` into the anomaly id, so a sensor hovering above its threshold produces a new id for each new reading. That bypasses the pending prompt, the notifier's per-id cooldown and execution idempotency, and re-alerts every type cooldown, the same shape #723 fixed for `duration_hours` and `age_hours`. The baseline-deviation evaluators (`current_value`, `deviation_pct`) and `last_changed` on frequently updating sensors behave the same way.
@@ -957,20 +944,6 @@ Since step 6 this also covers `radio_new_device_joined`, and since step 7 `netwo
 **Effort:** M
 **Priority:** P2
 **Depends on:** PR #511 (reason-code relabeling)
-
----
-
-### Persist notified anomaly_id so compound responses attach to the right record
-
-**What:** `async_update_response` matches compound records by ANY constituent `anomaly_id`, but the notification only carries the highest-confidence constituent's id. If an older compound C1 notified via constituent A, and a newer compound C2 also contains A but notified via higher-confidence B, a late user response for A attaches to C2 — wrong compound, corrupted response KPIs and false-positive attribution.
-
-**Why:** Found by Codex review of #511. Pre-existing; #511's not_suppressed preference doesn't change it (newest-match semantics already existed). Needs a schema touch, so it deserves its own change.
-
-**How to apply:** Record the dispatched constituent's `anomaly_id` in the audit record at append time (e.g. `notification.notified_anomaly_id`, set from `best.anomaly_id` in `_dispatch_compound` / `finding.anomaly_id` in the simple path). In `async_update_response`, match on `notified_anomaly_id` first, falling back to the current constituent scan for old records.
-
-**Effort:** S
-**Priority:** P3
-**Depends on:** PR #511
 
 ---
 

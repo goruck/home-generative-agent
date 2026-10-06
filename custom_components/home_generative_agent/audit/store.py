@@ -88,6 +88,20 @@ def _acted(record: dict[str, Any]) -> bool:
     return isinstance(outcome, dict) and outcome.get("status") in _ACTED_STATUSES
 
 
+def _answers(record: dict[str, Any], anomaly_id: str) -> bool:
+    """Return True when a response to *anomaly_id*'s push belongs to *record*."""
+    finding = record.get("finding", {})
+    if finding.get("anomaly_id") == anomaly_id:
+        return True
+    shown = record.get("notification", {}).get("shown_anomaly_id")
+    if shown is not None:
+        return shown == anomaly_id
+    return any(
+        cf.get("anomaly_id") == anomaly_id
+        for cf in finding.get("constituent_findings", [])
+    )
+
+
 def _is_evictable(record: dict[str, Any]) -> bool:
     """
     Return True when *record* may be evicted to make room for a newer entry.
@@ -213,15 +227,28 @@ class AuditStore:
         autonomy_level_at_decision: str | None = None,
         action_policy_path: str | None = None,
         action_outcome: dict[str, Any] | None = None,
+        shown_anomaly_id: str | None = None,
+        named_anomaly_ids: list[str] | None = None,
     ) -> None:
-        """Append a finding audit record."""
+        """
+        Append a finding audit record.
+
+        For a compound finding, *shown_anomaly_id* is the constituent the push
+        showed (its buttons answer for it alone) and *named_anomaly_ids* the
+        partners its "Also: ..." line named.
+        """
+        notification: dict[str, Any] = {
+            "explanation": explanation,
+            "notified_at": _now_iso(),
+        }
+        if shown_anomaly_id is not None:
+            notification["shown_anomaly_id"] = shown_anomaly_id
+        if named_anomaly_ids:
+            notification["named_anomaly_ids"] = list(named_anomaly_ids)
         record = AuditRecord(
             snapshot_ref=_snapshot_ref(snapshot),
             finding=finding.as_dict(),
-            notification={
-                "explanation": explanation,
-                "notified_at": _now_iso(),
-            },
+            notification=notification,
             user_response=None,
             action_outcome=action_outcome,
             # v2 fields
@@ -288,9 +315,11 @@ class AuditStore:
         Update the latest record for an anomaly with user response.
 
         Matches simple findings by ``finding.anomaly_id`` and compound findings
-        by any ``finding.constituent_findings[].anomaly_id``, since a compound
-        notification is dispatched using one constituent's anomaly_id (the
-        most severe constituent that came due).
+        by ``notification.shown_anomaly_id``, the constituent whose buttons the
+        push carried. A compound record also holds partners shown by an earlier
+        push, so matching any constituent wrote a response for that earlier
+        push onto the later record. Records written before the field existed
+        fall back to matching any ``finding.constituent_findings[].anomaly_id``.
 
         Prefers the newest ``not_suppressed`` match: ``anomaly_id`` is a stable
         content hash, so a re-fired finding that was suppressed downstream
@@ -306,11 +335,7 @@ class AuditStore:
         unknown_match: dict[str, Any] | None = None
         suppressed_match: dict[str, Any] | None = None
         for record in reversed(self._records):
-            finding = record.get("finding", {})
-            if finding.get("anomaly_id") == anomaly_id or any(
-                cf.get("anomaly_id") == anomaly_id
-                for cf in finding.get("constituent_findings", [])
-            ):
+            if _answers(record, anomaly_id):
                 reason_code = record.get("suppression_reason_code")
                 if reason_code == "not_suppressed":
                     notified_match = record
