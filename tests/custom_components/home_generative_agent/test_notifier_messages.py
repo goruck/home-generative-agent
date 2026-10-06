@@ -32,6 +32,9 @@ _DUMMY_KWARGS: dict[str, Any] = {
     "type_summary": "Motion while away",
     "sev_summary": "2 high",
     "friendly": "Motion while away",
+    "duration": "3 h",
+    "hours": 3,
+    "minutes": 30,
 }
 
 
@@ -145,6 +148,11 @@ _CALL_SITE_KWARGS: dict[str, set[str]] = {
     "subtitle_entry_open_alarm_disarmed": {"entry_name"},
     "subtitle_power_deviation": {"appliance", "direction"},
     "subtitle_reading_deviation": {"appliance", "direction"},
+    "subtitle_state_open_for": {"entity", "duration"},
+    "subtitle_state_unlocked_for": {"entity", "duration"},
+    "subtitle_state_unchanged_for": {"entity", "duration"},
+    "duration_hours_short": {"hours"},
+    "duration_minutes_short": {"minutes"},
     "fallback_message": {"summary", "entity", "action_hint"},
     "persistent_fallback": {"summary", "severity", "entities", "hint"},
     "batch_message": {"count", "plural", "type_summary"},
