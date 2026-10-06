@@ -1729,6 +1729,62 @@ def test_dynamic_entity_state_duration_triggers_entry_open_too_long() -> None:
     assert findings[0].evidence["duration_hours"] == 4.0
 
 
+def test_dynamic_entity_state_duration_id_is_stable_within_an_episode() -> None:
+    """The growing duration must not mint a new anomaly id each cycle (#723)."""
+    rule = _dyn_rule(
+        "entity_state_duration",
+        "test_rule",
+        {
+            "entity_id": "lock.garage_door_lock",
+            "target_state": "unlocked",
+            "threshold_hours": 2.0,
+        },
+    )
+
+    def _finding_at(now: str, last_changed: str) -> Any:
+        snapshot = _base_snapshot()
+        snapshot["derived"]["now"] = now
+        snapshot["entities"] = [
+            _entity("lock.garage_door_lock", "unlocked", last_changed=last_changed)
+        ]
+        (finding,) = evaluate_dynamic_rule(snapshot, rule)
+        return finding
+
+    first = _finding_at("2025-01-01T03:00:00+00:00", "2025-01-01T00:00:00+00:00")
+    later = _finding_at("2025-01-01T03:30:00+00:00", "2025-01-01T00:00:00+00:00")
+    assert first.evidence["duration_hours"] != later.evidence["duration_hours"]
+    assert first.anomaly_id == later.anomaly_id
+
+    # A new episode (the lock re-locked and unlocked again) is a new anomaly.
+    next_episode = _finding_at("2025-01-01T06:00:00+00:00", "2025-01-01T03:45:00+00:00")
+    assert next_episode.anomaly_id != first.anomaly_id
+
+
+def test_dynamic_entity_staleness_id_is_stable_within_an_episode() -> None:
+    """The growing age must not mint a new anomaly id each cycle (#723)."""
+    rule = _dyn_rule(
+        "entity_staleness",
+        "test_rule",
+        {"entity_id": "sensor.garage_temp", "max_stale_hours": 2.0},
+    )
+
+    def _finding_at(now: str) -> Any:
+        snapshot = _base_snapshot()
+        snapshot["derived"]["now"] = now
+        snapshot["entities"] = [
+            _entity(
+                "sensor.garage_temp", "21", last_changed="2025-01-01T00:00:00+00:00"
+            )
+        ]
+        (finding,) = evaluate_dynamic_rule(snapshot, rule)
+        return finding
+
+    first = _finding_at("2025-01-01T03:00:00+00:00")
+    later = _finding_at("2025-01-01T03:30:00+00:00")
+    assert first.evidence["age_hours"] != later.evidence["age_hours"]
+    assert first.anomaly_id == later.anomaly_id
+
+
 def test_dynamic_entity_state_duration_no_trigger_below_threshold() -> None:
     snapshot = _base_snapshot()
     snapshot["derived"]["now"] = "2025-01-01T01:00:00+00:00"

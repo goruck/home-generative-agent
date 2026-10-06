@@ -165,8 +165,20 @@ def _jsonify(value: Any) -> Any:
 DISPLAY_ONLY_EVIDENCE_KEYS: frozenset[str] = frozenset(
     # "summary" is the pre-rendered sentence the network / HA-security rules
     # attach for the notifier; its figures (days idle, minutes offline)
-    # change every cycle and must not churn the anomaly id.
-    {"friendly_name", "unit_of_measurement", "device_class", "summary"}
+    # change every cycle and must not churn the anomaly id.  "duration_hours"
+    # (entity_state_duration) and "age_hours" (entity_staleness) are elapsed
+    # times that grow every cycle of one episode (last_changed already marks
+    # the episode); hashing them minted a new id per cycle, so the pending
+    # prompt never matched and a standing condition re-alerted every type
+    # cooldown (issue #723).
+    {
+        "friendly_name",
+        "unit_of_measurement",
+        "device_class",
+        "summary",
+        "duration_hours",
+        "age_hours",
+    }
 )
 
 
@@ -216,10 +228,13 @@ class AnomalyFinding:
         }
 
 
+# Severity order, lowest first.
+SEVERITY_RANK: dict[Severity, int] = {"low": 0, "medium": 1, "high": 2}
+
+
 def _max_severity(findings: list[AnomalyFinding]) -> Severity:
     """Return the highest severity across a list of findings."""
-    order: dict[Severity, int] = {"low": 0, "medium": 1, "high": 2}
-    return max((f.severity for f in findings), key=lambda s: order[s])
+    return max((f.severity for f in findings), key=lambda s: SEVERITY_RANK[s])
 
 
 def _merge_evidence(findings: list[AnomalyFinding]) -> dict[str, Any]:

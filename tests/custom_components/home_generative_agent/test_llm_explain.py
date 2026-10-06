@@ -319,6 +319,22 @@ def test_display_type_low_battery_template_label() -> None:
     assert _display_type(finding) == "Low battery"
 
 
+def test_display_type_bare_candidate_id_uses_template_label() -> None:
+    """An approved rule named "candidate_1" explains by its template label."""
+    finding = AnomalyFinding(
+        anomaly_id="slug-duration",
+        type="candidate_1",
+        severity="medium",
+        confidence=0.8,
+        triggering_entities=["binary_sensor.breakfast_nook_side_right_window"],
+        evidence={"template_id": "entity_state_duration"},
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+    assert _display_type(finding) == "Unchanged too long"
+    assert _friendly_type("candidate_101") == "Sentinel alert"
+
+
 def test_friendly_type_motion_while_away() -> None:
     """Issue #518: the day-agnostic away-motion template gets a clean label."""
     assert _friendly_type("motion_detected_while_away") == "Motion while away"

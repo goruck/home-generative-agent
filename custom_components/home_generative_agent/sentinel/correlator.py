@@ -229,8 +229,9 @@ class SentinelCorrelator:
             return []
 
         # Network / HA-security findings describe posture, not events, and
-        # carry high confidence; grouped with a live finding on the same lock
-        # they would win the "best constituent" pick and swallow the event.
+        # are often high severity with high confidence; grouped with a live
+        # finding on the same lock they would win the "best constituent" pick
+        # and swallow the event.
         posture = [f for f in findings if f.type in NETWORK_RULE_TYPES]
         findings = [f for f in findings if f.type not in NETWORK_RULE_TYPES]
 

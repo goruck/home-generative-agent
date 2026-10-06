@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -911,6 +911,142 @@ async def test_compound_audit_reason_follows_the_notifier(
     assert len(notifier.calls) == 1
     assert len(audit.calls) == 1
     assert audit.calls[0]["suppression_reason_code"] == expected
+
+
+def _standing_finding(
+    anomaly_id: str,
+    finding_type: str,
+    *,
+    severity: Literal["low", "medium", "high"] = "medium",
+    confidence: float = 0.9,
+) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id=anomaly_id,
+        type=finding_type,
+        severity=severity,
+        confidence=confidence,
+        triggering_entities=["lock.garage_door_lock"],
+        evidence={"state": "unlocked"},
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+
+
+async def _dispatch_group(
+    engine: SentinelEngine, *findings: AnomalyFinding, at: datetime
+) -> bool:
+    return await engine._dispatch_compound(
+        CompoundFinding.from_findings(list(findings)),
+        _make_snapshot(),
+        at,
+        timedelta(minutes=30),
+        timedelta(minutes=15),
+        False,  # noqa: FBT003
+    )
+
+
+@pytest.mark.asyncio
+async def test_compound_shows_the_constituent_that_came_due(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A compound push shows a constituent that passed, never a pending partner.
+
+    Issue #723: the confident lock finding was still pending when the duration
+    finding joined it, yet every push showed the lock again.  The pending
+    lock's own prompt clock is left alone: it reminds when it runs out.
+    """
+    engine, notifier, _audit = _make_engine(monkeypatch, _make_snapshot())
+    suppression = cast("DummySuppression", cast("Any", engine)._suppression)
+    t0 = datetime(2025, 1, 1, 12, 0, tzinfo=UTC)
+    lock = _standing_finding("lock-id", "unlocked_lock_when_home", confidence=0.9)
+    duration = _standing_finding(
+        "duration-id", "garage_door_unlocked_duration", confidence=0.5
+    )
+
+    assert await _dispatch_group(engine, lock, at=t0)
+    assert await _dispatch_group(engine, lock, duration, at=t0 + timedelta(hours=2))
+
+    assert notifier.calls[1]["finding"] is duration
+    assert suppression.state.pending_prompts["lock-id"] == t0.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_compound_does_not_mark_a_held_safety_finding_as_prompted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A constituent held back this cycle is not registered by its partner's push.
+
+    The open door is inside presence grace when the lock alerts; the push
+    shows the lock, so the door must still alert once grace ends.
+    """
+    engine, notifier, _audit = _make_engine(monkeypatch, _make_snapshot())
+    suppression = cast("DummySuppression", cast("Any", engine)._suppression)
+    t0 = datetime(2025, 1, 1, 22, 0, tzinfo=UTC)
+    suppression.state.presence_grace_until["person.someone"] = (
+        t0 + timedelta(minutes=10)
+    ).isoformat()
+    lock = _standing_finding("lock-id", "unlocked_lock_at_night", confidence=0.9)
+    door = _standing_finding("door-id", "open_entry_while_away", confidence=0.6)
+
+    assert await _dispatch_group(engine, lock, door, at=t0)
+    assert notifier.calls[0]["finding"] is lock
+    assert "door-id" not in suppression.state.pending_prompts
+    assert "open_entry_while_away" not in suppression.state.last_by_type
+
+    assert await _dispatch_group(engine, lock, door, at=t0 + timedelta(minutes=15))
+    assert notifier.calls[1]["finding"] is door
+
+
+@pytest.mark.asyncio
+async def test_compound_prompts_only_the_constituent_it_showed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A passing constituent the push did not show is not held for the prompt TTL.
+
+    With stable ids, a held loser matched its pending prompt and lost the
+    pick again whenever both prompts expired, so it was never pushed while its
+    partner stood.  It now only cools down and comes due on its own.
+    """
+    engine, notifier, _audit = _make_engine(monkeypatch, _make_snapshot())
+    suppression = cast("DummySuppression", cast("Any", engine)._suppression)
+    t0 = datetime(2025, 1, 1, 12, 0, tzinfo=UTC)
+    door = _standing_finding("door-id", "open_entry_while_away", confidence=0.9)
+    lock = _standing_finding("lock-id", "garage_door_unlocked_duration", confidence=0.5)
+
+    assert await _dispatch_group(engine, door, lock, at=t0)
+    assert notifier.calls[0]["finding"] is door
+    assert "lock-id" not in suppression.state.pending_prompts
+    assert suppression.state.last_by_type["garage_door_unlocked_duration"] == (
+        t0.isoformat()
+    )
+
+    # Inside the cooldown nothing is due; after it the lock is pushed itself.
+    assert not await _dispatch_group(engine, door, lock, at=t0 + timedelta(minutes=20))
+    assert await _dispatch_group(engine, door, lock, at=t0 + timedelta(minutes=31))
+    assert notifier.calls[1]["finding"] is lock
+
+
+@pytest.mark.asyncio
+async def test_compound_shows_the_most_severe_due_constituent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A confident low-severity finding does not hide a high-severity one."""
+    engine, notifier, _audit = _make_engine(monkeypatch, _make_snapshot())
+    appliance = _standing_finding(
+        "appliance-id", "appliance_power_duration", severity="low", confidence=0.95
+    )
+    lock = _standing_finding(
+        "lock-id", "unlocked_lock_at_night", severity="high", confidence=0.4
+    )
+
+    assert await _dispatch_group(
+        engine, appliance, lock, at=datetime(2025, 1, 1, tzinfo=UTC)
+    )
+
+    assert notifier.calls[0]["finding"] is lock
 
 
 @pytest.mark.asyncio

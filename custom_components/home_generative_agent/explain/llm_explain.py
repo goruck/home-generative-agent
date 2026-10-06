@@ -181,6 +181,8 @@ _KNOWN_TYPE_LABELS = {
     "radio_coordinator_update_pending": "Radio coordinator update available",
     "appliance_power_duration": "Appliance power duration",
     "low_battery_sensors": "Low battery",
+    "entity_state_duration": "Unchanged too long",
+    "motion_detected_at_night_while_alarm_disarmed": "Motion at night, alarm disarmed",
 }
 
 
@@ -209,7 +211,11 @@ def _friendly_type(anomaly_type: str) -> str:
     parts = display.split("_")
     if len(parts) >= 3 and parts[0] == "rule" and parts[1].isdigit():  # noqa: PLR2004
         display = "_".join(parts[2:])
-    return display.replace("_", " ").strip().capitalize()
+    display = display.replace("_", " ").strip().capitalize()
+    # An approved rule id like "candidate_1" leaves no words at all.
+    if not any(char.isalpha() for char in display):
+        return "Sentinel alert"
+    return display
 
 
 def _friendly_entity(entity_id: str) -> str:

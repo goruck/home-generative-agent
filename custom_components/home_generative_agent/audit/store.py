@@ -288,9 +288,9 @@ class AuditStore:
         Update the latest record for an anomaly with user response.
 
         Matches simple findings by ``finding.anomaly_id`` and compound findings
-        by any ``finding.constituent_findings[].anomaly_id``, since compound
-        notifications are dispatched using the highest-confidence constituent's
-        anomaly_id.
+        by any ``finding.constituent_findings[].anomaly_id``, since a compound
+        notification is dispatched using one constituent's anomaly_id (the
+        most severe constituent that came due).
 
         Prefers the newest ``not_suppressed`` match: ``anomaly_id`` is a stable
         content hash, so a re-fired finding that was suppressed downstream
