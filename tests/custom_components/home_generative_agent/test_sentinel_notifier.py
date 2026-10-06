@@ -1937,6 +1937,32 @@ def test_display_type_low_battery_template_label() -> None:
     assert _display_type(finding, hass) == "Slabá baterie"  # type: ignore[arg-type]
 
 
+def test_display_type_bare_candidate_id_uses_template_label() -> None:
+    """An approved rule named "candidate_1" shows its template label, not "1"."""
+    finding = AnomalyFinding(
+        anomaly_id="slug-duration",
+        type="candidate_1",
+        severity="medium",
+        confidence=0.8,
+        triggering_entities=["binary_sensor.breakfast_nook_side_right_window"],
+        evidence={"template_id": "entity_state_duration"},
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+    assert _display_type(finding) == "Unchanged too long"
+    hass = DummyHass()
+    hass.config.language = "cs"
+    assert _display_type(finding, hass) == "Příliš dlouho beze změny"  # type: ignore[arg-type]
+
+
+def test_friendly_type_with_no_words_falls_back_to_generic_label() -> None:
+    """A rule id that prettifies to a bare number never reaches the push."""
+    assert _friendly_type("candidate_101") == "Sentinel alert"
+    hass = DummyHass()
+    hass.config.language = "cs"
+    assert _friendly_type("candidate_101", hass) == "Upozornění Sentinelu"  # type: ignore[arg-type]
+
+
 # ---------------------------------------------------------------------------
 # response_language vs deterministic mobile formatters (PR #523 field report)
 # ---------------------------------------------------------------------------

@@ -851,6 +851,10 @@ _KNOWN_TYPE_LABEL_KEYS = {
     "radio_coordinator_update_pending": "type_radio_coordinator_update_pending",
     "appliance_power_duration": "type_appliance_power_duration",
     "low_battery_sensors": "type_low_battery_sensors",
+    "entity_state_duration": "type_entity_state_duration",
+    "motion_detected_at_night_while_alarm_disarmed": (
+        "type_motion_detected_at_night_while_alarm_disarmed"
+    ),
 }
 
 
@@ -883,7 +887,11 @@ def _friendly_type(anomaly_type: str, hass: HomeAssistant | None = None) -> str:
     parts = display.split("_")
     if len(parts) >= 3 and parts[0] == "rule" and parts[1].isdigit():  # noqa: PLR2004
         display = "_".join(parts[2:])
-    return display.replace("_", " ").strip().capitalize()
+    display = display.replace("_", " ").strip().capitalize()
+    # An approved rule id like "candidate_1" leaves no words at all.
+    if not any(char.isalpha() for char in display):
+        return notif_msg(hass, "type_unlabeled_rule")
+    return display
 
 
 def _record_notified_after(record: dict[str, Any], cutoff: datetime) -> bool:

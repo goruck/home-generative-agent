@@ -55,6 +55,11 @@ _MESSAGES: dict[str, dict[str, str]] = {
         ),
         "type_appliance_power_duration": "Appliance power duration",
         "type_low_battery_sensors": "Low battery",
+        "type_entity_state_duration": "Unchanged too long",
+        "type_motion_detected_at_night_while_alarm_disarmed": (
+            "Motion at night, alarm disarmed"
+        ),
+        "type_unlabeled_rule": "Sentinel alert",
         "type_ha_sensitive_entity_exposed_without_pin": (
             "Sensitive entity exposed without PIN"
         ),
@@ -147,6 +152,11 @@ _MESSAGES: dict[str, dict[str, str]] = {
         ),
         "type_appliance_power_duration": "Doba provozu spotřebiče",
         "type_low_battery_sensors": "Slabá baterie",
+        "type_entity_state_duration": "Příliš dlouho beze změny",
+        "type_motion_detected_at_night_while_alarm_disarmed": (
+            "Pohyb v noci při vypnutém alarmu"
+        ),
+        "type_unlabeled_rule": "Upozornění Sentinelu",
         "type_ha_sensitive_entity_exposed_without_pin": (
             "Citlivá entita zpřístupněna bez PIN"
         ),
