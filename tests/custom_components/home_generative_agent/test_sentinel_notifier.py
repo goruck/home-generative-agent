@@ -902,9 +902,7 @@ async def test_async_flush_batch_sends_summary_no_actions() -> None:
 
     # Pre-load the held batch.
     finding = _finding_with_severity("low", anomaly_id="flush1")
-    notifier._held_batch.append(
-        (finding, "Some message", "notify.mobile_app_phone", None)
-    )
+    notifier._held_batch.append((finding, "Some message", "notify.mobile_app_phone"))
 
     notifier._async_flush_batch()
     await hass.drain_tasks()
@@ -931,10 +929,8 @@ async def test_flush_batch_lists_each_held_finding_body() -> None:
         "XBR-65X850E (androidtv_remote via zeroconf), eero (upnp via ssdp)."
     )
     ordinary = _finding_with_severity("low", anomaly_id="flushplain")
-    notifier._held_batch.append(
-        (network, "model prose", "notify.mobile_app_phone", None)
-    )
-    notifier._held_batch.append((ordinary, "Kettle ran longer.", None, None))
+    notifier._held_batch.append((network, "model prose", "notify.mobile_app_phone"))
+    notifier._held_batch.append((ordinary, "Kettle ran longer.", None))
 
     notifier._async_flush_batch()
     await hass.drain_tasks()
@@ -954,7 +950,7 @@ async def test_flush_batch_single_finding_keeps_header_and_body() -> None:
     options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
     notifier, hass, _suppression, _action_handler = _make_notifier(options)
     finding = _finding_with_severity("low", anomaly_id="flushone")
-    notifier._held_batch.append((finding, "Only one thing happened.", None, None))
+    notifier._held_batch.append((finding, "Only one thing happened.", None))
 
     notifier._async_flush_batch()
     await hass.drain_tasks()
@@ -2318,9 +2314,7 @@ async def test_flush_batch_czech_title_and_type_label() -> None:
     finding = _finding_with_severity(
         "low", anomaly_id="csflush1", ftype="motion_detected_while_away"
     )
-    notifier._held_batch.append(
-        (finding, "Some message", "notify.mobile_app_phone", None)
-    )
+    notifier._held_batch.append((finding, "Some message", "notify.mobile_app_phone"))
 
     notifier._async_flush_batch()
     await hass.drain_tasks()
@@ -2803,9 +2797,7 @@ async def test_flush_batch_body_is_capped() -> None:
     notifier, hass, _suppression, _action_handler = _make_notifier(options)
     for i in range(12):
         finding = _finding_with_severity("low", anomaly_id=f"cap{i}")
-        notifier._held_batch.append(
-            (finding, f"Finding number {i} " + "x" * 180, None, None)
-        )
+        notifier._held_batch.append((finding, f"Finding number {i} " + "x" * 180, None))
 
     notifier._async_flush_batch()
     await hass.drain_tasks()
@@ -3208,6 +3200,35 @@ def _named_snapshot(*names: tuple[str, str]) -> dict[str, Any]:
     return snapshot
 
 
+def _also(
+    shown: AnomalyFinding,
+    related: list[AnomalyFinding],
+    snapshot: dict[str, Any] | None = None,
+    options: dict[str, Any] | None = None,
+    hass: Any = None,
+) -> tuple[str | None, list[AnomalyFinding]]:
+    return related_findings_line(
+        shown,
+        related,
+        snapshot if snapshot is not None else _minimal_snapshot(),  # type: ignore[arg-type]
+        options or {},
+        hass,
+    )
+
+
+def _high(anomaly_id: str, ftype: str, entities: list[str]) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id=anomaly_id,
+        type=ftype,
+        severity="high",
+        confidence=0.5,
+        triggering_entities=entities,
+        evidence={},
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+
+
 def test_related_line_names_partners_by_snapshot_friendly_name() -> None:
     shown = _finding("shown", triggering_entities=["binary_sensor.front_door"])
     kitchen = _finding("k", triggering_entities=["binary_sensor.w1"])
@@ -3218,7 +3239,7 @@ def test_related_line_names_partners_by_snapshot_friendly_name() -> None:
         ("binary_sensor.w2", "Landing Window"),
     )
 
-    line, named = related_findings_line(shown, [kitchen, landing], snapshot)  # type: ignore[arg-type]
+    line, named = _also(shown, [kitchen, landing], snapshot)
 
     assert line == "Also: Kitchen Window, Landing Window"
     assert named == [kitchen, landing]
@@ -3230,27 +3251,79 @@ def test_related_line_lists_a_shared_device_once() -> None:
     away = _finding("a", triggering_entities=["binary_sensor.kitchen_window"])
     disarmed = _finding("d", triggering_entities=["binary_sensor.kitchen_window"])
 
-    line, named = related_findings_line(shown, [away, disarmed], _minimal_snapshot())  # type: ignore[arg-type]
+    line, named = _also(shown, [away, disarmed])
 
     assert line == "Also: Kitchen Window"
     assert named == [away, disarmed]
 
 
-def test_related_line_is_none_when_partners_share_the_shown_device() -> None:
+def test_related_line_repeats_the_shown_device_rather_than_hold_silently() -> None:
+    """A partner on the shown finding's own device is still named on the line."""
     shown = _finding("shown")
-    same_device = _finding("same")
+    same_device = _finding("same", ftype="alarm_disarmed_open_entry")
 
-    line, named = related_findings_line(shown, [same_device], _minimal_snapshot())  # type: ignore[arg-type]
+    line, named = _also(shown, [same_device])
 
-    assert line is None
+    assert line == "Also: Front Door"
     assert named == [same_device]
 
 
 def test_related_line_never_names_a_finding_without_devices() -> None:
-    shown = _finding("shown")
-    deviceless = _finding("none", triggering_entities=[])
+    line, named = _also(_finding("shown"), [_finding("none", triggering_entities=[])])
 
-    line, named = related_findings_line(shown, [deviceless], _minimal_snapshot())  # type: ignore[arg-type]
+    assert line is None
+    assert named == []
+
+
+def test_related_line_keeps_a_different_high_severity_alert_due() -> None:
+    """A different kind of high-severity alert is never reduced to a name."""
+    shown = _high("shown", "open_entry_while_away", ["binary_sensor.front_door"])
+    lock = _high("lock", "unlocked_lock_at_night", ["lock.front_door"])
+    same_kind = _high("door2", "open_entry_while_away", ["binary_sensor.back_door"])
+
+    line, named = _also(shown, [lock, same_kind])
+
+    assert line == "Also: Back Door"
+    assert named == [same_kind]
+
+
+def test_related_line_does_not_name_a_device_sharing_another_devices_name() -> None:
+    """
+    Two devices called "Front Door" cannot be told apart on the push.
+
+    Matching by name held the open-entry finding behind a lock push that
+    never mentioned it.
+    """
+    shown = _finding("shown", triggering_entities=["lock.front_door"])
+    sensor = _finding("sensor", triggering_entities=["binary_sensor.front_door"])
+    snapshot = _named_snapshot(
+        ("lock.front_door", "Front Door"),
+        ("binary_sensor.front_door", "Front Door"),
+    )
+
+    line, named = _also(shown, [sensor], snapshot)
+
+    assert line is None
+    assert named == []
+
+
+def test_related_line_leaves_out_a_partner_routed_to_another_phone() -> None:
+    shown = _finding("shown", triggering_entities=["binary_sensor.front_door"])
+    garage = _finding("garage", triggering_entities=["binary_sensor.garage_door"])
+    snapshot = _minimal_snapshot(area="Front")
+    snapshot["entities"].append(
+        {
+            **snapshot["entities"][0],
+            "entity_id": "binary_sensor.garage_door",
+            "area": "Garage",
+        }
+    )
+    options = {
+        CONF_NOTIFY_SERVICE: "notify.mobile_app_phone",
+        CONF_SENTINEL_AREA_NOTIFY_MAP: {"Garage": "notify.mobile_app_garage"},
+    }
+
+    line, named = _also(shown, [garage], snapshot, options)
 
     assert line is None
     assert named == []
@@ -3263,7 +3336,7 @@ def test_related_line_names_a_multi_device_finding_only_whole() -> None:
     first = _finding("first", triggering_entities=["binary_sensor.kitchen_window"])
     pair = _finding("pair", triggering_entities=[long_name + "c", long_name + "d"])
 
-    line, named = related_findings_line(shown, [first, pair], _minimal_snapshot())  # type: ignore[arg-type]
+    line, named = _also(shown, [first, pair])
 
     assert named == [first]
     assert line is not None
@@ -3271,13 +3344,21 @@ def test_related_line_names_a_multi_device_finding_only_whole() -> None:
     assert line.endswith("+2 more")
 
 
+def test_related_line_leaves_out_a_partner_whose_name_alone_overflows() -> None:
+    huge = _finding("huge", triggering_entities=["binary_sensor." + "x" * 200])
+
+    line, named = _also(_finding("shown"), [huge])
+
+    assert line is None
+    assert named == []
+
+
 def test_related_line_czech() -> None:
     hass = DummyHass()
     hass.config.language = "cs"
-    shown = _finding("shown")
     window = _finding("w", triggering_entities=["binary_sensor.kitchen_window"])
 
-    line, _named = related_findings_line(shown, [window], _minimal_snapshot(), hass)  # type: ignore[arg-type]
+    line, _named = _also(_finding("shown"), [window], hass=hass)
 
     assert line == "Také: Kitchen Window"
 
@@ -3314,18 +3395,30 @@ async def test_async_notify_appends_also_line_to_push_and_persistent() -> None:
 
 
 @pytest.mark.asyncio
-async def test_flush_batch_keeps_the_also_line() -> None:
-    """A rate-limited grouped push still names the partners it counted."""
+async def test_grouped_push_is_never_held_for_the_burst_batch() -> None:
+    """
+    The engine holds every finding the also line names, so it must go out now.
+
+    The batch can cut a line past its cap or be lost at unload.
+    """
     notifier, hass, _s, _a = _make_notifier(
         {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
     )
-    finding = _finding_with_severity("low", anomaly_id="flushalso")
-    notifier._held_batch.append(
-        (finding, "Front door is open.", None, "Also: Kitchen Window")
+    snapshot = _minimal_snapshot()
+    for i in range(3):
+        await notifier.async_notify(
+            _finding_with_severity("low", anomaly_id=f"burst{i}"),
+            snapshot,  # type: ignore[arg-type]
+            f"Burst {i}.",
+        )
+
+    sent = await notifier.async_notify(
+        _finding_with_severity("low", anomaly_id="grouped"),
+        snapshot,  # type: ignore[arg-type]
+        "Front door is open.",
+        also_line="Also: Kitchen Window",
     )
 
-    notifier._async_flush_batch()
-    await hass.drain_tasks()
-
-    message = hass.services.calls[0]["data"]["message"]
-    assert message.endswith("• Front door is open. Also: Kitchen Window")
+    assert sent is True
+    assert notifier._held_batch == []
+    assert hass.services.calls[-1]["data"]["message"].endswith("Also: Kitchen Window")

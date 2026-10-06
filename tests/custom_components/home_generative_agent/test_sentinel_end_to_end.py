@@ -1101,7 +1101,7 @@ async def test_grouped_push_names_its_due_partners_and_prompts_them(
     )
     kitchen = _window("kitchen-id", "binary_sensor.kitchen_window")
     landing = _window("landing-id", "binary_sensor.landing_window", confidence=0.7)
-    # Same device as the shown finding: the push is about it already.
+    # Same device as the shown finding: named too, never held silently.
     disarmed = _standing_finding(
         "disarmed-id",
         "alarm_disarmed_open_entry",
@@ -1114,7 +1114,9 @@ async def test_grouped_push_names_its_due_partners_and_prompts_them(
     assert notifier.calls[0]["finding"] is door
     # Front Door has a snapshot friendly name; the others fall back to the id.
     # Most severe, then most confident, first.
-    assert notifier.calls[0]["also_line"] == "Also: Landing Window, Kitchen Window"
+    assert notifier.calls[0]["also_line"] == (
+        "Also: Landing Window, Kitchen Window, Front Door"
+    )
     assert set(suppression.state.pending_prompts) == {
         "door-id",
         "kitchen-id",

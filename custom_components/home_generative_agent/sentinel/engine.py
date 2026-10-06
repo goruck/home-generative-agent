@@ -1901,8 +1901,9 @@ class SentinelEngine:
         would individually be suppressed.  When at least one constituent passes
         the suppression check, the compound is dispatched and all passing
         constituents are registered for cooldown tracking.  The push shows
-        one constituent and names the other passing ones by device on an
-        "Also: ..." line (issue #727).  Only the shown constituent and the
+        one constituent and names other passing ones by device on an
+        "Also: ..." line when the push really tells the user about them
+        (issue #727, see ``related_findings_line``).  Only the shown constituent and the
         ones that line named are registered as pending prompts, and the named
         ones only once the push went out.  A constituent the user never saw
         comes due again after its cooldown instead of waiting out the prompt
@@ -2021,6 +2022,7 @@ class SentinelEngine:
                 if constituent is not best
             ],
             snapshot,
+            self._options,
             self._hass,
         )
         sent = await self._notifier.async_notify(
@@ -2028,7 +2030,9 @@ class SentinelEngine:
         )
         # A push the notifier dropped as a repeat named nothing, so its named
         # partners stay due.
-        if sent is not False and named:
+        if sent is False:
+            named = []
+        if named:
             for constituent in named:
                 register_prompt(self._suppression.state, constituent, now)
             await self._suppression.async_save()
@@ -2039,11 +2043,7 @@ class SentinelEngine:
             explanation,
             _delivered_reason(SUPPRESSION_REASON_NOT_SUPPRESSED, sent=sent),
             shown_anomaly_id=best.anomaly_id,
-            named_anomaly_ids=(
-                [constituent.anomaly_id for constituent in named]
-                if sent is not False
-                else []
-            ),
+            named_anomaly_ids=[constituent.anomaly_id for constituent in named],
             triage_decision=None,
             triage_reason_code=None,
             triage_confidence=None,
