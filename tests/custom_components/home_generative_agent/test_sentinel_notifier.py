@@ -3257,15 +3257,40 @@ def test_related_line_lists_a_shared_device_once() -> None:
     assert named == [away, disarmed]
 
 
-def test_related_line_repeats_the_shown_device_rather_than_hold_silently() -> None:
-    """A partner on the shown finding's own device is still named on the line."""
+def test_related_line_leaves_a_shared_device_off_the_line() -> None:
+    """
+    The alarm panel behind every alarm-disarmed finding is not listed.
+
+    Field push: "Also: Home Alarm, Family Room Right Win..." spent the line
+    on the panel the push was already about.
+    """
+    panel = "alarm_control_panel.home_alarm"
+    shown = _finding(
+        "shown",
+        ftype="alarm_disarmed_open_entry",
+        triggering_entities=[panel, "binary_sensor.nook_window"],
+    )
+    family = _finding(
+        "family",
+        ftype="alarm_disarmed_open_entry",
+        triggering_entities=[panel, "binary_sensor.family_room_window"],
+    )
+
+    line, named = _also(shown, [family])
+
+    assert line == "Also: Family Room Window"
+    assert named == [family]
+
+
+def test_related_line_never_holds_a_partner_with_no_device_of_its_own() -> None:
+    """A partner only on the shown finding's devices adds nothing to name."""
     shown = _finding("shown")
     same_device = _finding("same")
 
     line, named = _also(shown, [same_device])
 
-    assert line == "Also: Front Door"
-    assert named == [same_device]
+    assert line is None
+    assert named == []
 
 
 def test_related_line_never_names_a_finding_without_devices() -> None:

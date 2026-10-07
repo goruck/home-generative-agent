@@ -1583,8 +1583,11 @@ def related_findings_line(
     as alerted, so a finding is returned only when the push really tells the
     user about it:
 
-    * every one of its devices is on the line, even one *shown* is about, so
-      nothing is held without a mention;
+    * it has a device of its own, not one of *shown*'s, and every such device
+      is on the line, so nothing is held without a mention. A device *shown*
+      also has (the alarm panel behind every alarm-disarmed finding) is left
+      off the line: the push already names it, and a same-type finding on
+      it describes the same condition;
     * each device name on the line belongs to one device in the home: a
       name (ignoring case) that another device also goes by, under any name
       a notification may show for it, cannot be told apart;
@@ -1623,9 +1626,16 @@ def related_findings_line(
             or _resolve_notify_service(finding, snapshot, options) != target
         ):
             continue
+        own = [
+            entity_id
+            for entity_id in finding.triggering_entities
+            if entity_id not in shown.triggering_entities
+        ]
+        if not own:
+            continue
         new = {
             entity_id: _entity_display_name(entity_id, names)
-            for entity_id in finding.triggering_entities
+            for entity_id in own
             if entity_id not in listed
         }
         if any(
