@@ -1594,6 +1594,14 @@ def related_findings_line(
     * it is the same type of finding as *shown*: a device name says what is
       wrong only when the condition is the one the push describes, so a
       stranger on camera or an unlocked lock is never reduced to a name;
+    * or it is about the same door or window as *shown* (its subject
+      device, see ``_subject_entity``) and its condition has a curated
+      phrase (``_condition_label``): the line names that device with each
+      condition, "Garage Window (open while home, alarm disarmed)", so one
+      window tripping several rules is one push (field test of #727). A
+      partner whose condition is the one *shown* describes needs no phrase.
+      A rule without a curated phrase keeps its own push: a label made
+      from an approved rule's id can say something else entirely;
     * it is routed to the same notify service as *shown*, so a finding for
       another area's phone is not held after reaching the wrong one.
 
@@ -1619,9 +1627,18 @@ def related_findings_line(
     listed: dict[str, str] = {}
     left_out: set[str] = set()
     named: list[AnomalyFinding] = []
+    conditions = _same_device_conditions(
+        shown, ordered, snapshot, options, names, owners, budget, hass
+    )
+    head: list[str] = []
+    if conditions is not None:
+        head_text, same_device = conditions
+        named.extend(same_device)
+        head = [head_text] if head_text else []
     for finding in ordered:
         if (
-            not finding.triggering_entities
+            finding in named
+            or not finding.triggering_entities
             or finding.type != shown.type
             or _resolve_notify_service(finding, snapshot, options) != target
         ):
@@ -1647,16 +1664,121 @@ def related_findings_line(
         shown_new = {
             entity_id: name for entity_id, name in new.items() if name is not None
         }
-        candidate = [*listed.values(), *shown_new.values()]
+        candidate = [*head, *listed.values(), *shown_new.values()]
         if new and len(_also_text(candidate, 0, hass)) > budget:
             left_out.update(new)
             continue
         listed.update(shown_new)
         named.append(finding)
     left_out.difference_update(listed)
-    if not listed:
+    if not head and not listed:
+        # Nothing on the line: hold nothing, so a push the batch or a failed
+        # delivery loses can never take a partner down with it.
         return None, []
-    return _also_text(list(listed.values()), len(left_out), hass), named
+    return _also_text([*head, *listed.values()], len(left_out), hass), named
+
+
+def _same_device_conditions(  # noqa: PLR0913
+    shown: AnomalyFinding,
+    ordered: Sequence[AnomalyFinding],
+    snapshot: FullStateSnapshot,
+    options: Mapping[str, Any],
+    names: Mapping[str, str],
+    owners: Mapping[str, set[str]],
+    budget: int,
+    hass: HomeAssistant | None,
+) -> tuple[str | None, list[AnomalyFinding]] | None:
+    """
+    Return the "<device> (<conditions>)" head and the partners it covers.
+
+    Partners about *shown*'s subject device whose condition has a curated
+    phrase. One whose phrase is *shown*'s own is covered by the push itself;
+    the head lists the others. None when *shown* has no nameable subject.
+    """
+    subject = _subject_entity(shown)
+    if subject is None:
+        return None
+    subject_name = _entity_display_name(subject, names)
+    if subject_name is None or owners.get(subject_name.casefold()) != {subject}:
+        return None
+    target = _resolve_notify_service(shown, snapshot, options)
+    shown_condition = _condition_label(shown, hass)
+    phrases: list[str] = []
+    covered: list[AnomalyFinding] = []
+    for finding in ordered:
+        if (
+            _subject_entity(finding) != subject
+            or _resolve_notify_service(finding, snapshot, options) != target
+        ):
+            continue
+        condition = _condition_label(finding, hass)
+        if condition is None:
+            continue
+        if condition != shown_condition and condition not in phrases:
+            head = _subject_text(subject_name, [*phrases, condition])
+            if len(_also_text([head], 0, hass)) > budget:
+                continue
+            phrases.append(condition)
+        covered.append(finding)
+    if not phrases:
+        # Only partners repeating the shown condition: they are named only
+        # alongside visible text, which the caller decides.
+        return None, []
+    return _subject_text(subject_name, phrases), covered
+
+
+def _subject_text(name: str, phrases: list[str]) -> str:
+    """Render "<device> (<condition>, <condition>)"."""
+    return f"{name} ({', '.join(phrases)})"
+
+
+def _subject_entity(finding: AnomalyFinding) -> str | None:
+    """
+    Return the device *finding* is about, or None.
+
+    The entry an open-entry or alarm-disarmed finding names, the entity a
+    duration finding watches, else the single triggering entity. The alarm
+    panel an alarm-disarmed finding also carries is context, not subject.
+    """
+    evidence = finding.evidence
+    for key in ("entry_entity_id", "entity_id"):
+        value = evidence.get(key)
+        if isinstance(value, str) and value:
+            return value
+    if len(finding.triggering_entities) == 1:
+        return finding.triggering_entities[0]
+    return None
+
+
+# Curated condition phrases for same-device folding, by template id (approved
+# rules) or type (built-in rules). Only these: an approved rule's own label is
+# built from its id, which the discovery model wrote and which can describe a
+# different condition ("garage window open away night" on a rule that fires
+# whenever the window has been open two hours).
+_CONDITION_KEYS = {
+    "open_entry_while_away": "condition_open_while_away",
+    "open_entry_when_home": "condition_open_while_home",
+    "open_entry_at_night": "condition_open_at_night",
+    "open_entry_at_night_when_home": "condition_open_at_night",
+    "open_entry_at_night_while_away": "condition_open_at_night",
+    "open_any_window_at_night_while_away": "condition_open_at_night",
+    "alarm_disarmed_open_entry": "condition_alarm_disarmed",
+}
+_DURATION_CONDITION_KEYS = {
+    "on": "condition_open_too_long",
+    "open": "condition_open_too_long",
+    "unlocked": "condition_unlocked_too_long",
+}
+
+
+def _condition_label(finding: AnomalyFinding, hass: HomeAssistant | None) -> str | None:
+    """Return *finding*'s curated condition phrase, or None."""
+    template_id = str(finding.evidence.get("template_id") or "")
+    if template_id == "entity_state_duration":
+        key = _DURATION_CONDITION_KEYS.get(str(finding.evidence.get("state") or ""))
+    else:
+        key = _CONDITION_KEYS.get(template_id or finding.type)
+    return notif_msg(hass, key) if key else None
 
 
 def _name_aliases(entity_id: str, names: Mapping[str, str]) -> set[str]:

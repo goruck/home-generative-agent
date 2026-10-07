@@ -1100,10 +1100,9 @@ async def test_grouped_push_names_its_due_partners_and_prompts_them(
     One push covers the same condition: due partners are named and held.
 
     Issue #727: a 15-finding away group sent a push every 10-30 minutes, one
-    per finding.  The push now names the other open entries by device, and
-    each named one gets the pending-prompt hold its own push would have given
-    it.  A different kind of finding is never reduced to a device name: it
-    keeps its own push.
+    per finding.  The push now names the other open entries by device and a
+    curated condition on the shown door by its phrase, and each named one
+    gets the pending-prompt hold its own push would have given it.
     """
     engine, notifier, audit = _make_engine(monkeypatch, _make_snapshot())
     suppression = cast("DummySuppression", cast("Any", engine)._suppression)
@@ -1121,23 +1120,56 @@ async def test_grouped_push_names_its_due_partners_and_prompts_them(
     assert await _dispatch_group(engine, door, kitchen, landing, disarmed, at=t0)
 
     assert notifier.calls[0]["finding"] is door
-    # Most severe, then most confident, first.
-    assert notifier.calls[0]["also_line"] == "Also: Landing Door, Kitchen Door"
+    # The alarm finding on the shown door is named by its condition; the
+    # other doors by device, most severe, then most confident, first.
+    assert notifier.calls[0]["also_line"] == (
+        "Also: Front Door (alarm disarmed), Landing Door, Kitchen Door"
+    )
     assert set(suppression.state.pending_prompts) == {
         "door-id",
         "kitchen-id",
         "landing-id",
+        "disarmed-id",
     }
     assert audit.calls[-1]["shown_anomaly_id"] == "door-id"
-    assert audit.calls[-1]["named_anomaly_ids"] == ["landing-id", "kitchen-id"]
-
-    # After the cooldown only the alarm finding the push did not describe is
-    # due, and it is shown itself.
-    assert await _dispatch_group(
+    assert audit.calls[-1]["named_anomaly_ids"] == [
+        "disarmed-id",
+        "landing-id",
+        "kitchen-id",
+    ]
+    # Every finding was told, so nothing comes due after the cooldown.
+    assert not await _dispatch_group(
         engine, door, kitchen, landing, disarmed, at=t0 + timedelta(minutes=31)
     )
-    assert notifier.calls[1]["finding"] is disarmed
-    assert notifier.calls[1]["also_line"] is None
+
+
+@pytest.mark.asyncio
+async def test_grouped_push_keeps_an_unphrased_same_door_rule_due(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A rule on the shown door without a curated condition phrase pushes itself.
+
+    Its label would be built from an id the discovery model wrote, which can
+    describe another condition.
+    """
+    engine, notifier, _audit = _make_engine(monkeypatch, _make_snapshot())
+    suppression = cast("DummySuppression", cast("Any", engine)._suppression)
+    t0 = datetime(2025, 1, 1, 12, 0, tzinfo=UTC)
+    door = _open_door("door-id", "binary_sensor.front_door")
+    openings = _standing_finding(
+        "openings-id",
+        "multiple_openings_simultaneous",
+        severity="medium",
+        entities=["binary_sensor.front_door"],
+    )
+
+    assert await _dispatch_group(engine, door, openings, at=t0)
+
+    assert notifier.calls[0]["also_line"] is None
+    assert "openings-id" not in suppression.state.pending_prompts
+    assert await _dispatch_group(engine, door, openings, at=t0 + timedelta(minutes=31))
+    assert notifier.calls[1]["finding"] is openings
 
 
 @pytest.mark.asyncio

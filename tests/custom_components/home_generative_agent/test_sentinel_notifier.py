@@ -3558,3 +3558,171 @@ async def test_grouped_push_is_never_held_for_the_burst_batch() -> None:
     assert sent is True
     assert notifier._held_batch == []
     assert hass.services.calls[-1]["data"]["message"].endswith("Also: Kitchen Window")
+
+
+# ---------------------------------------------------------------------------
+# Same-device conditions on the also line (field test of #727)
+# ---------------------------------------------------------------------------
+
+_GARAGE = "binary_sensor.garage_and_play_room_windows"
+_PANEL = "alarm_control_panel.home_alarm"
+
+
+def _rule_finding(
+    anomaly_id: str,
+    rule_type: str,
+    evidence: dict[str, Any],
+    entities: list[str],
+    severity: str = "medium",
+) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id=anomaly_id,
+        type=rule_type,
+        severity=severity,  # type: ignore[arg-type]
+        confidence=0.6,
+        triggering_entities=entities,
+        evidence=evidence,
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+
+
+def _garage_group() -> tuple[AnomalyFinding, dict[str, AnomalyFinding]]:
+    """Replay of the overnight group: one window, six rules, 2026-10-07."""
+    shown = _rule_finding(
+        "night",
+        "open_entry_at_night_when_home_window",
+        {"template_id": "open_entry_at_night_when_home", "entry_entity_id": _GARAGE},
+        [_GARAGE],
+    )
+    partners = {
+        "home": _rule_finding(
+            "home",
+            "open_entry_when_home_window",
+            {"template_id": "open_entry_when_home", "entry_entity_id": _GARAGE},
+            [_GARAGE],
+        ),
+        "disarmed": _rule_finding(
+            "disarmed",
+            "alarm_disarmed_open_entry_alarm_control_panel_home_alarm",
+            {"template_id": "alarm_disarmed_open_entry", "entry_entity_id": _GARAGE},
+            [_PANEL, _GARAGE],
+            severity="high",
+        ),
+        "duration": _rule_finding(
+            "duration",
+            "candidate_garage_window_open_away_night",
+            {
+                "template_id": "entity_state_duration",
+                "entity_id": _GARAGE,
+                "state": "on",
+            },
+            [_GARAGE],
+        ),
+        "openings": _rule_finding(
+            "openings",
+            "multiple_openings_simultaneous",
+            {"template_id": "multiple_entries_open"},
+            ["binary_sensor.garage_door", _GARAGE],
+            severity="high",
+        ),
+        "motion": _rule_finding(
+            "motion",
+            "motion_at_night_disarmed",
+            {"template_id": "motion_detected_at_night_while_alarm_disarmed"},
+            [_PANEL, "binary_sensor.backyard_motion"],
+            severity="low",
+        ),
+    }
+    return shown, partners
+
+
+def test_related_line_folds_one_windows_conditions_into_one_push() -> None:
+    """
+    Field test: one open window tripped six rules overnight, 14 pushes.
+
+    Its curated conditions are named with the window; rules without a
+    curated phrase, and rules about other devices, keep their own push.
+    """
+    shown, partners = _garage_group()
+    snapshot = _named_snapshot((_GARAGE, "Garage and Play Room Windows"))
+
+    line, named = _also(shown, list(partners.values()), snapshot)
+
+    assert line == (
+        "Also: Garage and Play Room Windows "
+        "(alarm disarmed, open while home, open too long)"
+    )
+    assert {f.anomaly_id for f in named} == {"disarmed", "home", "duration"}
+
+
+def test_related_line_never_uses_an_approved_rules_own_label() -> None:
+    """A rule id the model wrote can name another condition entirely."""
+    shown, _partners = _garage_group()
+    away_named = _rule_finding(
+        "away",
+        "candidate_garage_window_open_away_night",
+        {"template_id": "baseline_deviation", "entity_id": _GARAGE},
+        [_GARAGE],
+    )
+
+    line, named = _also(shown, [away_named])
+
+    assert line is None
+    assert named == []
+
+
+def test_related_line_never_holds_a_repeat_of_the_shown_condition_alone() -> None:
+    """With nothing on the line, nothing is held."""
+    shown, _partners = _garage_group()
+    repeat = _rule_finding(
+        "repeat",
+        "open_entry_at_night_when_home_window",
+        {"template_id": "open_entry_at_night", "entry_entity_id": _GARAGE},
+        [_GARAGE],
+    )
+
+    assert _also(shown, [repeat]) == (None, [])
+
+
+def test_related_line_covers_a_repeat_alongside_a_named_condition() -> None:
+    shown, partners = _garage_group()
+    repeat = _rule_finding(
+        "repeat",
+        "candidate_garage_open_night",
+        {"template_id": "open_entry_at_night", "entry_entity_id": _GARAGE},
+        [_GARAGE],
+    )
+
+    line, named = _also(shown, [repeat, partners["disarmed"]])
+
+    assert line == "Also: Garage And Play Room Windows (alarm disarmed)"
+    assert {f.anomaly_id for f in named} == {"repeat", "disarmed"}
+
+
+def test_related_line_same_device_condition_respects_routing() -> None:
+    shown, partners = _garage_group()
+    snapshot = _minimal_snapshot(area="Garage")
+    snapshot["entities"] = [
+        {**snapshot["entities"][0], "entity_id": _GARAGE, "area": "Garage"},
+        {**snapshot["entities"][0], "entity_id": _PANEL, "area": "Hall"},
+    ]
+    options = {
+        CONF_NOTIFY_SERVICE: "notify.mobile_app_phone",
+        CONF_SENTINEL_AREA_NOTIFY_MAP: {"Hall": "notify.mobile_app_hall"},
+    }
+
+    line, named = _also(shown, [partners["disarmed"]], snapshot, options)
+
+    assert line is None
+    assert named == []
+
+
+def test_related_line_same_device_conditions_czech() -> None:
+    hass = DummyHass()
+    hass.config.language = "cs"
+    shown, partners = _garage_group()
+
+    line, _named = _also(shown, [partners["disarmed"]], hass=hass)
+
+    assert line == "Také: Garage And Play Room Windows (alarm vypnutý)"
