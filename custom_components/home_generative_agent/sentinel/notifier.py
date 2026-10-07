@@ -1748,15 +1748,17 @@ def _implied_context(
     """
     Return the devices a condition phrase may leave unnamed.
 
-    Those the push is already about (*shown*'s), and any device that is the
-    only one of its domain in the home, such as a single alarm panel.
+    Those the push is already about (*shown*'s), and the home's alarm panel
+    when it has exactly one. An approved alarm rule may watch another entity
+    (an alarm-mode select); "alarm disarmed" names only a lone panel.
     """
     by_domain: dict[str, list[str]] = {}
     for entity in snapshot.get("entities", []):
         entity_id = str(entity.get("entity_id") or "")
         if entity_id:
             by_domain.setdefault(entity_id.split(".", 1)[0], []).append(entity_id)
-    sole = {ids[0] for ids in by_domain.values() if len(ids) == 1}
+    panels = by_domain.get("alarm_control_panel", [])
+    sole = set(panels) if len(panels) == 1 else set()
     return frozenset({*shown.triggering_entities, *sole})
 
 
@@ -1882,7 +1884,12 @@ def _name_aliases(entity_id: str, names: Mapping[str, str]) -> set[str]:
     still an alias: rendered text could match it.
     """
     aliases: set[str] = set()
-    raw = " ".join(str(names.get(entity_id) or "").split())
+    raw = " ".join(
+        "".join(
+            ch if not unicodedata.category(ch).startswith("C") or ch.isspace() else ""
+            for ch in str(names.get(entity_id) or "")
+        ).split()
+    )
     for name in (
         _entity_display_name(entity_id, names),
         raw,

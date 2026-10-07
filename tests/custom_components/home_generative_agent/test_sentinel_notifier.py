@@ -3812,6 +3812,42 @@ def test_related_line_names_the_shown_findings_own_panel() -> None:
     assert named == [duration]
 
 
+def test_related_line_does_not_treat_a_lone_select_as_the_alarm() -> None:
+    """An approved alarm rule may watch an alarm-mode select, not a panel."""
+    shown, _partners = _garage_group()
+    select_alarm = _rule_finding(
+        "select-alarm",
+        "alarm_disarmed_open_entry_select_alarm_mode",
+        {"template_id": "alarm_disarmed_open_entry", "entry_entity_id": _GARAGE},
+        ["select.alarm_mode", _GARAGE],
+        severity="high",
+    )
+    snapshot = _garage_snapshot()
+    snapshot["entities"].append(
+        {
+            **snapshot["entities"][0],
+            "entity_id": "select.alarm_mode",
+            "domain": "select",
+        }
+    )
+
+    assert _also(shown, [select_alarm], snapshot) == (None, [])
+
+
+def test_related_line_refuses_text_matching_an_invisible_char_lookalike() -> None:
+    shown, partners = _garage_group()
+    snapshot = _garage_snapshot()
+    snapshot["entities"].append(
+        {
+            **snapshot["entities"][0],
+            "entity_id": "binary_sensor.decoy",
+            "friendly_name": "Garage and Play\u200b Room Windows (alarm disarmed)",
+        }
+    )
+
+    assert _also(shown, [partners["disarmed"]], snapshot) == (None, [])
+
+
 def test_related_line_refuses_text_matching_another_devices_name() -> None:
     """The rendered "<device> (<condition>)" must not be some device's name."""
     shown, partners = _garage_group()
