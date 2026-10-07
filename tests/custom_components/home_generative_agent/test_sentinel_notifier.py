@@ -2988,6 +2988,26 @@ def test_open_entry_subtitle_never_calls_a_non_entry_device_open(
     assert subtitle == _display_type(finding)
 
 
+@pytest.mark.parametrize("attributes", [{"device_class": ["window"]}, ["window"]])
+def test_open_entry_subtitle_survives_malformed_attributes(attributes: Any) -> None:
+    """A malformed device class from an integration must not lose the alert."""
+    finding = _approved_entry("open_any_window_at_night_while_away", "sensor.w")
+    entity = {**_entity("sensor.w", "Window"), "attributes": attributes}
+
+    subtitle = _build_subtitle(finding, None, _entry_snapshot(entity))  # type: ignore[arg-type]
+
+    assert subtitle == _display_type(finding)
+
+
+def test_open_entry_subtitle_caps_the_id_derived_name() -> None:
+    entity_id = "binary_sensor." + "very_long_window_" * 15
+    snapshot = _entry_snapshot(_entity(entity_id, None))
+
+    subtitle = _build_subtitle(_away_entry(entity_id), None, snapshot)  # type: ignore[arg-type]
+
+    assert len(subtitle) <= 70
+
+
 def test_open_entry_subtitle_covers_a_cover() -> None:
     finding = _approved_entry("open_entry_while_away", "cover.garage_door")
     snapshot = _entry_snapshot(_entity("cover.garage_door", "Garage Door", None))

@@ -1110,8 +1110,13 @@ def _is_entry_device(entity: Mapping[str, Any]) -> bool:
     """Return True when *entity* is a door, window, or cover."""
     if entity.get("domain") == "cover":
         return True
-    attributes = entity.get("attributes") or {}
-    return attributes.get("device_class") in _ENTRY_DEVICE_CLASSES
+    # Attributes come from integrations; a malformed device class (a list,
+    # say) must not raise and lose the alert.
+    attributes = entity.get("attributes")
+    if not isinstance(attributes, dict):
+        return False
+    device_class = attributes.get("device_class")
+    return isinstance(device_class, str) and device_class in _ENTRY_DEVICE_CLASSES
 
 
 def _snapshot_entity(
@@ -1139,7 +1144,7 @@ def _snapshot_name(entity_id: str, snapshot: FullStateSnapshot | None) -> str:
         name = sanitize_label(entity.get("friendly_name"))
         if any(ch.isalnum() for ch in name):
             return name
-    return _friendly_entity(entity_id)
+    return sanitize_label(_friendly_entity(entity_id))
 
 
 # entity_state_duration states with a curated word; "on" is how an open
@@ -1170,7 +1175,7 @@ def _state_duration_subtitle(
     entity = (
         raw_name
         if any(ch.isalnum() for ch in raw_name)
-        else _friendly_entity(entity_id)
+        else sanitize_label(_friendly_entity(entity_id))
     )
     duration = (
         notif_msg(hass, "duration_hours_short", hours=int(hours))
