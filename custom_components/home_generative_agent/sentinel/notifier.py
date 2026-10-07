@@ -295,7 +295,7 @@ class SentinelNotifier:
         }.get(severity, "severity_title_medium")
         title = notif_msg(self._hass, title_key)
         interrupt_level = _SEVERITY_INTERRUPT_LEVEL.get(severity, "active")
-        subtitle = _build_subtitle(finding, self._hass)
+        subtitle = _build_subtitle(finding, self._hass, snapshot)
         mobile_msg = _mobile_message(
             clean_explanation,
             finding,
@@ -996,7 +996,11 @@ def _appliance_power_duration_mobile_message(finding: AnomalyFinding) -> str:
     return msg[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
 
 
-def _build_subtitle(finding: AnomalyFinding, hass: HomeAssistant | None = None) -> str:
+def _build_subtitle(
+    finding: AnomalyFinding,
+    hass: HomeAssistant | None = None,
+    snapshot: FullStateSnapshot | None = None,
+) -> str:
     """Return the notification subtitle line for *finding*."""
     if finding.evidence.get("is_completion"):
         raw_name = str(finding.evidence.get("friendly_name") or "").strip()
@@ -1037,11 +1041,80 @@ def _build_subtitle(finding: AnomalyFinding, hass: HomeAssistant | None = None) 
             else "subtitle_reading_deviation"
         )
         return notif_msg(hass, subtitle_key, appliance=appliance, direction=direction)
-    if finding.evidence.get("template_id") == "entity_state_duration":
-        duration_subtitle = _state_duration_subtitle(finding, hass)
-        if duration_subtitle:
-            return duration_subtitle
-    return _display_type(finding, hass)
+    device_subtitle = (
+        _state_duration_subtitle(finding, hass)
+        if finding.evidence.get("template_id") == "entity_state_duration"
+        else _open_entry_subtitle(finding, hass, snapshot)
+    )
+    return device_subtitle or _display_type(finding, hass)
+
+
+# Open-entry findings whose subtitle names the door or window (issue #729):
+# the built-in rule by type, approved rules by template. The body is often
+# model prose, which can leave the device out, so two pushes about two
+# windows in one room read as duplicates.
+_OPEN_ENTRY_TYPES = frozenset({"open_entry_while_away"})
+_OPEN_ENTRY_TEMPLATES = frozenset(
+    {
+        "open_entry_while_away",
+        "open_entry_when_home",
+        "open_entry_at_night",
+        "open_entry_at_night_when_home",
+        "open_entry_at_night_while_away",
+        "open_any_window_at_night_while_away",
+    }
+)
+
+
+def _open_entry_subtitle(
+    finding: AnomalyFinding,
+    hass: HomeAssistant | None = None,
+    snapshot: FullStateSnapshot | None = None,
+) -> str | None:
+    """
+    Return "<door or window> open" for an open-entry finding, else None.
+
+    The name is the entity's friendly name from *snapshot*, falling back to
+    one derived from its id; it is not read from the evidence, which is
+    hashed into the anomaly id.
+    """
+    evidence = finding.evidence
+    if finding.type in _OPEN_ENTRY_TYPES:
+        entity_id = str(evidence.get("entity_id") or "")
+    elif str(evidence.get("template_id") or "") in _OPEN_ENTRY_TEMPLATES:
+        entity_id = str(evidence.get("entry_entity_id") or "")
+    else:
+        return None
+    if not entity_id:
+        return None
+    return notif_msg(
+        hass, "subtitle_entry_open", entity=_snapshot_name(entity_id, snapshot)
+    )
+
+
+def _snapshot_name(entity_id: str, snapshot: FullStateSnapshot | None) -> str:
+    """
+    Return *entity_id*'s friendly name from *snapshot*, else one from its id.
+
+    Friendly names are untrusted entity attributes: control and format
+    characters (bidi overrides, zero-width spaces) are dropped and whitespace
+    collapsed before the name reaches a notification.
+    """
+    for entity in (snapshot or {}).get("entities", []):
+        if entity.get("entity_id") == entity_id:
+            raw = str(entity.get("friendly_name") or "")
+            name = " ".join(
+                "".join(
+                    ch
+                    if not unicodedata.category(ch).startswith("C") or ch.isspace()
+                    else ""
+                    for ch in raw
+                ).split()
+            )
+            if any(ch.isalnum() for ch in name):
+                return name
+            break
+    return _friendly_entity(entity_id)
 
 
 # entity_state_duration states with a curated word; "on" is how an open

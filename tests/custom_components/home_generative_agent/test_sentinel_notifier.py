@@ -2850,3 +2850,141 @@ async def test_action_event_passes_the_mobile_user_to_the_handler() -> None:
     notifier._handle_action_event(event)  # type: ignore[arg-type]
     await hass.drain_tasks()
     assert action_handler.user_ids == ["u-admin"]
+
+
+# ---------------------------------------------------------------------------
+# Open-entry subtitle names the door or window (issue #729)
+# ---------------------------------------------------------------------------
+
+
+def _entry_snapshot(entity_id: str, friendly_name: str) -> dict[str, Any]:
+    snapshot = _minimal_snapshot()
+    snapshot["entities"] = [
+        {
+            **snapshot["entities"][0],
+            "entity_id": entity_id,
+            "friendly_name": friendly_name,
+        }
+    ]
+    return snapshot
+
+
+def _away_entry(entity_id: str) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id="entry1",
+        type="open_entry_while_away",
+        severity="high",
+        confidence=0.65,
+        triggering_entities=[entity_id],
+        evidence={"entity_id": entity_id, "state": "on"},
+        suggested_actions=["close_entry"],
+        is_sensitive=True,
+    )
+
+
+def test_open_entry_subtitle_names_the_window_from_the_snapshot() -> None:
+    """
+    Two windows in one room no longer read as one.
+
+    Field case: "Open entry while away" over model prose that said only "the
+    window in the breakfast nook".
+    """
+    entity_id = "binary_sensor.breakfast_nook_center_right_window"
+    snapshot = _entry_snapshot(entity_id, "Breakfast Nook Center Right Window")
+
+    subtitle = _build_subtitle(_away_entry(entity_id), None, snapshot)  # type: ignore[arg-type]
+
+    assert subtitle == "Breakfast Nook Center Right Window open"
+
+
+def test_open_entry_subtitle_falls_back_to_the_entity_id() -> None:
+    finding = _away_entry("binary_sensor.kitchen_door")
+
+    assert _build_subtitle(finding) == "Kitchen Door open"
+
+
+@pytest.mark.parametrize("raw", ["\u200b", "  "])
+def test_open_entry_subtitle_ignores_a_blank_or_invisible_name(raw: str) -> None:
+    entity_id = "binary_sensor.kitchen_door"
+
+    subtitle = _build_subtitle(
+        _away_entry(entity_id),
+        None,
+        _entry_snapshot(entity_id, raw),  # type: ignore[arg-type]
+    )
+
+    assert subtitle == "Kitchen Door open"
+
+
+def test_open_entry_subtitle_strips_control_characters() -> None:
+    entity_id = "binary_sensor.w"
+
+    subtitle = _build_subtitle(
+        _away_entry(entity_id),
+        None,
+        _entry_snapshot(entity_id, "Landing\u202e\nWindow"),  # type: ignore[arg-type]
+    )
+
+    assert subtitle == "Landing Window open"
+
+
+@pytest.mark.parametrize(
+    "template_id",
+    [
+        "open_entry_while_away",
+        "open_entry_when_home",
+        "open_entry_at_night",
+        "open_entry_at_night_when_home",
+        "open_entry_at_night_while_away",
+        "open_any_window_at_night_while_away",
+    ],
+)
+def test_open_entry_subtitle_covers_approved_entry_rules(template_id: str) -> None:
+    finding = AnomalyFinding(
+        anomaly_id="dyn1",
+        type="candidate_garage_window_open_away_night",
+        severity="medium",
+        confidence=0.6,
+        triggering_entities=["binary_sensor.garage_window"],
+        evidence={
+            "template_id": template_id,
+            "entry_entity_id": "binary_sensor.garage_window",
+        },
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+
+    assert _build_subtitle(finding) == "Garage Window open"
+
+
+def test_open_entry_subtitle_czech() -> None:
+    hass = DummyHass()
+    hass.config.language = "cs"
+
+    subtitle = _build_subtitle(_away_entry("binary_sensor.kitchen_door"), hass)  # type: ignore[arg-type]
+
+    assert subtitle == "Kitchen Door: otevřeno"
+
+
+def test_other_findings_keep_their_type_label_subtitle() -> None:
+    finding = _finding_with_severity("high", ftype="unlocked_lock_at_night")
+
+    assert _build_subtitle(finding) == _display_type(finding)
+
+
+@pytest.mark.asyncio
+async def test_async_notify_sends_the_open_entry_subtitle() -> None:
+    notifier, hass, _s, _a = _make_notifier(
+        {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    )
+    entity_id = "binary_sensor.breakfast_nook_center_right_window"
+    snapshot = _entry_snapshot(entity_id, "Breakfast Nook Center Right Window")
+
+    await notifier.async_notify(
+        _away_entry(entity_id),
+        snapshot,  # type: ignore[arg-type]
+        "The window in the breakfast nook is open.",
+    )
+
+    subtitle = hass.services.calls[0]["data"]["data"]["subtitle"]
+    assert subtitle == "Breakfast Nook Center Right Window open"
