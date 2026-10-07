@@ -1043,7 +1043,7 @@ def _build_subtitle(
         )
         return notif_msg(hass, subtitle_key, appliance=appliance, direction=direction)
     device_subtitle = (
-        _state_duration_subtitle(finding, hass)
+        _state_duration_subtitle(finding, hass, snapshot)
         if finding.evidence.get("template_id") == "entity_state_duration"
         else _open_entry_subtitle(finding, hass, snapshot)
     )
@@ -1106,6 +1106,14 @@ def _open_entry_subtitle(
 _ENTRY_DEVICE_CLASSES = frozenset({"door", "window", "opening", "garage_door"})
 
 
+def _is_lock_device(entity: Mapping[str, Any]) -> bool:
+    """Return True when *entity* is a lock (or a lock-class binary sensor)."""
+    if entity.get("domain") == "lock":
+        return True
+    attributes = entity.get("attributes")
+    return isinstance(attributes, dict) and attributes.get("device_class") == "lock"
+
+
 def _is_entry_device(entity: Mapping[str, Any]) -> bool:
     """Return True when *entity* is a door, window, or cover."""
     if entity.get("domain") == "cover":
@@ -1147,23 +1155,19 @@ def _snapshot_name(entity_id: str, snapshot: FullStateSnapshot | None) -> str:
     return sanitize_label(_friendly_entity(entity_id))
 
 
-# entity_state_duration states with a curated word; "on" is how an open
-# window or door binary sensor reports.
-_STATE_DURATION_KEYS = {
-    "on": "subtitle_state_open_for",
-    "open": "subtitle_state_open_for",
-    "unlocked": "subtitle_state_unlocked_for",
-}
-
-
 def _state_duration_subtitle(
-    finding: AnomalyFinding, hass: HomeAssistant | None = None
+    finding: AnomalyFinding,
+    hass: HomeAssistant | None = None,
+    snapshot: FullStateSnapshot | None = None,
 ) -> str | None:
     """
     Return "<device> open for 3 h" for an entity_state_duration finding.
 
-    Returns None when the evidence lacks the device or a usable duration, so
-    the caller falls back to the template label.
+    "open" only for a door, window or cover and "unlocked" only for a lock,
+    per *snapshot*: approved rules pick their entity by name, so "on" may be
+    a motion sensor. Any other device reads "unchanged for". Returns None
+    when the evidence lacks the device or a usable duration, so the caller
+    falls back to the template label.
     """
     entity_id = str(finding.evidence.get("entity_id") or "")
     hours = finding.evidence.get("duration_hours")
@@ -1183,7 +1187,14 @@ def _state_duration_subtitle(
         else notif_msg(hass, "duration_minutes_short", minutes=max(int(hours * 60), 1))
     )
     state = str(finding.evidence.get("state") or "")
-    key = _STATE_DURATION_KEYS.get(state, "subtitle_state_unchanged_for")
+    device = _snapshot_entity(entity_id, snapshot)
+    key = "subtitle_state_unchanged_for"
+    if device is not None:
+        if _is_lock_device(device) and state in {"unlocked", "on"}:
+            # A lock-class binary sensor reports "on" for unlocked.
+            key = "subtitle_state_unlocked_for"
+        elif _is_entry_device(device) and state in {"on", "open"}:
+            key = "subtitle_state_open_for"
     return notif_msg(hass, key, entity=entity, duration=duration)
 
 

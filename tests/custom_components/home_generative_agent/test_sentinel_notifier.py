@@ -2004,10 +2004,64 @@ def test_state_duration_subtitle_names_device_state_and_duration(
 ) -> None:
     """An entity_state_duration push says what is open, and for how long."""
     finding = _duration_finding(evidence)
-    assert _build_subtitle(finding) == english
+    snapshot = _entry_snapshot(
+        _entity("binary_sensor.breakfast_nook_side_right_window", None, "window"),
+        _entity("lock.garage_door_lock", None, None),
+        _entity("light.porch", None, None),
+    )
+    assert _build_subtitle(finding, None, snapshot) == english  # type: ignore[arg-type]
     hass = DummyHass()
     hass.config.language = "cs"
-    assert _build_subtitle(finding, hass) == czech  # type: ignore[arg-type]
+    assert _build_subtitle(finding, hass, snapshot) == czech  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("entity_id", "device_class", "state", "expected"),
+    [
+        (
+            "binary_sensor.front_door_motion",
+            "motion",
+            "on",
+            "Front Door Motion unchanged for 3 h",
+        ),
+        (
+            "binary_sensor.front_door_lock",
+            "lock",
+            "on",
+            "Front Door Lock unlocked for 3 h",
+        ),
+        ("lock.shed", None, "open", "Shed unchanged for 3 h"),
+        (
+            "binary_sensor.window_heater",
+            "running",
+            "on",
+            "Window Heater unchanged for 3 h",
+        ),
+    ],
+)
+def test_state_duration_subtitle_words_the_state_by_device(
+    entity_id: str, device_class: str | None, state: str, expected: str
+) -> None:
+    """
+    Approved rules pick their entity by name: "on" is not always "open".
+
+    A motion sensor "on" for 3 h is not "open"; a lock-class sensor "on" is
+    unlocked; a lock in state "open" is not an open door.
+    """
+    finding = _duration_finding(
+        {"entity_id": entity_id, "state": state, "duration_hours": 3.0}
+    )
+    snapshot = _entry_snapshot(_entity(entity_id, None, device_class))
+
+    assert _build_subtitle(finding, None, snapshot) == expected  # type: ignore[arg-type]
+
+
+def test_state_duration_subtitle_without_the_device_does_not_say_open() -> None:
+    finding = _duration_finding(
+        {"entity_id": "binary_sensor.w", "state": "on", "duration_hours": 3.0}
+    )
+
+    assert _build_subtitle(finding) == "W unchanged for 3 h"
 
 
 def test_state_duration_subtitle_without_duration_uses_template_label() -> None:
