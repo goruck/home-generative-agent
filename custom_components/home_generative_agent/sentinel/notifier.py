@@ -73,6 +73,7 @@ from custom_components.home_generative_agent.sentinel.suppression import (
     record_cooldown_feedback,
     register_snooze,
 )
+from custom_components.home_generative_agent.snapshot.network import sanitize_label
 
 if TYPE_CHECKING:
     import asyncio
@@ -1013,7 +1014,7 @@ def _build_subtitle(
     if finding.evidence.get("template_id") == "alarm_disarmed_open_entry":
         entry_id = str(finding.evidence.get("entry_entity_id") or "")
         entry_name = (
-            _friendly_entity(entry_id)
+            _snapshot_name(entry_id, snapshot)
             if entry_id
             else notif_msg(hass, "fallback_entry")
         )
@@ -1074,46 +1075,70 @@ def _open_entry_subtitle(
     """
     Return "<door or window> open" for an open-entry finding, else None.
 
-    The name is the entity's friendly name from *snapshot*, falling back to
-    one derived from its id; it is not read from the evidence, which is
-    hashed into the anomaly id.
+    An approved rule is matched by its template, which also says where the
+    device is; only a finding with no template is matched by type, since an
+    approved rule's type is its rule id and can be any slug. The device must
+    be a door, window or cover in *snapshot*: approved entry rules pick their
+    entities by name ("window" in the id), so the subtitle never calls a
+    lock or a window heater "open". The name is the snapshot's friendly name,
+    not read from the evidence, which is hashed into the anomaly id.
     """
     evidence = finding.evidence
-    if finding.type in _OPEN_ENTRY_TYPES:
-        entity_id = str(evidence.get("entity_id") or "")
-    elif str(evidence.get("template_id") or "") in _OPEN_ENTRY_TEMPLATES:
+    template_id = str(evidence.get("template_id") or "")
+    if template_id:
+        if template_id not in _OPEN_ENTRY_TEMPLATES:
+            return None
         entity_id = str(evidence.get("entry_entity_id") or "")
+    elif finding.type in _OPEN_ENTRY_TYPES:
+        entity_id = str(evidence.get("entity_id") or "")
     else:
         return None
-    if not entity_id:
+    entity = _snapshot_entity(entity_id, snapshot)
+    if entity is None or not _is_entry_device(entity):
         return None
     return notif_msg(
         hass, "subtitle_entry_open", entity=_snapshot_name(entity_id, snapshot)
     )
 
 
+# Device classes whose "on" state means open, and covers (garage doors,
+# gates), whose "open" state does.
+_ENTRY_DEVICE_CLASSES = frozenset({"door", "window", "opening", "garage_door"})
+
+
+def _is_entry_device(entity: Mapping[str, Any]) -> bool:
+    """Return True when *entity* is a door, window, or cover."""
+    if entity.get("domain") == "cover":
+        return True
+    attributes = entity.get("attributes") or {}
+    return attributes.get("device_class") in _ENTRY_DEVICE_CLASSES
+
+
+def _snapshot_entity(
+    entity_id: str, snapshot: FullStateSnapshot | None
+) -> Mapping[str, Any] | None:
+    """Return *entity_id*'s snapshot entry, or None."""
+    if not entity_id:
+        return None
+    for entity in (snapshot or {}).get("entities", []):
+        if entity.get("entity_id") == entity_id:
+            return entity
+    return None
+
+
 def _snapshot_name(entity_id: str, snapshot: FullStateSnapshot | None) -> str:
     """
     Return *entity_id*'s friendly name from *snapshot*, else one from its id.
 
-    Friendly names are untrusted entity attributes: control and format
-    characters (bidi overrides, zero-width spaces) are dropped and whitespace
-    collapsed before the name reaches a notification.
+    Friendly names are untrusted entity attributes: ``sanitize_label`` drops
+    control and format characters, collapses whitespace and caps the length,
+    so a name can neither restyle a push nor push it past the payload limit.
     """
-    for entity in (snapshot or {}).get("entities", []):
-        if entity.get("entity_id") == entity_id:
-            raw = str(entity.get("friendly_name") or "")
-            name = " ".join(
-                "".join(
-                    ch
-                    if not unicodedata.category(ch).startswith("C") or ch.isspace()
-                    else ""
-                    for ch in raw
-                ).split()
-            )
-            if any(ch.isalnum() for ch in name):
-                return name
-            break
+    entity = _snapshot_entity(entity_id, snapshot)
+    if entity is not None:
+        name = sanitize_label(entity.get("friendly_name"))
+        if any(ch.isalnum() for ch in name):
+            return name
     return _friendly_entity(entity_id)
 
 
@@ -1141,8 +1166,12 @@ def _state_duration_subtitle(
         return None
     if not entity_id or hours <= 0:
         return None
-    raw_name = str(finding.evidence.get("friendly_name") or "").strip()
-    entity = raw_name or _friendly_entity(entity_id)
+    raw_name = sanitize_label(finding.evidence.get("friendly_name"))
+    entity = (
+        raw_name
+        if any(ch.isalnum() for ch in raw_name)
+        else _friendly_entity(entity_id)
+    )
     duration = (
         notif_msg(hass, "duration_hours_short", hours=int(hours))
         if hours >= 1
