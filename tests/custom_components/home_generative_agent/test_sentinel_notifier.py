@@ -3637,6 +3637,24 @@ def _garage_group() -> tuple[AnomalyFinding, dict[str, AnomalyFinding]]:
     return shown, partners
 
 
+def _garage_snapshot(
+    friendly_name: str = "Garage and Play Room Windows",
+    device_class: str | None = "window",
+    domain: str = "binary_sensor",
+) -> dict[str, Any]:
+    snapshot = _minimal_snapshot()
+    snapshot["entities"] = [
+        {
+            **snapshot["entities"][0],
+            "entity_id": _GARAGE,
+            "domain": domain,
+            "friendly_name": friendly_name,
+            "attributes": {"device_class": device_class} if device_class else {},
+        }
+    ]
+    return snapshot
+
+
 def test_related_line_folds_one_windows_conditions_into_one_push() -> None:
     """
     Field test: one open window tripped six rules overnight, 14 pushes.
@@ -3645,9 +3663,8 @@ def test_related_line_folds_one_windows_conditions_into_one_push() -> None:
     curated phrase, and rules about other devices, keep their own push.
     """
     shown, partners = _garage_group()
-    snapshot = _named_snapshot((_GARAGE, "Garage and Play Room Windows"))
 
-    line, named = _also(shown, list(partners.values()), snapshot)
+    line, named = _also(shown, list(partners.values()), _garage_snapshot())
 
     assert line == (
         "Also: Garage and Play Room Windows "
@@ -3666,47 +3683,123 @@ def test_related_line_never_uses_an_approved_rules_own_label() -> None:
         [_GARAGE],
     )
 
-    line, named = _also(shown, [away_named])
+    assert _also(shown, [away_named], _garage_snapshot()) == (None, [])
+
+
+def test_related_line_names_a_repeat_of_the_shown_condition_with_its_phrase() -> None:
+    """
+    A partner is held only when its own phrase is on the line.
+
+    Eliding a phrase the shown finding "already states" relied on copy that,
+    for an unlabeled approved rule, never says it.
+    """
+    shown, partners = _garage_group()
+    repeat = _rule_finding(
+        "repeat",
+        "candidate_1",
+        {"template_id": "open_entry_at_night", "entry_entity_id": _GARAGE},
+        [_GARAGE],
+    )
+
+    line, named = _also(shown, [repeat, partners["disarmed"]], _garage_snapshot())
+
+    assert line == "Also: Garage and Play Room Windows (alarm disarmed, open at night)"
+    assert {f.anomaly_id for f in named} == {"repeat", "disarmed"}
+
+
+@pytest.mark.parametrize(
+    ("device_class", "domain"),
+    [("motion", "binary_sensor"), ("lock", "binary_sensor"), (None, "light")],
+)
+def test_related_line_never_calls_a_non_entry_device_open(
+    device_class: str | None, domain: str
+) -> None:
+    """Approved rules pick devices by name; "on" is not always "open"."""
+    shown, partners = _garage_group()
+
+    line, named = _also(
+        shown,
+        [partners["duration"], partners["home"]],
+        _garage_snapshot(device_class=device_class, domain=domain),
+    )
 
     assert line is None
     assert named == []
 
 
-def test_related_line_never_holds_a_repeat_of_the_shown_condition_alone() -> None:
-    """With nothing on the line, nothing is held."""
-    shown, _partners = _garage_group()
-    repeat = _rule_finding(
-        "repeat",
-        "open_entry_at_night_when_home_window",
-        {"template_id": "open_entry_at_night", "entry_entity_id": _GARAGE},
-        [_GARAGE],
+def test_related_line_says_unlocked_only_for_a_lock() -> None:
+    lock_id = "lock.garage_door_lock"
+    shown = _rule_finding(
+        "shown",
+        "unlocked_lock_at_night",
+        {"entity_id": lock_id},
+        [lock_id],
+        severity="high",
     )
+    unlocked = _rule_finding(
+        "unlocked",
+        "candidate_lock_open",
+        {
+            "template_id": "entity_state_duration",
+            "entity_id": lock_id,
+            "state": "unlocked",
+        },
+        [lock_id],
+    )
+    snapshot = _minimal_snapshot()
+    snapshot["entities"] = [
+        {
+            **snapshot["entities"][0],
+            "entity_id": lock_id,
+            "domain": "lock",
+            "friendly_name": "Garage Door Lock",
+            "attributes": {},
+        }
+    ]
 
-    assert _also(shown, [repeat]) == (None, [])
+    line, named = _also(shown, [unlocked], snapshot)
+
+    assert line == "Also: Garage Door Lock (unlocked too long)"
+    assert named == [unlocked]
 
 
-def test_related_line_covers_a_repeat_alongside_a_named_condition() -> None:
+def test_related_line_one_alarm_phrase_covers_one_panel() -> None:
+    """A second panel's alarm finding is not covered by the first's phrase."""
     shown, partners = _garage_group()
-    repeat = _rule_finding(
-        "repeat",
-        "candidate_garage_open_night",
-        {"template_id": "open_entry_at_night", "entry_entity_id": _GARAGE},
-        [_GARAGE],
+    other_panel = _rule_finding(
+        "other-panel",
+        "alarm_disarmed_open_entry_alarm_control_panel_studio",
+        {"template_id": "alarm_disarmed_open_entry", "entry_entity_id": _GARAGE},
+        ["alarm_control_panel.studio", _GARAGE],
+        severity="high",
     )
 
-    line, named = _also(shown, [repeat, partners["disarmed"]])
+    line, named = _also(shown, [partners["disarmed"], other_panel], _garage_snapshot())
 
-    assert line == "Also: Garage And Play Room Windows (alarm disarmed)"
-    assert {f.anomaly_id for f in named} == {"repeat", "disarmed"}
+    assert line == "Also: Garage and Play Room Windows (alarm disarmed)"
+    assert named == [partners["disarmed"]]
+
+
+def test_related_line_refuses_a_name_that_looks_like_conditions() -> None:
+    shown, partners = _garage_group()
+
+    line, named = _also(
+        shown,
+        [partners["disarmed"]],
+        _garage_snapshot(friendly_name="Garage Window (open too long)"),
+    )
+
+    assert line is None
+    assert named == []
 
 
 def test_related_line_same_device_condition_respects_routing() -> None:
     shown, partners = _garage_group()
-    snapshot = _minimal_snapshot(area="Garage")
-    snapshot["entities"] = [
-        {**snapshot["entities"][0], "entity_id": _GARAGE, "area": "Garage"},
-        {**snapshot["entities"][0], "entity_id": _PANEL, "area": "Hall"},
-    ]
+    snapshot = _garage_snapshot()
+    snapshot["entities"][0]["area"] = "Garage"
+    snapshot["entities"].append(
+        {**snapshot["entities"][0], "entity_id": _PANEL, "area": "Hall"}
+    )
     options = {
         CONF_NOTIFY_SERVICE: "notify.mobile_app_phone",
         CONF_SENTINEL_AREA_NOTIFY_MAP: {"Hall": "notify.mobile_app_hall"},
@@ -3723,6 +3816,6 @@ def test_related_line_same_device_conditions_czech() -> None:
     hass.config.language = "cs"
     shown, partners = _garage_group()
 
-    line, _named = _also(shown, [partners["disarmed"]], hass=hass)
+    line, _named = _also(shown, [partners["disarmed"]], _garage_snapshot(), hass=hass)
 
-    assert line == "Také: Garage And Play Room Windows (alarm vypnutý)"
+    assert line == "Také: Garage and Play Room Windows (alarm vypnutý)"

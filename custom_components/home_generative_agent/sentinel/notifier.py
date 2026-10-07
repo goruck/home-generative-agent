@@ -1562,7 +1562,7 @@ def _entity_display_name(entity_id: str, names: Mapping[str, str]) -> str | None
             for ch in raw
         ).split()
     )
-    if "," in name or not any(ch.isalnum() for ch in name):
+    if any(ch in name for ch in ",()") or not any(ch.isalnum() for ch in name):
         return None
     return name
 
@@ -1598,10 +1598,10 @@ def related_findings_line(
       device, see ``_subject_entity``) and its condition has a curated
       phrase (``_condition_label``): the line names that device with each
       condition, "Garage Window (open while home, alarm disarmed)", so one
-      window tripping several rules is one push (field test of #727). A
-      partner whose condition is the one *shown* describes needs no phrase.
-      A rule without a curated phrase keeps its own push: a label made
-      from an approved rule's id can say something else entirely;
+      window tripping several rules is one push (field test of #727). Its
+      own phrase must be on the line and true of that device. A rule
+      without a curated phrase keeps its own push: a label made from an
+      approved rule's id can say something else entirely;
     * it is routed to the same notify service as *shown*, so a finding for
       another area's phone is not held after reaching the wrong one.
 
@@ -1692,8 +1692,12 @@ def _same_device_conditions(  # noqa: PLR0913
     Return the "<device> (<conditions>)" head and the partners it covers.
 
     Partners about *shown*'s subject device whose condition has a curated
-    phrase. One whose phrase is *shown*'s own is covered by the push itself;
-    the head lists the others. None when *shown* has no nameable subject.
+    phrase that is true of that device (see ``_condition_label``). A partner
+    is covered only when its own phrase is on the line, even one the shown
+    finding states too: its copy may never say it. One phrase covers only
+    partners with the same other devices (the alarm panel), so a second
+    panel's finding keeps its own push. None when *shown* has no nameable
+    subject.
     """
     subject = _subject_entity(shown)
     if subject is None:
@@ -1701,9 +1705,11 @@ def _same_device_conditions(  # noqa: PLR0913
     subject_name = _entity_display_name(subject, names)
     if subject_name is None or owners.get(subject_name.casefold()) != {subject}:
         return None
+    entity = _snapshot_entity(subject, snapshot)
+    if entity is None:
+        return None
     target = _resolve_notify_service(shown, snapshot, options)
-    shown_condition = _condition_label(shown, hass)
-    phrases: list[str] = []
+    phrases: dict[str, frozenset[str]] = {}
     covered: list[AnomalyFinding] = []
     for finding in ordered:
         if (
@@ -1711,20 +1717,22 @@ def _same_device_conditions(  # noqa: PLR0913
             or _resolve_notify_service(finding, snapshot, options) != target
         ):
             continue
-        condition = _condition_label(finding, hass)
+        condition = _condition_label(finding, entity, hass)
         if condition is None:
             continue
-        if condition != shown_condition and condition not in phrases:
-            head = _subject_text(subject_name, [*phrases, condition])
-            if len(_also_text([head], 0, hass)) > budget:
-                continue
-            phrases.append(condition)
+        context = frozenset(finding.triggering_entities) - {subject}
+        if condition in phrases:
+            if phrases[condition] == context:
+                covered.append(finding)
+            continue
+        head = _subject_text(subject_name, [*phrases, condition])
+        if len(_also_text([head], 0, hass)) > budget:
+            continue
+        phrases[condition] = context
         covered.append(finding)
     if not phrases:
-        # Only partners repeating the shown condition: they are named only
-        # alongside visible text, which the caller decides.
         return None, []
-    return _subject_text(subject_name, phrases), covered
+    return _subject_text(subject_name, list(phrases)), covered
 
 
 def _subject_text(name: str, phrases: list[str]) -> str:
@@ -1771,14 +1779,72 @@ _DURATION_CONDITION_KEYS = {
 }
 
 
-def _condition_label(finding: AnomalyFinding, hass: HomeAssistant | None) -> str | None:
-    """Return *finding*'s curated condition phrase, or None."""
+def _condition_label(
+    finding: AnomalyFinding,
+    subject: Mapping[str, Any],
+    hass: HomeAssistant | None,
+) -> str | None:
+    """
+    Return *finding*'s curated condition phrase, or None.
+
+    Only when the phrase is true of *subject*, the device's snapshot entry:
+    approved rules pick their devices by name, so "on" may be a motion
+    sensor or a lock-class sensor rather than an open door. An "open" phrase
+    needs a door, window or cover; "unlocked" needs a lock.
+    """
     template_id = str(finding.evidence.get("template_id") or "")
     if template_id == "entity_state_duration":
         key = _DURATION_CONDITION_KEYS.get(str(finding.evidence.get("state") or ""))
     else:
         key = _CONDITION_KEYS.get(template_id or finding.type)
-    return notif_msg(hass, key) if key else None
+    if key is None:
+        return None
+    is_true = (
+        _is_lock_device(subject)
+        if key == "condition_unlocked_too_long"
+        else _is_entry_device(subject)
+    )
+    return notif_msg(hass, key) if is_true else None
+
+
+# Device classes whose "on" state means open, and covers (garage doors,
+# gates), whose "open" state does.
+_ENTRY_DEVICE_CLASSES = frozenset({"door", "window", "opening", "garage_door"})
+
+
+def _device_class(entity: Mapping[str, Any]) -> str | None:
+    """Return *entity*'s device class when it is a string."""
+    # Attributes come from integrations; a malformed device class (a list,
+    # say) must not raise and lose the alert.
+    attributes = entity.get("attributes")
+    if not isinstance(attributes, dict):
+        return None
+    device_class = attributes.get("device_class")
+    return device_class if isinstance(device_class, str) else None
+
+
+def _is_entry_device(entity: Mapping[str, Any]) -> bool:
+    """Return True when *entity* is a door, window, or cover."""
+    if entity.get("domain") == "cover":
+        return True
+    return _device_class(entity) in _ENTRY_DEVICE_CLASSES
+
+
+def _is_lock_device(entity: Mapping[str, Any]) -> bool:
+    """Return True when *entity* is a lock (or a lock-class binary sensor)."""
+    return entity.get("domain") == "lock" or _device_class(entity) == "lock"
+
+
+def _snapshot_entity(
+    entity_id: str, snapshot: FullStateSnapshot | None
+) -> Mapping[str, Any] | None:
+    """Return *entity_id*'s snapshot entry, or None."""
+    if not entity_id:
+        return None
+    for entity in (snapshot or {}).get("entities", []):
+        if entity.get("entity_id") == entity_id:
+            return entity
+    return None
 
 
 def _name_aliases(entity_id: str, names: Mapping[str, str]) -> set[str]:
