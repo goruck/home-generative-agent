@@ -1709,6 +1709,7 @@ def _same_device_conditions(  # noqa: PLR0913
     if entity is None:
         return None
     target = _resolve_notify_service(shown, snapshot, options)
+    implied = _implied_context(shown, snapshot)
     phrases: dict[str, frozenset[str]] = {}
     covered: list[AnomalyFinding] = []
     for finding in ordered:
@@ -1721,18 +1722,42 @@ def _same_device_conditions(  # noqa: PLR0913
         if condition is None:
             continue
         context = frozenset(finding.triggering_entities) - {subject}
+        # The phrase must not leave a device unidentified: an alarm panel is
+        # named by "alarm disarmed" only when the push is about it or it is
+        # the home's only panel.
+        if not context <= implied:
+            continue
         if condition in phrases:
             if phrases[condition] == context:
                 covered.append(finding)
             continue
         head = _subject_text(subject_name, [*phrases, condition])
-        if len(_also_text([head], 0, hass)) > budget:
+        if len(_also_text([head], 0, hass)) > budget or head.casefold() in owners:
+            # Over the budget, or the rendered text is another device's name.
             continue
         phrases[condition] = context
         covered.append(finding)
     if not phrases:
         return None, []
     return _subject_text(subject_name, list(phrases)), covered
+
+
+def _implied_context(
+    shown: AnomalyFinding, snapshot: FullStateSnapshot
+) -> frozenset[str]:
+    """
+    Return the devices a condition phrase may leave unnamed.
+
+    Those the push is already about (*shown*'s), and any device that is the
+    only one of its domain in the home, such as a single alarm panel.
+    """
+    by_domain: dict[str, list[str]] = {}
+    for entity in snapshot.get("entities", []):
+        entity_id = str(entity.get("entity_id") or "")
+        if entity_id:
+            by_domain.setdefault(entity_id.split(".", 1)[0], []).append(entity_id)
+    sole = {ids[0] for ids in by_domain.values() if len(ids) == 1}
+    return frozenset({*shown.triggering_entities, *sole})
 
 
 def _subject_text(name: str, phrases: list[str]) -> str:
@@ -1852,10 +1877,17 @@ def _name_aliases(entity_id: str, names: Mapping[str, str]) -> set[str]:
     Return every name a notification may show for *entity_id*, casefolded.
 
     The friendly name, the name derived from the id (the fallback copy), and
-    the appliance copy's forms of both without a "Power"-style suffix.
+    the appliance copy's forms of both without a "Power"-style suffix. A
+    friendly name the also line refuses to list (one with parentheses) is
+    still an alias: rendered text could match it.
     """
     aliases: set[str] = set()
-    for name in (_entity_display_name(entity_id, names), _friendly_entity(entity_id)):
+    raw = " ".join(str(names.get(entity_id) or "").split())
+    for name in (
+        _entity_display_name(entity_id, names),
+        raw,
+        _friendly_entity(entity_id),
+    ):
         if name:
             aliases.update(
                 alias.casefold() for alias in (name, _strip_power_suffix(name)) if alias

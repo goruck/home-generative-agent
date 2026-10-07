@@ -3650,7 +3650,15 @@ def _garage_snapshot(
             "domain": domain,
             "friendly_name": friendly_name,
             "attributes": {"device_class": device_class} if device_class else {},
-        }
+        },
+        # The home's only alarm panel: "alarm disarmed" identifies it.
+        {
+            **snapshot["entities"][0],
+            "entity_id": _PANEL,
+            "domain": "alarm_control_panel",
+            "friendly_name": "Home Alarm",
+            "attributes": {},
+        },
     ]
     return snapshot
 
@@ -3763,8 +3771,12 @@ def test_related_line_says_unlocked_only_for_a_lock() -> None:
     assert named == [unlocked]
 
 
-def test_related_line_one_alarm_phrase_covers_one_panel() -> None:
-    """A second panel's alarm finding is not covered by the first's phrase."""
+def test_related_line_never_leaves_an_alarm_panel_unidentified() -> None:
+    """
+    With two panels, "alarm disarmed" does not say which one.
+
+    Neither panel's finding is the shown one, so neither is named.
+    """
     shown, partners = _garage_group()
     other_panel = _rule_finding(
         "other-panel",
@@ -3773,11 +3785,49 @@ def test_related_line_one_alarm_phrase_covers_one_panel() -> None:
         ["alarm_control_panel.studio", _GARAGE],
         severity="high",
     )
+    snapshot = _garage_snapshot()
+    snapshot["entities"].append(
+        {**snapshot["entities"][1], "entity_id": "alarm_control_panel.studio"}
+    )
 
-    line, named = _also(shown, [partners["disarmed"], other_panel], _garage_snapshot())
+    line, named = _also(shown, [partners["disarmed"], other_panel], snapshot)
 
-    assert line == "Also: Garage and Play Room Windows (alarm disarmed)"
-    assert named == [partners["disarmed"]]
+    assert line is None
+    assert named == []
+
+
+def test_related_line_names_the_shown_findings_own_panel() -> None:
+    """A panel the push is already about needs no name, even with two."""
+    _shown, partners = _garage_group()
+    shown = partners["disarmed"]
+    duration = partners["duration"]
+    snapshot = _garage_snapshot()
+    snapshot["entities"].append(
+        {**snapshot["entities"][1], "entity_id": "alarm_control_panel.studio"}
+    )
+
+    line, named = _also(shown, [duration], snapshot)
+
+    assert line == "Also: Garage and Play Room Windows (open too long)"
+    assert named == [duration]
+
+
+def test_related_line_refuses_text_matching_another_devices_name() -> None:
+    """The rendered "<device> (<condition>)" must not be some device's name."""
+    shown, partners = _garage_group()
+    snapshot = _garage_snapshot()
+    snapshot["entities"].append(
+        {
+            **snapshot["entities"][0],
+            "entity_id": "binary_sensor.decoy",
+            "friendly_name": "Garage and Play Room Windows (alarm disarmed)",
+        }
+    )
+
+    line, named = _also(shown, [partners["disarmed"]], snapshot)
+
+    assert line is None
+    assert named == []
 
 
 def test_related_line_refuses_a_name_that_looks_like_conditions() -> None:
