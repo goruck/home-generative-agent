@@ -111,6 +111,7 @@ from .helpers import (
     resolve_critical_action_policy,
     sanitize_tool_args,
     sanitize_tool_text,
+    tool_call_data,
 )
 from .pin_messages import pin_msg
 
@@ -1110,7 +1111,7 @@ async def _execute_pending_action(
     tool_args = sanitize_tool_args(tool_args)
     try:
         tool_input = llm.ToolInput(tool_name=tool_name, tool_args=tool_args)
-        response = await ha_llm_api.async_call_tool(tool_input)
+        response = tool_call_data(await ha_llm_api.async_call_tool(tool_input)).data
     except (HomeAssistantError, vol.Invalid) as err:
         return None, pin_msg(cfg.get("hass"), "action_execute_failed", err=repr(err))
 
