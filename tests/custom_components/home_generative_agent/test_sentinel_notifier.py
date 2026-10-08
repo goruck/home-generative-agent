@@ -22,6 +22,9 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_RESPONSE_LANGUAGE,
     SNOOZE_PERMANENT,
 )
+from custom_components.home_generative_agent.sentinel.dynamic_rules import (
+    evaluate_dynamic_rules,
+)
 from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
 from custom_components.home_generative_agent.sentinel.notifier import (
     MAX_MOBILE_MESSAGE_CHARS,
@@ -2001,10 +2004,64 @@ def test_state_duration_subtitle_names_device_state_and_duration(
 ) -> None:
     """An entity_state_duration push says what is open, and for how long."""
     finding = _duration_finding(evidence)
-    assert _build_subtitle(finding) == english
+    snapshot = _entry_snapshot(
+        _entity("binary_sensor.breakfast_nook_side_right_window", None, "window"),
+        _entity("lock.garage_door_lock", None, None),
+        _entity("light.porch", None, None),
+    )
+    assert _build_subtitle(finding, None, snapshot) == english  # type: ignore[arg-type]
     hass = DummyHass()
     hass.config.language = "cs"
-    assert _build_subtitle(finding, hass) == czech  # type: ignore[arg-type]
+    assert _build_subtitle(finding, hass, snapshot) == czech  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("entity_id", "device_class", "state", "expected"),
+    [
+        (
+            "binary_sensor.front_door_motion",
+            "motion",
+            "on",
+            "Front Door Motion unchanged for 3 h",
+        ),
+        (
+            "binary_sensor.front_door_lock",
+            "lock",
+            "on",
+            "Front Door Lock unlocked for 3 h",
+        ),
+        ("lock.shed", None, "open", "Shed unchanged for 3 h"),
+        (
+            "binary_sensor.window_heater",
+            "running",
+            "on",
+            "Window Heater unchanged for 3 h",
+        ),
+    ],
+)
+def test_state_duration_subtitle_words_the_state_by_device(
+    entity_id: str, device_class: str | None, state: str, expected: str
+) -> None:
+    """
+    Approved rules pick their entity by name: "on" is not always "open".
+
+    A motion sensor "on" for 3 h is not "open"; a lock-class sensor "on" is
+    unlocked; a lock in state "open" is not an open door.
+    """
+    finding = _duration_finding(
+        {"entity_id": entity_id, "state": state, "duration_hours": 3.0}
+    )
+    snapshot = _entry_snapshot(_entity(entity_id, None, device_class))
+
+    assert _build_subtitle(finding, None, snapshot) == expected  # type: ignore[arg-type]
+
+
+def test_state_duration_subtitle_without_the_device_does_not_say_open() -> None:
+    finding = _duration_finding(
+        {"entity_id": "binary_sensor.w", "state": "on", "duration_hours": 3.0}
+    )
+
+    assert _build_subtitle(finding) == "W unchanged for 3 h"
 
 
 def test_state_duration_subtitle_without_duration_uses_template_label() -> None:
@@ -2850,3 +2907,278 @@ async def test_action_event_passes_the_mobile_user_to_the_handler() -> None:
     notifier._handle_action_event(event)  # type: ignore[arg-type]
     await hass.drain_tasks()
     assert action_handler.user_ids == ["u-admin"]
+
+
+# ---------------------------------------------------------------------------
+# Open-entry subtitle names the door or window (issue #729)
+# ---------------------------------------------------------------------------
+
+
+def _entity(
+    entity_id: str,
+    friendly_name: str | None = None,
+    device_class: str | None = "window",
+) -> dict[str, Any]:
+    base = _minimal_snapshot()["entities"][0]
+    entity: dict[str, Any] = {
+        **base,
+        "entity_id": entity_id,
+        "domain": entity_id.split(".", maxsplit=1)[0],
+        "attributes": {"device_class": device_class} if device_class else {},
+    }
+    if friendly_name is not None:
+        entity["friendly_name"] = friendly_name
+    return entity
+
+
+def _entry_snapshot(*entities: dict[str, Any]) -> dict[str, Any]:
+    snapshot = _minimal_snapshot()
+    snapshot["entities"] = list(entities)
+    return snapshot
+
+
+def _away_entry(entity_id: str) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id="entry1",
+        type="open_entry_while_away",
+        severity="high",
+        confidence=0.65,
+        triggering_entities=[entity_id],
+        evidence={"entity_id": entity_id, "state": "on"},
+        suggested_actions=["close_entry"],
+        is_sensitive=True,
+    )
+
+
+def _approved_entry(
+    template_id: str, entity_id: str, rule_type: str = "candidate_nook_window"
+) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id="dyn1",
+        type=rule_type,
+        severity="medium",
+        confidence=0.6,
+        triggering_entities=[entity_id],
+        evidence={"template_id": template_id, "entry_entity_id": entity_id},
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+
+
+_NOOK = "binary_sensor.breakfast_nook_center_right_window"
+
+
+def test_open_entry_subtitle_names_the_window_from_the_snapshot() -> None:
+    """
+    Two windows in one room no longer read as one.
+
+    Field case: "Open entry while away" over model prose that said only "the
+    window in the breakfast nook".
+    """
+    snapshot = _entry_snapshot(
+        _entity("binary_sensor.breakfast_nook_side_right_window", "Nook Side"),
+        _entity(_NOOK, "Breakfast Nook Center Right Window"),
+    )
+
+    subtitle = _build_subtitle(_away_entry(_NOOK), None, snapshot)  # type: ignore[arg-type]
+
+    assert subtitle == "Breakfast Nook Center Right Window open"
+
+
+@pytest.mark.parametrize("raw", [None, "\u200b", "  "])
+def test_open_entry_subtitle_falls_back_to_the_id_without_a_usable_name(
+    raw: str | None,
+) -> None:
+    snapshot = _entry_snapshot(_entity("binary_sensor.kitchen_door", raw, "door"))
+
+    subtitle = _build_subtitle(
+        _away_entry("binary_sensor.kitchen_door"),
+        None,
+        snapshot,  # type: ignore[arg-type]
+    )
+
+    assert subtitle == "Kitchen Door open"
+
+
+def test_open_entry_subtitle_strips_control_characters() -> None:
+    snapshot = _entry_snapshot(_entity("binary_sensor.w", "Landing\u202e\nWindow"))
+
+    subtitle = _build_subtitle(_away_entry("binary_sensor.w"), None, snapshot)  # type: ignore[arg-type]
+
+    assert subtitle == "Landing Window open"
+
+
+def test_open_entry_subtitle_caps_a_long_name() -> None:
+    """An unbounded friendly name could push the alert past the payload limit."""
+    snapshot = _entry_snapshot(_entity("binary_sensor.w", "Window " * 2000))
+
+    subtitle = _build_subtitle(_away_entry("binary_sensor.w"), None, snapshot)  # type: ignore[arg-type]
+
+    assert len(subtitle) <= 70
+    assert subtitle.endswith("\u2026 open")
+
+
+@pytest.mark.parametrize(
+    ("entity_id", "device_class"),
+    [
+        ("binary_sensor.front_door_lock", "lock"),
+        ("binary_sensor.window_heater_running", "running"),
+        ("binary_sensor.window_sensor", None),
+    ],
+)
+def test_open_entry_subtitle_never_calls_a_non_entry_device_open(
+    entity_id: str, device_class: str | None
+) -> None:
+    """
+    Approved entry rules pick devices by name; "on" is not always "open".
+
+    A lock reporting "on" is unlocked, a window heater "on" is running.
+    """
+    finding = _approved_entry("open_entry_at_night_while_away", entity_id)
+    snapshot = _entry_snapshot(_entity(entity_id, "Device", device_class))
+
+    subtitle = _build_subtitle(finding, None, snapshot)  # type: ignore[arg-type]
+
+    assert subtitle == _display_type(finding)
+
+
+@pytest.mark.parametrize("attributes", [{"device_class": ["window"]}, ["window"]])
+def test_open_entry_subtitle_survives_malformed_attributes(attributes: Any) -> None:
+    """A malformed device class from an integration must not lose the alert."""
+    finding = _approved_entry("open_any_window_at_night_while_away", "sensor.w")
+    entity = {**_entity("sensor.w", "Window"), "attributes": attributes}
+
+    subtitle = _build_subtitle(finding, None, _entry_snapshot(entity))  # type: ignore[arg-type]
+
+    assert subtitle == _display_type(finding)
+
+
+def test_open_entry_subtitle_caps_the_id_derived_name() -> None:
+    entity_id = "binary_sensor." + "very_long_window_" * 15
+    snapshot = _entry_snapshot(_entity(entity_id, None))
+
+    subtitle = _build_subtitle(_away_entry(entity_id), None, snapshot)  # type: ignore[arg-type]
+
+    assert len(subtitle) <= 70
+
+
+def test_open_entry_subtitle_covers_a_cover() -> None:
+    finding = _approved_entry("open_entry_while_away", "cover.garage_door")
+    snapshot = _entry_snapshot(_entity("cover.garage_door", "Garage Door", None))
+
+    assert _build_subtitle(finding, None, snapshot) == "Garage Door open"  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "template_id",
+    [
+        "open_entry_while_away",
+        "open_entry_when_home",
+        "open_entry_at_night",
+        "open_entry_at_night_when_home",
+        "open_entry_at_night_while_away",
+        "open_any_window_at_night_while_away",
+    ],
+)
+def test_open_entry_subtitle_covers_approved_entry_rules(template_id: str) -> None:
+    finding = _approved_entry(template_id, "binary_sensor.garage_window")
+    snapshot = _entry_snapshot(_entity("binary_sensor.garage_window", "Garage Window"))
+
+    assert _build_subtitle(finding, None, snapshot) == "Garage Window open"  # type: ignore[arg-type]
+
+
+def test_open_entry_subtitle_matches_an_approved_rule_by_template_not_type() -> None:
+    """
+    An approved rule's type is its rule id, any slug the model proposed.
+
+    One named "open_entry_while_away" took the built-in branch and read the
+    wrong evidence key; one from another template must never read "open".
+    """
+    entry = _approved_entry(
+        "open_entry_while_away", _NOOK, rule_type="open_entry_while_away"
+    )
+    stale = AnomalyFinding(
+        anomaly_id="stale1",
+        type="open_entry_while_away",
+        severity="low",
+        confidence=0.5,
+        triggering_entities=["binary_sensor.kitchen_window"],
+        evidence={
+            "template_id": "entity_staleness",
+            "entity_id": "binary_sensor.kitchen_window",
+        },
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+    snapshot = _entry_snapshot(
+        _entity(_NOOK, "Breakfast Nook Center Right Window"),
+        _entity("binary_sensor.kitchen_window", "Kitchen Window"),
+    )
+
+    assert _build_subtitle(entry, None, snapshot) == (  # type: ignore[arg-type]
+        "Breakfast Nook Center Right Window open"
+    )
+    # Falls back to the label, never "Kitchen Window open".
+    assert _build_subtitle(stale, None, snapshot) == _display_type(stale)  # type: ignore[arg-type]
+
+
+def test_open_entry_subtitle_from_a_real_approved_rule() -> None:
+    """The evaluator's evidence has the shape the subtitle reads."""
+    snapshot = _entry_snapshot(_entity(_NOOK, "Breakfast Nook Center Right Window"))
+    rule = {
+        "rule_id": "candidate_nook_window_open_away",
+        "template_id": "open_entry_while_away",
+        "severity": "medium",
+        "confidence": 0.6,
+        "params": {"entry_entity_ids": [_NOOK]},
+    }
+
+    (finding,) = evaluate_dynamic_rules(snapshot, [rule])  # type: ignore[arg-type]
+
+    assert _build_subtitle(finding, None, snapshot) == (  # type: ignore[arg-type]
+        "Breakfast Nook Center Right Window open"
+    )
+
+
+def test_open_entry_subtitle_without_a_device_keeps_the_type_label() -> None:
+    finding = _away_entry("binary_sensor.kitchen_door")
+    finding.evidence.pop("entity_id")
+
+    assert _build_subtitle(finding, None, _entry_snapshot()) == _display_type(finding)  # type: ignore[arg-type]
+
+
+def test_open_entry_subtitle_czech() -> None:
+    hass = DummyHass()
+    hass.config.language = "cs"
+    snapshot = _entry_snapshot(_entity("binary_sensor.kitchen_door", None, "door"))
+
+    subtitle = _build_subtitle(
+        _away_entry("binary_sensor.kitchen_door"),
+        hass,  # type: ignore[arg-type]
+        snapshot,  # type: ignore[arg-type]
+    )
+
+    assert subtitle == "Kitchen Door: otevřeno"
+
+
+def test_other_findings_keep_their_type_label_subtitle() -> None:
+    finding = _finding_with_severity("high", ftype="unlocked_lock_at_night")
+
+    assert _build_subtitle(finding) == _display_type(finding)
+
+
+@pytest.mark.asyncio
+async def test_async_notify_sends_the_open_entry_subtitle() -> None:
+    notifier, hass, _s, _a = _make_notifier(
+        {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    )
+    snapshot = _entry_snapshot(_entity(_NOOK, "Breakfast Nook Center Right Window"))
+
+    await notifier.async_notify(
+        _away_entry(_NOOK),
+        snapshot,  # type: ignore[arg-type]
+        "The window in the breakfast nook is open.",
+    )
+
+    subtitle = hass.services.calls[0]["data"]["data"]["subtitle"]
+    assert subtitle == "Breakfast Nook Center Right Window open"

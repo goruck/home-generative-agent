@@ -73,6 +73,7 @@ from custom_components.home_generative_agent.sentinel.suppression import (
     record_cooldown_feedback,
     register_snooze,
 )
+from custom_components.home_generative_agent.snapshot.network import sanitize_label
 
 if TYPE_CHECKING:
     import asyncio
@@ -295,7 +296,7 @@ class SentinelNotifier:
         }.get(severity, "severity_title_medium")
         title = notif_msg(self._hass, title_key)
         interrupt_level = _SEVERITY_INTERRUPT_LEVEL.get(severity, "active")
-        subtitle = _build_subtitle(finding, self._hass)
+        subtitle = _build_subtitle(finding, self._hass, snapshot)
         mobile_msg = _mobile_message(
             clean_explanation,
             finding,
@@ -996,7 +997,11 @@ def _appliance_power_duration_mobile_message(finding: AnomalyFinding) -> str:
     return msg[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
 
 
-def _build_subtitle(finding: AnomalyFinding, hass: HomeAssistant | None = None) -> str:
+def _build_subtitle(
+    finding: AnomalyFinding,
+    hass: HomeAssistant | None = None,
+    snapshot: FullStateSnapshot | None = None,
+) -> str:
     """Return the notification subtitle line for *finding*."""
     if finding.evidence.get("is_completion"):
         raw_name = str(finding.evidence.get("friendly_name") or "").strip()
@@ -1009,7 +1014,7 @@ def _build_subtitle(finding: AnomalyFinding, hass: HomeAssistant | None = None) 
     if finding.evidence.get("template_id") == "alarm_disarmed_open_entry":
         entry_id = str(finding.evidence.get("entry_entity_id") or "")
         entry_name = (
-            _friendly_entity(entry_id)
+            _snapshot_name(entry_id, snapshot)
             if entry_id
             else notif_msg(hass, "fallback_entry")
         )
@@ -1037,30 +1042,132 @@ def _build_subtitle(finding: AnomalyFinding, hass: HomeAssistant | None = None) 
             else "subtitle_reading_deviation"
         )
         return notif_msg(hass, subtitle_key, appliance=appliance, direction=direction)
-    if finding.evidence.get("template_id") == "entity_state_duration":
-        duration_subtitle = _state_duration_subtitle(finding, hass)
-        if duration_subtitle:
-            return duration_subtitle
-    return _display_type(finding, hass)
+    device_subtitle = (
+        _state_duration_subtitle(finding, hass, snapshot)
+        if finding.evidence.get("template_id") == "entity_state_duration"
+        else _open_entry_subtitle(finding, hass, snapshot)
+    )
+    return device_subtitle or _display_type(finding, hass)
 
 
-# entity_state_duration states with a curated word; "on" is how an open
-# window or door binary sensor reports.
-_STATE_DURATION_KEYS = {
-    "on": "subtitle_state_open_for",
-    "open": "subtitle_state_open_for",
-    "unlocked": "subtitle_state_unlocked_for",
-}
+# Open-entry findings whose subtitle names the door or window (issue #729):
+# the built-in rule by type, approved rules by template. The body is often
+# model prose, which can leave the device out, so two pushes about two
+# windows in one room read as duplicates.
+_OPEN_ENTRY_TYPES = frozenset({"open_entry_while_away"})
+_OPEN_ENTRY_TEMPLATES = frozenset(
+    {
+        "open_entry_while_away",
+        "open_entry_when_home",
+        "open_entry_at_night",
+        "open_entry_at_night_when_home",
+        "open_entry_at_night_while_away",
+        "open_any_window_at_night_while_away",
+    }
+)
+
+
+def _open_entry_subtitle(
+    finding: AnomalyFinding,
+    hass: HomeAssistant | None = None,
+    snapshot: FullStateSnapshot | None = None,
+) -> str | None:
+    """
+    Return "<door or window> open" for an open-entry finding, else None.
+
+    An approved rule is matched by its template, which also says where the
+    device is; only a finding with no template is matched by type, since an
+    approved rule's type is its rule id and can be any slug. The device must
+    be a door, window or cover in *snapshot*: approved entry rules pick their
+    entities by name ("window" in the id), so the subtitle never calls a
+    lock or a window heater "open". The name is the snapshot's friendly name,
+    not read from the evidence, which is hashed into the anomaly id.
+    """
+    evidence = finding.evidence
+    template_id = str(evidence.get("template_id") or "")
+    if template_id:
+        if template_id not in _OPEN_ENTRY_TEMPLATES:
+            return None
+        entity_id = str(evidence.get("entry_entity_id") or "")
+    elif finding.type in _OPEN_ENTRY_TYPES:
+        entity_id = str(evidence.get("entity_id") or "")
+    else:
+        return None
+    entity = _snapshot_entity(entity_id, snapshot)
+    if entity is None or not _is_entry_device(entity):
+        return None
+    return notif_msg(
+        hass, "subtitle_entry_open", entity=_snapshot_name(entity_id, snapshot)
+    )
+
+
+# Device classes whose "on" state means open, and covers (garage doors,
+# gates), whose "open" state does.
+_ENTRY_DEVICE_CLASSES = frozenset({"door", "window", "opening", "garage_door"})
+
+
+def _is_lock_device(entity: Mapping[str, Any]) -> bool:
+    """Return True when *entity* is a lock (or a lock-class binary sensor)."""
+    if entity.get("domain") == "lock":
+        return True
+    attributes = entity.get("attributes")
+    return isinstance(attributes, dict) and attributes.get("device_class") == "lock"
+
+
+def _is_entry_device(entity: Mapping[str, Any]) -> bool:
+    """Return True when *entity* is a door, window, or cover."""
+    if entity.get("domain") == "cover":
+        return True
+    # Attributes come from integrations; a malformed device class (a list,
+    # say) must not raise and lose the alert.
+    attributes = entity.get("attributes")
+    if not isinstance(attributes, dict):
+        return False
+    device_class = attributes.get("device_class")
+    return isinstance(device_class, str) and device_class in _ENTRY_DEVICE_CLASSES
+
+
+def _snapshot_entity(
+    entity_id: str, snapshot: FullStateSnapshot | None
+) -> Mapping[str, Any] | None:
+    """Return *entity_id*'s snapshot entry, or None."""
+    if not entity_id:
+        return None
+    for entity in (snapshot or {}).get("entities", []):
+        if entity.get("entity_id") == entity_id:
+            return entity
+    return None
+
+
+def _snapshot_name(entity_id: str, snapshot: FullStateSnapshot | None) -> str:
+    """
+    Return *entity_id*'s friendly name from *snapshot*, else one from its id.
+
+    Friendly names are untrusted entity attributes: ``sanitize_label`` drops
+    control and format characters, collapses whitespace and caps the length,
+    so a name can neither restyle a push nor push it past the payload limit.
+    """
+    entity = _snapshot_entity(entity_id, snapshot)
+    if entity is not None:
+        name = sanitize_label(entity.get("friendly_name"))
+        if any(ch.isalnum() for ch in name):
+            return name
+    return sanitize_label(_friendly_entity(entity_id))
 
 
 def _state_duration_subtitle(
-    finding: AnomalyFinding, hass: HomeAssistant | None = None
+    finding: AnomalyFinding,
+    hass: HomeAssistant | None = None,
+    snapshot: FullStateSnapshot | None = None,
 ) -> str | None:
     """
     Return "<device> open for 3 h" for an entity_state_duration finding.
 
-    Returns None when the evidence lacks the device or a usable duration, so
-    the caller falls back to the template label.
+    "open" only for a door, window or cover and "unlocked" only for a lock,
+    per *snapshot*: approved rules pick their entity by name, so "on" may be
+    a motion sensor. Any other device reads "unchanged for". Returns None
+    when the evidence lacks the device or a usable duration, so the caller
+    falls back to the template label.
     """
     entity_id = str(finding.evidence.get("entity_id") or "")
     hours = finding.evidence.get("duration_hours")
@@ -1068,15 +1175,26 @@ def _state_duration_subtitle(
         return None
     if not entity_id or hours <= 0:
         return None
-    raw_name = str(finding.evidence.get("friendly_name") or "").strip()
-    entity = raw_name or _friendly_entity(entity_id)
+    raw_name = sanitize_label(finding.evidence.get("friendly_name"))
+    entity = (
+        raw_name
+        if any(ch.isalnum() for ch in raw_name)
+        else sanitize_label(_friendly_entity(entity_id))
+    )
     duration = (
         notif_msg(hass, "duration_hours_short", hours=int(hours))
         if hours >= 1
         else notif_msg(hass, "duration_minutes_short", minutes=max(int(hours * 60), 1))
     )
     state = str(finding.evidence.get("state") or "")
-    key = _STATE_DURATION_KEYS.get(state, "subtitle_state_unchanged_for")
+    device = _snapshot_entity(entity_id, snapshot)
+    key = "subtitle_state_unchanged_for"
+    if device is not None:
+        if _is_lock_device(device) and state in {"unlocked", "on"}:
+            # A lock-class binary sensor reports "on" for unlocked.
+            key = "subtitle_state_unlocked_for"
+        elif _is_entry_device(device) and state in {"on", "open"}:
+            key = "subtitle_state_open_for"
     return notif_msg(hass, key, entity=entity, duration=duration)
 
 

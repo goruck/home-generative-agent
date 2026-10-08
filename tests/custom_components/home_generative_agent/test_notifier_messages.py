@@ -148,6 +148,7 @@ _CALL_SITE_KWARGS: dict[str, set[str]] = {
     "subtitle_entry_open_alarm_disarmed": {"entry_name"},
     "subtitle_power_deviation": {"appliance", "direction"},
     "subtitle_reading_deviation": {"appliance", "direction"},
+    "subtitle_entry_open": {"entity"},
     "subtitle_state_open_for": {"entity", "duration"},
     "subtitle_state_unlocked_for": {"entity", "duration"},
     "subtitle_state_unchanged_for": {"entity", "duration"},
