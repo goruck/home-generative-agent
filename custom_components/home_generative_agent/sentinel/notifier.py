@@ -1117,44 +1117,6 @@ def _open_entry_subtitle(
     )
 
 
-# Device classes whose "on" state means open, and covers (garage doors,
-# gates), whose "open" state does.
-_ENTRY_DEVICE_CLASSES = frozenset({"door", "window", "opening", "garage_door"})
-
-
-def _is_lock_device(entity: Mapping[str, Any]) -> bool:
-    """Return True when *entity* is a lock (or a lock-class binary sensor)."""
-    if entity.get("domain") == "lock":
-        return True
-    attributes = entity.get("attributes")
-    return isinstance(attributes, dict) and attributes.get("device_class") == "lock"
-
-
-def _is_entry_device(entity: Mapping[str, Any]) -> bool:
-    """Return True when *entity* is a door, window, or cover."""
-    if entity.get("domain") == "cover":
-        return True
-    # Attributes come from integrations; a malformed device class (a list,
-    # say) must not raise and lose the alert.
-    attributes = entity.get("attributes")
-    if not isinstance(attributes, dict):
-        return False
-    device_class = attributes.get("device_class")
-    return isinstance(device_class, str) and device_class in _ENTRY_DEVICE_CLASSES
-
-
-def _snapshot_entity(
-    entity_id: str, snapshot: FullStateSnapshot | None
-) -> Mapping[str, Any] | None:
-    """Return *entity_id*'s snapshot entry, or None."""
-    if not entity_id:
-        return None
-    for entity in (snapshot or {}).get("entities", []):
-        if entity.get("entity_id") == entity_id:
-            return entity
-    return None
-
-
 def _snapshot_name(entity_id: str, snapshot: FullStateSnapshot | None) -> str:
     """
     Return *entity_id*'s friendly name from *snapshot*, else one from its id.
