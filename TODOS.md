@@ -1082,6 +1082,19 @@ Since step 6 this also covers `radio_new_device_joined`, and since step 7 `netwo
 
 ## Discovery
 
+### About a fifth of discovery cycles are thrown away as "not valid JSON", and the log hides why
+
+**What:** On the dev box, `Discovery output was not valid JSON.` was logged 10 times between 2026-10-06 05:16 and 2026-10-08 05:00 PDT, out of roughly 48 hourly cycles. The other cycles complete normally ("3 generated, N novel"). The warning goes through `_log_limiter`, so 10 may be an undercount. Each one drops the whole cycle (`discovery_engine.py`, the `json.loads(content)` branch after `extract_final`), and nothing records the raw output, so the cause can't be seen from the log.
+
+**Why:** Not user-visible. Discovery is advisory and retries the next hour, and no one would search for this. But a fifth of the discovery model calls are paid for and discarded. The likely causes are all cheap to handle once seen: a markdown code fence around the JSON, a prose preamble or trailer, or output truncated at the token limit (unbalanced braces).
+
+**How to apply:** First make it observable: log the failure's position and a capped, sanitized excerpt of `content` (first and last ~200 chars) at DEBUG, plus its length and whether it ends in `}`. Then decide from real samples: strip a surrounding code fence, or extract the outermost `{...}` before `json.loads`, or raise the output budget if it's truncation. Keep the schema validation that follows unchanged. Add a test per sample shape seen.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
 ### Identically-worded candidates about different devices still merge; the device token cannot split them as a matcher
 
 **What:** Two evidence-less low-battery candidates with identical `title`/`summary` but different device addresses share an identity key and one card is dropped, hiding a battery warning the user never sees. Reproduced on v3.32.1 with the #571 candidate: same wording under `0xffffaa67127301f8` and `0xaaaa11122233344` still collide. This is base behaviour, not a v3.32.1 regression — it was listed as a known limit in the v3.31.3 close-out on #571 and restated in the v3.32.1 one (issuecomment-5438771917).
