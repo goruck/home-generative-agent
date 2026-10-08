@@ -103,6 +103,7 @@ from .helpers import (
     resolve_critical_action_policy,
     sanitize_tool_args,
     sanitize_tool_text,
+    tool_call_data,
     tool_exclusions,
     tool_inclusions,
     tool_index_key,
@@ -451,11 +452,13 @@ async def _run_ha_tool(
 
     tool_input = llm.ToolInput(tool_name=tool_name, tool_args=prepared_args)
     try:
-        response = await ctx.ha_llm_api.async_call_tool(tool_input)
+        response = tool_call_data(await ctx.ha_llm_api.async_call_tool(tool_input))
     except (HomeAssistantError, vol.Invalid) as err:
         return _make_tool_error(repr(err), tool_name, tool_call.get("id") or "")
 
-    content_str, status = _parse_tool_response(response, prepared_args)
+    content_str, status = _parse_tool_response(response.data, prepared_args)
+    if response.error:
+        status = "error"
     return ToolMessage(
         content=content_str,
         tool_call_id=tool_call.get("id"),
