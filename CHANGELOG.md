@@ -7,6 +7,12 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+## [3.43.3] - 2026-10-08
+
+### Fixed
+
+- The integration failed to start on Home Assistant 2026.10.0 with "Setup failed for custom integration 'home_generative_agent': Requirements for home_generative_agent not found: ['langchain-openai==1.0.3']". Home Assistant 2026.10 moved to `openai` 3.10.0, and the pinned `langchain-openai` 1.0.3 only accepts `openai` below 3, so the requirements could not be installed. This blocked every install, including Ollama-only ones that never use OpenAI. `langchain-openai` is now 1.6.7, which accepts `openai` 2.45 and later, so the integration installs on both Home Assistant 2026.9 and 2026.10 ([#735](https://github.com/goruck/home-generative-agent/issues/735)).
+
 ## [3.43.2] - 2026-10-03
 
 ### Fixed

@@ -322,7 +322,7 @@ async def test_invoke_model_drops_unsupported_temperature(
     response = httpx.Response(400, request=request)
     err = openai.BadRequestError(
         "Error code: 400",
-        response=response,
+        response=response,  # pyright: ignore[reportArgumentType]  # httpx vs openai 3's httpx2
         body={
             "message": "Unsupported value: 'temperature' does not support 0.2.",
             "type": "invalid_request_error",
@@ -745,7 +745,7 @@ async def test_sampling_rebind_recovers_tool_bound_chat_model(
         response = httpx.Response(400, request=request)
         return openai.BadRequestError(
             "Error code: 400",
-            response=response,
+            response=response,  # pyright: ignore[reportArgumentType]  # httpx vs openai 3's httpx2
             body={
                 "message": "Unsupported value: 'temperature' does not support 0.2.",
                 "type": "invalid_request_error",

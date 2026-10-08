@@ -227,7 +227,7 @@ def _openai_error() -> OpenAIError:
 def _auth_error() -> AuthenticationError:
     request = httpx.Request("POST", "https://api.openai.com/v1/audio/speech")
     response = httpx.Response(401, request=request)
-    return AuthenticationError("bad key", response=response, body=None)
+    return AuthenticationError("bad key", response=response, body=None)  # pyright: ignore[reportArgumentType]  # httpx vs openai 3's httpx2
 
 
 # ------------------------------------------------------------------ client
