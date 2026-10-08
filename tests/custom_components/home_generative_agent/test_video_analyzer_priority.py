@@ -2964,7 +2964,7 @@ def _unsupported_temperature_error() -> Exception:
         "param": "temperature",
         "code": "unsupported_value",
     }
-    return openai.BadRequestError("Error code: 400", response=response, body=body)
+    return openai.BadRequestError("Error code: 400", response=response, body=body)  # pyright: ignore[reportArgumentType]  # httpx vs openai 3's httpx2
 
 
 @pytest.mark.asyncio
