@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import functools
 import hashlib
+import importlib
 import json
 import logging
 import re
@@ -820,10 +821,17 @@ class _ThinkStreamFilter:
         return tail
 
 
-# HA's Assist pipeline (assist_pipeline/pipeline.py) starts streaming speech
-# only after more than this many characters, or on text followed by a tool
-# call. Read from HA at runtime; this is the value when it cannot be read.
+# HA's Assist pipeline starts streaming speech only after more than this many
+# characters, or on text followed by a tool call. Read from HA at runtime; this
+# is the value when it cannot be read.
 _DEFAULT_STREAM_RESPONSE_CHARS = 60
+
+# Where HA keeps STREAM_RESPONSE_CHARS, newest first: 2026.10 moved it from
+# assist_pipeline/pipeline.py to assist_pipeline/default_pipeline.py.
+_STREAM_RESPONSE_CHARS_MODULES = (
+    "homeassistant.components.assist_pipeline.default_pipeline",
+    "homeassistant.components.assist_pipeline.pipeline",
+)
 
 
 @functools.cache
@@ -832,14 +840,15 @@ def _stream_response_chars() -> int:
     # Imported lazily and defensively: assist_pipeline is an after_dependency
     # and the constant is internal. If it moves, the default keeps the same
     # behavior, and if HA's rule changes, padding only fails to start early.
-    try:
-        from homeassistant.components.assist_pipeline import (  # noqa: PLC0415
-            pipeline as ha_pipeline,
-        )
-    except ImportError:
-        return _DEFAULT_STREAM_RESPONSE_CHARS
-    value = getattr(ha_pipeline, "STREAM_RESPONSE_CHARS", None)
-    return value if isinstance(value, int) else _DEFAULT_STREAM_RESPONSE_CHARS
+    for module_name in _STREAM_RESPONSE_CHARS_MODULES:
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            continue
+        value = getattr(module, "STREAM_RESPONSE_CHARS", None)
+        if isinstance(value, int):
+            return value
+    return _DEFAULT_STREAM_RESPONSE_CHARS
 
 
 def _padded_for_streaming(text: str) -> str:

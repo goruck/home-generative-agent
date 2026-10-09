@@ -1197,7 +1197,10 @@ def test_filter_excluded_tools_survives_tools_being_none() -> None:
     the caller's `except HomeAssistantError`, so an unguarded iteration fails
     every turn until the server comes back.
     """
-    api = _api_instance(cast("Any", None))
+    # HA 2026.10's APIInstance iterates tools on construction, so plant the
+    # None afterwards: the guard under test is ours, not the constructor's.
+    api = _api_instance([])
+    api.tools = cast("Any", None)
 
     filtered, dropped = filter_excluded_tools("mcp-abc", api, {"mcp-abc": {"x"}})
 
@@ -1224,9 +1227,9 @@ def test_filter_excluded_tools_survives_a_malformed_descriptor() -> None:
     as the server advertises the bad descriptor — strictly worse than the
     options-form variant of the same bug.
     """
-    bad = cast("Any", SimpleNamespace(name=["not", "a", "str"]))
-    good = cast("Any", SimpleNamespace(name="ping"))
-    keep = cast("Any", SimpleNamespace(name="stay"))
+    bad = cast("Any", SimpleNamespace(name=["not", "a", "str"], integration="mcp"))
+    good = cast("Any", SimpleNamespace(name="ping", integration="mcp"))
+    keep = cast("Any", SimpleNamespace(name="stay", integration="mcp"))
     api = _api_instance([bad, good, keep])
 
     filtered, dropped = filter_excluded_tools("mcp-abc", api, {"mcp-abc": {"ping"}})

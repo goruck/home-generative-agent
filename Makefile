@@ -27,20 +27,21 @@ runtimedeps: venv
 check: venv
 	$(PIP) check
 
-# Non-mutating checks: enforce generated runtime requirements + lint + format
+# Non-mutating checks: enforce generated runtime requirements + lint + format.
+# Whole repo, matching the Ruff job in CI.
 lint: devdeps
 	$(PY) scripts/gen_manifest_requirements.py
 	git diff --exit-code -- requirements_runtime_manifest.txt
-	$(RUFF) format --check custom_components tests
-	$(RUFF) check custom_components tests
+	$(RUFF) format --check .
+	$(RUFF) check .
 
 # Mutating formatting
 format: devdeps
-	$(RUFF) format custom_components tests
+	$(RUFF) format .
 
 # Mutating lint fixes (kept separate from format)
 fix: devdeps
-	$(RUFF) check --fix custom_components tests
+	$(RUFF) check --fix .
 
 # Test suite (ensures harness + runtime deps are installed)
 test: testdeps runtimedeps
