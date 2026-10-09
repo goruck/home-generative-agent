@@ -30,6 +30,20 @@
 
 ---
 
+### Exact `langchain-*` pins break setup whenever Home Assistant bumps a shared dependency
+
+**What:** `manifest.json` pins `langchain-openai`, `langchain-google-genai`, `langchain-anthropic`, `langchain-ollama`, `langchain` and `langgraph*` to exact versions. Each one constrains packages that Home Assistant pins for every integration in `homeassistant/package_constraints.txt`: HA 2026.10 pins `openai`, `httpx`, `pydantic`, `protobuf`, `numpy` and `Pillow`. When HA moves one of those past what HGA's exact pin accepts, the requirements can't be resolved and the integration fails to set up for everyone, until a release with a new pin ships. That happened with #735 (`langchain-openai==1.0.3` needed `openai<3`, HA 2026.10 pinned `openai==3.10.0`), reported three times (#735, #740, #741) within a day of HA's release.
+
+**Why:** Suggested by the #741 reporter (2026-10-08): use a range such as `langchain-openai>=1.6.7,<2`, so HA's resolver can pick a release compatible with the core's pins on its own. The trade-off is that HACS installs then run `langchain-*` releases we never tested, and langchain minors have changed behavior before: 1.6 moved some model names to the Responses API (#735 had to pin `use_responses_api=False`), and 1.6 opens a probe socket at `ChatOpenAI` construction. An open range also lets the resolver pick a release that needs a newer `langchain-core` than other pins allow.
+
+**How to apply:** Decide per package. Ranges capped below the next major (`>=X.Y.Z,<X+1`) suit the provider packages, whose job is to track their SDK; keep exact pins where behavior is load-bearing (`langgraph-checkpoint-postgres`, whose schema we migrate). Before switching, add a CI job that resolves the manifest against the latest HA beta's `package_constraints.txt` (`uv pip compile` with `-c`, as in the #735 investigation), so a conflict shows up during HA's beta week, not on release day. That job is worth having even if the pins stay exact.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** None
+
+---
+
 ### Ollama exact token count sends non-option keys inside `options`
 
 **What:** `_count_ollama_tokens` (`agent/token_counter.py`) copies `chat_model_options` wholesale into the `/api/generate` request's `options` object before overriding `num_predict` to 0. That dict also carries `keep_alive` and, when a reasoning model is configured, `reasoning`, which are top-level request parameters, not runner options. Ollama logs an invalid-option warning for each and ignores them, so the count still works, but the request is malformed on every exact count and a stricter server (Ollama Cloud rejects unknown values more readily, see [#614](https://github.com/goruck/home-generative-agent/issues/614)) could start refusing it.
