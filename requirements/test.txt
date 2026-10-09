@@ -16,7 +16,7 @@ zwave-js-server-python==0.73.1
 # public helper, and its tests hold a upnp config entry, so both core
 # components must import. Pin to core's ssdp and upnp manifests.
 async-upnp-client==0.48.2
-getmac==0.9.5
+getmac==0.9.6
 
 pytest==9.*
 pytest-asyncio==1.*
