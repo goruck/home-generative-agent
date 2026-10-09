@@ -62,7 +62,7 @@ Most AI conversation integrations are prompt passthroughs: they forward your wor
 
 | Requirement | Notes |
 | --- | --- |
-| Home Assistant | 2025.5.0 minimum; 2026.4.0+ for streaming responses; 2026.9 (probatio schema core) supported |
+| Home Assistant | 2026.8.0 minimum (3.43.3 and later); 2026.9 (probatio schema core) and 2026.10 supported |
 | HACS | Required for the recommended install path; manual install is also supported |
 | PostgreSQL with pgvector | Provided as a bundled HA app (step 1 below) |
 | Model provider | At least one of: OpenAI, Gemini, Anthropic, Ollama, or any OpenAI-compatible server |

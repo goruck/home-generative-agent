@@ -716,6 +716,9 @@ def _maybe_filter_open_state_tool_response(
         tool_call is not first_open_state_live_context_call
         or not _is_live_context_tool(tool_name)
         or not isinstance(tool_response.content, str)
+        # A failed lookup has no states to filter; rewriting it would turn
+        # "unavailable" into "no open windows".
+        or tool_response.status == "error"
     ):
         return tool_response
 

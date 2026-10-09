@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from homeassistant.helpers import llm
+from langchain_core.messages import ToolMessage
 
 from custom_components.home_generative_agent.agent import graph
 from custom_components.home_generative_agent.agent.helpers import tool_call_data
@@ -114,17 +115,9 @@ async def test_ha_tool_error_result_is_an_error_message(
     assert message.status == "error"
 
 
-async def test_pin_confirmed_action_reports_completion(
-    tool_result_cls: type,
-) -> None:
-    """
-    The confirmed action ran; its reply must not crash on serialization.
-
-    Before the fix the unlock happened and the user got an error instead.
-    """
+def _pin_config(api: _FakeAPI) -> dict[str, Any]:
     hashed, salt = hash_pin("1234")
-    api = _FakeAPI(tool_result_cls(data={"success": True, "result": "Unlocked"}))
-    config = {
+    return {
         "configurable": {
             "options": {
                 CONF_CRITICAL_ACTION_PIN_HASH: hashed,
@@ -142,10 +135,59 @@ async def test_pin_confirmed_action_reports_completion(
             "hass": None,
         }
     }
+
+
+async def test_pin_confirmed_action_reports_completion(
+    tool_result_cls: type,
+) -> None:
+    """
+    The confirmed action ran; its reply must not crash on serialization.
+
+    Before the fix the unlock happened and the user got an error instead.
+    """
+    api = _FakeAPI(tool_result_cls(data={"success": True, "result": "Unlocked"}))
     confirm = cast("Any", confirm_sensitive_action).coroutine
 
-    reply = json.loads(await confirm("aid", "1234", config=config, store=None))
+    reply = json.loads(
+        await confirm("aid", "1234", config=_pin_config(api), store=None)
+    )
 
     assert api.calls == ["HassTurnOff"]
     assert reply["status"] == "completed"
     assert reply["result"] == {"success": True, "result": "Unlocked"}
+
+
+async def test_pin_confirmed_action_error_result_is_a_failure(
+    tool_result_cls: type,
+) -> None:
+    """
+    A tool that reports failure through the error flag did not lock or unlock.
+
+    It gets the same reply as a raised error, and the action stays pending so
+    the user can retry it.
+    """
+    api = _FakeAPI(tool_result_cls(data={"error": "Lock jammed"}, error=True))
+    config = _pin_config(api)
+    confirm = cast("Any", confirm_sensitive_action).coroutine
+
+    reply = await confirm("aid", "1234", config=config, store=None)
+
+    assert api.calls == ["HassTurnOff"]
+    assert "completed" not in reply
+    assert "Lock jammed" in reply
+    assert "aid" in config["configurable"]["pending_actions"]
+
+
+def test_failed_live_context_is_not_rewritten_as_all_clear() -> None:
+    """A failed lookup must never read as "No open windows were found"."""
+    content = json.dumps({"result": "Context unavailable"})
+    tool_call: dict[str, Any] = {"id": "call1", "name": "GetLiveContext"}
+    message = ToolMessage(
+        content=content, tool_call_id="call1", name="GetLiveContext", status="error"
+    )
+
+    filtered = graph._maybe_filter_open_state_tool_response(
+        message, tool_call, tool_call, "GetLiveContext", "are any windows open?"
+    )
+
+    assert filtered.content == content

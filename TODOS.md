@@ -2,6 +2,34 @@
 
 ## Agent
 
+### A confirmed critical action that fails can be re-run without a new PIN
+
+**What:** When a PIN-confirmed action fails (`_execute_pending_action` in `agent/tools.py`: a raised `HomeAssistantError`, or since #735 a `ToolResult` with `error=True`), the pending action stays queued for its 10-minute TTL so the user can retry. A correct PIN never increments `attempts`, and the PIN is already in the conversation, so the model can call `confirm_sensitive_action` again on its own, in the same turn, bounded only by the graph recursion limit. Each call actuates the device again. A tool that half-acted before reporting failure (a cover toggle, an alarm arm that timed out) can act twice.
+
+**Why:** Found by the second Claude adversarial pass in the #735 hotfix review (2026-10-08). The raised-error path has always behaved this way; #735 only made error-flag failures behave the same, as the review intended. Left out of the hotfix because a retry policy for critical actions is a design call.
+
+**How to apply:** Count executions on the pending action and drop it after one failed execute, or require a new user turn before the same action can be confirmed again (record the turn's request id on the pending action). Pin it with a test that confirms once, gets `error=True`, then calls confirm again in the same turn and asserts the device tool ran once.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** None
+
+---
+
+### Resolve the schema converter from probatio directly on HA 2026.10
+
+**What:** `_resolve_converter` in `agent/helpers.py` looks for `to_openapi` / `UNSUPPORTED` on `homeassistant.helpers.llm` first. HA 2026.10's `llm.py` imports `probatio` and no longer re-exports either name, so every 2026.10 install falls through to the fallback that checks whether `vol.Schema.__module__` starts with `probatio`. That works today (probatio 0.13.0 reports `probatio.schema`, and the box ran fine), but if the check ever misses, the code imports `voluptuous_openapi`, which 2026.10 does not install, and the module fails at import. The docstring's claim that core re-exports these names is no longer true.
+
+**Why:** Found by the red-team pass in the #735 hotfix review (2026-10-08). Not fixed there because it works on every shipped HA version and the hotfix was kept to what was broken. No test runs the 2026.10 path, because the 2026.9.4 venv still has the re-exports.
+
+**How to apply:** Before the `__module__` check, look up probatio directly: if `importlib.util.find_spec("probatio")` and `vol.Schema is probatio.Schema`, use `probatio.to_openapi` and `probatio.UNSUPPORTED`. Update the docstring. Add a test that removes `llm.to_openapi` and `llm.UNSUPPORTED` with monkeypatch and asserts the converter still resolves to probatio.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ### Ollama exact token count sends non-option keys inside `options`
 
 **What:** `_count_ollama_tokens` (`agent/token_counter.py`) copies `chat_model_options` wholesale into the `/api/generate` request's `options` object before overriding `num_predict` to 0. That dict also carries `keep_alive` and, when a reasoning model is configured, `reasoning`, which are top-level request parameters, not runner options. Ollama logs an invalid-option warning for each and ignores them, so the count still works, but the request is malformed on every exact count and a stricter server (Ollama Cloud rejects unknown values more readily, see [#614](https://github.com/goruck/home-generative-agent/issues/614)) could start refusing it.
