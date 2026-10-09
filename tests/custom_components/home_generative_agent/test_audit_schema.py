@@ -359,6 +359,52 @@ async def test_update_response_picks_most_recent_compound_record() -> None:
     assert store._records[0]["user_response"] is None
 
 
+@pytest.mark.asyncio
+async def test_update_response_lands_on_the_record_whose_push_showed_it() -> None:
+    """
+    A later compound that holds the answered id but showed a partner is skipped.
+
+    Both pushes' answers used to land on the newer record, overwriting one.
+    """
+    store = _make_store()
+    first = _compound_record("compound-1", ["door", "window"])
+    first["notification"]["shown_anomaly_id"] = "door"
+    second = _compound_record("compound-2", ["door", "window"])
+    second["notification"]["shown_anomaly_id"] = "window"
+    second["notification"]["named_anomaly_ids"] = ["door"]
+    store._records = [first, second]
+
+    await store.async_update_response(
+        anomaly_id="door", response={"action": "dismiss"}, outcome=None
+    )
+    await store.async_update_response(
+        anomaly_id="window", response={"action": "execute"}, outcome=None
+    )
+
+    assert store._records[0]["user_response"] == {"action": "dismiss"}
+    assert store._records[1]["user_response"] == {"action": "execute"}
+
+
+@pytest.mark.asyncio
+async def test_append_finding_records_shown_and_named_ids() -> None:
+    store = _make_store()
+    compound = MagicMock()
+    compound.as_dict.return_value = {"compound_id": "c1"}
+
+    await store.async_append_finding(
+        cast("Any", {"generated_at": "2026-01-01T00:00:00+00:00"}),
+        compound,
+        None,
+        suppression_reason_code="not_suppressed",
+        shown_anomaly_id="door",
+        named_anomaly_ids=["window"],
+    )
+
+    notification = store._records[-1]["notification"]
+    assert notification["shown_anomaly_id"] == "door"
+    assert notification["named_anomaly_ids"] == ["window"]
+
+
 # ---------------------------------------------------------------------------
 # Gap 5: action_policy_path backfilled by v1→v2 migration
 # ---------------------------------------------------------------------------

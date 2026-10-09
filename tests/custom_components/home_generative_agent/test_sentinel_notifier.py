@@ -27,6 +27,7 @@ from custom_components.home_generative_agent.sentinel.dynamic_rules import (
 )
 from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
 from custom_components.home_generative_agent.sentinel.notifier import (
+    MAX_ALSO_LINE_CHARS,
     MAX_MOBILE_MESSAGE_CHARS,
     SentinelNotifier,
     _alarm_disarmed_mobile_message,
@@ -42,6 +43,7 @@ from custom_components.home_generative_agent.sentinel.notifier import (
     _mobile_message,
     _persistent_message,
     _redact_if_sensitive,
+    related_findings_line,
 )
 from custom_components.home_generative_agent.sentinel.suppression import (
     SuppressionState,
@@ -3182,3 +3184,724 @@ async def test_async_notify_sends_the_open_entry_subtitle() -> None:
 
     subtitle = hass.services.calls[0]["data"]["data"]["subtitle"]
     assert subtitle == "Breakfast Nook Center Right Window open"
+
+
+# ---------------------------------------------------------------------------
+# Grouped push: the "Also: ..." line (issue #727)
+# ---------------------------------------------------------------------------
+
+
+def _named_snapshot(*names: tuple[str, str]) -> dict[str, Any]:
+    snapshot = _minimal_snapshot()
+    snapshot["entities"] = [
+        {**snapshot["entities"][0], "entity_id": entity_id, "friendly_name": name}
+        for entity_id, name in names
+    ]
+    return snapshot
+
+
+def _also(
+    shown: AnomalyFinding,
+    related: list[AnomalyFinding],
+    snapshot: dict[str, Any] | None = None,
+    options: dict[str, Any] | None = None,
+    hass: Any = None,
+) -> tuple[str | None, list[AnomalyFinding]]:
+    return related_findings_line(
+        shown,
+        related,
+        snapshot if snapshot is not None else _minimal_snapshot(),  # type: ignore[arg-type]
+        options or {},
+        hass,
+    )
+
+
+def _high(anomaly_id: str, ftype: str, entities: list[str]) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id=anomaly_id,
+        type=ftype,
+        severity="high",
+        confidence=0.5,
+        triggering_entities=entities,
+        evidence={},
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+
+
+def test_related_line_names_partners_by_snapshot_friendly_name() -> None:
+    shown = _finding("shown", triggering_entities=["binary_sensor.front_door"])
+    kitchen = _finding("k", triggering_entities=["binary_sensor.w1"])
+    landing = _finding("l", triggering_entities=["binary_sensor.w2"])
+    snapshot = _named_snapshot(
+        ("binary_sensor.front_door", "Front Door"),
+        ("binary_sensor.w1", "Kitchen Window"),
+        ("binary_sensor.w2", "Landing Window"),
+    )
+
+    line, named = _also(shown, [kitchen, landing], snapshot)
+
+    assert line == "Also: Kitchen Window, Landing Window"
+    assert named == [kitchen, landing]
+
+
+def test_related_line_lists_a_shared_device_once() -> None:
+    """Two partners on one device need one name; both count as named."""
+    shown = _finding("shown", triggering_entities=["binary_sensor.front_door"])
+    away = _finding("a", triggering_entities=["binary_sensor.kitchen_window"])
+    disarmed = _finding("d", triggering_entities=["binary_sensor.kitchen_window"])
+
+    line, named = _also(shown, [away, disarmed])
+
+    assert line == "Also: Kitchen Window"
+    assert named == [away, disarmed]
+
+
+def test_related_line_leaves_a_shared_device_off_the_line() -> None:
+    """
+    The alarm panel behind every alarm-disarmed finding is not listed.
+
+    Field push: "Also: Home Alarm, Family Room Right Win..." spent the line
+    on the panel the push was already about.
+    """
+    panel = "alarm_control_panel.home_alarm"
+    shown = _finding(
+        "shown",
+        ftype="alarm_disarmed_open_entry",
+        triggering_entities=[panel, "binary_sensor.nook_window"],
+    )
+    family = _finding(
+        "family",
+        ftype="alarm_disarmed_open_entry",
+        triggering_entities=[panel, "binary_sensor.family_room_window"],
+    )
+
+    line, named = _also(shown, [family])
+
+    assert line == "Also: Family Room Window"
+    assert named == [family]
+
+
+def test_related_line_never_holds_a_partner_with_no_device_of_its_own() -> None:
+    """A partner only on the shown finding's devices adds nothing to name."""
+    shown = _finding("shown")
+    same_device = _finding("same")
+
+    line, named = _also(shown, [same_device])
+
+    assert line is None
+    assert named == []
+
+
+def test_related_line_never_names_a_finding_without_devices() -> None:
+    line, named = _also(_finding("shown"), [_finding("none", triggering_entities=[])])
+
+    assert line is None
+    assert named == []
+
+
+def test_related_line_names_only_the_shown_findings_type() -> None:
+    """
+    A device name says what is wrong only for the condition the push shows.
+
+    A stranger on camera is low severity and pairs with an open door while
+    away; reduced to "Also: Driveway Camera" it was held without being
+    described.  Any severity of a different type keeps its own push.
+    """
+    shown = _high("shown", "open_entry_while_away", ["binary_sensor.front_door"])
+    lock = _high("lock", "unlocked_lock_at_night", ["lock.back_door_lock"])
+    stranger = _finding(
+        "stranger",
+        ftype="unknown_person_camera_no_home",
+        triggering_entities=["camera.driveway"],
+    )
+    same_kind = _high("door2", "open_entry_while_away", ["binary_sensor.back_door"])
+
+    line, named = _also(shown, [lock, stranger, same_kind])
+
+    assert line == "Also: Back Door"
+    assert named == [same_kind]
+
+
+def test_related_line_does_not_name_a_device_sharing_another_devices_name() -> None:
+    """
+    Two devices called "Front Door" cannot be told apart on the push.
+
+    Matching by name held the open-entry finding behind a lock push that
+    never mentioned it.
+    """
+    shown = _finding("shown", triggering_entities=["lock.front_door"])
+    sensor = _finding("sensor", triggering_entities=["binary_sensor.front_door"])
+    snapshot = _named_snapshot(
+        ("lock.front_door", "Front Door"),
+        ("binary_sensor.front_door", "Front Door"),
+    )
+
+    line, named = _also(shown, [sensor], snapshot)
+
+    assert line is None
+    assert named == []
+
+
+def test_related_line_checks_collisions_against_the_id_derived_name() -> None:
+    """
+    The body may name the shown device from its id ("Front Door").
+
+    A second device whose friendly name is "Front Door" cannot be told apart
+    from it, even when the shown device's own friendly name differs.
+    """
+    shown = _finding("shown", triggering_entities=["binary_sensor.front_door"])
+    other = _finding("other", triggering_entities=["binary_sensor.side_contact"])
+    snapshot = _named_snapshot(
+        ("binary_sensor.front_door", "Entry contact"),
+        ("binary_sensor.side_contact", "front door"),
+    )
+
+    line, named = _also(shown, [other], snapshot)
+
+    assert line is None
+    assert named == []
+
+
+def test_related_line_refuses_both_partners_sharing_a_name() -> None:
+    """
+    Two partners called "Door" are both refused, not just the second.
+
+    The first used to win and be held as "Also: Door +1 more" though nothing
+    said which lock it was.
+    """
+    shown = _finding("shown", triggering_entities=["lock.front"])
+    first = _finding("first", triggering_entities=["lock.garage"])
+    second = _finding("second", triggering_entities=["lock.shed"])
+    snapshot = _named_snapshot(
+        ("lock.front", "Front Door"),
+        ("lock.garage", "Door"),
+        ("lock.shed", "Door"),
+    )
+
+    line, named = _also(shown, [first, second], snapshot)
+
+    assert line is None
+    assert named == []
+
+
+def test_related_line_refuses_a_name_another_device_in_the_home_has() -> None:
+    """A device sharing its name with one outside the push cannot be told apart."""
+    shown = _finding("shown", triggering_entities=["binary_sensor.front_door"])
+    window = _finding("w", triggering_entities=["binary_sensor.window_1"])
+    snapshot = _named_snapshot(
+        ("binary_sensor.front_door", "Front Door"),
+        ("binary_sensor.window_1", "Window Sensor"),
+        ("binary_sensor.window_2", "Window Sensor"),
+    )
+
+    line, named = _also(shown, [window], snapshot)
+
+    assert line is None
+    assert named == []
+
+
+def test_related_line_refuses_the_appliance_name_the_body_shows() -> None:
+    """
+    The appliance copy calls "Dishwasher Power" "Dishwasher".
+
+    A second sensor named "Dishwasher" read as the shown appliance on the
+    also line, while it was held.
+    """
+    shown = _finding("shown", triggering_entities=["sensor.dishwasher_power"])
+    other = _finding("other", triggering_entities=["sensor.kitchen_plug"])
+    snapshot = _named_snapshot(
+        ("sensor.dishwasher_power", "Dishwasher Power"),
+        ("sensor.kitchen_plug", "Dishwasher"),
+    )
+
+    line, named = _also(shown, [other], snapshot)
+
+    assert line is None
+    assert named == []
+
+
+@pytest.mark.parametrize("raw", ["\u200b", "\u202e\u200b ", "Hall, Upstairs"])
+def test_related_line_never_names_an_invisible_or_ambiguous_name(raw: str) -> None:
+    shown = _finding("shown")
+    hidden = _finding("hidden", triggering_entities=["binary_sensor.hall"])
+    snapshot = _named_snapshot(("binary_sensor.hall", raw))
+
+    line, named = _also(shown, [hidden], snapshot)
+
+    assert line is None
+    assert named == []
+
+
+def test_related_line_strips_control_characters_from_names() -> None:
+    shown = _finding("shown")
+    window = _finding("w", triggering_entities=["binary_sensor.w"])
+    snapshot = _named_snapshot(("binary_sensor.w", "Kitchen\u202e\nWindow"))
+
+    line, _named = _also(shown, [window], snapshot)
+
+    assert line == "Also: Kitchen Window"
+
+
+def test_related_line_leaves_out_a_partner_routed_to_another_phone() -> None:
+    shown = _finding("shown", triggering_entities=["binary_sensor.front_door"])
+    garage = _finding("garage", triggering_entities=["binary_sensor.garage_door"])
+    snapshot = _minimal_snapshot(area="Front")
+    snapshot["entities"].append(
+        {
+            **snapshot["entities"][0],
+            "entity_id": "binary_sensor.garage_door",
+            "area": "Garage",
+        }
+    )
+    options = {
+        CONF_NOTIFY_SERVICE: "notify.mobile_app_phone",
+        CONF_SENTINEL_AREA_NOTIFY_MAP: {"Garage": "notify.mobile_app_garage"},
+    }
+
+    line, named = _also(shown, [garage], snapshot, options)
+
+    assert line is None
+    assert named == []
+
+
+def test_related_line_names_a_multi_device_finding_only_whole() -> None:
+    """A finding counts as named only when every one of its devices is listed."""
+    shown = _finding("shown")
+    long_name = "binary_sensor." + "very_long_window_name_" * 2
+    first = _finding("first", triggering_entities=["binary_sensor.kitchen_window"])
+    pair = _finding("pair", triggering_entities=[long_name + "c", long_name + "d"])
+
+    line, named = _also(shown, [first, pair])
+
+    assert named == [first]
+    assert line is not None
+    assert len(line) <= MAX_ALSO_LINE_CHARS
+    assert line.endswith("+2 more")
+
+
+def test_related_line_leaves_out_a_partner_whose_name_alone_overflows() -> None:
+    huge = _finding("huge", triggering_entities=["binary_sensor." + "x" * 200])
+
+    line, named = _also(_finding("shown"), [huge])
+
+    assert line is None
+    assert named == []
+
+
+def test_related_line_czech() -> None:
+    hass = DummyHass()
+    hass.config.language = "cs"
+    window = _finding("w", triggering_entities=["binary_sensor.kitchen_window"])
+
+    line, _named = _also(_finding("shown"), [window], hass=hass)
+
+    assert line == "Také: Kitchen Window"
+
+
+@pytest.mark.asyncio
+async def test_async_notify_appends_also_line_to_push_and_persistent() -> None:
+    notifier, hass, _s, _a = _make_notifier(
+        {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    )
+    finding = _finding_with_severity("high", anomaly_id="also1")
+
+    await notifier.async_notify(
+        finding,
+        _minimal_snapshot(),  # type: ignore[arg-type]
+        "Front door is open.",
+        also_line="Also: Kitchen_Window",
+    )
+
+    message = hass.services.calls[0]["data"]["message"]
+    assert message == "Front door is open.\nAlso: Kitchen_Window"
+    # The buttons still answer for the shown finding alone.
+    actions = hass.services.calls[0]["data"]["data"]["actions"]
+    assert all(action["action"].endswith("_also1") for action in actions)
+
+    notifier_p, hass_p, _s, _a = _make_notifier({})
+    await notifier_p.async_notify(
+        finding,
+        _minimal_snapshot(),  # type: ignore[arg-type]
+        "Front door is open.",
+        also_line="Also: Kitchen_Window",
+    )
+    persistent = hass_p.services.calls[0]["data"]["message"]
+    assert persistent == "Front door is open.\n\nAlso: Kitchen\\_Window"
+
+
+@pytest.mark.asyncio
+async def test_grouped_push_is_never_held_for_the_burst_batch() -> None:
+    """
+    The engine holds every finding the also line names, so it must go out now.
+
+    The batch can cut a line past its cap or be lost at unload.
+    """
+    notifier, hass, _s, _a = _make_notifier(
+        {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    )
+    snapshot = _minimal_snapshot()
+    for i in range(3):
+        await notifier.async_notify(
+            _finding_with_severity("low", anomaly_id=f"burst{i}"),
+            snapshot,  # type: ignore[arg-type]
+            f"Burst {i}.",
+        )
+
+    sent = await notifier.async_notify(
+        _finding_with_severity("low", anomaly_id="grouped"),
+        snapshot,  # type: ignore[arg-type]
+        "Front door is open.",
+        also_line="Also: Kitchen Window",
+    )
+
+    assert sent is True
+    assert notifier._held_batch == []
+    assert hass.services.calls[-1]["data"]["message"].endswith("Also: Kitchen Window")
+
+
+# ---------------------------------------------------------------------------
+# Same-device conditions on the also line (field test of #727)
+# ---------------------------------------------------------------------------
+
+_GARAGE = "binary_sensor.garage_and_play_room_windows"
+_PANEL = "alarm_control_panel.home_alarm"
+
+
+def _rule_finding(
+    anomaly_id: str,
+    rule_type: str,
+    evidence: dict[str, Any],
+    entities: list[str],
+    severity: str = "medium",
+) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id=anomaly_id,
+        type=rule_type,
+        severity=severity,  # type: ignore[arg-type]
+        confidence=0.6,
+        triggering_entities=entities,
+        evidence=evidence,
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+
+
+def _garage_group() -> tuple[AnomalyFinding, dict[str, AnomalyFinding]]:
+    """Replay of the overnight group: one window, six rules, 2026-10-07."""
+    shown = _rule_finding(
+        "night",
+        "open_entry_at_night_when_home_window",
+        {"template_id": "open_entry_at_night_when_home", "entry_entity_id": _GARAGE},
+        [_GARAGE],
+    )
+    partners = {
+        "home": _rule_finding(
+            "home",
+            "open_entry_when_home_window",
+            {"template_id": "open_entry_when_home", "entry_entity_id": _GARAGE},
+            [_GARAGE],
+        ),
+        "disarmed": _rule_finding(
+            "disarmed",
+            "alarm_disarmed_open_entry_alarm_control_panel_home_alarm",
+            {"template_id": "alarm_disarmed_open_entry", "entry_entity_id": _GARAGE},
+            [_PANEL, _GARAGE],
+            severity="high",
+        ),
+        "duration": _rule_finding(
+            "duration",
+            "candidate_garage_window_open_away_night",
+            {
+                "template_id": "entity_state_duration",
+                "entity_id": _GARAGE,
+                "state": "on",
+            },
+            [_GARAGE],
+        ),
+        "openings": _rule_finding(
+            "openings",
+            "multiple_openings_simultaneous",
+            {"template_id": "multiple_entries_open"},
+            ["binary_sensor.garage_door", _GARAGE],
+            severity="high",
+        ),
+        "motion": _rule_finding(
+            "motion",
+            "motion_at_night_disarmed",
+            {"template_id": "motion_detected_at_night_while_alarm_disarmed"},
+            [_PANEL, "binary_sensor.backyard_motion"],
+            severity="low",
+        ),
+    }
+    return shown, partners
+
+
+def _garage_snapshot(
+    friendly_name: str = "Garage and Play Room Windows",
+    device_class: str | None = "window",
+    domain: str = "binary_sensor",
+) -> dict[str, Any]:
+    snapshot = _minimal_snapshot()
+    snapshot["entities"] = [
+        {
+            **snapshot["entities"][0],
+            "entity_id": _GARAGE,
+            "domain": domain,
+            "friendly_name": friendly_name,
+            "attributes": {"device_class": device_class} if device_class else {},
+        },
+        # The home's only alarm panel: "alarm disarmed" identifies it.
+        {
+            **snapshot["entities"][0],
+            "entity_id": _PANEL,
+            "domain": "alarm_control_panel",
+            "friendly_name": "Home Alarm",
+            "attributes": {},
+        },
+    ]
+    return snapshot
+
+
+def test_related_line_folds_one_windows_conditions_into_one_push() -> None:
+    """
+    Field test: one open window tripped six rules overnight, 14 pushes.
+
+    Its curated conditions are named with the window; rules without a
+    curated phrase, and rules about other devices, keep their own push.
+    """
+    shown, partners = _garage_group()
+
+    line, named = _also(shown, list(partners.values()), _garage_snapshot())
+
+    assert line == (
+        "Also: Garage and Play Room Windows "
+        "(alarm disarmed, open while home, open too long)"
+    )
+    assert {f.anomaly_id for f in named} == {"disarmed", "home", "duration"}
+
+
+def test_related_line_never_uses_an_approved_rules_own_label() -> None:
+    """A rule id the model wrote can name another condition entirely."""
+    shown, _partners = _garage_group()
+    away_named = _rule_finding(
+        "away",
+        "candidate_garage_window_open_away_night",
+        {"template_id": "baseline_deviation", "entity_id": _GARAGE},
+        [_GARAGE],
+    )
+
+    assert _also(shown, [away_named], _garage_snapshot()) == (None, [])
+
+
+def test_related_line_names_a_repeat_of_the_shown_condition_with_its_phrase() -> None:
+    """
+    A partner is held only when its own phrase is on the line.
+
+    Eliding a phrase the shown finding "already states" relied on copy that,
+    for an unlabeled approved rule, never says it.
+    """
+    shown, partners = _garage_group()
+    repeat = _rule_finding(
+        "repeat",
+        "candidate_1",
+        {"template_id": "open_entry_at_night", "entry_entity_id": _GARAGE},
+        [_GARAGE],
+    )
+
+    line, named = _also(shown, [repeat, partners["disarmed"]], _garage_snapshot())
+
+    assert line == "Also: Garage and Play Room Windows (alarm disarmed, open at night)"
+    assert {f.anomaly_id for f in named} == {"repeat", "disarmed"}
+
+
+@pytest.mark.parametrize(
+    ("device_class", "domain"),
+    [("motion", "binary_sensor"), ("lock", "binary_sensor"), (None, "light")],
+)
+def test_related_line_never_calls_a_non_entry_device_open(
+    device_class: str | None, domain: str
+) -> None:
+    """Approved rules pick devices by name; "on" is not always "open"."""
+    shown, partners = _garage_group()
+
+    line, named = _also(
+        shown,
+        [partners["duration"], partners["home"]],
+        _garage_snapshot(device_class=device_class, domain=domain),
+    )
+
+    assert line is None
+    assert named == []
+
+
+def test_related_line_says_unlocked_only_for_a_lock() -> None:
+    lock_id = "lock.garage_door_lock"
+    shown = _rule_finding(
+        "shown",
+        "unlocked_lock_at_night",
+        {"entity_id": lock_id},
+        [lock_id],
+        severity="high",
+    )
+    unlocked = _rule_finding(
+        "unlocked",
+        "candidate_lock_open",
+        {
+            "template_id": "entity_state_duration",
+            "entity_id": lock_id,
+            "state": "unlocked",
+        },
+        [lock_id],
+    )
+    snapshot = _minimal_snapshot()
+    snapshot["entities"] = [
+        {
+            **snapshot["entities"][0],
+            "entity_id": lock_id,
+            "domain": "lock",
+            "friendly_name": "Garage Door Lock",
+            "attributes": {},
+        }
+    ]
+
+    line, named = _also(shown, [unlocked], snapshot)
+
+    assert line == "Also: Garage Door Lock (unlocked too long)"
+    assert named == [unlocked]
+
+
+def test_related_line_never_leaves_an_alarm_panel_unidentified() -> None:
+    """
+    With two panels, "alarm disarmed" does not say which one.
+
+    Neither panel's finding is the shown one, so neither is named.
+    """
+    shown, partners = _garage_group()
+    other_panel = _rule_finding(
+        "other-panel",
+        "alarm_disarmed_open_entry_alarm_control_panel_studio",
+        {"template_id": "alarm_disarmed_open_entry", "entry_entity_id": _GARAGE},
+        ["alarm_control_panel.studio", _GARAGE],
+        severity="high",
+    )
+    snapshot = _garage_snapshot()
+    snapshot["entities"].append(
+        {**snapshot["entities"][1], "entity_id": "alarm_control_panel.studio"}
+    )
+
+    line, named = _also(shown, [partners["disarmed"], other_panel], snapshot)
+
+    assert line is None
+    assert named == []
+
+
+def test_related_line_names_the_shown_findings_own_panel() -> None:
+    """A panel the push is already about needs no name, even with two."""
+    _shown, partners = _garage_group()
+    shown = partners["disarmed"]
+    duration = partners["duration"]
+    snapshot = _garage_snapshot()
+    snapshot["entities"].append(
+        {**snapshot["entities"][1], "entity_id": "alarm_control_panel.studio"}
+    )
+
+    line, named = _also(shown, [duration], snapshot)
+
+    assert line == "Also: Garage and Play Room Windows (open too long)"
+    assert named == [duration]
+
+
+def test_related_line_does_not_treat_a_lone_select_as_the_alarm() -> None:
+    """An approved alarm rule may watch an alarm-mode select, not a panel."""
+    shown, _partners = _garage_group()
+    select_alarm = _rule_finding(
+        "select-alarm",
+        "alarm_disarmed_open_entry_select_alarm_mode",
+        {"template_id": "alarm_disarmed_open_entry", "entry_entity_id": _GARAGE},
+        ["select.alarm_mode", _GARAGE],
+        severity="high",
+    )
+    snapshot = _garage_snapshot()
+    snapshot["entities"].append(
+        {
+            **snapshot["entities"][0],
+            "entity_id": "select.alarm_mode",
+            "domain": "select",
+        }
+    )
+
+    assert _also(shown, [select_alarm], snapshot) == (None, [])
+
+
+def test_related_line_refuses_text_matching_an_invisible_char_lookalike() -> None:
+    shown, partners = _garage_group()
+    snapshot = _garage_snapshot()
+    snapshot["entities"].append(
+        {
+            **snapshot["entities"][0],
+            "entity_id": "binary_sensor.decoy",
+            "friendly_name": "Garage and Play\u200b Room Windows (alarm disarmed)",
+        }
+    )
+
+    assert _also(shown, [partners["disarmed"]], snapshot) == (None, [])
+
+
+def test_related_line_refuses_text_matching_another_devices_name() -> None:
+    """The rendered "<device> (<condition>)" must not be some device's name."""
+    shown, partners = _garage_group()
+    snapshot = _garage_snapshot()
+    snapshot["entities"].append(
+        {
+            **snapshot["entities"][0],
+            "entity_id": "binary_sensor.decoy",
+            "friendly_name": "Garage and Play Room Windows (alarm disarmed)",
+        }
+    )
+
+    line, named = _also(shown, [partners["disarmed"]], snapshot)
+
+    assert line is None
+    assert named == []
+
+
+def test_related_line_refuses_a_name_that_looks_like_conditions() -> None:
+    shown, partners = _garage_group()
+
+    line, named = _also(
+        shown,
+        [partners["disarmed"]],
+        _garage_snapshot(friendly_name="Garage Window (open too long)"),
+    )
+
+    assert line is None
+    assert named == []
+
+
+def test_related_line_same_device_condition_respects_routing() -> None:
+    shown, partners = _garage_group()
+    snapshot = _garage_snapshot()
+    snapshot["entities"][0]["area"] = "Garage"
+    snapshot["entities"].append(
+        {**snapshot["entities"][0], "entity_id": _PANEL, "area": "Hall"}
+    )
+    options = {
+        CONF_NOTIFY_SERVICE: "notify.mobile_app_phone",
+        CONF_SENTINEL_AREA_NOTIFY_MAP: {"Hall": "notify.mobile_app_hall"},
+    }
+
+    line, named = _also(shown, [partners["disarmed"]], snapshot, options)
+
+    assert line is None
+    assert named == []
+
+
+def test_related_line_same_device_conditions_czech() -> None:
+    hass = DummyHass()
+    hass.config.language = "cs"
+    shown, partners = _garage_group()
+
+    line, _named = _also(shown, [partners["disarmed"]], _garage_snapshot(), hass=hass)
+
+    assert line == "Také: Garage and Play Room Windows (alarm vypnutý)"

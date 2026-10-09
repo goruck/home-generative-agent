@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from custom_components.home_generative_agent.const import (
+    ACTION_POLICY_AUTO_EXECUTE,
     ACTION_POLICY_BLOCKED,
     CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
     CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
@@ -29,6 +30,9 @@ from custom_components.home_generative_agent.sentinel.execution import (
 from custom_components.home_generative_agent.sentinel.models import (
     AnomalyFinding,
     CompoundFinding,
+)
+from custom_components.home_generative_agent.sentinel.notifier import (
+    MAX_ALSO_LINE_CHARS,
 )
 from custom_components.home_generative_agent.sentinel.suppression import (
     SUPPRESSION_REASON_POLICY_BLOCKED,
@@ -79,8 +83,13 @@ class DummyNotifier:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
-    async def async_notify(self, finding, snapshot, explanation) -> None:  # type: ignore[no-untyped-def]
-        self.calls.append({"finding": finding, "snapshot": snapshot})
+    async def async_notify(  # type: ignore[no-untyped-def]
+        self, finding, snapshot, explanation, also_line=None
+    ) -> bool | None:
+        self.calls.append(
+            {"finding": finding, "snapshot": snapshot, "also_line": also_line}
+        )
+        return None
 
 
 class DummyAudit:
@@ -97,6 +106,8 @@ class DummyAudit:
                 "finding": finding,
                 "snapshot": snapshot,
                 "suppression_reason_code": kwargs.get("suppression_reason_code"),
+                "shown_anomaly_id": kwargs.get("shown_anomaly_id"),
+                "named_anomaly_ids": kwargs.get("named_anomaly_ids"),
                 "triage_decision": kwargs.get("triage_decision"),
                 "triage_reason_code": kwargs.get("triage_reason_code"),
                 "canary_would_execute": kwargs.get("canary_would_execute"),
@@ -180,8 +191,10 @@ def test_delivered_reason_keeps_the_code_unless_the_push_was_dropped() -> None:
 class _DroppingNotifier(DummyNotifier):
     """A notifier that drops every push as a repeat within its cooldown."""
 
-    async def async_notify(self, finding, snapshot, explanation) -> bool:  # type: ignore[no-untyped-def]
-        await super().async_notify(finding, snapshot, explanation)
+    async def async_notify(  # type: ignore[no-untyped-def]
+        self, finding, snapshot, explanation, also_line=None
+    ) -> bool:
+        await super().async_notify(finding, snapshot, explanation, also_line)
         return False
 
 
@@ -919,13 +932,16 @@ def _standing_finding(
     *,
     severity: Literal["low", "medium", "high"] = "medium",
     confidence: float = 0.9,
+    entities: list[str] | None = None,
 ) -> AnomalyFinding:
     return AnomalyFinding(
         anomaly_id=anomaly_id,
         type=finding_type,
         severity=severity,
         confidence=confidence,
-        triggering_entities=["lock.garage_door_lock"],
+        triggering_entities=(
+            ["lock.garage_door_lock"] if entities is None else entities
+        ),
         evidence={"state": "unlocked"},
         suggested_actions=[],
         is_sensitive=False,
@@ -1004,17 +1020,20 @@ async def test_compound_prompts_only_the_constituent_it_showed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    A passing constituent the push did not show is not held for the prompt TTL.
+    A passing constituent the push neither showed nor named is not prompted.
 
     With stable ids, a held loser matched its pending prompt and lost the
     pick again whenever both prompts expired, so it was never pushed while its
-    partner stood.  It now only cools down and comes due on its own.
+    partner stood.  It now only cools down and comes due on its own.  A
+    finding with no devices cannot go on the also line (issue #727).
     """
     engine, notifier, _audit = _make_engine(monkeypatch, _make_snapshot())
     suppression = cast("DummySuppression", cast("Any", engine)._suppression)
     t0 = datetime(2025, 1, 1, 12, 0, tzinfo=UTC)
     door = _standing_finding("door-id", "open_entry_while_away", confidence=0.9)
-    lock = _standing_finding("lock-id", "garage_door_unlocked_duration", confidence=0.5)
+    lock = _standing_finding(
+        "lock-id", "garage_door_unlocked_duration", confidence=0.5, entities=[]
+    )
 
     assert await _dispatch_group(engine, door, lock, at=t0)
     assert notifier.calls[0]["finding"] is door
@@ -1047,6 +1066,204 @@ async def test_compound_shows_the_most_severe_due_constituent(
     )
 
     assert notifier.calls[0]["finding"] is lock
+
+
+def _window(
+    anomaly_id: str, entity_id: str, *, confidence: float = 0.6
+) -> AnomalyFinding:
+    return _standing_finding(
+        anomaly_id,
+        "open_entry_while_away_window",
+        severity="medium",
+        confidence=confidence,
+        entities=[entity_id],
+    )
+
+
+def _open_door(
+    anomaly_id: str, entity_id: str, *, confidence: float = 0.9
+) -> AnomalyFinding:
+    return _standing_finding(
+        anomaly_id,
+        "open_entry_while_away",
+        severity="high",
+        confidence=confidence,
+        entities=[entity_id],
+    )
+
+
+@pytest.mark.asyncio
+async def test_grouped_push_names_its_due_partners_and_prompts_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    One push covers the same condition: due partners are named and held.
+
+    Issue #727: a 15-finding away group sent a push every 10-30 minutes, one
+    per finding.  The push now names the other open entries by device and a
+    curated condition on the shown door by its phrase, and each named one
+    gets the pending-prompt hold its own push would have given it.
+    """
+    engine, notifier, audit = _make_engine(monkeypatch, _make_snapshot())
+    suppression = cast("DummySuppression", cast("Any", engine)._suppression)
+    t0 = datetime(2025, 1, 1, 12, 0, tzinfo=UTC)
+    door = _open_door("door-id", "binary_sensor.front_door")
+    kitchen = _open_door("kitchen-id", "binary_sensor.kitchen_door", confidence=0.5)
+    landing = _open_door("landing-id", "binary_sensor.landing_door", confidence=0.7)
+    disarmed = _standing_finding(
+        "disarmed-id",
+        "alarm_disarmed_open_entry",
+        severity="low",
+        entities=["binary_sensor.front_door"],
+    )
+
+    assert await _dispatch_group(engine, door, kitchen, landing, disarmed, at=t0)
+
+    assert notifier.calls[0]["finding"] is door
+    # The alarm finding on the shown door is named by its condition; the
+    # other doors by device, most severe, then most confident, first.
+    assert notifier.calls[0]["also_line"] == (
+        "Also: Front Door (alarm disarmed), Landing Door, Kitchen Door"
+    )
+    assert set(suppression.state.pending_prompts) == {
+        "door-id",
+        "kitchen-id",
+        "landing-id",
+        "disarmed-id",
+    }
+    assert audit.calls[-1]["shown_anomaly_id"] == "door-id"
+    assert audit.calls[-1]["named_anomaly_ids"] == [
+        "disarmed-id",
+        "landing-id",
+        "kitchen-id",
+    ]
+    # Every finding was told, so nothing comes due after the cooldown.
+    assert not await _dispatch_group(
+        engine, door, kitchen, landing, disarmed, at=t0 + timedelta(minutes=31)
+    )
+
+
+@pytest.mark.asyncio
+async def test_grouped_push_keeps_an_unphrased_same_door_rule_due(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A rule on the shown door without a curated condition phrase pushes itself.
+
+    Its label would be built from an id the discovery model wrote, which can
+    describe another condition.
+    """
+    engine, notifier, _audit = _make_engine(monkeypatch, _make_snapshot())
+    suppression = cast("DummySuppression", cast("Any", engine)._suppression)
+    t0 = datetime(2025, 1, 1, 12, 0, tzinfo=UTC)
+    door = _open_door("door-id", "binary_sensor.front_door")
+    openings = _standing_finding(
+        "openings-id",
+        "multiple_openings_simultaneous",
+        severity="medium",
+        entities=["binary_sensor.front_door"],
+    )
+
+    assert await _dispatch_group(engine, door, openings, at=t0)
+
+    assert notifier.calls[0]["also_line"] is None
+    assert "openings-id" not in suppression.state.pending_prompts
+    assert await _dispatch_group(engine, door, openings, at=t0 + timedelta(minutes=31))
+    assert notifier.calls[1]["finding"] is openings
+
+
+@pytest.mark.asyncio
+async def test_grouped_push_never_names_a_partner_the_policy_acts_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A partner bound for auto-execution is shown itself, not held for 4 h."""
+    engine, notifier, _audit = _make_engine(monkeypatch, _make_snapshot())
+    suppression = cast("DummySuppression", cast("Any", engine)._suppression)
+    door = _open_door("door-id", "binary_sensor.front_door")
+    kitchen = _open_door("kitchen-id", "binary_sensor.kitchen_door", confidence=0.5)
+    real = cast("Any", engine)._execution_service.evaluate_canary
+
+    def _evaluate(finding: AnomalyFinding, *args: Any) -> ActionPolicyResult:
+        result = real(finding, *args)
+        if finding is kitchen:
+            return ActionPolicyResult(
+                action_policy_path=ACTION_POLICY_AUTO_EXECUTE,
+                data_quality=result.data_quality,
+                data_quality_details={},
+                execution_id=None,
+                block_reason=None,
+            )
+        return result
+
+    monkeypatch.setattr(
+        cast("Any", engine)._execution_service, "evaluate_canary", _evaluate
+    )
+
+    await _dispatch_group(engine, door, kitchen, at=datetime(2025, 1, 1, tzinfo=UTC))
+
+    assert notifier.calls[0]["also_line"] is None
+    assert "kitchen-id" not in suppression.state.pending_prompts
+
+
+@pytest.mark.asyncio
+async def test_grouped_push_dropped_as_repeat_names_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A push the notifier dropped never reached the user: partners stay due."""
+    engine, _notifier, audit = _make_engine(monkeypatch, _make_snapshot())
+    notifier = _DroppingNotifier()
+    cast("Any", engine)._notifier = notifier
+    suppression = cast("DummySuppression", cast("Any", engine)._suppression)
+    door = _open_door("door-id", "binary_sensor.front_door")
+    kitchen = _open_door("kitchen-id", "binary_sensor.kitchen_door", confidence=0.5)
+
+    await _dispatch_group(engine, door, kitchen, at=datetime(2025, 1, 1, tzinfo=UTC))
+
+    assert notifier.calls[0]["also_line"] == "Also: Kitchen Door"
+    assert "kitchen-id" not in suppression.state.pending_prompts
+    assert audit.calls[-1]["named_anomaly_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_grouped_push_leaves_out_what_does_not_fit_and_keeps_it_due(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The also line is capped; a finding it could not name gets its own push.
+
+    Counting a finding as alerted when the push never named it would hide it
+    for the prompt TTL behind a partner (the #723 review).
+    """
+    engine, notifier, _audit = _make_engine(monkeypatch, _make_snapshot())
+    suppression = cast("DummySuppression", cast("Any", engine)._suppression)
+    t0 = datetime(2025, 1, 1, 12, 0, tzinfo=UTC)
+    windows = [
+        _window(
+            f"w{i}-id",
+            f"binary_sensor.upstairs_guest_bedroom_window_{i}",
+            confidence=0.9 - i / 100,
+        )
+        for i in range(9)
+    ]
+    shown, partners = windows[0], windows[1:]
+
+    assert await _dispatch_group(engine, *windows, at=t0)
+
+    assert notifier.calls[0]["finding"] is shown
+    also_line = cast("str", notifier.calls[0]["also_line"])
+    assert len(also_line) <= MAX_ALSO_LINE_CHARS
+    named = [w for w in partners if w.anomaly_id in suppression.state.pending_prompts]
+    left_out = [w for w in partners if w not in named]
+    assert named
+    assert left_out
+    assert also_line.endswith(f"+{len(left_out)} more")
+    for window in named:
+        name = window.triggering_entities[0].split(".")[1].replace("_", " ").title()
+        assert name in also_line
+
+    # After its cooldown the first one left out is shown itself.
+    assert await _dispatch_group(engine, *windows, at=t0 + timedelta(minutes=31))
+    assert notifier.calls[1]["finding"] is left_out[0]
 
 
 @pytest.mark.asyncio

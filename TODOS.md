@@ -550,15 +550,15 @@ validation.
 
 ---
 
-### A response to one push can land on a later compound record
+### A grouped push that fails to deliver still holds every finding it named
 
-**What:** `AuditStore.async_update_response` (`audit/store.py`) matches a response to the newest `not_suppressed` record whose finding, or any compound constituent, carries the anomaly id. A compound record stores every constituent, including partners still pending from an earlier push, so answering the earlier push for A writes the response (and any action outcome) onto the later record that showed B. Answering both pushes then writes the same record twice and loses one response.
+**What:** `_dispatch_compound` (`sentinel/engine.py`) registers the shown finding and every finding the "Also: ..." line named as pending prompts once `SentinelNotifier.async_notify` returns. The notifier calls the notify service with `blocking=False` and returns True once the call is scheduled, and the mobile_app notify service swallows push errors, so a push that never reached the phone still holds all of them for the prompt TTL (4 h) with nothing logged.
 
-**Why:** Pre-existing; Codex flagged it in the #723 review. Since #723 the compound push shows only a constituent that came due, so the record that showed B routinely also lists A.
+**Why:** Found by both adversarial passes in the #727 review. Before #727 an undelivered push cost only the shown finding; a grouped push now multiplies that by the number of named findings.
 
-**How to apply:** Store the anomaly id of the constituent the push showed on each audit record (for example `notification.shown_anomaly_id`) and match responses against it, falling back to the constituent scan only for records written before the field existed. Pin it with a test that answers two pushes whose records share a constituent.
+**How to apply:** There is no delivery receipt from mobile_app today, so a fix needs one: either a blocking call that surfaces service exceptions (catches a missing or misconfigured service, not a failed APNs/FCM push), or the companion app's notification-received event where it exists. Until then, keep the hold for named findings at the same footing as the shown one.
 
-**Effort:** S
+**Effort:** M
 **Priority:** P3
 
 ---
@@ -985,20 +985,6 @@ Since step 6 this also covers `radio_new_device_joined`, and since step 7 `netwo
 **Effort:** M
 **Priority:** P2
 **Depends on:** PR #511 (reason-code relabeling)
-
----
-
-### Persist notified anomaly_id so compound responses attach to the right record
-
-**What:** `async_update_response` matches compound records by ANY constituent `anomaly_id`, but the notification only carries the highest-confidence constituent's id. If an older compound C1 notified via constituent A, and a newer compound C2 also contains A but notified via higher-confidence B, a late user response for A attaches to C2 — wrong compound, corrupted response KPIs and false-positive attribution.
-
-**Why:** Found by Codex review of #511. Pre-existing; #511's not_suppressed preference doesn't change it (newest-match semantics already existed). Needs a schema touch, so it deserves its own change.
-
-**How to apply:** Record the dispatched constituent's `anomaly_id` in the audit record at append time (e.g. `notification.notified_anomaly_id`, set from `best.anomaly_id` in `_dispatch_compound` / `finding.anomaly_id` in the simple path). In `async_update_response`, match on `notified_anomaly_id` first, falling back to the current constituent scan for old records.
-
-**Effort:** S
-**Priority:** P3
-**Depends on:** PR #511
 
 ---
 

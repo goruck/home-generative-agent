@@ -116,6 +116,14 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "batch_title": "Home Update",
         "batch_message": "{count} home update{plural}: {type_summary}.",
         "batch_more": "\u2026and {count} more",
+        "also_line": "Also: {names}",
+        "also_more": "+{count} more",
+        "condition_open_while_away": "open while away",
+        "condition_open_while_home": "open while home",
+        "condition_open_at_night": "open at night",
+        "condition_alarm_disarmed": "alarm disarmed",
+        "condition_open_too_long": "open too long",
+        "condition_unlocked_too_long": "unlocked too long",
         "digest_title": "Sentinel Daily Digest",
         "digest_message": (
             "Sentinel: {count} alert{plural} in the last 24 h ({sev_summary})."
@@ -231,6 +239,14 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "batch_title": "Novinka z domova",
         "batch_message": "{count} novinek z domova: {type_summary}.",
         "batch_more": "\u2026a dal\u0161\u00edch {count}",
+        "also_line": "Také: {names}",
+        "also_more": "+{count} další",
+        "condition_open_while_away": "otevřeno v nepřítomnosti",
+        "condition_open_while_home": "otevřeno v přítomnosti",
+        "condition_open_at_night": "otevřeno v noci",
+        "condition_alarm_disarmed": "alarm vypnutý",
+        "condition_open_too_long": "otevřeno příliš dlouho",
+        "condition_unlocked_too_long": "odemčeno příliš dlouho",
         "digest_title": "Denní přehled Sentinelu",
         "digest_message": (
             "Sentinel: {count} upozornění za posledních 24 h ({sev_summary})."
