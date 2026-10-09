@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
 import inspect
 import re
 import sys
@@ -2187,13 +2188,18 @@ def test_turn_start_padding_tracks_home_assistants_streaming_threshold(
     Reads Home Assistant's constant, so a change to it is caught here rather
     than as an acknowledgement that silently waits for the model again.
     """
-    from homeassistant.components.assist_pipeline import (  # noqa: PLC0415
-        pipeline as ha_pipeline,
-    )
-
     from custom_components.home_generative_agent.conversation import (  # noqa: PLC0415
+        _STREAM_RESPONSE_CHARS_MODULES,
         _padded_for_streaming,
         _stream_response_chars,
+    )
+
+    # The running core must define the constant in one of the modules we
+    # read; if HA moves it again, this fails instead of the default masking it.
+    ha_pipeline = next(
+        module
+        for name in _STREAM_RESPONSE_CHARS_MODULES
+        if hasattr(module := importlib.import_module(name), "STREAM_RESPONSE_CHARS")
     )
 
     _stream_response_chars.cache_clear()

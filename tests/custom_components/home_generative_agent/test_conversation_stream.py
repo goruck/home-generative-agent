@@ -63,6 +63,7 @@ def _stub_ha_conversation() -> None:
 _stub_ha_conversation()
 
 from custom_components.home_generative_agent import conversation as hga_conversation
+from custom_components.home_generative_agent.agent.helpers import chat_log_tool_result
 from custom_components.home_generative_agent.conversation import (
     _get_synthetic_rejections,
     _handle_on_chain_end,
@@ -75,6 +76,13 @@ from custom_components.home_generative_agent.conversation import (
     _with_tool_acknowledgement,
 )
 from custom_components.home_generative_agent.core.utils import extract_final
+
+
+def _tool_data(delta: Any) -> Any:
+    """Return a tool-result delta's data in either HA chat-log shape."""
+    if "tool_result" in delta:
+        return delta["tool_result"]
+    return delta["result"].data
 
 
 async def _streamed_text(event_stream: AsyncGenerator[dict[str, Any]]) -> str:
@@ -409,7 +417,7 @@ async def test_stream_partial_results() -> None:
     assert cast("Any", deltas[2])["tool_call_id"] == "call_1"
     assert cast("Any", deltas[3])["role"] == "tool_result"
     assert cast("Any", deltas[3])["tool_call_id"] == "call_2"
-    tool_result = cast("Any", deltas[3])["tool_result"]
+    tool_result = _tool_data(deltas[3])
     assert "rejected by routing policy" in tool_result["error"]
 
 
@@ -463,7 +471,7 @@ async def test_stream_with_tool_calls() -> None:
         "role": "tool_result",
         "tool_call_id": "call_1",
         "tool_name": "turn_on",
-        "tool_result": {"result": "Light turned on"},
+        **chat_log_tool_result({"result": "Light turned on"}),
     }
 
 
@@ -508,7 +516,9 @@ async def test_stream_orphaned_tool_calls() -> None:
         "role": "tool_result",
         "tool_call_id": "call_1",
         "tool_name": "turn_on",
-        "tool_result": {"error": "Tool execution rejected by routing policy."},
+        **chat_log_tool_result(
+            {"error": "Tool execution rejected by routing policy."}, error=True
+        ),
     }
 
 
@@ -685,7 +695,7 @@ async def test_stream_idless_tool_calls() -> None:
 
     result_delta = cast("ToolResultContentDeltaDict", deltas[2])
     assert result_delta.get("tool_call_id") == generated_id
-    assert result_delta.get("tool_result") == {"result": "Success"}
+    assert _tool_data(result_delta) == {"result": "Success"}
 
 
 @pytest.mark.asyncio
@@ -718,7 +728,7 @@ async def test_stream_graph_error_persistence_guard() -> None:
     assert deltas[2]["role"] == "tool_result"
     result_delta = cast("ToolResultContentDeltaDict", deltas[2])
     assert result_delta.get("tool_call_id") == "call_1"
-    tool_result = cast("dict[str, Any]", result_delta.get("tool_result"))
+    tool_result = cast("dict[str, Any]", _tool_data(result_delta))
     assert "failed mid-stream" in tool_result["error"]
 
 

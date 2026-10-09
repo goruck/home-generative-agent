@@ -11,6 +11,7 @@ import weakref
 from dataclasses import replace
 from datetime import datetime, timedelta
 from functools import partial
+from types import ModuleType
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict
 
 import homeassistant.util.dt as dt_util
@@ -53,17 +54,21 @@ def _resolve_converter() -> tuple[Any, Any]:
     other's ``Schema``. Core's ``llm`` helper imports exactly the pair the
     running core was built against (``convert`` + ``UNSUPPORTED`` from
     voluptuous-openapi on <= 2026.8; ``to_openapi`` + ``UNSUPPORTED`` from
-    probatio on 2026.9+), so prefer those re-exports — they cannot diverge
-    from core by construction, where sniffing ``vol.Schema.__module__``
-    breaks the day probatio stamps a voluptuous-compatible ``__module__`` on
-    its shim. The sniff survives only as a fallback for a core that stops
-    re-exporting them. Neither library is declared in our manifest on
-    purpose: core installs exactly the one it uses.
+    probatio on 2026.9; a bare ``import probatio`` from 2026.10), so prefer
+    those — they cannot diverge from core by construction, where sniffing
+    ``vol.Schema.__module__`` breaks the day probatio stamps a
+    voluptuous-compatible ``__module__`` on its shim. The sniff survives only
+    as a fallback for a core that exposes neither. Neither library is
+    declared in our manifest on purpose: core installs exactly the one it
+    uses.
     """
     core_convert = getattr(llm, "to_openapi", None) or getattr(llm, "convert", None)
     core_unsupported = getattr(llm, "UNSUPPORTED", None)
     if core_convert is not None and core_unsupported is not None:
         return core_convert, core_unsupported
+    core_probatio = getattr(llm, "probatio", None)
+    if isinstance(core_probatio, ModuleType):
+        return core_probatio.to_openapi, core_probatio.UNSUPPORTED
     if vol.Schema.__module__.startswith("probatio"):
         module = importlib.import_module("probatio")
         return module.to_openapi, module.UNSUPPORTED

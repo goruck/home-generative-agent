@@ -29,9 +29,16 @@ from custom_components.home_generative_agent.agent import helpers
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-# Core re-exports the sentinel of whichever converter library it was built
-# against, and that is exactly the object its own serializers hand back.
-_CORE_UNSUPPORTED: Any = llm.UNSUPPORTED  # pyright: ignore[reportPrivateImportUsage]
+# Core imports the sentinel of whichever converter library it was built
+# against, and that is exactly the object its own serializers hand back:
+# re-exported by name through 2026.9, reached via ``llm.probatio`` from 2026.10.
+_CORE_UNSUPPORTED: Any = getattr(llm, "UNSUPPORTED", None) or llm.probatio.UNSUPPORTED  # pyright: ignore[reportPrivateImportUsage]
+
+_CORE_CONVERT: Any = (
+    getattr(llm, "to_openapi", None)
+    or getattr(llm, "convert", None)
+    or llm.probatio.to_openapi  # pyright: ignore[reportPrivateImportUsage]
+)
 
 _IS_PROBATIO_CORE = vol.Schema.__module__.startswith("probatio")
 
@@ -42,9 +49,7 @@ class _Opaque:
 
 def test_converter_and_sentinel_match_core_llm_exports() -> None:
     """On any supported core, the converter pair is core's own re-exports."""
-    core_convert = getattr(llm, "to_openapi", None) or getattr(llm, "convert", None)
-    assert core_convert is not None
-    assert helpers.convert is core_convert
+    assert helpers.convert is _CORE_CONVERT
     assert helpers.UNSUPPORTED is _CORE_UNSUPPORTED
 
 
@@ -127,7 +132,7 @@ def test_llm_exports_win_over_the_module_sniff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    Core's ``llm`` re-exports beat the ``__module__`` heuristic.
+    Core's ``llm`` exports beat the ``__module__`` heuristic.
 
     This is the divergence-proofing: even if a future probatio stamps a
     voluptuous-compatible ``__module__`` on its shim (or vice versa), the
@@ -140,8 +145,7 @@ def test_llm_exports_win_over_the_module_sniff(
         monkeypatch.setitem(sys.modules, "probatio", probatio)
         monkeypatch.setitem(sys.modules, "voluptuous", aliased_vol)
         importlib.reload(helpers)
-        core_convert = getattr(llm, "to_openapi", None) or getattr(llm, "convert", None)
-        assert helpers.convert is core_convert
+        assert helpers.convert is _CORE_CONVERT
         assert helpers.UNSUPPORTED is _CORE_UNSUPPORTED
         # The fake probatio's sentinel is importable, so it is accepted too.
         assert helpers._is_unsupported(probatio.UNSUPPORTED)
@@ -156,7 +160,7 @@ def test_module_sniff_fallback_when_llm_stops_reexporting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    Without the ``llm`` re-exports, the sniff picks the aliasing library.
+    Without the ``llm`` exports, the sniff picks the aliasing library.
 
     Foreign sentinels still defer: a serializer built against the *other*
     library hands back its own sentinel, and treating that as a rendered
@@ -175,6 +179,7 @@ def test_module_sniff_fallback_when_llm_stops_reexporting(
         monkeypatch.delattr(llm, "convert", raising=False)
         monkeypatch.delattr(llm, "to_openapi", raising=False)
         monkeypatch.delattr(llm, "UNSUPPORTED", raising=False)
+        monkeypatch.delattr(llm, "probatio", raising=False)
         importlib.reload(helpers)
         assert helpers.convert is probatio.to_openapi
         assert helpers.UNSUPPORTED is probatio.UNSUPPORTED
