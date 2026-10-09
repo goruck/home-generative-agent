@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 from homeassistant.helpers.httpx_client import get_async_client
@@ -207,8 +207,13 @@ class OpenAIClientCache:
         client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
-            http_client=get_async_client(hass),
-            timeout=httpx.Timeout(self._timeout_s, connect=CONNECT_TIMEOUT_S),
+            # openai 3.x types these as httpx2 objects but still accepts HA's
+            # httpx client and timeout at runtime, as HA's own OpenAI
+            # integration relies on.
+            http_client=cast("Any", get_async_client(hass)),
+            timeout=cast(
+                "Any", httpx.Timeout(self._timeout_s, connect=CONNECT_TIMEOUT_S)
+            ),
             max_retries=0,
         )
         self._client = client

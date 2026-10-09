@@ -2123,6 +2123,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 http_async_client=http_async_client,
                 streaming=True,
                 stream_usage=True,
+                # langchain-openai 1.6 routes some model names (gpt-6 with
+                # tools, *codex*, *-pro) to the Responses API on its own; this
+                # integration is built and tested on Chat Completions.
+                use_responses_api=False,
             ).configurable_fields(
                 model_name=ConfigurableField(id="model_name"),
                 temperature=ConfigurableField(id="temperature"),
@@ -2230,6 +2234,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 timeout=120,
                 http_client=openai_http_client,
                 http_async_client=http_async_client,
+                # Most OpenAI-compatible servers serve Chat Completions only;
+                # keep langchain-openai 1.6 from switching to /responses by
+                # model name.
+                use_responses_api=False,
             ).configurable_fields(
                 model_name=ConfigurableField(id="model_name"),
                 temperature=ConfigurableField(id="temperature"),

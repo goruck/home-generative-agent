@@ -508,7 +508,7 @@ async def test_authentication_error_returns_error() -> None:
     entity, _ = _make_entity()
     error = hga_stt.AuthenticationError(
         "bad key",
-        response=httpx.Response(
+        response=httpx.Response(  # pyright: ignore[reportArgumentType]  # httpx vs openai 3's httpx2
             401, request=httpx.Request("POST", "https://api.openai.com")
         ),
         body=None,
