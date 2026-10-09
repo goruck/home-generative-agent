@@ -8,4 +8,4 @@
 # core reads as the wrong type. Every name we use is the same object in both at
 # runtime (checked against 2026.10). The code keeps ``import voluptuous`` because
 # HA 2026.8, the oldest supported core, does not ship probatio.
-from probatio import *
+from probatio import *  # noqa: F403 -- the whole surface, by design
