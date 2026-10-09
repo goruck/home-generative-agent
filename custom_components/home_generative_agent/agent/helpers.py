@@ -128,6 +128,21 @@ def tool_call_data(result: Any) -> ToolCallData:
     return ToolCallData(result, error=False)
 
 
+def chat_log_tool_result(data: Any, *, error: bool = False) -> dict[str, Any]:
+    """
+    Return the tool result keyword for HA's chat log on this HA version.
+
+    Home Assistant 2026.10 replaced ``ToolResultContent.tool_result`` with
+    ``result: llm.ToolResult``: the old keyword is a TypeError on the content
+    class and a deprecated delta key. Earlier versions have no
+    ``llm.ToolResult`` and take ``tool_result``.
+    """
+    tool_result_cls = getattr(llm, "ToolResult", None)
+    if tool_result_cls is None:
+        return {"tool_result": data}
+    return {"result": tool_result_cls(data=data, error=error)}
+
+
 def active_llm_api_ids(options: Mapping[str, Any]) -> list[str]:
     """
     Return the LLM API ids to expose, defaulting to Assist when unset.
