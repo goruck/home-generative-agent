@@ -31,6 +31,14 @@ their own. See [RELEASING.md](RELEASING.md).
 
 - Sentinel pushes for a low-battery rule approved from discovery now carry a readable subtitle, "Low battery" (Czech: "Slabá baterie"), in place of the rule's internal id ("V1 subject sensor predicate low battery night any"). The `low_battery_sensors` template had no curated label, so the subtitle, the batch summary, the snooze confirmation, and the explanation text used as the push body when the model call fails fell back to the slugified rule id ([#696](https://github.com/goruck/home-generative-agent/pull/696), @hruba202).
 
+## [3.43.3] - 2026-10-08
+
+### Fixed
+
+- The integration failed to start on Home Assistant 2026.10.0 with "Setup failed for custom integration 'home_generative_agent': Requirements for home_generative_agent not found: ['langchain-openai==1.0.3']". Home Assistant 2026.10 moved to `openai` 3.10.0, and the pinned `langchain-openai` 1.0.3 only accepts `openai` below 3, so the requirements could not be installed. This blocked every install, including Ollama-only ones that never use OpenAI. `langchain-openai` is now 1.6.7, which accepts `openai` 2.45 and later. Both providers built on it (OpenAI and OpenAI-compatible) stay on the Chat Completions API they used before; langchain-openai 1.6 would otherwise switch some model names to the Responses API on its own. **The minimum Home Assistant version is now 2026.8.0.** Home Assistant 2026.3 to 2026.7 pin `openai` 2.21, and no `langchain-openai` release accepts both that and the `openai` 3 that 2026.10 requires, so HACS no longer offers this update on those versions; they keep 3.43.2 until Home Assistant is updated ([#735](https://github.com/goruck/home-generative-agent/issues/735)).
+
+- On Home Assistant 2026.10 the agent could not use any Home Assistant tool: every device command and state lookup failed with "Object of type ToolResult is not JSON serializable", so chat and voice could neither read nor control the home. Home Assistant 2026.10 returns tool results wrapped in a new `ToolResult` object, and also renamed the chat log's tool result field. With **schema-first YAML** turned on, every turn that used a tool failed after the device had already acted. A critical action confirmed with the PIN (unlocking a lock, disarming an alarm) ran and then replied with an error instead of confirming. Both are fixed, and the integration reads and writes tool results the way each Home Assistant version expects. A PIN-confirmed action that a tool reports as failed is now reported as failed and stays pending so it can be retried, a failed live-context lookup is no longer reported as "no open windows", and tool calls rejected by routing policy show as errors in **Show Details** ([#735](https://github.com/goruck/home-generative-agent/issues/735)).
+
 ## [3.43.2] - 2026-10-03
 
 ### Fixed

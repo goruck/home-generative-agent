@@ -113,6 +113,7 @@ from .helpers import (
     resolve_critical_action_policy,
     sanitize_tool_args,
     sanitize_tool_text,
+    tool_call_data,
 )
 from .pin_messages import pin_msg
 
@@ -1121,14 +1122,26 @@ async def _execute_pending_action(
     tool_args = sanitize_tool_args(tool_args)
     try:
         tool_input = llm.ToolInput(tool_name=tool_name, tool_args=tool_args)
-        response = await ha_llm_api.async_call_tool(tool_input)
+        response = tool_call_data(await ha_llm_api.async_call_tool(tool_input))
     except (HomeAssistantError, vol.Invalid) as err:
         return None, pin_msg(cfg.get("hass"), "action_execute_failed", err=repr(err))
+    if response.error:
+        # A tool that reports failure through HA 2026.10's error flag did not
+        # act: same reply as a raised error, and the action stays pending.
+        return None, pin_msg(
+            cfg.get("hass"),
+            "action_execute_failed",
+            err=json.dumps(response.data, default=str),
+        )
 
     pending_actions = cfg.get("pending_actions", {})
     pending_actions.pop(resolved_action_id, None)
     return json.dumps(
-        {"status": "completed", "action_id": resolved_action_id, "result": response}
+        {
+            "status": "completed",
+            "action_id": resolved_action_id,
+            "result": response.data,
+        }
     ), None
 
 

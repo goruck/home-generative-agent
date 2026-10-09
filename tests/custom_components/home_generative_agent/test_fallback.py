@@ -599,7 +599,9 @@ def _bad_request_error(
         "code": code,
     }
     return openai.BadRequestError(
-        f"Error code: 400 - {{'error': {body}}}", response=response, body=body
+        f"Error code: 400 - {{'error': {body}}}",
+        response=response,  # pyright: ignore[reportArgumentType]  # httpx vs openai 3's httpx2
+        body=body,
     )
 
 

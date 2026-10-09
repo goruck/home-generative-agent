@@ -45,6 +45,7 @@ from .agent.automation_targets import normalize_notify_service
 from .agent.graph import workflow
 from .agent.helpers import (
     active_llm_api_ids,
+    chat_log_tool_result,
     filter_excluded_tools,
     format_tool,
     is_actuation_tool,
@@ -391,7 +392,10 @@ def _populate_chat_log_from_response(
                     agent_id=agent_id,
                     tool_call_id=msg.tool_call_id,
                     tool_name=msg.name or "",
-                    tool_result=_normalize_tool_result(msg.content),
+                    **chat_log_tool_result(
+                        _normalize_tool_result(msg.content),
+                        error=msg.status == "error",
+                    ),
                 )
             )
 
@@ -473,11 +477,17 @@ def _handle_on_chain_end(
         if tool_call_id in pending_tool_map:
             pending_tool_map.pop(tool_call_id)
             deltas.append(
-                ToolResultContentDeltaDict(
-                    role="tool_result",
-                    tool_call_id=str(tool_call_id),
-                    tool_name=str(msg.name or ""),
-                    tool_result=_normalize_tool_result(msg.content),
+                cast(
+                    "ToolResultContentDeltaDict",
+                    {
+                        "role": "tool_result",
+                        "tool_call_id": str(tool_call_id),
+                        "tool_name": str(msg.name or ""),
+                        **chat_log_tool_result(
+                            _normalize_tool_result(msg.content),
+                            error=msg.status == "error",
+                        ),
+                    },
                 )
             )
 
@@ -502,11 +512,14 @@ def _get_synthetic_rejections(
     ensuring Home Assistant receives a final state for all initiated calls.
     """
     return [
-        ToolResultContentDeltaDict(
-            role="tool_result",
-            tool_call_id=call_id,
-            tool_name=tc.get("name") or "tool",
-            tool_result={"error": error_msg},
+        cast(
+            "ToolResultContentDeltaDict",
+            {
+                "role": "tool_result",
+                "tool_call_id": call_id,
+                "tool_name": tc.get("name") or "tool",
+                **chat_log_tool_result({"error": error_msg}, error=True),
+            },
         )
         for call_id, tc in pending_tool_map.items()
     ]

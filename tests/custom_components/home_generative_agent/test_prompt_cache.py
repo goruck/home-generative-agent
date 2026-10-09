@@ -321,7 +321,7 @@ class _RejectingSamplingChat(_RecordingChat):
             "param": "temperature",
             "code": "unsupported_value",
         }
-        raise openai.BadRequestError(body["message"], response=response, body=body)
+        raise openai.BadRequestError(body["message"], response=response, body=body)  # pyright: ignore[reportArgumentType]  # httpx vs openai 3's httpx2
 
 
 @pytest.mark.asyncio

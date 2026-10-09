@@ -107,6 +107,42 @@ def _is_unsupported(value: Any) -> bool:
     return any(value is sentinel for sentinel in _UNSUPPORTED_SENTINELS)
 
 
+class ToolCallData(NamedTuple):
+    """The JSON data of an HA tool call and whether the tool reported an error."""
+
+    data: Any
+    error: bool
+
+
+def tool_call_data(result: Any) -> ToolCallData:
+    """
+    Return the JSON data of an ``APIInstance.async_call_tool`` result.
+
+    Home Assistant 2026.10 wraps the data in ``llm.ToolResult(data, error)``;
+    earlier versions return the data itself. ``llm.ToolResult`` does not exist
+    before 2026.10, so look it up rather than import it.
+    """
+    tool_result_cls = getattr(llm, "ToolResult", None)
+    if tool_result_cls is not None and isinstance(result, tool_result_cls):
+        return ToolCallData(result.data, bool(getattr(result, "error", False)))
+    return ToolCallData(result, error=False)
+
+
+def chat_log_tool_result(data: Any, *, error: bool = False) -> dict[str, Any]:
+    """
+    Return the tool result keyword for HA's chat log on this HA version.
+
+    Home Assistant 2026.10 replaced ``ToolResultContent.tool_result`` with
+    ``result: llm.ToolResult``: the old keyword is a TypeError on the content
+    class and a deprecated delta key. Earlier versions have no
+    ``llm.ToolResult`` and take ``tool_result``.
+    """
+    tool_result_cls = getattr(llm, "ToolResult", None)
+    if tool_result_cls is None:
+        return {"tool_result": data}
+    return {"result": tool_result_cls(data=data, error=error)}
+
+
 def active_llm_api_ids(options: Mapping[str, Any]) -> list[str]:
     """
     Return the LLM API ids to expose, defaulting to Assist when unset.
