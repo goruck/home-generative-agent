@@ -14,20 +14,27 @@ from custom_components.home_generative_agent.const import (
     ANTHROPIC_THINKING_MAX_BUDGET,
     ANTHROPIC_THINKING_MIN_BUDGET,
     ANTHROPIC_THINKING_RESPONSE_TOKENS,
+    CONF_OLLAMA_CHAT_URL,
+    CONF_OLLAMA_URL,
     GEMINI_3_RECOMMENDED_TEMPERATURE,
 )
 from custom_components.home_generative_agent.core.utils import (
     CannotConnectError,
     InvalidAuthError,
     anthropic_healthy,
+    configured_ollama_urls,
     extract_final,
     gemini_sampling_configurable,
     is_gemini_3_or_later,
     normalize_openai_compatible_base_url,
+    normalized_ollama_url,
+    ollama_healthy,
     openai_compatible_healthy,
     reasoning_field,
+    redact_url,
     thinking_configurable,
     validate_anthropic_key,
+    validate_ollama_url,
     validate_openai_compatible_url,
 )
 
@@ -1215,3 +1222,71 @@ def test_gemini_sampling_output_survives_model_reconstruction() -> None:
     params = model._prepare_params(stop=None)
     assert params.temperature == GEMINI_3_RECOMMENDED_TEMPERATURE
     assert "top_p" not in params
+
+
+# ---------------------------------------------------------------------------
+# Ollama URL normalization (issue #749)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, None),
+        ("", None),
+        ("   ", None),
+        (" ollama:11434/ ", "http://ollama:11434"),
+        ("http://ollama:11434//", "http://ollama:11434"),
+        ("https://ollama.example", "https://ollama.example"),
+        ("http://host/ollama/", "http://host/ollama"),
+    ],
+)
+def test_normalized_ollama_url(value: Any, expected: str | None) -> None:
+    """One server has one spelling: scheme added, slashes and padding dropped."""
+    assert normalized_ollama_url(value) == expected
+
+
+def test_configured_ollama_urls_counts_one_server_once() -> None:
+    """The same server spelled two ways in the options is checked once."""
+    options = {
+        CONF_OLLAMA_URL: "ollama:11434",
+        CONF_OLLAMA_CHAT_URL: "http://ollama:11434/",
+    }
+
+    assert configured_ollama_urls(options) == ["http://ollama:11434"]
+
+
+def test_redact_url_survives_a_malformed_url() -> None:
+    """A malformed URL is logged as invalid instead of raising."""
+    assert redact_url("http://[broken:11434") == "<invalid URL>"
+    assert redact_url("http://ollama:notaport") == "<invalid URL>"
+
+
+@pytest.mark.asyncio
+async def test_ollama_healthy_is_false_for_a_malformed_url(
+    hass: HomeAssistant,
+) -> None:
+    """A malformed saved URL fails its check instead of aborting setup."""
+    with pytest.raises(CannotConnectError):
+        await validate_ollama_url(hass, "http://[broken:11434")
+    assert await ollama_healthy(hass, "http://[broken:11434") is False
+
+
+@pytest.mark.asyncio
+async def test_validate_ollama_url_maps_an_invalid_url_to_cannot_connect(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An httpx.InvalidURL from the client is a failed check, not a crash."""
+
+    class _RejectingClient:
+        async def get(self, *_args: Any, **_kwargs: Any) -> Any:
+            msg = "Invalid port"
+            raise httpx.InvalidURL(msg)
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: _RejectingClient(),
+    )
+
+    with pytest.raises(CannotConnectError):
+        await validate_ollama_url(hass, "http://ollama:11434")

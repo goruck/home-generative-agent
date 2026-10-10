@@ -281,11 +281,13 @@ from .core.utils import (
     gemini_sampling_configurable,
     generate_embeddings,
     normalize_openai_compatible_base_url,
+    normalized_ollama_url,
     ollama_healthy,
     ollama_url_for_category,
     openai_compatible_healthy,
     openai_healthy,
     reasoning_field,
+    redact_url,
     thinking_configurable,
     validate_anthropic_key,
     validate_gemini_key,
@@ -1263,13 +1265,10 @@ def _provider_api_key(
 def _ollama_provider_url(provider: ModelProviderConfig) -> str:
     """Return the Ollama URL a provider's models use, as setup keys it."""
     settings = provider.data.get("settings", {})
-    return ensure_http_url(
-        settings.get("base_url")
-        or settings.get("chat_url")
-        or settings.get("vlm_url")
-        or settings.get("summarization_url")
-        or RECOMMENDED_OLLAMA_URL
-    )
+    for key in ("base_url", "chat_url", "vlm_url", "summarization_url"):
+        if url := normalized_ollama_url(settings.get(key)):
+            return url
+    return RECOMMENDED_OLLAMA_URL
 
 
 def _provider_setting(
@@ -1770,7 +1769,7 @@ async def _log_ollama_server_info(
     for url, cats in url_to_cats.items():
         LOGGER.info(
             "subsystem=model_server url=%s categories=%s",
-            url,
+            redact_url(url),
             ",".join(sorted(cats)),
         )
 
@@ -1782,16 +1781,23 @@ async def _log_ollama_server_info(
             resp.raise_for_status()
             data = resp.json()
         except Exception as err:  # noqa: BLE001
+            reason = (
+                f"HTTP {err.response.status_code}"
+                if isinstance(err, httpx.HTTPStatusError)
+                else type(err).__name__
+            )
             LOGGER.warning(
                 "subsystem=model_server url=%s probe_failed reason=%s",
-                url,
-                err,
+                redact_url(url),
+                reason,
             )
             continue
 
         models = data.get("models", [])
         if not models:
-            LOGGER.info("subsystem=model_server url=%s loaded_models=none", url)
+            LOGGER.info(
+                "subsystem=model_server url=%s loaded_models=none", redact_url(url)
+            )
             continue
 
         for m in models:
@@ -1800,19 +1806,22 @@ async def _log_ollama_server_info(
             vram_mb = int(m.get("size_vram", 0)) // (1024 * 1024)
             LOGGER.info(
                 "subsystem=model_server url=%s model=%s size_mb=%d vram_mb=%d",
-                url,
+                redact_url(url),
                 name,
                 size_mb,
                 vram_mb,
             )
 
-        if len(cats) > 1:
+        # A fallback only runs once its primary fails, so only primaries that
+        # share a server swap models on it in normal use.
+        primaries = [cat for cat in cats if "_fallback" not in cat]
+        if len(primaries) > 1:
             LOGGER.info(
                 "subsystem=model_server url=%s shared_by=%d categories=%s "
                 "note=model_swapping_may_add_latency",
-                url,
-                len(cats),
-                ",".join(sorted(cats)),
+                redact_url(url),
+                len(primaries),
+                ",".join(sorted(primaries)),
             )
 
 
@@ -2040,7 +2049,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     openai_compatible_embedding_api_key = (
         conf.get(CONF_OPENAI_COMPATIBLE_EMBEDDING_API_KEY) or openai_compatible_api_key
     )
-    base_ollama_url = ensure_http_url(conf.get(CONF_OLLAMA_URL, RECOMMENDED_OLLAMA_URL))
+    base_ollama_url = (
+        normalized_ollama_url(conf.get(CONF_OLLAMA_URL)) or RECOMMENDED_OLLAMA_URL
+    )
     ollama_chat_url = (
         ollama_url_for_category(conf, "chat", fallback=base_ollama_url)
         or base_ollama_url
@@ -2065,13 +2076,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     ollama_urls = configured_ollama_urls(conf, fallback=base_ollama_url)
     # Only each category's head provider reaches the options, so an Ollama
     # provider used only as a fallback would never be checked or built at its
-    # own URL, leaving its chain empty (issue #749).
+    # own URL, leaving its chain empty (issue #749). A head runs at its
+    # category's URL, which the options already cover.
     chained = [p for chain in fallback_chains.values() for p in chain]
-    for provider in chained:
-        if provider.provider_type == "ollama":
-            url = _ollama_provider_url(provider)
-            if url not in ollama_urls:
-                ollama_urls.append(url)
+    fallback_ollama_urls = {
+        category: [
+            _ollama_provider_url(p) for p in chain[1:] if p.provider_type == "ollama"
+        ]
+        for category, chain in fallback_chains.items()
+    }
+    for urls in fallback_ollama_urls.values():
+        ollama_urls.extend(url for url in urls if url not in ollama_urls)
     ollama_health: dict[str, bool] = {}
     if ollama_urls:
         ollama_results = await asyncio.gather(
@@ -2114,9 +2129,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     # chain uses count: a spare key, a stale legacy Ollama URL or the default
     # Ollama URL coming back would reload the entry for nothing.
     chained_types = {p.provider_type for p in chained}
-    used_ollama_urls = {
-        _ollama_provider_url(p) for p in chained if p.provider_type == "ollama"
-    }
+    used_ollama_urls = {url for urls in fallback_ollama_urls.values() for url in urls}
     for category, url in (
         ("chat", ollama_chat_url),
         ("vlm", ollama_vlm_url),
@@ -2127,7 +2140,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         chain = fallback_chains.get(category)
         if chain and chain[0].provider_type == "ollama":
             used_ollama_urls.add(url)
-    used_ollama_urls = {ensure_http_url(url).rstrip("/") for url in used_ollama_urls}
 
     recheck_probes: list[ProviderProbe] = [
         ProviderProbe(
@@ -2135,7 +2147,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             partial(validate_ollama_url, hass, url, health_timeout),
         )
         for url, healthy in ollama_health.items()
-        if not healthy and url.rstrip("/") in used_ollama_urls
+        if not healthy and url in used_ollama_urls
     ]
     for provider_type, label, key, ok, validate in (
         ("openai", "OpenAI", api_key, openai_ok, validate_openai_key),
@@ -2271,9 +2283,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             continue
         try:
             ollama_providers[url] = _build_ollama_provider(url)
-        except Exception:
-            LOGGER.exception(
-                "Ollama provider init failed for %s; continuing without it.", url
+        except Exception as err:  # noqa: BLE001
+            # No traceback: the client's validation error quotes the raw URL.
+            LOGGER.error(  # noqa: TRY400
+                "Ollama provider init failed for %s (%s); continuing without it.",
+                redact_url(url),
+                type(err).__name__,
             )
 
     gemini_provider: RunnableSerializable[LanguageModelInput, BaseMessage] | None = None
@@ -2371,20 +2386,37 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         except Exception:
             LOGGER.exception("OpenAI embeddings init failed; continuing without them.")
 
-    ollama_embeddings: OllamaEmbeddings | None = None
-    if ollama_health.get(ollama_embedding_url):
+    # Every Ollama server embeds with the one configured model, a fallback
+    # server included: provider settings hold only a URL, and the same model
+    # keeps fallback vectors comparable with the ones already stored.
+    ollama_embedding_model = options.get(
+        CONF_OLLAMA_EMBEDDING_MODEL, RECOMMENDED_OLLAMA_EMBEDDING_MODEL
+    )
+
+    def _build_ollama_embeddings(url: str) -> OllamaEmbeddings | None:
+        """Build Ollama embeddings at ``url``, or None if the client fails."""
         try:
-            ollama_embeddings = OllamaEmbeddings(
-                model=options.get(
-                    CONF_OLLAMA_EMBEDDING_MODEL, RECOMMENDED_OLLAMA_EMBEDDING_MODEL
-                ),
-                base_url=ollama_embedding_url,
+            return OllamaEmbeddings(
+                model=ollama_embedding_model,
+                base_url=url,
                 num_ctx=EMBEDDING_MODEL_CTX,
                 sync_client_kwargs=_ollama_httpx_client_kwargs(),
                 async_client_kwargs=_ollama_httpx_client_kwargs(),
             )
-        except Exception:
-            LOGGER.exception("Ollama embeddings init failed; continuing without them.")
+        except Exception as err:  # noqa: BLE001
+            # No traceback: the client's validation error quotes the raw URL.
+            LOGGER.error(  # noqa: TRY400
+                "Ollama embeddings init failed for %s (%s); continuing without them.",
+                redact_url(url),
+                type(err).__name__,
+            )
+            return None
+
+    ollama_embeddings = (
+        _build_ollama_embeddings(ollama_embedding_url)
+        if ollama_health.get(ollama_embedding_url)
+        else None
+    )
 
     gemini_embeddings: GoogleGenerativeAIEmbeddings | None = None
     if gemini_ok:
@@ -2419,31 +2451,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 "OpenAI-compatible embeddings init failed; continuing without them."
             )
 
+    fallback_ollama_embeddings: dict[str, OllamaEmbeddings | None] = {}
+
     def _ollama_embeddings_for_provider(provider: ModelProviderConfig) -> Any:
         """Return Ollama embeddings at the provider's own URL, if it answered."""
         url = _ollama_provider_url(provider)
         if url == ollama_embedding_url:
             return ollama_embeddings
-        # A fallback-only Ollama provider on a server of its own (issue #749).
+        # A fallback-only Ollama provider on a server of its own (issue #749),
+        # one client per server however many providers point at it.
         if not ollama_health.get(url):
             return None
-        settings = provider.data.get("settings", {})
-        try:
-            return OllamaEmbeddings(
-                model=settings.get("embedding_model")
-                or options.get(
-                    CONF_OLLAMA_EMBEDDING_MODEL, RECOMMENDED_OLLAMA_EMBEDDING_MODEL
-                ),
-                base_url=url,
-                num_ctx=EMBEDDING_MODEL_CTX,
-                sync_client_kwargs=_ollama_httpx_client_kwargs(),
-                async_client_kwargs=_ollama_httpx_client_kwargs(),
-            )
-        except Exception:
-            LOGGER.exception(
-                "Ollama embeddings init failed for %s; continuing without them.", url
-            )
-            return None
+        if url not in fallback_ollama_embeddings:
+            fallback_ollama_embeddings[url] = _build_ollama_embeddings(url)
+        return fallback_ollama_embeddings[url]
 
     def _embedding_instance_for_provider(provider: ModelProviderConfig) -> Any:
         """Map a ModelProviderConfig to the initialized embedding instance."""
@@ -3523,14 +3544,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    if ollama_any_ok:
-        ollama_probe_urls: dict[str, str] = {
-            "chat": ollama_chat_url,
-            "vlm": ollama_vlm_url,
-            "summarization": ollama_sum_url,
-        }
-        if embedding_provider not in {"openai", "openai_compatible", "gemini"}:
-            ollama_probe_urls["embeddings"] = ollama_embedding_url
+    # Describe only the Ollama servers a chain uses and that answered: with a
+    # cloud primary and an Ollama fallback, the category URLs are an unused
+    # localhost default.
+    ollama_probe_urls: dict[str, str] = {}
+    for category, head_url in (
+        ("chat", ollama_chat_url),
+        ("vlm", ollama_vlm_url),
+        ("summarization", ollama_sum_url),
+        ("embedding", ollama_embedding_url),
+    ):
+        chain = fallback_chains.get(category)
+        if chain and chain[0].provider_type == "ollama" and ollama_health.get(head_url):
+            ollama_probe_urls[category] = head_url
+        for index, url in enumerate(fallback_ollama_urls.get(category, []), 1):
+            if ollama_health.get(url):
+                ollama_probe_urls[f"{category}_fallback{index}"] = url
+    if ollama_probe_urls:
         hass.async_create_task(_log_ollama_server_info(hass, ollama_probe_urls))
 
     if options.get(CONF_VIDEO_ANALYZER_MODE) != "disable":
