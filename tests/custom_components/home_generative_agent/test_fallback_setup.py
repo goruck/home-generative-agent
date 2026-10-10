@@ -25,6 +25,10 @@ from custom_components.home_generative_agent.const import (
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OLLAMA_URL,
     CONF_OPENAI_CHAT_MODEL,
+    CONF_OPENAI_COMPATIBLE_API_KEY,
+    CONF_OPENAI_COMPATIBLE_BASE_URL,
+    CONF_OPENAI_COMPATIBLE_EMBEDDING_API_KEY,
+    CONF_OPENAI_COMPATIBLE_EMBEDDING_URL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
     CONF_OPENAI_VLM,
     CONF_SENTINEL_DISCOVERY_ENABLED,
@@ -769,3 +773,202 @@ async def test_setup_drops_the_anthropic_provider_when_priming_fails(
     assert isinstance(chat_model, FakeConfiguredModel)
     assert chat_model.base.name == "ollama"
     assert "Anthropic provider init failed; continuing without it." in caplog.text
+
+
+def _capture_recheck(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Collect the probes setup schedules instead of starting a recheck."""
+    scheduled: list[Any] = []
+    monkeypatch.setattr(
+        hga_component,
+        "async_schedule_provider_recheck",
+        lambda _hass, _entry, probes: scheduled.extend(probes),
+    )
+    return scheduled
+
+
+@pytest.mark.asyncio
+async def test_setup_schedules_a_recheck_for_providers_that_failed(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A chained provider that failed its setup check is re-probed (issue #711).
+
+    OpenAI has a key, sits in every chain and failed, so it is re-checked.
+    Gemini has a key and failed too, but no category uses it: a spare key
+    coming back must not reload the entry. Ollama passed and is left alone.
+    """
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    data.openai_available = False
+    data.options[CONF_GEMINI_API_KEY] = "gm-spare"
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    scheduled = _capture_recheck(monkeypatch)
+
+    result = await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert result is True
+    assert [probe.label for probe in scheduled] == ["OpenAI"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("uses_ollama", "expected"), [(True, ["Ollama (http://ollama)"]), (False, [])]
+)
+async def test_setup_rechecks_a_failed_ollama_url_only_when_a_chain_uses_it(
+    hass: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    uses_ollama: bool,  # noqa: FBT001
+    expected: list[str],
+) -> None:
+    """
+    Ollama URLs are health-checked even on installs that never use Ollama.
+
+    The default URL failing there is expected, so it must not be polled.
+    """
+    checked: list[str] = []
+
+    async def _ollama_down(_hass: Any, url: str, **_kwargs: Any) -> bool:
+        checked.append(url)
+        return False
+
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    if not uses_ollama:
+        del data.providers["ollama1"]
+        for category, chain in data.fallback_chains.items():
+            data.fallback_chains[category] = chain[:1]
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    monkeypatch.setattr(hga_component, "ollama_healthy", _ollama_down)
+    scheduled = _capture_recheck(monkeypatch)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert checked == ["http://ollama"], "the Ollama URL was not health-checked"
+    assert [probe.label for probe in scheduled] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("embedding_url", "categories", "expected"),
+    [
+        (None, ("chat",), ["OpenAI-compatible (http://oc/v1)"]),
+        (
+            "http://emb/v1",
+            ("chat", "embedding"),
+            ["OpenAI-compatible (http://oc/v1)", "OpenAI-compatible (http://emb/v1)"],
+        ),
+        # Embeddings only: the chat URL builds a client nothing uses.
+        ("http://emb/v1", ("embedding",), ["OpenAI-compatible (http://emb/v1)"]),
+        # Chat only: a separate embedding URL is never used.
+        ("http://emb/v1", ("chat",), ["OpenAI-compatible (http://oc/v1)"]),
+    ],
+)
+async def test_setup_rechecks_each_failed_openai_compatible_url_once(
+    hass: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    embedding_url: str | None,
+    categories: tuple[str, ...],
+    expected: list[str],
+) -> None:
+    """Each URL is probed once, only for the chains that use it, without creds."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    compatible = ModelProviderConfig(
+        entry_id="oc1",
+        name="Local server",
+        provider_type="openai_compatible",
+        capabilities={"chat"},
+        data={"settings": {"base_url": "http://user:pw@oc/v1"}},
+        deployment="edge",
+    )
+    data.providers[compatible.entry_id] = compatible
+    for category in categories:
+        data.fallback_chains[category] = [*data.fallback_chains[category], compatible]
+    data.options[CONF_OPENAI_COMPATIBLE_BASE_URL] = "http://user:pw@oc/v1"
+    data.options[CONF_OPENAI_COMPATIBLE_API_KEY] = "oc-key"
+    if embedding_url:
+        data.options[CONF_OPENAI_COMPATIBLE_EMBEDDING_URL] = embedding_url
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    scheduled = _capture_recheck(monkeypatch)
+    validated: list[tuple[str, Any, Any]] = []
+
+    async def _validate(
+        _hass: Any, url: str, key: Any, _timeout: float, **kwargs: Any
+    ) -> None:
+        validated.append((url, key, kwargs.get("capability_path")))
+
+    monkeypatch.setattr(hga_component, "validate_openai_compatible_url", _validate)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert [probe.label for probe in scheduled] == expected
+    for probe in scheduled:
+        await probe.probe()
+    # The probe still reaches the real URL; only the log label is redacted.
+    probed = {"http://oc/v1": "http://user:pw@oc/v1", "http://emb/v1": "http://emb/v1"}
+    assert validated == [
+        (
+            probed[label.removeprefix("OpenAI-compatible (").rstrip(")")],
+            "oc-key",
+            "/chat/completions",
+        )
+        for label in expected
+    ]
+
+
+@pytest.mark.asyncio
+async def test_setup_checks_embeddings_with_their_own_key_on_a_shared_url(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A shared URL with a different embedding key gets its own check and probe.
+
+    Copying the chat key's failure to embeddings while the recheck probed with
+    the embedding key reloaded the entry forever without restoring anything.
+    """
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    compatible = ModelProviderConfig(
+        entry_id="oc1",
+        name="Local server",
+        provider_type="openai_compatible",
+        capabilities={"embedding"},
+        data={"settings": {"base_url": "http://oc/v1"}},
+        deployment="edge",
+    )
+    data.providers[compatible.entry_id] = compatible
+    data.fallback_chains["embedding"] = [
+        *data.fallback_chains["embedding"],
+        compatible,
+    ]
+    data.options[CONF_OPENAI_COMPATIBLE_BASE_URL] = "http://oc/v1"
+    data.options[CONF_OPENAI_COMPATIBLE_API_KEY] = "expired-chat-key"
+    data.options[CONF_OPENAI_COMPATIBLE_EMBEDDING_URL] = "http://oc/v1"
+    data.options[CONF_OPENAI_COMPATIBLE_EMBEDDING_API_KEY] = "good-embedding-key"
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    checked_keys: list[Any] = []
+
+    async def _healthy_with_good_key(
+        _hass: Any, _url: Any, key: Any = None, **_kwargs: Any
+    ) -> bool:
+        checked_keys.append(key)
+        return key == "good-embedding-key"
+
+    monkeypatch.setattr(
+        hga_component, "openai_compatible_healthy", _healthy_with_good_key
+    )
+    scheduled = _capture_recheck(monkeypatch)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert checked_keys == ["expired-chat-key", "good-embedding-key"]
+    # Embeddings passed with their own key; the unused chat key is not polled.
+    assert scheduled == []

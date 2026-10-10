@@ -12,7 +12,7 @@ import secrets
 import time
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal, cast
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 import httpx
 import psycopg
@@ -627,6 +627,51 @@ def valid_exclusion_entry(entry: str) -> bool:
 # ---------------------------
 
 
+def _http_status(resp: httpx.Response) -> str:
+    """Name an HTTP error status for a validator's exception message."""
+    return f"HTTP {resp.status_code}"
+
+
+def redact_url(url: str) -> str:
+    """Return ``url`` without credentials, query or fragment, for logging."""
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    if parts.port is not None:
+        host = f"{host}:{parts.port}"
+    return urlunsplit((parts.scheme, host, parts.path, "", ""))
+
+
+# Transport errors whose text is safe to log: it names the network failure,
+# never the request. Other httpx errors can quote it: h11 rejects a key with a
+# stray newline as "Illegal header value b'Bearer sk-...'", key included.
+_SAFE_CAUSE_TYPES: tuple[type[BaseException], ...] = (
+    TimeoutError,
+    httpx.TimeoutException,
+    httpx.NetworkError,
+    OSError,
+)
+
+
+def health_failure_reason(err: Exception) -> str:
+    """
+    Describe why a health check failed, readably and without secrets.
+
+    The validators raise ``CannotConnectError`` from the transport error, so
+    the error itself often has no message, and a ``TimeoutError`` prints as
+    nothing at all. Naming the cause's type keeps the log line readable
+    (issue #711); its text is added only for error types that cannot carry a
+    request header (see ``_SAFE_CAUSE_TYPES``).
+    """
+    cause = err.__cause__
+    if cause is not None:
+        name = type(cause).__name__
+        detail = str(cause) if isinstance(cause, _SAFE_CAUSE_TYPES) else ""
+        return f"{name}: {detail}" if detail else name
+    return str(err) or type(err).__name__
+
+
 async def ollama_healthy(
     hass: HomeAssistant, base_url: str, timeout_s: float = 2.0
 ) -> bool:
@@ -635,7 +680,9 @@ async def ollama_healthy(
         await validate_ollama_url(hass, base_url, timeout_s)
     except CannotConnectError as err:
         LOGGER.warning(
-            "Ollama health check failed (%s): %s", ensure_http_url(base_url), err
+            "Ollama health check failed (%s): %s",
+            redact_url(ensure_http_url(base_url)),
+            health_failure_reason(err),
         )
         return False
     else:
@@ -652,7 +699,7 @@ async def openai_healthy(
     try:
         await validate_openai_key(hass, api_key, timeout_s)
     except (CannotConnectError, InvalidAuthError) as err:
-        LOGGER.warning("OpenAI health check failed: %s", err)
+        LOGGER.warning("OpenAI health check failed: %s", health_failure_reason(err))
         return False
     else:
         return True
@@ -668,7 +715,7 @@ async def gemini_healthy(
     try:
         await validate_gemini_key(hass, api_key, timeout_s)
     except (CannotConnectError, InvalidAuthError) as err:
-        LOGGER.warning("Gemini health check failed: %s", err)
+        LOGGER.warning("Gemini health check failed: %s", health_failure_reason(err))
         return False
     else:
         return True
@@ -695,7 +742,7 @@ async def validate_ollama_url(
         raise CannotConnectError from err
     else:
         if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
-            raise CannotConnectError
+            raise CannotConnectError(_http_status(resp))
 
 
 async def list_ollama_models(  # noqa: PLR0911
@@ -750,9 +797,9 @@ async def validate_openai_key(
         raise CannotConnectError from err
     else:
         if resp.status_code == HTTP_STATUS_UNAUTHORIZED:
-            raise InvalidAuthError
+            raise InvalidAuthError(_http_status(resp))
         if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
-            raise CannotConnectError
+            raise CannotConnectError(_http_status(resp))
 
 
 # Statuses that mean "nothing serves this path here" rather than "your request
@@ -911,7 +958,11 @@ async def openai_compatible_healthy(
             capability_path=OPENAI_CHAT_COMPLETIONS_PATH,
         )
     except (CannotConnectError, InvalidAuthError) as err:
-        LOGGER.warning("OpenAI-compatible health check failed (%s): %s", base_url, err)
+        LOGGER.warning(
+            "OpenAI-compatible health check failed (%s): %s",
+            redact_url(base_url),
+            health_failure_reason(err),
+        )
         return False
     else:
         return True
@@ -944,9 +995,9 @@ async def validate_gemini_key(
             HTTP_STATUS_UNAUTHORIZED,
             HTTP_STATUS_FORBIDDEN,
         ):
-            raise InvalidAuthError
+            raise InvalidAuthError(_http_status(resp))
         if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
-            raise CannotConnectError
+            raise CannotConnectError(_http_status(resp))
 
 
 async def validate_anthropic_key(
@@ -970,9 +1021,9 @@ async def validate_anthropic_key(
         raise CannotConnectError from err
     else:
         if resp.status_code == HTTP_STATUS_UNAUTHORIZED:
-            raise InvalidAuthError
+            raise InvalidAuthError(_http_status(resp))
         if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
-            raise CannotConnectError
+            raise CannotConnectError(_http_status(resp))
 
 
 async def anthropic_healthy(
@@ -985,7 +1036,7 @@ async def anthropic_healthy(
     try:
         await validate_anthropic_key(hass, api_key, timeout_s)
     except (CannotConnectError, InvalidAuthError) as err:
-        LOGGER.warning("Anthropic health check failed: %s", err)
+        LOGGER.warning("Anthropic health check failed: %s", health_failure_reason(err))
         return False
     else:
         return True
