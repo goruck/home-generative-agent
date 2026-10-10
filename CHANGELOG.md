@@ -7,6 +7,8 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+## [3.43.4] - 2026-10-10
+
 ### Fixed
 
 - A model provider that failed its health check when Home Assistant started stayed disabled until the integration was reloaded. On a busy boot the checks' 2-second timeouts can fire late and together, so working cloud providers were marked down, and with the primary (for example a local Ollama) really down, every turn answered "I'm sorry, I was unable to respond in time" for the whole session. A provider that a model category uses (as primary or fallback) and that failed its check is now checked again once Home Assistant has started, then after 30 seconds, 1, 2 and 5 minutes, and every 5 minutes while it stays down; when it answers, the integration reloads itself to use it. This also switches back to a primary that comes back online later, which used to need a manual reload. These reloads happen at most once every 5 minutes, backing off to once an hour if a reload does not fix the provider, so a provider that answers only some of the time cannot reload the integration in a loop. A provider whose key is rejected is checked once more and then left alone. The health-check warnings now name the cause, such as `TimeoutError` or `HTTP 503`, instead of ending in an empty message ([#711](https://github.com/goruck/home-generative-agent/issues/711)).
