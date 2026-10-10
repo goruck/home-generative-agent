@@ -3193,9 +3193,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         if active_provider_id != primary_provider.entry_id:
             LOGGER.warning(
                 "Fallback selected at setup for %s: primary provider %s was "
-                "unavailable; using provider %s (deployment=%s). This selection "
-                "remains active until the integration is reloaded or Home "
-                "Assistant restarts.",
+                "unavailable; using provider %s (deployment=%s). The primary is "
+                "re-checked in the background, and Home Generative Agent "
+                "reloads to switch back once it answers.",
                 category,
                 primary_provider.entry_id,
                 active_provider_id,
