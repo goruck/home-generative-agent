@@ -109,13 +109,19 @@ def ensure_http_url(url: str) -> str:
     return f"http://{url}"
 
 
-def _normalized_url(value: Any) -> str | None:
-    """Return a cleaned HTTP(S) URL or None."""
+def normalized_ollama_url(value: Any) -> str | None:
+    """
+    Return an Ollama URL in the one form setup keys clients by, or None.
+
+    Every URL setup checks, builds and looks up goes through here, so one server
+    written with and without a trailing slash is one server, not two.
+    """
     if value is None:
         return None
-    if isinstance(value, str) and not value.strip():
+    text = str(value).strip()
+    if not text:
         return None
-    return ensure_http_url(str(value))
+    return ensure_http_url(text).rstrip("/")
 
 
 def normalize_openai_compatible_base_url(url: str) -> str:
@@ -143,14 +149,14 @@ def ollama_url_for_category(
     """Pick the Ollama URL for a model category, falling back to the global URL."""
     specific_key = OLLAMA_CATEGORY_URL_KEYS.get(category)
     if specific_key:
-        url = _normalized_url(options.get(specific_key))
+        url = normalized_ollama_url(options.get(specific_key))
         if url:
             return url
 
     if fallback:
-        return _normalized_url(fallback)
+        return normalized_ollama_url(fallback)
 
-    return _normalized_url(options.get(CONF_OLLAMA_URL))
+    return normalized_ollama_url(options.get(CONF_OLLAMA_URL))
 
 
 def configured_ollama_urls(
@@ -159,9 +165,9 @@ def configured_ollama_urls(
     """Return a de-duplicated list of configured Ollama URLs."""
     urls: list[str] = []
 
-    base_url = _normalized_url(options.get(CONF_OLLAMA_URL)) or _normalized_url(
-        fallback
-    )
+    base_url = normalized_ollama_url(
+        options.get(CONF_OLLAMA_URL)
+    ) or normalized_ollama_url(fallback)
     if base_url:
         urls.append(base_url)
 
@@ -634,12 +640,17 @@ def _http_status(resp: httpx.Response) -> str:
 
 def redact_url(url: str) -> str:
     """Return ``url`` without credentials, query or fragment, for logging."""
-    parts = urlsplit(url)
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        # Malformed (bad IPv6 brackets, non-numeric port): nothing safe to show.
+        return "<invalid URL>"
     host = parts.hostname or ""
     if ":" in host:
         host = f"[{host}]"
-    if parts.port is not None:
-        host = f"{host}:{parts.port}"
+    if port is not None:
+        host = f"{host}:{port}"
     return urlunsplit((parts.scheme, host, parts.path, "", ""))
 
 
@@ -740,6 +751,9 @@ async def validate_ollama_url(
     except (TimeoutError, httpx.RequestError) as err:
         LOGGER.debug("Ollama connectivity exception: %s", err)
         raise CannotConnectError from err
+    except (httpx.InvalidURL, ValueError) as err:
+        # A malformed saved URL must fail its check, not abort setup.
+        raise CannotConnectError(type(err).__name__) from err
     else:
         if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
             raise CannotConnectError(_http_status(resp))
@@ -756,7 +770,8 @@ async def list_ollama_models(  # noqa: PLR0911
     try:
         async with asyncio.timeout(timeout_s):
             resp = await client.get(urljoin(base_url.rstrip("/") + "/", "api/tags"))
-    except (TimeoutError, httpx.RequestError):
+    except (TimeoutError, httpx.RequestError, httpx.InvalidURL, ValueError):
+        # Unreachable, or a malformed saved URL: offer no models either way.
         return []
     if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
         return []

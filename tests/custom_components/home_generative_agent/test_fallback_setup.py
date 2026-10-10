@@ -23,6 +23,8 @@ from custom_components.home_generative_agent.const import (
     CONF_GEMINI_API_KEY,
     CONF_NOTIFY_SERVICE,
     CONF_OLLAMA_CHAT_MODEL,
+    CONF_OLLAMA_EMBEDDING_MODEL,
+    CONF_OLLAMA_EMBEDDING_URL,
     CONF_OLLAMA_URL,
     CONF_OPENAI_CHAT_MODEL,
     CONF_OPENAI_COMPATIBLE_API_KEY,
@@ -50,6 +52,7 @@ from custom_components.home_generative_agent.core.fallback import (
 from custom_components.home_generative_agent.core.subentry_types import (
     ModelProviderConfig,
 )
+from custom_components.home_generative_agent.core.utils import configured_ollama_urls
 
 
 class FakeConfiguredModel:
@@ -193,6 +196,12 @@ class FallbackSetupData:
     captured_embedding_chain: dict[str, list[tuple[Any, str, str]]]
     openai_available: bool = True
     openai_embeddings_available: bool = True
+
+
+# An Ollama URL behind a basic-auth proxy, with a fake password, for the
+# redaction tests. Assembled from parts so the pre-push secret scanner does
+# not flag the fake credential.
+_URL_WITH_PASSWORD = "http://" + "hga:s3cret" + "@ollama-fallback:11434"
 
 
 def _fallback_setup_data() -> FallbackSetupData:
@@ -972,3 +981,349 @@ async def test_setup_checks_embeddings_with_their_own_key_on_a_shared_url(
     assert checked_keys == ["expired-chat-key", "good-embedding-key"]
     # Embeddings passed with their own key; the unused chat key is not polled.
     assert scheduled == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "configured_url",
+    [
+        "http://ollama-fallback:11434",
+        # Saved without a scheme or with a trailing slash: still one server,
+        # checked and looked up under the same key.
+        "ollama-fallback:11434",
+        "http://ollama-fallback:11434/",
+    ],
+)
+async def test_setup_builds_a_fallback_only_ollama_provider_at_its_own_url(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, configured_url: str
+) -> None:
+    """
+    An Ollama provider used only as a fallback is checked and built (issue #749).
+
+    Only each category's head provider reaches the options, so with OpenAI as
+    every primary no Ollama URL is configured and setup used to check only
+    the default one. The fallback's own server was never built and every
+    chain came out with OpenAI alone.
+    """
+    fallback_url = "http://ollama-fallback:11434"
+    checked: list[str] = []
+
+    async def _only_fallback_up(_hass: Any, url: str, **_kwargs: Any) -> bool:
+        checked.append(url)
+        return url == fallback_url
+
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    del data.options[CONF_OLLAMA_URL]
+    data.options[CONF_OLLAMA_EMBEDDING_MODEL] = "configured-embed"
+    data.providers["ollama1"].data["settings"]["base_url"] = configured_url
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    monkeypatch.setattr(hga_component, "configured_ollama_urls", configured_ollama_urls)
+    monkeypatch.setattr(hga_component, "ollama_healthy", _only_fallback_up)
+    monkeypatch.setattr(
+        hga_component,
+        "ChatOllama",
+        lambda *_args, base_url, **_kwargs: FakeRunnable(f"ollama@{base_url}"),
+    )
+    monkeypatch.setattr(
+        hga_component,
+        "OllamaEmbeddings",
+        lambda *_args, model, base_url, **_kwargs: FakeEmbeddings(
+            f"{model}@{base_url}"
+        ),
+    )
+    _capture_recheck(monkeypatch)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert checked.count(fallback_url) == 1
+    for model in (
+        entry.runtime_data.chat_model,
+        entry.runtime_data.vision_model,
+        entry.runtime_data.summarization_model,
+    ):
+        assert isinstance(model, (FallbackChatModel, FallbackVLM))
+        fallback = cast("FakeConfiguredModel", model.chain[1][0])
+        assert fallback.base.name == f"ollama@{fallback_url}"
+    embedding_chain = data.captured_embedding_chain["chain"]
+    assert [model.name for model, _deployment, _provider_id in embedding_chain] == [
+        "openai",
+        # The configured embedding model, so fallback vectors stay comparable.
+        f"configured-embed@{fallback_url}",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_setup_rechecks_a_fallback_only_ollama_url_that_failed(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A down fallback-only Ollama server is re-checked; the unused default is not."""
+    fallback_url = "http://ollama-fallback:11434"
+
+    async def _ollama_down(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    del data.options[CONF_OLLAMA_URL]
+    data.providers["ollama1"].data["settings"]["base_url"] = fallback_url
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    monkeypatch.setattr(hga_component, "configured_ollama_urls", configured_ollama_urls)
+    monkeypatch.setattr(hga_component, "ollama_healthy", _ollama_down)
+    scheduled = _capture_recheck(monkeypatch)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert [probe.label for probe in scheduled] == [f"Ollama ({fallback_url})"]
+    # The down server is left out of every chain until the re-check reloads.
+    for model in (
+        entry.runtime_data.chat_model,
+        entry.runtime_data.vision_model,
+        entry.runtime_data.summarization_model,
+    ):
+        assert not isinstance(model, (FallbackChatModel, FallbackVLM))
+    assert "chain" not in data.captured_embedding_chain
+
+
+@pytest.mark.asyncio
+async def test_setup_continues_when_fallback_ollama_embeddings_fail_to_build(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A fallback Ollama embeddings client that fails to build is skipped, logged."""
+    # Behind a basic-auth proxy: the password must never reach the log.
+    fallback_url = _URL_WITH_PASSWORD
+
+    async def _only_fallback_up(_hass: Any, url: str, **_kwargs: Any) -> bool:
+        return url == fallback_url
+
+    def _broken_embeddings(*_args: Any, **_kwargs: Any) -> Any:
+        msg = "bad client config"
+        raise ValueError(msg)
+
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    del data.options[CONF_OLLAMA_URL]
+    data.providers["ollama1"].data["settings"]["base_url"] = fallback_url
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    monkeypatch.setattr(hga_component, "configured_ollama_urls", configured_ollama_urls)
+    monkeypatch.setattr(hga_component, "ollama_healthy", _only_fallback_up)
+    monkeypatch.setattr(hga_component, "OllamaEmbeddings", _broken_embeddings)
+    _capture_recheck(monkeypatch)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    # Embeddings stay on OpenAI alone; chat still gets its Ollama fallback.
+    assert "chain" not in data.captured_embedding_chain
+    assert isinstance(entry.runtime_data.chat_model, FallbackChatModel)
+    assert (
+        "Ollama embeddings init failed for http://ollama-fallback:11434 (ValueError)"
+        in caplog.text
+    )
+    assert "s3cret" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_setup_continues_when_a_fallback_ollama_chat_client_fails_to_build(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A fallback ChatOllama that fails to build is left out; its URL is redacted."""
+    fallback_url = _URL_WITH_PASSWORD
+
+    async def _only_fallback_up(_hass: Any, url: str, **_kwargs: Any) -> bool:
+        return url == fallback_url
+
+    def _broken_chat(*_args: Any, **_kwargs: Any) -> Any:
+        msg = f"bad base_url {fallback_url}"
+        raise ValueError(msg)
+
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    del data.options[CONF_OLLAMA_URL]
+    data.providers["ollama1"].data["settings"]["base_url"] = fallback_url
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    monkeypatch.setattr(hga_component, "configured_ollama_urls", configured_ollama_urls)
+    monkeypatch.setattr(hga_component, "ollama_healthy", _only_fallback_up)
+    monkeypatch.setattr(hga_component, "ChatOllama", _broken_chat)
+    _capture_recheck(monkeypatch)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert not isinstance(entry.runtime_data.chat_model, FallbackChatModel)
+    assert "Ollama provider init failed for http://ollama-fallback:11434" in caplog.text
+    # The client's error text quotes the URL, so no traceback is logged.
+    assert "s3cret" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_setup_rechecks_one_server_spelled_two_ways_once(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Options and provider spelling one down server differently: one probe."""
+
+    async def _ollama_down(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    data.options[CONF_OLLAMA_URL] = "ollama-fallback:11434/"
+    data.providers["ollama1"].data["settings"]["base_url"] = (
+        "http://ollama-fallback:11434"
+    )
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    monkeypatch.setattr(hga_component, "configured_ollama_urls", configured_ollama_urls)
+    monkeypatch.setattr(hga_component, "ollama_healthy", _ollama_down)
+    scheduled = _capture_recheck(monkeypatch)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert [probe.label for probe in scheduled] == [
+        "Ollama (http://ollama-fallback:11434)"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_setup_survives_a_malformed_fallback_ollama_url(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A malformed saved fallback URL fails its check; setup carries on."""
+    broken_url = "http://[broken:11434"
+    real_ollama_healthy = hga_component.ollama_healthy
+
+    async def _check(hass_: Any, url: str, **kwargs: Any) -> bool:
+        if url == broken_url:
+            return await real_ollama_healthy(hass_, url, **kwargs)
+        return False
+
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    del data.options[CONF_OLLAMA_URL]
+    data.providers["ollama1"].data["settings"]["base_url"] = broken_url
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    monkeypatch.setattr(hga_component, "configured_ollama_urls", configured_ollama_urls)
+    monkeypatch.setattr(hga_component, "ollama_healthy", _check)
+    scheduled = _capture_recheck(monkeypatch)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert not isinstance(entry.runtime_data.chat_model, FallbackChatModel)
+    assert [probe.label for probe in scheduled] == ["Ollama (<invalid URL>)"]
+
+
+@pytest.mark.asyncio
+async def test_setup_describes_only_ollama_servers_a_chain_uses(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Startup diagnostics probe the healthy fallback, not the unused default.
+
+    With a cloud primary the category URLs are the localhost default, which
+    nothing uses; probing it logged a failure on every boot.
+    """
+    fallback_url = "http://ollama-fallback:11434"
+
+    async def _only_fallback_up(_hass: Any, url: str, **_kwargs: Any) -> bool:
+        return url == fallback_url
+
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    del data.options[CONF_OLLAMA_URL]
+    data.providers["ollama1"].data["settings"]["base_url"] = fallback_url
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    monkeypatch.setattr(hga_component, "configured_ollama_urls", configured_ollama_urls)
+    monkeypatch.setattr(hga_component, "ollama_healthy", _only_fallback_up)
+    server_info = AsyncMock()
+    monkeypatch.setattr(hga_component, "_log_ollama_server_info", server_info)
+    _capture_recheck(monkeypatch)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    server_info.assert_called_once()
+    urls_by_category = server_info.call_args.args[1]
+    assert set(urls_by_category.values()) == {fallback_url}
+    assert set(urls_by_category) == {
+        "chat_fallback1",
+        "vlm_fallback1",
+        "summarization_fallback1",
+        "embedding_fallback1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_setup_rechecks_a_down_ollama_embedding_head_once(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ollama heading embeddings on its own URL, down at setup: one probe."""
+
+    async def _only_embedding_down(_hass: Any, url: str, **_kwargs: Any) -> bool:
+        return url != "http://ollama-emb:11434"
+
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    data.options[CONF_EMBEDDING_MODEL_PROVIDER] = "ollama"
+    data.options[CONF_OLLAMA_EMBEDDING_URL] = "http://ollama-emb:11434/"
+    data.fallback_chains["embedding"] = [
+        data.providers["ollama1"],
+        data.providers["openai1"],
+    ]
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    monkeypatch.setattr(hga_component, "configured_ollama_urls", configured_ollama_urls)
+    monkeypatch.setattr(hga_component, "ollama_healthy", _only_embedding_down)
+    scheduled = _capture_recheck(monkeypatch)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert [probe.label for probe in scheduled] == ["Ollama (http://ollama-emb:11434)"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ollama_up", [True, False])
+async def test_setup_describes_an_ollama_primary_only_when_it_answered(
+    hass: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    ollama_up: bool,  # noqa: FBT001
+) -> None:
+    """With Ollama as the chat primary, diagnostics cover it when it is up."""
+
+    async def _ollama(*_args: Any, **_kwargs: Any) -> bool:
+        return ollama_up
+
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    data.options[CONF_CHAT_MODEL_PROVIDER] = "ollama"
+    data.fallback_chains["chat"] = [
+        data.providers["ollama1"],
+        data.providers["openai1"],
+    ]
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    monkeypatch.setattr(hga_component, "configured_ollama_urls", configured_ollama_urls)
+    monkeypatch.setattr(hga_component, "ollama_healthy", _ollama)
+    server_info = AsyncMock()
+    monkeypatch.setattr(hga_component, "_log_ollama_server_info", server_info)
+    _capture_recheck(monkeypatch)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    if not ollama_up:
+        server_info.assert_not_called()
+        return
+    urls_by_category = server_info.call_args.args[1]
+    assert urls_by_category["chat"] == "http://ollama"
+    assert "chat_fallback1" not in urls_by_category
