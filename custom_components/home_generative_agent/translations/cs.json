@@ -516,7 +516,7 @@
     },
     "ollama_embedding_model_missing": {
       "title": "Embedding model Ollama {model} není nainstalován",
-      "description": "Home Generative Agent vytváří embeddingy v Ollama modelem **{model}**, ale Ollama na adrese {url} tento model nemá, takže požadavky na embeddingy tam selhávají. Pokud nepřevezme práci jiný poskytovatel embeddingů, nevrací vyhledávání v dlouhodobé paměti nic a výběr nástrojů přechází na porovnávání klíčových slov, takže agent může tvrdit, že nevidí nástroje nebo skripty, které jste mu zpřístupnili.\n\nOpravíte to spuštěním `ollama pull {model}` na každém uvedeném serveru. Pokud je Ollama poskytovatelem funkce **Embeddings** (**Nastavení → Zařízení a služby → Home Generative Agent**), můžete tam místo toho zvolit nainstalovaný model. Poté integraci znovu načtěte; tento problém zmizí při prvním znovunačtení po instalaci modelu."
+      "description": "Home Generative Agent vytváří embeddingy v Ollama modelem **{model}**, ale Ollama na adrese {url} tento model nemá, takže požadavky na embeddingy tam selhávají a záložní poskytovatel práci nepřevezme. Pokud jde o hlavního poskytovatele embeddingů, nevrací vyhledávání v dlouhodobé paměti nic a výběr nástrojů přechází na porovnávání klíčových slov, takže agent může tvrdit, že nevidí nástroje nebo skripty, které jste mu zpřístupnili. Na záložním serveru selžou embeddingy vždy, když je hlavní poskytovatel nedostupný.\n\nOpravíte to spuštěním `ollama pull {model}` na každém uvedeném serveru. Pokud je Ollama poskytovatelem funkce **Embeddings** (**Nastavení → Zařízení a služby → Home Generative Agent**), můžete tam místo toho zvolit nainstalovaný model. Poté integraci znovu načtěte; tento problém zmizí při prvním znovunačtení po instalaci modelu."
     }
   }
 }
