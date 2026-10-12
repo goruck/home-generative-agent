@@ -325,7 +325,7 @@
         "invalid_auth": "Invalid authorization.",
         "invalid_uri": "URI could not be generated.",
         "unknown": "Unexpected error.",
-        "ollama_model_not_installed": "Model {model} is not installed on Ollama at {url}. Run `ollama pull {model}` there, or choose an installed model. If you are sure the server has it under another spelling, submit again to save it anyway."
+        "ollama_model_not_installed": "Model {model} is not installed on Ollama at {url}. Run `ollama pull {model}` there, or choose an installed model. If the server has it under another name, or you are about to pull it, submit again to save it anyway."
       },
       "initiate_flow": {
         "reconfigure": "Reconfigure Feature",

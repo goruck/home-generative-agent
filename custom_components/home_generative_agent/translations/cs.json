@@ -325,7 +325,7 @@
         "invalid_auth": "Neplatná autorizace.",
         "invalid_uri": "URI se nepodařilo vygenerovat.",
         "unknown": "Neočekávaná chyba.",
-        "ollama_model_not_installed": "Model {model} není nainstalován v Ollama na adrese {url}. Spusťte tam `ollama pull {model}` nebo zvolte nainstalovaný model. Pokud jste si jisti, že jej server má pod jiným zápisem, odešlete formulář znovu a model se přesto uloží."
+        "ollama_model_not_installed": "Model {model} není nainstalován v Ollama na adrese {url}. Spusťte tam `ollama pull {model}` nebo zvolte nainstalovaný model. Pokud jej server má pod jiným názvem nebo se jej chystáte stáhnout, odešlete formulář znovu a model se přesto uloží."
       },
       "initiate_flow": {
         "reconfigure": "Přenastavit funkci",
