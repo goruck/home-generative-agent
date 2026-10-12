@@ -18,6 +18,7 @@ from custom_components.home_generative_agent.agent.graph import (
     State,
     _conversation_has_automation_context,
     _conversation_has_history_context,
+    _fallback_words,
     _filter_open_state_live_context_content,
     _get_actuation_safety_tools,
     _get_allowed_api_ids,
@@ -32,6 +33,7 @@ from custom_components.home_generative_agent.agent.graph import (
     _query_wants_automation,
     _query_wants_history,
     _query_wants_security_audit,
+    _rank_fallback_by_query,
     _retrieval_query,
     _retrieve_tools,
     _split_query_intents,
@@ -2430,7 +2432,7 @@ async def test_excluded_tool_does_not_consume_a_retrieval_slot(
     # keyword fallback -- which is the half that actually pins the fix. The
     # fallback would bind HassTurnOn too, from a differently-shaped tool set,
     # so asserting only on the routing map would pass without the fix.
-    assert "keyword-filtered fallback" not in caplog.text
+    assert "keyword-ranked fallback" not in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -2875,7 +2877,7 @@ async def test_renamed_index_rows_do_not_consume_retrieval_slots(
     assert "HassTurnOff" not in routed
     assert "HassMediaPlayerMute" not in routed
     # Via RAG, not by the pass collapsing into the keyword fallback.
-    assert "keyword-filtered fallback" not in caplog.text
+    assert "keyword-ranked fallback" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -2936,7 +2938,7 @@ async def test_live_context_force_injection_survives_the_rename(
     assert "homeassistant__GetLiveContext" in result["tool_routing_map"]
     assert "GetLiveContext" not in result["tool_routing_map"]
     # Injected by step 3c, not by the whole pass collapsing into the fallback.
-    assert "keyword-filtered fallback" not in caplog.text
+    assert "keyword-ranked fallback" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -3216,3 +3218,288 @@ def test_category_name_open_question_is_still_widened() -> None:
 def test_names_a_specific_device(name: str | None, *, specific: bool) -> None:
     """Category words alone are not a device name."""
     assert _names_a_specific_device(name) is specific
+
+
+# ---------------------------------------------------------------------------
+# Keyword-ranked fallback (issue #757)
+# ---------------------------------------------------------------------------
+
+
+def _raw_tool(name: str, description: str = "", *, actuation: bool = False) -> Any:
+    return {
+        "name": name,
+        "api_id": "assist",
+        "description": description,
+        "parameters": "{}",
+        "is_actuation": actuation,
+    }
+
+
+def test_rank_fallback_lifts_named_script_over_declaration_order() -> None:
+    """A tool the query names outranks every tool declared before it."""
+    tools = [
+        _raw_tool("HassTurnOn", "Turns on a device or entity", actuation=True),
+        _raw_tool("HassTurnOff", "Turns off a device or entity", actuation=True),
+        _raw_tool("HassLightSet", "Sets the brightness of a light"),
+        _raw_tool("GetLiveContext", "Provides real-time state of devices"),
+        _raw_tool("script__test_script", "Test script"),
+        _raw_tool("script__door_history", "Door opening history"),
+    ]
+
+    ranked, matched = _rank_fallback_by_query(
+        tools, "Run the door history script please"
+    )
+
+    assert ranked[0]["name"] == "script__door_history"
+    # "script" is in only two of six tools, so it still counts, ranking the
+    # other script above the non-matching tools.
+    assert ranked[1]["name"] == "script__test_script"
+    assert matched == 2
+
+
+def test_rank_fallback_keeps_order_when_nothing_matches() -> None:
+    """With no overlap the caller's order is returned unchanged."""
+    tools = [_raw_tool("HassTurnOn"), _raw_tool("HassTurnOff"), _raw_tool("Foo")]
+
+    ranked, matched = _rank_fallback_by_query(tools, "zzz qqq")
+
+    assert [t["name"] for t in ranked] == ["HassTurnOn", "HassTurnOff", "Foo"]
+    assert matched == 0
+
+
+def test_rank_fallback_ignores_words_common_to_most_tools() -> None:
+    """A word found in most tools ("device") cannot reorder them."""
+    tools = [
+        _raw_tool("alpha", "a device tool"),
+        _raw_tool("beta", "a device tool"),
+        _raw_tool("gamma", "a device tool"),
+        _raw_tool("delta", "unrelated"),
+    ]
+
+    ranked, matched = _rank_fallback_by_query(tools, "which device")
+
+    assert [t["name"] for t in ranked] == ["alpha", "beta", "gamma", "delta"]
+    assert matched == 0
+
+
+def test_rank_fallback_name_match_beats_description_match() -> None:
+    """A query word in the name outweighs the same word in a description."""
+    tools = [
+        _raw_tool("mentions_it", "reads the garage sensor"),
+        _raw_tool("garage_door", "opens things"),
+        _raw_tool("other_one", "nothing"),
+        _raw_tool("other_two", "nothing"),
+    ]
+
+    ranked, _ = _rank_fallback_by_query(tools, "garage")
+
+    assert [t["name"] for t in ranked[:2]] == ["garage_door", "mentions_it"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_fallback_binds_script_named_in_query(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    Issue #757: with the tool index down, a named script is still bound.
+
+    Before the fix the fallback took the first `limit` tools in declaration
+    order, and HA declares scripts after its intent tools.
+    """
+    state: State = {
+        "messages": [HumanMessage(content="run the door history script")],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+    }
+    store = MagicMock()
+    store.asearch = AsyncMock()
+    config: RunnableConfig = {
+        "configurable": {
+            "options": {"llm_hass_api": ["assist"], "tool_retrieval_limit": 2},
+            "tool_index_ready": False,
+            "tool_index_failed": True,
+            "langchain_tools": {},
+            "ha_llm_api": _live_llm_api(
+                "HassTurnOn",
+                "HassTurnOff",
+                "HassLightSet",
+                "HassClimateSetTemperature",
+                "script__test_script",
+                "script__door_history",
+            ),
+        }
+    }
+
+    result = await _retrieve_tools(state, config, store=store)
+
+    assert "script__door_history" in result["tool_routing_map"]
+    assert "keyword-ranked fallback" in caplog.text
+    assert "matched=2" in caplog.text
+
+
+def _fallback_state(text: str) -> State:
+    return {
+        "messages": [HumanMessage(content=text)],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+    }
+
+
+def _index_down_config(limit: int, *tool_names: str) -> RunnableConfig:
+    return {
+        "configurable": {
+            "options": {"llm_hass_api": ["assist"], "tool_retrieval_limit": limit},
+            "tool_index_ready": False,
+            "tool_index_failed": True,
+            "langchain_tools": {},
+            "ha_llm_api": _live_llm_api(*tool_names),
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_fallback_keeps_actuation_slots() -> None:
+    """
+    Tools that share the request's words cannot crowd out actuation tools.
+
+    Three garage scripts outrank every Hass intent on "open the garage door".
+    Ranked alone they would take 3 of 5 slots and push HassLightSet out; an
+    actuation request keeps 3 slots for actuation tools instead.
+    """
+    scripts = [f"script__garage_door_{n}" for n in ("a", "b", "c")]
+    config = _index_down_config(
+        5,
+        "HassTurnOn",
+        "HassTurnOff",
+        "HassLightSet",
+        "GetLiveContext",
+        "HassMediaPause",
+        "HassMediaUnpause",
+        "script__vacation_mode",
+        *scripts,
+    )
+    store = MagicMock()
+    store.asearch = AsyncMock()
+
+    result = await _retrieve_tools(
+        _fallback_state("open the garage door"), config, store=store
+    )
+
+    routed = result["tool_routing_map"]
+    assert {"HassTurnOn", "HassTurnOff", "HassLightSet"} <= routed.keys()
+    assert sum(name in routed for name in scripts) == 2
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_fallback_unmatched_actuation_query_unchanged() -> None:
+    """With nothing matching, an actuation request binds actuation tools first."""
+    config = _index_down_config(
+        2, "GetLiveContext", "script__x", "HassTurnOn", "HassTurnOff"
+    )
+    store = MagicMock()
+    store.asearch = AsyncMock()
+
+    result = await _retrieve_tools(_fallback_state("turn on zzz"), config, store=store)
+
+    assert {"HassTurnOn", "HassTurnOff"} <= result["tool_routing_map"].keys()
+    assert "script__x" not in result["tool_routing_map"]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # camelCase intents split; "on" is under the 3-character minimum.
+        ("HassTurnOn", {"hass", "turn"}),
+        ("script__door_history", {"script", "door", "history"}),
+        # Plurals fold on both sides; 3-letter words keep their "s".
+        ("doors", {"door"}),
+        ("bus", {"bus"}),
+        # Non-ASCII words are kept whole.
+        ("historie dveří", {"historie", "dveří"}),
+        ("the and for", set()),
+        ("", set()),
+        (None, set()),
+    ],
+)
+def test_fallback_words(text: str | None, expected: set[str]) -> None:
+    """Word splitting decides whether a named tool is found."""
+    assert _fallback_words(text) == expected
+
+
+def test_rank_fallback_matches_czech_description() -> None:
+    """Matching is language-agnostic when query and description share words."""
+    tools = [
+        _raw_tool("HassTurnOn", "Turns on a device"),
+        _raw_tool("script__a", "Spustí historii dveří"),
+        _raw_tool("script__b", "Jiný skript"),
+        _raw_tool("script__c", "Další skript"),
+    ]
+
+    ranked, matched = _rank_fallback_by_query(tools, "ukaž historii dveří")
+
+    assert ranked[0]["name"] == "script__a"
+    assert matched == 1
+
+
+def test_rank_fallback_tolerates_null_description() -> None:
+    """A third-party tool's explicit null description does not break ranking."""
+    tools = [_raw_tool("door_tool", "x"), _raw_tool("other", "y")]
+    tools[1]["description"] = None
+
+    ranked, matched = _rank_fallback_by_query(tools, "door")
+
+    assert ranked[0]["name"] == "door_tool"
+    assert matched == 1
+
+
+def test_rank_fallback_ignores_query_words_no_tool_uses() -> None:
+    """A long pasted query only scores against words the tools use."""
+    tools = [_raw_tool("door_tool", "opens"), _raw_tool("light_tool", "dims")]
+    noise = " ".join(f"word{n}" for n in range(20000))
+
+    ranked, matched = _rank_fallback_by_query(tools, f"{noise} light")
+
+    assert ranked[0]["name"] == "light_tool"
+    assert matched == 1
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_fallback_named_script_binds_at_limit_one() -> None:
+    """
+    At a retrieval limit of 1 the actuation quota fills the only slot.
+
+    The best keyword match still gets one slot past it, or "run the door
+    history script" (an actuation request) could never bind the script.
+    """
+    config = _index_down_config(
+        1, "HassTurnOn", "HassTurnOff", "GetLiveContext", "script__door_history"
+    )
+    store = MagicMock()
+    store.asearch = AsyncMock()
+
+    result = await _retrieve_tools(
+        _fallback_state("run the door history script"), config, store=store
+    )
+
+    assert {"HassTurnOn", "script__door_history"} <= result["tool_routing_map"].keys()
+    assert "HassTurnOff" not in result["tool_routing_map"]
+
+
+def test_rank_fallback_reads_only_the_start_of_huge_descriptions() -> None:
+    """An oversized MCP description is cut before tokenizing."""
+    tools = [
+        _raw_tool("alpha", "garage " + "x " * 500_000 + "telescope"),
+        _raw_tool("beta", "nothing"),
+    ]
+
+    ranked, matched = _rank_fallback_by_query(tools, "telescope garage")
+
+    # "garage" is in the kept prefix; "telescope", far past it, is not read.
+    assert ranked[0]["name"] == "alpha"
+    assert matched == 1

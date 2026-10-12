@@ -324,7 +324,8 @@
         "cannot_connect": "Could not connect to the database. Check settings and try again.",
         "invalid_auth": "Invalid authorization.",
         "invalid_uri": "URI could not be generated.",
-        "unknown": "Unexpected error."
+        "unknown": "Unexpected error.",
+        "ollama_model_not_installed": "Model {model} is not installed on Ollama at {url}. Run `ollama pull {model}` there, or choose an installed model. If you are sure the server has it under another spelling, submit again to save it anyway."
       },
       "initiate_flow": {
         "reconfigure": "Reconfigure Feature",
@@ -512,6 +513,10 @@
     "unknown_person_rules_inert_no_analyzer": {
       "title": "Sentinel's unknown-person rules cannot fire",
       "description": "Affected rules:\n\n{rules}\n\n**Why this is showing:** face recognition is switched on and the database is present, but the video analyzer is turned off. Faces are only recognised while the analyzer is processing camera snapshots, so nothing ever produces the result.\n\n**To fix it:** set a video analyzer mode other than *disable* in the integration's options. The notice clears on the next reload.\n\nThese rules trigger only on a face-recognition result saying a person was seen but not recognised, and only the face-recognition pipeline produces it. Nothing errors and nothing is logged when it is missing, and the rules still count as active on the `sentinel_health` sensor, because from Sentinel's side they simply never match.\n\nSentinel's other rules are unaffected: unlocked locks, open entries, appliance and battery checks, and the Home Assistant & network security audit.\n\n**For camera coverage without face recognition**, approve a `motion_detected_*` rule from Sentinel's rule discovery — those alert on motion while nobody is home, or at night, and need no face service.\n\nIf you meant to run without these rules, ignore this notice — it is a statement about coverage, not a fault."
+    },
+    "ollama_embedding_model_missing": {
+      "title": "Ollama embedding model {model} is not installed",
+      "description": "Home Generative Agent creates embeddings on Ollama with **{model}**, but Ollama at {url} does not have that model, so embedding requests there fail. Unless another embedding provider takes over, long-term memory search returns nothing and tool retrieval falls back to keyword matching, so the agent may say it cannot see tools or scripts you have exposed to it.\n\nTo fix it, run `ollama pull {model}` on each server listed. If Ollama is the provider of the **Embeddings** feature (**Settings → Devices & services → Home Generative Agent**), you can instead pick a model that is installed there. Then reload the integration; this issue clears on the first reload after the model is installed."
     }
   }
 }

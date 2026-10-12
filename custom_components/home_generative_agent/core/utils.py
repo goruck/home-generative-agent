@@ -39,6 +39,7 @@ from ..const import (  # noqa: TID252
     OLLAMA_GPT_EFFORT,
     OLLAMA_OSS_TAG,
     OPENAI_CHAT_COMPLETIONS_PATH,
+    RECOMMENDED_OLLAMA_URL,
 )
 from .fallback import (
     ainvoke_dropping_unsupported_params,
@@ -122,6 +123,22 @@ def normalized_ollama_url(value: Any) -> str | None:
     if not text:
         return None
     return ensure_http_url(text).rstrip("/")
+
+
+_OLLAMA_PROVIDER_URL_KEYS = ("base_url", "chat_url", "vlm_url", "summarization_url")
+
+
+def ollama_provider_settings_url(settings: Mapping[str, Any]) -> str:
+    """
+    Return the Ollama URL a provider's models use, as setup keys it.
+
+    Legacy providers may carry only a per-category URL; one with none uses
+    the recommended default, like setup does.
+    """
+    for key in _OLLAMA_PROVIDER_URL_KEYS:
+        if url := normalized_ollama_url(settings.get(key)):
+            return url
+    return RECOMMENDED_OLLAMA_URL
 
 
 def normalize_openai_compatible_base_url(url: str) -> str:
@@ -759,39 +776,89 @@ async def validate_ollama_url(
             raise CannotConnectError(_http_status(resp))
 
 
-async def list_ollama_models(  # noqa: PLR0911
+async def fetch_ollama_models(  # noqa: PLR0911
     hass: HomeAssistant, base_url: str, timeout_s: float = 5.0
-) -> list[str]:
-    """Return available Ollama model names for the given base URL."""
+) -> list[str] | None:
+    """
+    Return the model names an Ollama server lists, or None if it cannot say.
+
+    None means unreachable, an HTTP error, or a reply that is not a model
+    listing; an empty list is a server that answered and has no models.
+    Checks that report a missing model must tell the two apart (#757).
+    """
     if not base_url:
-        return []
+        return None
     base_url = ensure_http_url(base_url)
     client = get_async_client(hass)
     try:
         async with asyncio.timeout(timeout_s):
             resp = await client.get(urljoin(base_url.rstrip("/") + "/", "api/tags"))
     except (TimeoutError, httpx.RequestError, httpx.InvalidURL, ValueError):
-        # Unreachable, or a malformed saved URL: offer no models either way.
-        return []
+        # Unreachable, or a malformed saved URL.
+        return None
     if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
-        return []
+        return None
     try:
         payload = resp.json()
     except ValueError:
-        return []
+        return None
     if not isinstance(payload, dict):
-        return []
+        return None
     models = payload.get("models")
     if not isinstance(models, list):
-        return []
+        return None
     names: list[str] = []
     for item in models:
         if not isinstance(item, dict):
             continue
-        name = item.get("name")
+        name = item.get("name") or item.get("model")
         if isinstance(name, str) and name and name not in names:
             names.append(name)
+    # Entries that carry no usable name (a proxy speaking a variant of the
+    # API) say nothing about which models exist: unknown, not "none".
+    if models and not names:
+        return None
     return names
+
+
+async def list_ollama_models(
+    hass: HomeAssistant, base_url: str, timeout_s: float = 5.0
+) -> list[str]:
+    """Return available Ollama model names for the given base URL."""
+    return await fetch_ollama_models(hass, base_url, timeout_s) or []
+
+
+_OLLAMA_DEFAULT_REGISTRY = "registry.ollama.ai/"
+_OLLAMA_DEFAULT_NAMESPACE = "library/"
+
+
+def _ollama_model_key(name: str) -> str:
+    """
+    Spell a model name the way Ollama resolves it, for comparison only.
+
+    Ollama matches names case-insensitively, fills in its default registry and
+    ``library/`` namespace, and reads an untagged name as ``:latest``; /api/tags
+    lists the short form ("mxbai-embed-large:latest").
+    """
+    key = name.strip().casefold()
+    key = key.removeprefix(_OLLAMA_DEFAULT_REGISTRY)
+    key = key.removeprefix(_OLLAMA_DEFAULT_NAMESPACE)
+    # The tag colon follows the last path segment; an earlier colon belongs to
+    # a registry host:port ("myregistry:5000/lib/model").
+    return key if ":" in key.rsplit("/", 1)[-1] else f"{key}:latest"
+
+
+def ollama_model_installed(model: str, installed: list[str]) -> bool:
+    """
+    Return True if ``model`` is among the names /api/tags returned.
+
+    A digest-pinned name ("model@sha256:...") is not listed by digest, so it
+    cannot be checked and is reported installed rather than refused.
+    """
+    if "@" in model:
+        return True
+    wanted = _ollama_model_key(model)
+    return any(_ollama_model_key(name) == wanted for name in installed)
 
 
 async def validate_openai_key(

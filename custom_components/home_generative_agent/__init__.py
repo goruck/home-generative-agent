@@ -241,6 +241,10 @@ from .core.database_guard import (
     async_sync_database_issue,
 )
 from .core.db_utils import parse_postgres_uri
+from .core.embedding_model_guard import (
+    async_clear_ollama_embedding_model_issue,
+    async_sync_ollama_embedding_model_issue,
+)
 from .core.face_guard import (
     async_check_unknown_person_rules,
     async_clear_unknown_person_issue,
@@ -283,6 +287,7 @@ from .core.utils import (
     normalize_openai_compatible_base_url,
     normalized_ollama_url,
     ollama_healthy,
+    ollama_provider_settings_url,
     ollama_url_for_category,
     openai_compatible_healthy,
     openai_healthy,
@@ -1262,13 +1267,37 @@ def _provider_api_key(
     return None
 
 
+def _ollama_embedding_urls_to_check(
+    *,
+    primary_url: str,
+    primary_selected: bool,
+    fallback_urls: list[str],
+    health: Mapping[str, bool],
+    has_database: bool,
+) -> list[str]:
+    """
+    Return the Ollama servers whose embedding model setup should verify.
+
+    The primary only when Ollama is the selected embedding provider, plus each
+    Ollama fallback in the embedding chain, which embeds with the same model
+    (#749). Only servers that passed the health check: an unreachable one is
+    already reported, and its embeddings client is never built. None without a
+    database, where nothing uses embeddings.
+    """
+    if not has_database:
+        return []
+    candidates = [primary_url] if primary_selected else []
+    candidates.extend(fallback_urls)
+    urls: list[str] = []
+    for url in candidates:
+        if url and health.get(url) and url not in urls:
+            urls.append(url)
+    return urls
+
+
 def _ollama_provider_url(provider: ModelProviderConfig) -> str:
     """Return the Ollama URL a provider's models use, as setup keys it."""
-    settings = provider.data.get("settings", {})
-    for key in ("base_url", "chat_url", "vlm_url", "summarization_url"):
-        if url := normalized_ollama_url(settings.get(key)):
-            return url
-    return RECOMMENDED_OLLAMA_URL
+    return ollama_provider_settings_url(provider.data.get("settings", {}))
 
 
 def _provider_setting(
@@ -2492,6 +2521,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         embedding_model = gemini_embeddings
     else:
         embedding_model = ollama_embeddings
+    # Read by the embedding-model repair check at the end of setup.
+    ollama_embeddings_selected = embedding_model is not None and (
+        embedding_model is ollama_embeddings
+    )
 
     # Wrap embedding model with fallback if multiple providers available
     _emb_fb = fallback_chains.get("embedding", [])
@@ -4238,6 +4271,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         database_missing=db_uri is None and bool(providers),
     )
 
+    # Same placement. Checked off the setup path: it is one request per server
+    # that just answered its health check, and only ever informs.
+    entry.async_create_background_task(
+        hass,
+        async_sync_ollama_embedding_model_issue(
+            hass,
+            entry.entry_id,
+            urls=_ollama_embedding_urls_to_check(
+                primary_url=ollama_embedding_url,
+                primary_selected=ollama_embeddings_selected,
+                fallback_urls=fallback_ollama_urls.get("embedding", []),
+                health=ollama_health,
+                has_database=db_uri is not None,
+            ),
+            model=ollama_embedding_model,
+        ),
+        name="hga_ollama_embedding_model_check",
+    )
+
     # Same placement, same reason: four Sentinel rule ids (five evaluators) key
     # on a positive "Unknown Person" label that only the face pipeline writes,
     # so without it they are permanently inert with nothing logged. Raised here
@@ -4393,6 +4445,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
     # (a disable would otherwise leave it standing); the next successful
     # setup re-raises it if the database is still missing.
     async_clear_database_issue(hass, entry.entry_id)
+    async_clear_ollama_embedding_model_issue(hass, entry.entry_id)
     # An unloaded entry runs no rules at all, so singling four out is wrong the
     # same way; the next successful setup re-raises it if it still applies.
     async_clear_unknown_person_issue(hass, entry.entry_id)
@@ -4407,6 +4460,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> None
     would otherwise leave the old ones standing until a restart.
     """
     async_clear_database_issue(hass, entry.entry_id)
+    async_clear_ollama_embedding_model_issue(hass, entry.entry_id)
     async_clear_pin_pipeline_issue(hass, entry.entry_id)
     async_clear_unknown_person_issue(hass, entry.entry_id)
 

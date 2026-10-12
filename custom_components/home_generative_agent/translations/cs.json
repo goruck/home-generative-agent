@@ -324,7 +324,8 @@
         "cannot_connect": "Nelze se připojit k databázi. Zkontrolujte nastavení a zkuste to znovu.",
         "invalid_auth": "Neplatná autorizace.",
         "invalid_uri": "URI se nepodařilo vygenerovat.",
-        "unknown": "Neočekávaná chyba."
+        "unknown": "Neočekávaná chyba.",
+        "ollama_model_not_installed": "Model {model} není nainstalován v Ollama na adrese {url}. Spusťte tam `ollama pull {model}` nebo zvolte nainstalovaný model. Pokud jste si jisti, že jej server má pod jiným zápisem, odešlete formulář znovu a model se přesto uloží."
       },
       "initiate_flow": {
         "reconfigure": "Přenastavit funkci",
@@ -512,6 +513,10 @@
     "unknown_person_rules_inert_no_analyzer": {
       "title": "Pravidla Sentinelu pro neznámé osoby se nemohou spustit",
       "description": "Dotčená pravidla:\n\n{rules}\n\n**Proč se toto zobrazuje:** rozpoznávání tváří je zapnuté a databáze je k dispozici, ale analyzátor videa je vypnutý. Tváře se rozpoznávají pouze tehdy, když analyzátor zpracovává snímky z kamer, takže výsledek nikdy nevznikne.\n\n**Jak to opravit:** nastavte v možnostech integrace jiný režim analyzátoru videa než *disable*. Hlášení zmizí při dalším načtení.\n\nTato pravidla se spouštějí pouze na základě výsledku rozpoznávání tváří, který říká, že byla spatřena osoba, ale nebyla rozpoznána, a tento výsledek vytváří pouze pipeline rozpoznávání tváří. Když chybí, nic nezhavaruje a nic se nezaloguje a pravidla se na senzoru `sentinel_health` stále počítají jako aktivní, protože ze strany Sentinelu prostě nikdy nenastane shoda.\n\nOstatní pravidla Sentinelu tím nejsou ovlivněna: odemčené zámky, otevřené vstupy, kontroly spotřebičů a baterií a audit zabezpečení Home Assistant a sítě.\n\n**Pro pokrytí kamerami bez rozpoznávání tváří** schvalte pravidlo `motion_detected_*` ze zjišťování pravidel Sentinelu — ta upozorňují na pohyb, když nikdo není doma nebo v noci, a žádnou službu pro tváře nepotřebují.\n\nPokud jste chtěli běžet bez těchto pravidel, hlášení ignorujte — jde o konstatování o pokrytí, nikoli o závadu."
+    },
+    "ollama_embedding_model_missing": {
+      "title": "Embedding model Ollama {model} není nainstalován",
+      "description": "Home Generative Agent vytváří embeddingy v Ollama modelem **{model}**, ale Ollama na adrese {url} tento model nemá, takže požadavky na embeddingy tam selhávají. Pokud nepřevezme práci jiný poskytovatel embeddingů, nevrací vyhledávání v dlouhodobé paměti nic a výběr nástrojů přechází na porovnávání klíčových slov, takže agent může tvrdit, že nevidí nástroje nebo skripty, které jste mu zpřístupnili.\n\nOpravíte to spuštěním `ollama pull {model}` na každém uvedeném serveru. Pokud je Ollama poskytovatelem funkce **Embeddings** (**Nastavení → Zařízení a služby → Home Generative Agent**), můžete tam místo toho zvolit nainstalovaný model. Poté integraci znovu načtěte; tento problém zmizí při prvním znovunačtení po instalaci modelu."
     }
   }
 }
