@@ -1267,6 +1267,25 @@ def _provider_api_key(
     return None
 
 
+def _configured_embedding_dims(options: Mapping[str, Any]) -> int:
+    """
+    Return the vector size a new memory store is created with.
+
+    The configured dimensions for an OpenAI-compatible primary, else the
+    size the other providers are asked for. An existing store keeps the size
+    it was created with, which the embedding-model check reads back.
+    """
+    if (
+        options.get(CONF_EMBEDDING_MODEL_PROVIDER, RECOMMENDED_EMBEDDING_MODEL_PROVIDER)
+        == "openai_compatible"
+    ):
+        return options.get(
+            CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
+            RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
+        )
+    return EMBEDDING_MODEL_DIMS
+
+
 def _ollama_embedding_urls_to_check(
     *,
     primary_url: str,
@@ -2606,16 +2625,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         else:
             embedding_model = None
 
-    # The store's vector size, which every provider in the embedding chain must
-    # produce; the startup check holds Ollama models to it.
-    embedding_dims = (
-        options.get(
-            CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
-            RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
-        )
-        if embedding_provider == "openai_compatible"
-        else EMBEDDING_MODEL_DIMS
-    )
+    embedding_dims = _configured_embedding_dims(options)
     if embedding_model is None:
         LOGGER.warning(
             "No embeddings provider available; vector store will be limited.",
@@ -4273,8 +4283,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         database_missing=db_uri is None and bool(providers),
     )
 
-    # Same placement. Checked off the setup path: it is one request per server
-    # that just answered its health check, and only ever informs.
+    # Same placement. Checked off the setup path: a model listing and a size
+    # request per server that just answered its health check, plus one read of
+    # the store's vector size, and it only ever informs.
     entry.async_create_background_task(
         hass,
         async_sync_ollama_embedding_model_issue(
@@ -4287,8 +4298,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 health=ollama_health,
                 has_database=db_uri is not None,
             ),
+            # Set whenever Ollama is the configured primary, even one that is
+            # down at boot: the check must then wait for it to be measured,
+            # not judge the fallbacks as if no Ollama primary existed.
+            primary_url=(
+                ollama_embedding_url if embedding_provider == "ollama" else None
+            ),
             model=ollama_embedding_model,
-            expected_dims=embedding_dims,
+            configured_dims=embedding_dims,
+            pool=pool,
         ),
         name="hga_ollama_embedding_model_check",
     )

@@ -48,6 +48,7 @@ from ..const import (  # noqa: TID252
     CONF_FEATURE_MODEL_REASONING_BUDGET,
     CONF_FEATURE_MODEL_REASONING_BY_MODEL,
     CONF_FEATURE_MODEL_TEMPERATURE,
+    CONF_VECTORS_BOOTSTRAPPED,
     EMBEDDING_MODEL_DIMS,
     FEATURE_CATEGORY_MAP,
     FEATURE_DEFS,
@@ -72,13 +73,15 @@ from ..const import (  # noqa: TID252
     SUBENTRY_TYPE_MODEL_PROVIDER,
 )
 from ..core.db_utils import build_postgres_uri  # noqa: TID252
+from ..core.embedding_model_guard import async_store_vector_dims  # noqa: TID252
 from ..core.utils import (  # noqa: TID252
     CannotConnectError,
     InvalidAuthError,
-    fetch_ollama_embedding_dims,
     fetch_ollama_models,
+    format_embedding_dims,
     list_ollama_models,
     normalized_ollama_url,
+    ollama_embedding_dims,
     ollama_model_installed,
     ollama_provider_settings_url,
     redact_url,
@@ -471,10 +474,11 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
         self._active_feature: str | None = None
         self._pending_provider_id: str | None = None
         self._ollama_model_cache: dict[str, list[str]] = {}
-        # The embedding model last refused as not installed; submitting the
-        # same name again saves it, so a spelling the check cannot match
-        # never locks a working model out (#757).
-        self._refused_embedding_model: tuple[str, tuple[str, ...]] | None = None
+        # The embedding model and servers last refused, with the checks the
+        # user has already seen fail. Submitting the same input again skips
+        # those checks, so a spelling the name check cannot match (#757) or a
+        # misreported vector size (#755) never locks a working model out.
+        self._embedding_refusal: tuple[tuple[Any, ...], frozenset[str]] | None = None
 
     def _schedule_reload(self) -> None:
         entry = self._get_entry()
@@ -1086,49 +1090,25 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
             _add_reasoning_schema(schema, provider_type, existing_model, defaults)
 
         if user_input is not None and (
-            missing_at := await self._async_ollama_embedding_model_missing(
+            refusal := await self._async_ollama_embedding_refusal(
                 category, provider_id, user_input
             )
         ):
             # Caught here rather than at runtime, where an un-pulled embedding
-            # model only shows up as a 404 on every memory search and a
-            # failed tool index (issue #757).
+            # model (#757) or one of the wrong vector size (#755) only shows up
+            # as failed writes on every memory search and a failed tool index.
+            error, placeholders = refusal
             return self.async_show_form(
                 step_id="feature_model",
                 data_schema=self.add_suggested_values_to_schema(
                     vol.Schema(schema), user_input
                 ),
-                errors={"base": "ollama_model_not_installed"},
+                errors={"base": error},
                 description_placeholders={
                     "provider_notice": provider_notice,
                     "feature_name": FEATURE_DEFS[feature_type]["name"],
                     "model": str(user_input.get(CONF_FEATURE_MODEL_NAME, "")).strip(),
-                    "url": ", ".join(redact_url(url) for url in missing_at),
-                },
-            )
-
-        if user_input is not None and (
-            wrong_dims := await self._async_ollama_embedding_wrong_dims(
-                category, provider_id, user_input
-            )
-        ):
-            # Not overridable like a missing model: the memory store holds one
-            # vector size, so a model of another size fails every write (#755).
-            return self.async_show_form(
-                step_id="feature_model",
-                data_schema=self.add_suggested_values_to_schema(
-                    vol.Schema(schema), user_input
-                ),
-                errors={"base": "ollama_embedding_dims_mismatch"},
-                description_placeholders={
-                    "provider_notice": provider_notice,
-                    "feature_name": FEATURE_DEFS[feature_type]["name"],
-                    "model": str(user_input.get(CONF_FEATURE_MODEL_NAME, "")).strip(),
-                    "url": ", ".join(redact_url(url) for url in wrong_dims),
-                    "dims": ", ".join(
-                        str(size) for size in sorted(set(wrong_dims.values()))
-                    ),
-                    "expected": str(EMBEDDING_MODEL_DIMS),
+                    **placeholders,
                 },
             )
 
@@ -1196,70 +1176,95 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
             },
         )
 
-    async def _async_ollama_embedding_model_missing(
+    async def _async_ollama_embedding_refusal(
         self,
         category: str | None,
         provider_id: str,
         user_input: dict[str, Any],
-    ) -> list[str]:
+    ) -> tuple[str, dict[str, str]] | None:
         """
-        Return the Ollama servers that lack the submitted embedding model.
+        Return the error and placeholders refusing the embedding model, if any.
 
         Checks an Ollama primary and every Ollama fallback provider submitted
-        with it, since they all embed with this one model (#749).
-        Only the embedding model is checked: a missing chat or vision model
-        fails loudly on the user's first request, an embedding model fails in
-        the background. A server that cannot list its models is skipped, since
-        an unknown answer must not block saving; one that lists none lacks the
-        model. Submitting a refused name a second time saves it.
+        with it, since they all embed with this one model (#749): first that
+        each server has the model, then that the servers that have it produce
+        vectors of the memory store's size. Only the embedding model is
+        checked: a missing chat or vision model fails loudly on the user's
+        first request, an embedding model fails in the background. Whatever a
+        server or the database cannot tell is skipped, since an unknown answer
+        must not block saving; a server that lists no models lacks this one.
+        Submitting a refused input again skips the checks it already failed.
         """
         model, urls = self._ollama_embedding_servers(category, provider_id, user_input)
         if not urls:
-            return []
-        # The override covers only the servers it was refused on: a fallback
-        # added on the resubmit is still checked.
-        refusal = (model, tuple(urls))
-        if refusal == self._refused_embedding_model:
-            self._refused_embedding_model = None
-            return []
+            self._embedding_refusal = None
+            return None
+        entry = self._get_entry()
+        bootstrapped = bool(entry.data.get(CONF_VECTORS_BOOTSTRAPPED))
         # Always ask the servers: the cached lists predate the form, and a
-        # model may have been pulled or removed since it rendered.
-        listings = await asyncio.gather(
-            *(fetch_ollama_models(self.hass, url) for url in urls)
+        # model may have been pulled or removed since it rendered. The store
+        # read and the size requests do not depend on the listings, so all
+        # three run together and one slow server costs a single timeout. An
+        # Ollama primary creates a new store at EMBEDDING_MODEL_DIMS; an
+        # existing one keeps the size it was created with.
+        expected, listings, reported = await asyncio.gather(
+            async_store_vector_dims(
+                getattr(getattr(entry, "runtime_data", None), "pool", None),
+                default=None if bootstrapped else EMBEDDING_MODEL_DIMS,
+            ),
+            asyncio.gather(*(fetch_ollama_models(self.hass, url) for url in urls)),
+            ollama_embedding_dims(self.hass, urls, model),
         )
         missing: list[str] = []
+        present: list[str] = []
         for url, installed in zip(urls, listings, strict=True):
             if installed is None:
                 continue
             self._ollama_model_cache[url] = installed
-            if not ollama_model_installed(model, installed):
-                missing.append(url)
-        self._refused_embedding_model = refusal if missing else None
-        return missing
-
-    async def _async_ollama_embedding_wrong_dims(
-        self,
-        category: str | None,
-        provider_id: str,
-        user_input: dict[str, Any],
-    ) -> dict[str, int]:
-        """
-        Return the Ollama servers whose embedding model has the wrong size.
-
-        Maps each server to the vector size it reports for the submitted model
-        when that differs from the store's. A server that does not report a
-        size, or does not have the model (a refusal the user overrode), is
-        skipped.
-        """
-        model, urls = self._ollama_embedding_servers(category, provider_id, user_input)
-        sizes = await asyncio.gather(
-            *(fetch_ollama_embedding_dims(self.hass, url, model) for url in urls)
+            (present if ollama_model_installed(model, installed) else missing).append(
+                url
+            )
+        sizes = {url: reported[url] for url in present if url in reported}
+        # The override covers only what the user was shown: the same model on
+        # the same servers, which answered the same way, against the same
+        # store. A fallback added on the resubmit, or a server that was
+        # unreachable or did not report a size and now does, is checked again.
+        key = (
+            model,
+            tuple(urls),
+            tuple(present),
+            tuple(missing),
+            tuple(sorted(sizes.items())),
+            expected,
         )
-        return {
-            url: dims
-            for url, dims in zip(urls, sizes, strict=True)
-            if dims is not None and dims != EMBEDDING_MODEL_DIMS
-        }
+        overridden = (
+            self._embedding_refusal[1]
+            if self._embedding_refusal and self._embedding_refusal[0] == key
+            else frozenset()
+        )
+        if missing and "missing" not in overridden:
+            self._embedding_refusal = (key, overridden | {"missing"})
+            return "ollama_model_not_installed", {
+                "url": ", ".join(redact_url(url) for url in missing)
+            }
+        wrong = (
+            {url: dims for url, dims in sizes.items() if dims != expected}
+            if expected is not None
+            else {}
+        )
+        if wrong and "dims" not in overridden:
+            self._embedding_refusal = (key, overridden | {"dims"})
+            servers, dims = format_embedding_dims(wrong)
+            # The primary is urls[0]. When only fallbacks are wrong, choosing
+            # another model would break the primary; their fix differs.
+            error = (
+                "ollama_embedding_dims_mismatch"
+                if urls[0] in wrong
+                else "ollama_fallback_embedding_dims_mismatch"
+            )
+            return error, {"url": servers, "dims": dims, "expected": str(expected)}
+        self._embedding_refusal = None
+        return None
 
     def _ollama_embedding_servers(
         self,

@@ -776,23 +776,31 @@ async def validate_ollama_url(
             raise CannotConnectError(_http_status(resp))
 
 
-async def fetch_ollama_models(  # noqa: PLR0911
-    hass: HomeAssistant, base_url: str, timeout_s: float = 5.0
-) -> list[str] | None:
+async def _ollama_json(
+    hass: HomeAssistant,
+    base_url: str,
+    path: str,
+    *,
+    body: dict[str, Any] | None = None,
+    timeout_s: float = 5.0,
+) -> dict[str, Any] | None:
     """
-    Return the model names an Ollama server lists, or None if it cannot say.
+    Return an Ollama API reply as a dict, or None if there is no usable one.
 
-    None means unreachable, an HTTP error, or a reply that is not a model
-    listing; an empty list is a server that answered and has no models.
-    Checks that report a missing model must tell the two apart (#757).
+    GETs ``path``, or POSTs ``body`` when one is given. None covers an empty
+    or malformed URL, an unreachable server, an HTTP error and a reply that
+    is not a JSON object, so callers can treat every one as "can't tell".
     """
     if not base_url:
         return None
-    base_url = ensure_http_url(base_url)
     client = get_async_client(hass)
     try:
+        # Inside the try: a malformed saved URL raises ValueError here.
+        url = urljoin(ensure_http_url(base_url).rstrip("/") + "/", path)
         async with asyncio.timeout(timeout_s):
-            resp = await client.get(urljoin(base_url.rstrip("/") + "/", "api/tags"))
+            resp = await (
+                client.get(url) if body is None else client.post(url, json=body)
+            )
     except (TimeoutError, httpx.RequestError, httpx.InvalidURL, ValueError):
         # Unreachable, or a malformed saved URL.
         return None
@@ -802,9 +810,21 @@ async def fetch_ollama_models(  # noqa: PLR0911
         payload = resp.json()
     except ValueError:
         return None
-    if not isinstance(payload, dict):
-        return None
-    models = payload.get("models")
+    return payload if isinstance(payload, dict) else None
+
+
+async def fetch_ollama_models(
+    hass: HomeAssistant, base_url: str, timeout_s: float = 5.0
+) -> list[str] | None:
+    """
+    Return the model names an Ollama server lists, or None if it cannot say.
+
+    None means unreachable, an HTTP error, or a reply that is not a model
+    listing; an empty list is a server that answered and has no models.
+    Checks that report a missing model must tell the two apart (#757).
+    """
+    payload = await _ollama_json(hass, base_url, "api/tags", timeout_s=timeout_s)
+    models = payload.get("models") if payload is not None else None
     if not isinstance(models, list):
         return None
     names: list[str] = []
@@ -821,7 +841,7 @@ async def fetch_ollama_models(  # noqa: PLR0911
     return names
 
 
-async def fetch_ollama_embedding_dims(  # noqa: PLR0911
+async def fetch_ollama_embedding_dims(
     hass: HomeAssistant, base_url: str, model: str, timeout_s: float = 5.0
 ) -> int | None:
     """
@@ -831,25 +851,12 @@ async def fetch_ollama_embedding_dims(  # noqa: PLR0911
     info. None for an unreachable server, a model it does not have, or a
     reply without that field, so callers skip the check rather than guess.
     """
-    if not base_url or not model:
+    if not model:
         return None
-    base_url = ensure_http_url(base_url)
-    client = get_async_client(hass)
-    try:
-        async with asyncio.timeout(timeout_s):
-            resp = await client.post(
-                urljoin(base_url.rstrip("/") + "/", "api/show"),
-                json={"model": model},
-            )
-    except (TimeoutError, httpx.RequestError, httpx.InvalidURL, ValueError):
-        return None
-    if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
-        return None
-    try:
-        payload = resp.json()
-    except ValueError:
-        return None
-    info = payload.get("model_info") if isinstance(payload, dict) else None
+    payload = await _ollama_json(
+        hass, base_url, "api/show", body={"model": model}, timeout_s=timeout_s
+    )
+    info = payload.get("model_info") if payload is not None else None
     if not isinstance(info, dict):
         return None
     arch = info.get("general.architecture")
@@ -858,6 +865,37 @@ async def fetch_ollama_embedding_dims(  # noqa: PLR0911
     if isinstance(dims, int) and not isinstance(dims, bool) and dims > 0:
         return dims
     return None
+
+
+async def ollama_embedding_dims(
+    hass: HomeAssistant, urls: Sequence[str], model: str
+) -> dict[str, int]:
+    """
+    Map each server that reports a vector size for ``model`` to that size.
+
+    Servers that do not report one are left out: they are unmeasured, which
+    callers must not read as either the right or the wrong size.
+    """
+    sizes = await asyncio.gather(
+        *(fetch_ollama_embedding_dims(hass, url, model) for url in urls)
+    )
+    return {
+        url: dims for url, dims in zip(urls, sizes, strict=True) if dims is not None
+    }
+
+
+def format_embedding_dims(wrong: Mapping[str, int]) -> tuple[str, str]:
+    """
+    Spell ``wrong`` servers and their sizes for the ``url``/``dims`` placeholders.
+
+    When the servers disagree, each server carries its own size so a message
+    never pairs a server with another one's size.
+    """
+    sizes = sorted(set(wrong.values()))
+    if len(sizes) == 1:
+        return ", ".join(redact_url(url) for url in wrong), str(sizes[0])
+    servers = ", ".join(f"{redact_url(url)} ({dims})" for url, dims in wrong.items())
+    return servers, ", ".join(str(size) for size in sizes)
 
 
 async def list_ollama_models(
