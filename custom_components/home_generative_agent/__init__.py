@@ -2606,19 +2606,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         else:
             embedding_model = None
 
+    # The store's vector size, which every provider in the embedding chain must
+    # produce; the startup check holds Ollama models to it.
+    embedding_dims = (
+        options.get(
+            CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
+            RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
+        )
+        if embedding_provider == "openai_compatible"
+        else EMBEDDING_MODEL_DIMS
+    )
     if embedding_model is None:
         LOGGER.warning(
             "No embeddings provider available; vector store will be limited.",
         )
     else:
-        embedding_dims = (
-            options.get(
-                CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
-                RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
-            )
-            if embedding_provider == "openai_compatible"
-            else EMBEDDING_MODEL_DIMS
-        )
         index_config = PostgresIndexConfig(
             embed=partial(generate_embeddings, embedding_model),
             dims=embedding_dims,
@@ -4286,6 +4288,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 has_database=db_uri is not None,
             ),
             model=ollama_embedding_model,
+            expected_dims=embedding_dims,
         ),
         name="hga_ollama_embedding_model_check",
     )

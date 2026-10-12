@@ -21,7 +21,9 @@ import custom_components.home_generative_agent as hga_component
 from custom_components.home_generative_agent.const import DOMAIN
 from custom_components.home_generative_agent.core import embedding_model_guard, utils
 from custom_components.home_generative_agent.core.embedding_model_guard import (
+    ISSUE_OLLAMA_EMBEDDING_DIMS_MISMATCH,
     ISSUE_OLLAMA_EMBEDDING_MODEL_MISSING,
+    _dims_issue_id,
     _issue_id,
     async_clear_ollama_embedding_model_issue,
     async_sync_ollama_embedding_model_issue,
@@ -35,6 +37,7 @@ from .test_database_guard import _setup_without_database
 URL = "http://ollama:11434"
 URL2 = "http://fallback:11434"
 MODEL = "qwen3-embedding:0.6b"
+DIMS = 1024
 
 
 def _issue(hass: Any, entry_id: str = "entry1") -> ir.IssueEntry | None:
@@ -50,14 +53,29 @@ def _loaded_entry(hass: Any) -> MockConfigEntry:
 
 
 def _serve(
-    monkeypatch: pytest.MonkeyPatch, listings: dict[str, list[str] | None]
-) -> None:
-    """Answer /api/tags per server URL; None is an unreachable server."""
+    monkeypatch: pytest.MonkeyPatch,
+    listings: dict[str, list[str] | None],
+    dims: dict[str, int] | None = None,
+) -> list[str]:
+    """
+    Answer /api/tags per server URL; None is an unreachable server.
+
+    ``dims`` is the vector size /api/show reports per server (none reported
+    when absent). Returns the URLs asked for a size, in order.
+    """
+    sizes = dims or {}
+    asked: list[str] = []
 
     async def _fetch(_hass: Any, url: str, *_: Any) -> list[str] | None:
         return listings[url]
 
+    async def _dims(_hass: Any, url: str, *_: Any) -> int | None:
+        asked.append(url)
+        return sizes.get(url)
+
     monkeypatch.setattr(embedding_model_guard, "fetch_ollama_models", _fetch)
+    monkeypatch.setattr(embedding_model_guard, "fetch_ollama_embedding_dims", _dims)
+    return asked
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +177,7 @@ async def test_missing_model_raises_issue_and_logs(
     _serve(monkeypatch, {URL: ["mxbai-embed-large:latest"]})
 
     await async_sync_ollama_embedding_model_issue(
-        hass, "entry1", urls=[URL], model=MODEL
+        hass, "entry1", urls=[URL], model=MODEL, expected_dims=DIMS
     )
 
     issue = _issue(hass)
@@ -179,7 +197,7 @@ async def test_empty_server_counts_as_missing(
     _serve(monkeypatch, {URL: []})
 
     await async_sync_ollama_embedding_model_issue(
-        hass, "entry1", urls=[URL], model=MODEL
+        hass, "entry1", urls=[URL], model=MODEL, expected_dims=DIMS
     )
 
     assert _issue(hass) is not None
@@ -194,7 +212,7 @@ async def test_issue_names_only_the_servers_missing_the_model(
     _serve(monkeypatch, {URL: [MODEL], URL2: ["other:latest"]})
 
     await async_sync_ollama_embedding_model_issue(
-        hass, "entry1", urls=[URL, URL2], model=MODEL
+        hass, "entry1", urls=[URL, URL2], model=MODEL, expected_dims=DIMS
     )
 
     issue = _issue(hass)
@@ -224,13 +242,13 @@ async def test_issue_clears_when_not_known_missing(
     _loaded_entry(hass)
     _serve(monkeypatch, {URL: ["other:latest"]})
     await async_sync_ollama_embedding_model_issue(
-        hass, "entry1", urls=[URL], model=MODEL
+        hass, "entry1", urls=[URL], model=MODEL, expected_dims=DIMS
     )
     assert _issue(hass) is not None
 
     _serve(monkeypatch, listings)
     await async_sync_ollama_embedding_model_issue(
-        hass, "entry1", urls=urls, model=MODEL
+        hass, "entry1", urls=urls, model=MODEL, expected_dims=DIMS
     )
 
     assert _issue(hass) is None
@@ -255,25 +273,113 @@ async def test_no_issue_for_an_entry_that_is_not_running(
     _serve(monkeypatch, {URL: ["other:latest"]})
 
     await async_sync_ollama_embedding_model_issue(
-        hass, "entry1", urls=[URL], model=MODEL
+        hass, "entry1", urls=[URL], model=MODEL, expected_dims=DIMS
     )
 
     assert _issue(hass) is None
+
+
+def _dims_issue(hass: Any, entry_id: str = "entry1") -> ir.IssueEntry | None:
+    return ir.async_get(hass).async_get_issue(DOMAIN, _dims_issue_id(entry_id))
+
+
+@pytest.mark.asyncio
+async def test_wrong_size_model_raises_its_own_issue(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The #755 follow-up: an installed model of the wrong vector size."""
+    _loaded_entry(hass)
+    _serve(monkeypatch, {URL: ["nomic-embed-text:latest"]}, dims={URL: 768})
+
+    await async_sync_ollama_embedding_model_issue(
+        hass, "entry1", urls=[URL], model="nomic-embed-text", expected_dims=DIMS
+    )
+
+    assert _issue(hass) is None
+    issue = _dims_issue(hass)
+    assert issue is not None
+    assert issue.translation_key == ISSUE_OLLAMA_EMBEDDING_DIMS_MISMATCH
+    assert issue.severity == ir.IssueSeverity.ERROR
+    assert issue.translation_placeholders == {
+        "model": "nomic-embed-text",
+        "dims": "768",
+        "expected": "1024",
+        "url": URL,
+    }
+    assert "768-dimension" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_size_is_checked_only_where_the_model_is_installed(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A server missing the model gets the missing issue, not a size check."""
+    _loaded_entry(hass)
+    asked = _serve(
+        monkeypatch, {URL: [MODEL], URL2: ["other:latest"]}, dims={URL: 1024}
+    )
+
+    await async_sync_ollama_embedding_model_issue(
+        hass, "entry1", urls=[URL, URL2], model=MODEL, expected_dims=DIMS
+    )
+
+    assert asked == [URL]
+    assert _issue(hass) is not None
+    assert _dims_issue(hass) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dims", [{URL: 1024}, {}])
+async def test_size_issue_clears_on_right_or_unknown_size(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, dims: dict[str, int]
+) -> None:
+    """A matching size clears the issue, and so does one the server won't report."""
+    _loaded_entry(hass)
+    _serve(monkeypatch, {URL: [MODEL]}, dims={URL: 768})
+    await async_sync_ollama_embedding_model_issue(
+        hass, "entry1", urls=[URL], model=MODEL, expected_dims=DIMS
+    )
+    assert _dims_issue(hass) is not None
+
+    _serve(monkeypatch, {URL: [MODEL]}, dims=dims)
+    await async_sync_ollama_embedding_model_issue(
+        hass, "entry1", urls=[URL], model=MODEL, expected_dims=DIMS
+    )
+
+    assert _dims_issue(hass) is None
+
+
+@pytest.mark.asyncio
+async def test_size_is_held_to_the_store_size_passed_in(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Behind a 768-dimension OpenAI-compatible primary, 768 is right."""
+    _loaded_entry(hass)
+    _serve(monkeypatch, {URL: [MODEL]}, dims={URL: 768})
+
+    await async_sync_ollama_embedding_model_issue(
+        hass, "entry1", urls=[URL], model=MODEL, expected_dims=768
+    )
+
+    assert _dims_issue(hass) is None
 
 
 @pytest.mark.asyncio
 async def test_clear_drops_issue(hass: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The clear helper removes the issue."""
+    """The clear helper removes both issues."""
     _loaded_entry(hass)
-    _serve(monkeypatch, {URL: ["other:latest"]})
+    _serve(monkeypatch, {URL: [MODEL]}, dims={URL: 768})
     await async_sync_ollama_embedding_model_issue(
-        hass, "entry1", urls=[URL], model=MODEL
+        hass, "entry1", urls=[URL], model=MODEL, expected_dims=DIMS
     )
+    _raise_issue(hass, "entry1")
     assert _issue(hass) is not None
+    assert _dims_issue(hass) is not None
 
     async_clear_ollama_embedding_model_issue(hass, "entry1")
 
     assert _issue(hass) is None
+    assert _dims_issue(hass) is None
 
 
 def _raise_issue(hass: Any, entry_id: str) -> None:
@@ -367,3 +473,67 @@ async def test_fetch_ollama_models_tells_empty_from_unknown(
 
     assert await utils.fetch_ollama_models(hass, URL) == expected
     assert await utils.list_ollama_models(hass, URL) == (expected or [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "payload", "expected"),
+    [
+        (
+            200,
+            {
+                "model_info": {
+                    "general.architecture": "nomic-bert",
+                    "nomic-bert.embedding_length": 768,
+                }
+            },
+            768,
+        ),
+        (
+            200,
+            {
+                "model_info": {
+                    "general.architecture": "bert",
+                    "bert.embedding_length": 1024,
+                }
+            },
+            1024,
+        ),
+        # No architecture, no size field, or junk: unknown, so not checked.
+        (200, {"model_info": {"bert.embedding_length": 1024}}, None),
+        (200, {"model_info": {"general.architecture": "bert"}}, None),
+        (
+            200,
+            {
+                "model_info": {
+                    "general.architecture": "bert",
+                    "bert.embedding_length": True,
+                }
+            },
+            None,
+        ),
+        (200, {"model_info": "junk"}, None),
+        (200, ValueError("not json"), None),
+        # The model is not on the server.
+        (404, {"error": "model 'x:latest' not found"}, None),
+    ],
+)
+async def test_fetch_ollama_embedding_dims(
+    hass: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    payload: Any,
+    expected: int | None,
+) -> None:
+    """The vector size is read from /api/show, or reported unknown."""
+    sent: list[Any] = []
+
+    class _Client:
+        async def post(self, url: str, **kwargs: Any) -> _Resp:
+            sent.append((url, kwargs.get("json")))
+            return _Resp(status, payload)
+
+    monkeypatch.setattr(utils, "get_async_client", lambda _hass: _Client())
+
+    assert await utils.fetch_ollama_embedding_dims(hass, URL, "m") == expected
+    assert sent == [(f"{URL}/api/show", {"model": "m"})]

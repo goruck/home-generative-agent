@@ -325,7 +325,8 @@
         "invalid_auth": "Invalid authorization.",
         "invalid_uri": "URI could not be generated.",
         "unknown": "Unexpected error.",
-        "ollama_model_not_installed": "Model {model} is not installed on Ollama at {url}. Run `ollama pull {model}` there, or choose an installed model. If the server has it under another name, or you are about to pull it, submit again to save it anyway."
+        "ollama_model_not_installed": "Model {model} is not installed on Ollama at {url}. Run `ollama pull {model}` there, or choose an installed model. If the server has it under another name, or you are about to pull it, submit again to save it anyway.",
+        "ollama_embedding_dims_mismatch": "Model {model} produces {dims}-dimension embeddings on Ollama at {url}, but the memory store holds {expected}-dimension vectors, so every embedding would fail. Choose a {expected}-dimension embedding model, such as `mxbai-embed-large` or `qwen3-embedding:0.6b`."
       },
       "initiate_flow": {
         "reconfigure": "Reconfigure Feature",
@@ -517,6 +518,10 @@
     "ollama_embedding_model_missing": {
       "title": "Ollama embedding model {model} is not installed",
       "description": "Home Generative Agent creates embeddings on Ollama with **{model}**, but Ollama at {url} does not have that model, so embedding requests there fail, and a fallback provider does not take over. When that server is the primary embedding provider, long-term memory search returns nothing and tool retrieval falls back to keyword matching, so the agent may say it cannot see tools or scripts you have exposed to it. On a fallback server, embeddings fail whenever the primary is down.\n\nTo fix it, run `ollama pull {model}` on each server listed. If Ollama is the provider of the **Embeddings** feature (**Settings → Devices & services → Home Generative Agent**), you can instead pick a model that is installed there. Then reload the integration; this issue clears on the first reload after the model is installed."
+    },
+    "ollama_embedding_dims_mismatch": {
+      "title": "Ollama embedding model {model} has the wrong vector size",
+      "description": "Home Generative Agent creates embeddings on Ollama with **{model}**, which produces {dims}-dimension vectors on {url}. The memory store holds {expected}-dimension vectors, so every embedding write fails, and a fallback provider does not take over. Long-term memory search returns nothing and tool retrieval falls back to keyword matching, so the agent may say it cannot see tools or scripts you have exposed to it.\n\nTo fix it, choose a {expected}-dimension embedding model in the **Embeddings** feature (**Settings → Devices & services → Home Generative Agent**), such as `mxbai-embed-large` or `qwen3-embedding:0.6b`, pull it on each server listed, then reload the integration. This issue clears on the first reload after the change."
     }
   }
 }

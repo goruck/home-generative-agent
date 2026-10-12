@@ -4410,6 +4410,7 @@ def _thinking_flow(
         "type": "form",
         "data_schema": kwargs["data_schema"],
         "errors": kwargs.get("errors"),
+        "description_placeholders": kwargs.get("description_placeholders"),
     }
     flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
         "type": "abort",
@@ -5053,15 +5054,25 @@ def _ollama_embedding_entry(
 
 
 def _serve_ollama(
-    monkeypatch: pytest.MonkeyPatch, listings: dict[str, list[str] | None]
+    monkeypatch: pytest.MonkeyPatch,
+    listings: dict[str, list[str] | None],
+    dims: dict[str, int] | None = None,
 ) -> list[str]:
     """
     Answer /api/tags per server; None is an unreachable server.
 
     Returns the URLs the submit-time check fetched, in order. The form's
-    model dropdown (list_ollama_models) sees the same listings.
+    model dropdown (list_ollama_models) sees the same listings. ``dims`` is
+    the vector size /api/show reports per server; a server not in it does not
+    report one.
     """
     fetched: list[str] = []
+    sizes = dims or {}
+
+    async def _dims(_hass: HomeAssistant, url: str, *_: Any) -> int | None:
+        return sizes.get(url)
+
+    monkeypatch.setattr(f"{_FLOW_MODULE}.fetch_ollama_embedding_dims", _dims)
 
     async def _fetch(_hass: HomeAssistant, url: str, *_: Any) -> list[str] | None:
         fetched.append(url)
@@ -5121,6 +5132,63 @@ async def test_feature_flow_rejects_unpulled_ollama_embedding_model(
         assert result.get("type") == "form"
         assert result.get("errors") == {"base": "ollama_model_not_installed"}
         assert CONF_FEATURE_MODEL not in feature.data
+
+
+@pytest.mark.asyncio
+async def test_feature_flow_refuses_wrong_size_embedding_model(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A model of another vector size is refused, and resubmitting does not help.
+
+    The #755 follow-up: nomic-embed-text is installed but produces 768-dimension
+    vectors, which the 1024-dimension store rejects on every write.
+    """
+    _serve_ollama(
+        monkeypatch,
+        {"http://ollama:11434": ["nomic-embed-text:latest"]},
+        dims={"http://ollama:11434": 768},
+    )
+    entry, feature = _ollama_embedding_entry()
+    flow = _thinking_flow(hass, entry, feature)
+
+    first = await _submit_embedding_model(
+        flow, {CONF_FEATURE_MODEL_NAME: "nomic-embed-text"}
+    )
+    second = await flow.async_step_feature_model(
+        {CONF_FEATURE_MODEL_NAME: "nomic-embed-text"}
+    )
+
+    for result in (first, second):
+        assert result.get("type") == "form"
+        assert result.get("errors") == {"base": "ollama_embedding_dims_mismatch"}
+        placeholders = result.get("description_placeholders") or {}
+        assert placeholders["dims"] == "768"
+        assert placeholders["expected"] == "1024"
+        assert placeholders["url"] == "http://ollama:11434"
+    assert CONF_FEATURE_MODEL not in feature.data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dims", [{"http://ollama:11434": 1024}, {}])
+async def test_feature_flow_saves_right_or_unknown_size_embedding_model(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch, dims: dict[str, int]
+) -> None:
+    """A 1024-dimension model saves, and so does one whose size is unknown."""
+    _serve_ollama(
+        monkeypatch, {"http://ollama:11434": ["mxbai-embed-large:latest"]}, dims=dims
+    )
+    entry, feature = _ollama_embedding_entry()
+    flow = _thinking_flow(hass, entry, feature)
+
+    result = await _submit_embedding_model(
+        flow, {CONF_FEATURE_MODEL_NAME: "mxbai-embed-large"}
+    )
+
+    assert result.get("type") == "abort"
+    assert (
+        feature.data[CONF_FEATURE_MODEL][CONF_FEATURE_MODEL_NAME] == "mxbai-embed-large"
+    )
 
 
 @pytest.mark.asyncio

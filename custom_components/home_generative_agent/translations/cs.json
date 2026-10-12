@@ -325,7 +325,8 @@
         "invalid_auth": "Neplatná autorizace.",
         "invalid_uri": "URI se nepodařilo vygenerovat.",
         "unknown": "Neočekávaná chyba.",
-        "ollama_model_not_installed": "Model {model} není nainstalován v Ollama na adrese {url}. Spusťte tam `ollama pull {model}` nebo zvolte nainstalovaný model. Pokud jej server má pod jiným názvem nebo se jej chystáte stáhnout, odešlete formulář znovu a model se přesto uloží."
+        "ollama_model_not_installed": "Model {model} není nainstalován v Ollama na adrese {url}. Spusťte tam `ollama pull {model}` nebo zvolte nainstalovaný model. Pokud jej server má pod jiným názvem nebo se jej chystáte stáhnout, odešlete formulář znovu a model se přesto uloží.",
+        "ollama_embedding_dims_mismatch": "Model {model} vytváří v Ollama na adrese {url} embeddingy o {dims} dimenzích, ale paměťové úložiště uchovává vektory o {expected} dimenzích, takže by každý embedding selhal. Zvolte embeddingový model s {expected} dimenzemi, například `mxbai-embed-large` nebo `qwen3-embedding:0.6b`."
       },
       "initiate_flow": {
         "reconfigure": "Přenastavit funkci",
@@ -517,6 +518,10 @@
     "ollama_embedding_model_missing": {
       "title": "Embedding model Ollama {model} není nainstalován",
       "description": "Home Generative Agent vytváří embeddingy v Ollama modelem **{model}**, ale Ollama na adrese {url} tento model nemá, takže požadavky na embeddingy tam selhávají a záložní poskytovatel práci nepřevezme. Pokud jde o hlavního poskytovatele embeddingů, nevrací vyhledávání v dlouhodobé paměti nic a výběr nástrojů přechází na porovnávání klíčových slov, takže agent může tvrdit, že nevidí nástroje nebo skripty, které jste mu zpřístupnili. Na záložním serveru selžou embeddingy vždy, když je hlavní poskytovatel nedostupný.\n\nOpravíte to spuštěním `ollama pull {model}` na každém uvedeném serveru. Pokud je Ollama poskytovatelem funkce **Embeddings** (**Nastavení → Zařízení a služby → Home Generative Agent**), můžete tam místo toho zvolit nainstalovaný model. Poté integraci znovu načtěte; tento problém zmizí při prvním znovunačtení po instalaci modelu."
+    },
+    "ollama_embedding_dims_mismatch": {
+      "title": "Embeddingový model Ollama {model} má nesprávnou velikost vektoru",
+      "description": "Home Generative Agent vytváří embeddingy v Ollama modelem **{model}**, který na {url} vytváří vektory o {dims} dimenzích. Paměťové úložiště uchovává vektory o {expected} dimenzích, takže každý zápis embeddingu selže a záložní poskytovatel práci nepřevezme. Vyhledávání v dlouhodobé paměti nevrací nic a výběr nástrojů přechází na porovnávání klíčových slov, takže agent může tvrdit, že nevidí nástroje nebo skripty, které jste mu zpřístupnili.\n\nOpravíte to tak, že ve funkci **Embeddings** (**Nastavení → Zařízení a služby → Home Generative Agent**) zvolíte embeddingový model s {expected} dimenzemi, například `mxbai-embed-large` nebo `qwen3-embedding:0.6b`, stáhnete jej na každém uvedeném serveru a integraci znovu načtete. Tento problém zmizí při prvním opětovném načtení po změně."
     }
   }
 }

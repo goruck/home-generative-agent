@@ -821,6 +821,45 @@ async def fetch_ollama_models(  # noqa: PLR0911
     return names
 
 
+async def fetch_ollama_embedding_dims(  # noqa: PLR0911
+    hass: HomeAssistant, base_url: str, model: str, timeout_s: float = 5.0
+) -> int | None:
+    """
+    Return the vector size an Ollama model produces, or None if unknown.
+
+    /api/show reports it as ``<architecture>.embedding_length`` in the model
+    info. None for an unreachable server, a model it does not have, or a
+    reply without that field, so callers skip the check rather than guess.
+    """
+    if not base_url or not model:
+        return None
+    base_url = ensure_http_url(base_url)
+    client = get_async_client(hass)
+    try:
+        async with asyncio.timeout(timeout_s):
+            resp = await client.post(
+                urljoin(base_url.rstrip("/") + "/", "api/show"),
+                json={"model": model},
+            )
+    except (TimeoutError, httpx.RequestError, httpx.InvalidURL, ValueError):
+        return None
+    if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
+        return None
+    try:
+        payload = resp.json()
+    except ValueError:
+        return None
+    info = payload.get("model_info") if isinstance(payload, dict) else None
+    if not isinstance(info, dict):
+        return None
+    arch = info.get("general.architecture")
+    dims = info.get(f"{arch}.embedding_length") if isinstance(arch, str) else None
+    # bool is an int; a size of True is not a size.
+    if isinstance(dims, int) and not isinstance(dims, bool) and dims > 0:
+        return dims
+    return None
+
+
 async def list_ollama_models(
     hass: HomeAssistant, base_url: str, timeout_s: float = 5.0
 ) -> list[str]:

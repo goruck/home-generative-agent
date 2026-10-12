@@ -48,6 +48,7 @@ from ..const import (  # noqa: TID252
     CONF_FEATURE_MODEL_REASONING_BUDGET,
     CONF_FEATURE_MODEL_REASONING_BY_MODEL,
     CONF_FEATURE_MODEL_TEMPERATURE,
+    EMBEDDING_MODEL_DIMS,
     FEATURE_CATEGORY_MAP,
     FEATURE_DEFS,
     KEEPALIVE_MAX_SECONDS,
@@ -74,6 +75,7 @@ from ..core.db_utils import build_postgres_uri  # noqa: TID252
 from ..core.utils import (  # noqa: TID252
     CannotConnectError,
     InvalidAuthError,
+    fetch_ollama_embedding_dims,
     fetch_ollama_models,
     list_ollama_models,
     normalized_ollama_url,
@@ -1105,6 +1107,31 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                 },
             )
 
+        if user_input is not None and (
+            wrong_dims := await self._async_ollama_embedding_wrong_dims(
+                category, provider_id, user_input
+            )
+        ):
+            # Not overridable like a missing model: the memory store holds one
+            # vector size, so a model of another size fails every write (#755).
+            return self.async_show_form(
+                step_id="feature_model",
+                data_schema=self.add_suggested_values_to_schema(
+                    vol.Schema(schema), user_input
+                ),
+                errors={"base": "ollama_embedding_dims_mismatch"},
+                description_placeholders={
+                    "provider_notice": provider_notice,
+                    "feature_name": FEATURE_DEFS[feature_type]["name"],
+                    "model": str(user_input.get(CONF_FEATURE_MODEL_NAME, "")).strip(),
+                    "url": ", ".join(redact_url(url) for url in wrong_dims),
+                    "dims": ", ".join(
+                        str(size) for size in sorted(set(wrong_dims.values()))
+                    ),
+                    "expected": str(EMBEDDING_MODEL_DIMS),
+                },
+            )
+
         if user_input is not None:
             provider_type = _provider_type_for_id(entry, provider_id)
             model_data = dict(defaults)
@@ -1186,37 +1213,9 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
         an unknown answer must not block saving; one that lists none lacks the
         model. Submitting a refused name a second time saves it.
         """
-        if category != "embedding":
+        model, urls = self._ollama_embedding_servers(category, provider_id, user_input)
+        if not urls:
             return []
-        raw_model = user_input.get(CONF_FEATURE_MODEL_NAME)
-        model = raw_model.strip() if isinstance(raw_model, str) else ""
-        if not model:
-            return []
-        entry = self._get_entry()
-        # The submitted name is the Ollama embedding model only when Ollama is
-        # the primary; behind another primary, Ollama fallbacks embed with the
-        # separately resolved Ollama model, which the startup check verifies.
-        if _provider_type_for_id(entry, provider_id) != "ollama":
-            return []
-        fallback_ids = user_input.get(CONF_FEATURE_FALLBACK_PROVIDER_IDS) or []
-        if not isinstance(fallback_ids, list):
-            fallback_ids = [str(fallback_ids)]
-        urls: list[str] = []
-        for pid in [provider_id, *fallback_ids]:
-            if _provider_type_for_id(entry, pid) != "ollama":
-                continue
-            provider = entry.subentries.get(pid)
-            settings = provider.data.get("settings", {}) if provider else {}
-            # Resolved as runtime does: the primary embeds at its base_url (or
-            # the default), a fallback at the URL setup keys its provider by.
-            url = (
-                normalized_ollama_url(settings.get("base_url"))
-                or RECOMMENDED_OLLAMA_URL
-                if pid == provider_id
-                else ollama_provider_settings_url(settings)
-            )
-            if url not in urls:
-                urls.append(url)
         # The override covers only the servers it was refused on: a fallback
         # added on the resubmit is still checked.
         refusal = (model, tuple(urls))
@@ -1237,6 +1236,75 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                 missing.append(url)
         self._refused_embedding_model = refusal if missing else None
         return missing
+
+    async def _async_ollama_embedding_wrong_dims(
+        self,
+        category: str | None,
+        provider_id: str,
+        user_input: dict[str, Any],
+    ) -> dict[str, int]:
+        """
+        Return the Ollama servers whose embedding model has the wrong size.
+
+        Maps each server to the vector size it reports for the submitted model
+        when that differs from the store's. A server that does not report a
+        size, or does not have the model (a refusal the user overrode), is
+        skipped.
+        """
+        model, urls = self._ollama_embedding_servers(category, provider_id, user_input)
+        sizes = await asyncio.gather(
+            *(fetch_ollama_embedding_dims(self.hass, url, model) for url in urls)
+        )
+        return {
+            url: dims
+            for url, dims in zip(urls, sizes, strict=True)
+            if dims is not None and dims != EMBEDDING_MODEL_DIMS
+        }
+
+    def _ollama_embedding_servers(
+        self,
+        category: str | None,
+        provider_id: str,
+        user_input: dict[str, Any],
+    ) -> tuple[str, list[str]]:
+        """
+        Return the submitted embedding model and the Ollama servers to check.
+
+        No servers unless this is the embedding feature with an Ollama primary
+        and a model name.
+        """
+        if category != "embedding":
+            return "", []
+        raw_model = user_input.get(CONF_FEATURE_MODEL_NAME)
+        model = raw_model.strip() if isinstance(raw_model, str) else ""
+        if not model:
+            return "", []
+        entry = self._get_entry()
+        # The submitted name is the Ollama embedding model only when Ollama is
+        # the primary; behind another primary, Ollama fallbacks embed with the
+        # separately resolved Ollama model, which the startup check verifies.
+        if _provider_type_for_id(entry, provider_id) != "ollama":
+            return "", []
+        fallback_ids = user_input.get(CONF_FEATURE_FALLBACK_PROVIDER_IDS) or []
+        if not isinstance(fallback_ids, list):
+            fallback_ids = [str(fallback_ids)]
+        urls: list[str] = []
+        for pid in [provider_id, *fallback_ids]:
+            if _provider_type_for_id(entry, pid) != "ollama":
+                continue
+            provider = entry.subentries.get(pid)
+            settings = provider.data.get("settings", {}) if provider else {}
+            # Resolved as runtime does: the primary embeds at its base_url (or
+            # the default), a fallback at the URL setup keys its provider by.
+            url = (
+                normalized_ollama_url(settings.get("base_url"))
+                or RECOMMENDED_OLLAMA_URL
+                if pid == provider_id
+                else ollama_provider_settings_url(settings)
+            )
+            if url not in urls:
+                urls.append(url)
+        return model, urls
 
     async def async_step_conversation(
         self, user_input: dict[str, Any] | None = None
