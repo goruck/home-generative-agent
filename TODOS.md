@@ -930,6 +930,34 @@ Since step 6 this also covers `radio_new_device_joined`, and since step 7 `netwo
 
 ---
 
+### Level-increase PIN checks run PBKDF2 on the event loop with no attempt limit
+
+**What:** `SentinelEngine.set_autonomy_level` calls `verify_pin` (`core/utils.py`, PBKDF2-HMAC-SHA256, 120,000 iterations) synchronously from the async `sentinel_set_autonomy_level` handler, so every attempt blocks Home Assistant's event loop for the length of one hash. There is no failed-attempt counter or backoff, so the 4-digit minimum PIN can be enumerated by repeated calls.
+
+**Why:** Found by the Claude adversarial and Codex passes in the review of #762 (PR #763). Not fixed there: the service is admin-only, and an admin can already remove the PIN from the Advanced form, so throttling does not protect against the callers who can reach it; the event-loop cost is the concrete harm, and it is bounded by how often an admin calls the service.
+
+**How to apply:** Run the verification through `hass.async_add_executor_job` (make `set_autonomy_level` async or split the check out), and add a per-entry failure counter with exponential backoff that resets on success. Pin both with tests: a wrong PIN after N failures is refused without hashing, and the handler does not call `hash_pin` on the loop.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
+### A reload that lowers the configured autonomy level keeps an override above the new base
+
+**What:** `SentinelEngine.stop()` drops a runtime autonomy override only when its level is above the *old* engine's configured level (`_base_autonomy_level()` reads the stopping engine's options). If a reload also lowers the configured level, a lowered-but-still-elevated override (for example base 3, override 2, new base 1) survives into the new engine, which then runs above its configured level without a verified PIN until the TTL ends.
+
+**Why:** Found by the convergence pass of the #762 review (PR #763). Not reachable from the UI today: no flow writes `sentinel_autonomy_level` and the resolver does not copy it from the Sentinel subentry, so the base is always the recommended default unless legacy `entry.options` were hand-edited.
+
+**How to apply:** Store the base level an override was set against alongside it in `_AUTONOMY_OVERRIDES`, and have `get_autonomy_level` drop an override above the current base when that recorded base differs. Do this before any flow exposes the configured autonomy level.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** A UI for the configured autonomy level
+
+---
+
 ### Autonomy level is captured before the triage await and reused after it
 
 **What:** `_dispatch_item` computes `effective_autonomy` at `sentinel/engine.py:1672`, then awaits `self._triage_service.triage(...)`, then passes that captured value into `self._execution_service.evaluate_canary(finding, snapshot, effective_autonomy, now)`. `now` is stale across the same await. Lowering the autonomy level -- or a temporary elevated level expiring -- while the model call is in flight still authorizes execution at the old level. The configurable triage timeout makes the window up to 120 seconds wide.

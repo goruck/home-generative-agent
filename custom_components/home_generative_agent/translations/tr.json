@@ -270,6 +270,7 @@
       "error": {
         "invalid_camera_entry_links": "Kamera varlık kimliklerini giriş varlık kimliklerinin listesiyle eşleştiren bir JSON nesnesi olmalıdır, ör. değeri [\"lock.front_door\"] olan bir \"camera.driveway\" anahtarı.",
         "invalid_pin": "PIN 4-10 rakam olmalıdır.",
+        "pin_required": "Bir PIN girin veya \"Özerklik düzeyi artışları için PIN iste\" seçeneğinin işaretini kaldırın. Kayıtlı PIN olmadığından her düzey artışı reddedilir.",
         "quiet_hours_incomplete": "Sessiz saatler için başlangıç ve bitişin ikisini de ayarlayın (veya ikisini de devre dışı bırakın).",
         "invalid_quiet_hours": "Sessiz saatler 0 ile 23 arasında yerel saat olmalıdır.",
         "invalid_rule_entity_exclusions": "Bir anomali türünü (veya tüm türler için \"*\") her biri nokta ve en az bir sabit karakter içeren varlık kimliği veya glob deseni (yalnızca * ve ? joker karakterleri, küçük harfli varlık kimliği karakterleri) listeleriyle eşleştiren bir JSON nesnesi olmalıdır, ör. değeri [\"sensor.ac_power\"] olan bir \"appliance_power_duration\" anahtarı veya değeri [\"camera.map_*\"] olan bir \"camera_entry_unsecured\" anahtarı. \"*\" veya \"*.*\" gibi tümüyle eşleşen girdilere izin verilmez — bunun yerine \"*\" tür anahtarını kullanın."
