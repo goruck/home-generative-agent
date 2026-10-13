@@ -401,14 +401,14 @@ def _carry_basic_setup_survivors(
       to explain why.
     * the critical-action PIN gate. The recommended default for
       ``sentinel_require_pin_for_level_increase`` is ``False`` and the Basic
-      form's PIN box is always blank, so a plain re-run reset ``require_pin``
-      to ``False`` and dropped the stored hash and salt --
-      and ``SentinelEngine.set_autonomy_level`` gates the whole check on
-      ``require_pin``, so ``sentinel_set_autonomy_level`` then succeeded with no
-      PIN at all. ``async_step_settings`` already preserves the hash on the
-      advanced path; this keeps the two paths honest with each other. A PIN typed
-      into the Basic form still overwrites what is carried here, because the
-      caller applies it after this runs.
+      form's PIN box is always blank, so a plain re-run used to reset the flag
+      and drop the stored hash and salt, and ``sentinel_set_autonomy_level``
+      then succeeded with no PIN at all. The gate is on whenever a PIN hash is
+      stored (``level_increase_pin_required``, #762), so a stored hash is
+      carried with the flag turned on; a flag with no stored PIN is not
+      carried, since there is nothing to check a PIN against. A PIN typed into
+      the Basic form still overwrites what is carried here, because the caller
+      applies it after this runs.
 
     Both maps are rebuilt rather than assigned: the values are mutable lists that
     would otherwise stay aliased to the previous subentry's stored data.
@@ -435,7 +435,10 @@ def _carry_basic_setup_survivors(
         if carried_links:
             data[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = carried_links
 
-    if stored.get(CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE):
+    # Before #762 a saved PIN could be stored with the flag off (always from
+    # Basic setup, and from Advanced when the box was left unchecked). The user
+    # typed a PIN, so a stored hash means the gate is on.
+    if stored.get(CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH):
         data[CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE] = True
         for key in (
             CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
@@ -1065,6 +1068,9 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                 hashed, salt = hash_pin(raw_pin)
                 data[CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH] = hashed
                 data[CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT] = salt
+                # The Basic form has no require-PIN checkbox; typing a PIN is
+                # the request to enforce it (#762).
+                data[CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE] = True
 
         data[CONF_SENTINEL_ENABLED] = bool(
             user_input.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED)
@@ -1116,6 +1122,11 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
         payload = _default_payload()
         if current is not None:
             payload.update(dict(current.data))
+        # A PIN saved before #762 can be stored with the flag off; the engine
+        # enforces it, so show the checkbox as on and saving this form unchanged
+        # keeps it enforced.
+        if payload.get(CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH):
+            payload[CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE] = True
 
         if user_input is None:
             suggested: dict[str, Any] = {
@@ -1159,6 +1170,9 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                 hashed, salt = hash_pin(raw_pin)
                 data[CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH] = hashed
                 data[CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT] = salt
+                # A saved PIN is always enforced; the engine treats a stored
+                # hash as the gate being on, so keep the checkbox in step (#762).
+                data[CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE] = True
         elif not data.get(CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE, False):
             data.pop(CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH, None)
             data.pop(CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT, None)
@@ -1172,6 +1186,14 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                 data[CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT] = existing_data[
                     CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT
                 ]
+        # The gate on with no PIN stored would refuse every level increase. A
+        # redisplay after another field's error also blanks the PIN box while
+        # keeping the box checked, so ask for the PIN again rather than save.
+        if data.get(CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE) and not (
+            data.get(CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH)
+            and data.get(CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT)
+        ):
+            errors.setdefault("base", "pin_required")
 
         raw_quiet_start = _raw_quiet_hour(data, CONF_SENTINEL_QUIET_HOURS_START)
         raw_quiet_end = _raw_quiet_hour(data, CONF_SENTINEL_QUIET_HOURS_END)

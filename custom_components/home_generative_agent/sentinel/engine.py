@@ -48,7 +48,6 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_QUIET_HOURS_END,
     CONF_SENTINEL_QUIET_HOURS_SEVERITIES,
     CONF_SENTINEL_QUIET_HOURS_START,
-    CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
     CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
     RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN,
@@ -69,7 +68,6 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     RECOMMENDED_SENTINEL_PRESENCE_GRACE_MINUTES,
     RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
-    RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
     SENTINEL_SEVERITIES,
     SIGNAL_SENTINEL_RUN_COMPLETE,
@@ -102,6 +100,7 @@ from .correlator import SentinelCorrelator
 from .dynamic_rules import evaluate_dynamic_rules
 from .execution import (
     SentinelExecutionService,
+    level_increase_pin_required,
 )
 from .lock_enrichment import async_enrich_lock_last_changed
 from .logging_utils import RepeatingLogLimiter
@@ -581,39 +580,43 @@ class SentinelEngine:
         Set a runtime autonomy-level override (TTL-bounded).
 
         Raises HomeAssistantError if a PIN is required for a level increase and
-        no PIN is supplied.  (PIN validation is a TODO; the stub just checks
-        presence when the option is enabled.)
+        the supplied PIN is missing or does not match the stored hash. With the
+        gate on, a call without the PIN cannot push a raised level's expiry
+        later, so re-requesting the current level does not renew it (#762).
         """
-        require_pin = bool(
-            self._options.get(
-                CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
-                RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
-            )
-        )
-        current_level = self.get_autonomy_level(entry_id)
-        if require_pin and level > current_level and not pin:
-            msg = (
-                "A PIN is required to increase the autonomy level. "
-                "Provide 'pin' in the service call data."
-            )
+        if self._stopped:
+            # The service stays registered until the unload finishes; a write
+            # from this engine's old options would carry into the reloaded one.
+            msg = "Sentinel is reloading; try again in a moment."
             raise HomeAssistantError(msg)
-        if require_pin and level > current_level:
-            pin_hash = str(self._options.get(CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH, ""))
-            pin_salt = str(self._options.get(CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT, ""))
-            if not pin_hash or not pin_salt:
+        require_pin = level_increase_pin_required(self._options)
+        current_level = self.get_autonomy_level(entry_id)
+        base_level = self._base_autonomy_level()
+        pin_verified = False
+        # Returning to the configured level after lowering it is not an increase.
+        if require_pin and level > max(current_level, base_level):
+            self._require_stored_pin()
+            if not pin:
                 msg = (
-                    "Sentinel level-increase PIN validation is enabled, but no PIN "
-                    "hash is configured."
+                    "A PIN is required to increase the autonomy level. "
+                    "Provide 'pin' in the service call data."
                 )
                 raise HomeAssistantError(msg)
-            if not verify_pin(str(pin), hashed=pin_hash, salt=pin_salt):
-                msg = "Invalid PIN for autonomy level increase."
-                raise HomeAssistantError(msg)
+            self._verify_level_increase_pin(pin)
+            pin_verified = True
+        elif require_pin and pin and level >= current_level and level > base_level:
+            # Renewing a raised level with the PIN gets a fresh TTL. A decrease
+            # is never checked, so a stale PIN cannot block lowering the level.
+            self._verify_level_increase_pin(pin)
+            pin_verified = True
         ttl_minutes = _coerce_int(
             self._options.get(CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES),
             default=RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
         )
         expires_at = dt_util.utcnow() + timedelta(minutes=ttl_minutes)
+        existing = _AUTONOMY_OVERRIDES.get(entry_id)
+        if require_pin and not pin_verified and level > base_level and existing:
+            expires_at = min(expires_at, existing[1])
         _AUTONOMY_OVERRIDES[entry_id] = (level, expires_at)
         LOGGER.info(
             "Sentinel autonomy level set to %s for entry %s (expires %s).",
@@ -621,6 +624,32 @@ class SentinelEngine:
             entry_id,
             expires_at.isoformat(),
         )
+
+    def _require_stored_pin(self) -> tuple[str, str]:
+        """
+        Return the stored PIN hash and salt, or raise saying how to set one.
+
+        The gate can be on with no PIN stored (an Advanced save before #762
+        that checked the box with the PIN blank). Nothing can match then, so
+        say what to change rather than asking the caller for a PIN.
+        """
+        pin_hash = str(self._options.get(CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH, ""))
+        pin_salt = str(self._options.get(CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT, ""))
+        if not pin_hash or not pin_salt:
+            msg = (
+                "Sentinel requires a PIN to raise the autonomy level, but none "
+                "is set. Set one in Sentinel setup (Advanced), or turn off "
+                "'Require PIN for autonomy level increases'."
+            )
+            raise HomeAssistantError(msg)
+        return pin_hash, pin_salt
+
+    def _verify_level_increase_pin(self, pin: str) -> None:
+        """Raise HomeAssistantError unless ``pin`` matches the stored hash."""
+        pin_hash, pin_salt = self._require_stored_pin()
+        if not verify_pin(str(pin), hashed=pin_hash, salt=pin_salt):
+            msg = "Invalid PIN for autonomy level increase."
+            raise HomeAssistantError(msg)
 
     def get_autonomy_level(self, entry_id: str) -> int:
         """
@@ -637,6 +666,10 @@ class SentinelEngine:
                 return level
             # TTL expired - clean up and fall through to config default
             del _AUTONOMY_OVERRIDES[entry_id]
+        return self._base_autonomy_level()
+
+    def _base_autonomy_level(self) -> int:
+        """Return the configured autonomy level, without any runtime override."""
         return _coerce_int(
             self._options.get(CONF_SENTINEL_AUTONOMY_LEVEL),
             default=RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
@@ -681,6 +714,20 @@ class SentinelEngine:
         # Latch before the not-started early return, not after: the entry that
         # never started is exactly the one whose deferred start is still armed.
         self._stopped = True
+        # A raised autonomy level belongs to this setup: a reload (an options
+        # save, or turning the PIN gate on) starts again at the configured level.
+        # A lowered level is kept until its TTL, so a reload never undoes a
+        # temporary reduction.
+        override = _AUTONOMY_OVERRIDES.get(self._entry_id) if self._entry_id else None
+        if override is not None and override[0] > self._base_autonomy_level():
+            del _AUTONOMY_OVERRIDES[cast("str", self._entry_id)]
+            if dt_util.utcnow() < override[1]:
+                LOGGER.info(
+                    "Sentinel autonomy level %s for entry %s ended by reload; "
+                    "back to the configured level.",
+                    override[0],
+                    self._entry_id,
+                )
 
         if self._task is None:
             return

@@ -42,6 +42,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
     CONF_SENTINEL_AUTO_EXECUTION_ENABLED,
     CONF_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES,
+    CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
     CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS,
     DATA_QUALITY_FRESH,
@@ -57,6 +58,7 @@ from custom_components.home_generative_agent.const import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from datetime import datetime
 
     from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
@@ -68,6 +70,21 @@ LOGGER = logging.getLogger(__name__)
 
 # Minimum autonomy level required for auto-execution.
 _MIN_AUTO_EXECUTE_LEVEL: int = 2
+
+
+def level_increase_pin_required(options: Mapping[str, Any]) -> bool:
+    """
+    Return whether raising the autonomy level needs the PIN.
+
+    A stored PIN hash turns the gate on even with the flag off: before #762, a
+    PIN saved from Sentinel setup could be stored without the flag.
+    """
+    return bool(
+        options.get(
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+            RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+        )
+    ) or bool(options.get(CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH))
 
 
 @dataclass(frozen=True)
@@ -613,12 +630,7 @@ class SentinelExecutionService:
                     RECOMMENDED_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
                 )
             ),
-            "require_pin_for_increase": bool(
-                self._options.get(
-                    CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
-                    RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
-                )
-            ),
+            "require_pin_for_increase": level_increase_pin_required(self._options),
             "effective_rule_threshold": effective_rule_threshold,
         }
         return hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest()
