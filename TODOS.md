@@ -972,20 +972,6 @@ Since step 6 this also covers `radio_new_device_joined`, and since step 7 `netwo
 
 ---
 
-### A PIN typed into Sentinel Basic setup is never enforced
-
-**What:** `async_step_basic_settings` hashes a typed `CONF_CRITICAL_ACTION_PIN` into `sentinel_level_increase_pin_hash`/`_salt`, but the Basic form has no `sentinel_require_pin_for_level_increase` field and `_default_payload()` sets it to the recommended `False`. `SentinelEngine.set_autonomy_level` (`sentinel/engine.py:552`; the check is inline, there is no separate helper) gates the entire check on that flag, so the hash it just stored is never consulted: the PIN box accepts input, validates its length, stores a hash, and changes nothing.
-
-**Why:** Noticed while fixing the adjacent Basic-setup wipe of the same PIN keys (review round, 2026-09-22). Not fixed there because it is a behavior change rather than a review finding -- typing a PIN arguably *should* enable the gate, but that is a product call, and the Advanced path deliberately gives the user a separate checkbox.
-
-**How to apply:** Either set `sentinel_require_pin_for_level_increase = True` when Basic setup accepts a PIN, or drop the PIN field from the Basic form and say it is configured under Advanced. The first matches what a user typing a PIN plainly intends.
-
-**Effort:** S
-**Priority:** P2
-**Depends on:** None
-
----
-
 ## Audit Store
 
 ### Audit notifier-drop findings as non-user-facing (delivery status from async_notify)

@@ -435,7 +435,12 @@ def _carry_basic_setup_survivors(
         if carried_links:
             data[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = carried_links
 
-    if stored.get(CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE):
+    # A stored hash with the flag off can only come from a Basic-setup PIN
+    # written before #762, which stored the hash without turning the gate on.
+    # The user typed a PIN, so treat it as the gate being on.
+    if stored.get(CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE) or stored.get(
+        CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH
+    ):
         data[CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE] = True
         for key in (
             CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
@@ -1065,6 +1070,9 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                 hashed, salt = hash_pin(raw_pin)
                 data[CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH] = hashed
                 data[CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT] = salt
+                # The Basic form has no require-PIN checkbox; typing a PIN is
+                # the request to enforce it (#762).
+                data[CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE] = True
 
         data[CONF_SENTINEL_ENABLED] = bool(
             user_input.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED)
@@ -1116,6 +1124,10 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
         payload = _default_payload()
         if current is not None:
             payload.update(dict(current.data))
+        # A pre-#762 Basic-setup PIN is stored with the flag off; show the
+        # checkbox as on so saving this form unchanged keeps the PIN enforced.
+        if payload.get(CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH):
+            payload[CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE] = True
 
         if user_input is None:
             suggested: dict[str, Any] = {
@@ -1159,6 +1171,9 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                 hashed, salt = hash_pin(raw_pin)
                 data[CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH] = hashed
                 data[CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT] = salt
+                # A saved PIN is always enforced; the engine treats a stored
+                # hash as the gate being on, so keep the checkbox in step (#762).
+                data[CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE] = True
         elif not data.get(CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE, False):
             data.pop(CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH, None)
             data.pop(CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT, None)

@@ -581,15 +581,17 @@ class SentinelEngine:
         Set a runtime autonomy-level override (TTL-bounded).
 
         Raises HomeAssistantError if a PIN is required for a level increase and
-        no PIN is supplied.  (PIN validation is a TODO; the stub just checks
-        presence when the option is enabled.)
+        the supplied PIN is missing or does not match the stored hash.
         """
+        # A stored PIN hash also turns the check on: before #762, a PIN typed
+        # into Basic setup was stored without the flag, and the flows only keep
+        # a hash while the gate is wanted.
         require_pin = bool(
             self._options.get(
                 CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
                 RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
             )
-        )
+        ) or bool(self._options.get(CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH))
         current_level = self.get_autonomy_level(entry_id)
         if require_pin and level > current_level and not pin:
             msg = (
