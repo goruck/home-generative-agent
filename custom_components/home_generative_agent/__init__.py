@@ -36,7 +36,7 @@ from homeassistant.const import (
     Platform,
 )
 from homeassistant.core import HomeAssistant, SupportsResponse, callback
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import ConfigEntryError, HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.dispatcher import (
     async_dispatcher_connect,
@@ -238,6 +238,7 @@ from .const import (
 from .core.anthropic_client import SharedClientChatAnthropic, async_prime_async_client
 from .core.database_guard import (
     async_clear_database_issue,
+    async_ensure_pgvector,
     async_sync_database_issue,
 )
 from .core.db_utils import parse_postgres_uri
@@ -2677,6 +2678,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             )
             # Initialize database for thread-based (short-term) memory.
             checkpointer = AsyncPostgresSaver(pool)
+            # The schema needs pgvector in this database (#756).
+            await async_ensure_pgvector(pool)
             # First-time setup (if needed)
             await _bootstrap_db_once(hass, entry, store, checkpointer)
             await _bootstrap_vectors_once(hass, entry, store)
@@ -2722,9 +2725,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     LOGGER.info(
                         "Gallery rows visible to this connection: %s", resp["total"]
                     )
-        except Exception:
-            LOGGER.exception("Postgresql setup failed; closing pool.")
+        except Exception as err:
             await pool.close()
+            # A ConfigEntryError already says what is wrong and how to fix
+            # it; HA shows it on the integration card and logs it.
+            if isinstance(err, ConfigEntryError):
+                raise
+            LOGGER.exception("Postgresql setup failed; pool closed.")
             return False
     else:
         # Log loudly: nothing downstream fails without a database (chat

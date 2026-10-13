@@ -436,6 +436,12 @@
   "exceptions": {
     "invalid_config_entry": {
       "message": "Byla poskytnuta neplatná konfigurační položka. Získáno: {config_entry}"
+    },
+    "pgvector_not_permitted": {
+      "message": "Rozšíření pgvector není v databázi PostgreSQL {database} povoleno a uživatel {user} ho nemá oprávnění povolit. Povolte ho jednou jako superuživatel připojený k databázi {database}: CREATE EXTENSION IF NOT EXISTS vector; a poté integraci znovu načtěte. Uživatel {user} sám superuživatelem být nemusí. Pokud jste pgvector už povolili, ověřte, že to bylo v databázi {database}: rozšíření platí jen pro databázi, ve které bylo vytvořeno."
+    },
+    "pgvector_not_available": {
+      "message": "Server PostgreSQL s databází {database} nemá nainstalované rozšíření pgvector. Použijte PostgreSQL s pgvector (aplikaci PostgreSQL with pgvector nebo obraz jako pgvector/pgvector) a poté integraci znovu načtěte."
     }
   },
   "options": {

@@ -117,6 +117,23 @@ Install the Blueprints from the `blueprints/` directory to create automations th
 
 ## Troubleshooting
 
+### Using your own PostgreSQL
+
+You can point the Database subentry at any PostgreSQL server instead of the bundled app, for example a container or a Kubernetes cluster. It needs:
+
+- **pgvector installed on the server.** Images such as `pgvector/pgvector` include it; the official `postgres` image does not. If it is missing, setup fails with "does not have the pgvector extension installed".
+- **The `vector` extension enabled in the integration's database.** An extension applies only to the database it was created in. Enabling it requires a superuser, so do it once, connected to the integration's database:
+
+  ```sql
+  -- Run as a superuser, connected to the integration's database.
+  CREATE EXTENSION IF NOT EXISTS vector;
+  ```
+
+  If it is not enabled there, setup enables it when its user is allowed to. Otherwise setup fails with "The pgvector extension is not enabled in PostgreSQL database …". With the CloudNativePG operator, put the statement under `bootstrap.initdb.postInitApplicationSQL`, which runs in the application database. `postInitSQL` runs in the `postgres` database, so the extension it creates does not reach yours.
+- **A database owned by the integration's user.** That user creates the tables on first startup (see the next section). It does not need to be a superuser.
+
+After fixing either pgvector problem, reload the integration.
+
 ### Database tables owned by the PostgreSQL superuser
 
 The integration's tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `store`, `store_vectors`, and their `*_migrations` tables) must be owned by the database user configured in the integration (default `hga`). If they were created by the `postgres` superuser instead — common when tables are created manually during troubleshooting — the LangGraph schema migrations run by `store.setup()` fail silently on startup due to insufficient privileges, and features that depend on the store (memory, tool index, vector search) degrade or crash.
