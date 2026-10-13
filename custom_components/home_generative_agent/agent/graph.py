@@ -7,6 +7,7 @@ import copy
 import json
 import logging
 import re
+from collections import Counter
 from dataclasses import dataclass
 from functools import partial
 from typing import (
@@ -1586,6 +1587,133 @@ async def _get_actuation_safety_tools(
     return safety_tools
 
 
+# Keyword ranking for the no-index fallback (issue #757). Without it the
+# fallback bound the first `limit` tools in API declaration order whatever the
+# user asked, so a tool past that slice — every exposed script, which HA
+# declares after its intent tools — was unreachable for as long as embeddings
+# were down. Deliberately crude: it only has to lift the tool the user named
+# above the ones they did not, in any language whose words are space-separated.
+_FALLBACK_WORD_RE = re.compile(r"[^\W_]+")
+_FALLBACK_CAMEL_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_FALLBACK_STOPWORDS = frozenset(
+    {
+        "and", "are", "can", "could", "does", "for", "from", "have", "how",
+        "into", "its", "me", "please", "that", "the", "this", "what", "when",
+        "which", "who", "why", "will", "with", "would", "you", "your",
+    }
+)  # fmt: skip
+_FALLBACK_MIN_WORD_LEN = 3
+# A query word found in more than half the tools ("device", "entity") says
+# nothing about which one the user wants; below this many tools that cutoff
+# would discard nearly every word, so it is not applied.
+_FALLBACK_COMMON_WORD_MIN_TOOLS = 4
+_FALLBACK_NAME_WEIGHT = 2
+# Query and tool text are cut before tokenizing, so a pasted wall of text or
+# an MCP server's oversized tool description cannot stall the event loop.
+_FALLBACK_MAX_TEXT_CHARS = 2000
+
+
+def _fallback_words(text: str | None) -> set[str]:
+    """Return the normalized words of a query, tool name, or description."""
+    words: set[str] = set()
+    # A third-party tool can declare an explicit null description.
+    for raw in _FALLBACK_WORD_RE.findall(_FALLBACK_CAMEL_RE.sub(" ", text or "")):
+        word = raw.casefold()
+        if len(word) < _FALLBACK_MIN_WORD_LEN or word in _FALLBACK_STOPWORDS:
+            continue
+        # Plural-insensitive on both sides: "doors" finds script__door_history.
+        # A double "s" is not a plural ("hass", "glass", "access").
+        if (
+            len(word) > _FALLBACK_MIN_WORD_LEN
+            and word.endswith("s")
+            and not word.endswith("ss")
+        ):
+            word = word[:-1]
+        words.add(word)
+    return words
+
+
+def _rank_fallback_by_query(
+    fallback: list[RawTool], query: str
+) -> tuple[list[RawTool], int]:
+    """
+    Stable-sort fallback tools by keyword overlap with the query.
+
+    A query word in a tool's name scores double one in its description only.
+    Tools that tie (including every tool when nothing matches) keep their
+    incoming order, so the caller's actuation / GetLiveContext ordering is the
+    tiebreak. Returns the ranked list and how many tools matched at all.
+    """
+    if not fallback:
+        return fallback, 0
+    tool_words = [
+        (
+            _fallback_words(t["name"][:_FALLBACK_MAX_TEXT_CHARS]),
+            _fallback_words((t["description"] or "")[:_FALLBACK_MAX_TEXT_CHARS]),
+        )
+        for t in fallback
+    ]
+    # How many tools each word appears in. Every pass below is linear in the
+    # tools' words, so a long pasted query costs no more than its own
+    # tokenizing: words no tool uses are dropped before any scoring.
+    doc_freq = Counter(word for name, desc in tool_words for word in name | desc)
+    cutoff = (
+        len(fallback) // 2
+        if len(fallback) >= _FALLBACK_COMMON_WORD_MIN_TOOLS
+        else len(fallback)
+    )
+    # The newest text is at the end of the ranking query, so keep the tail.
+    informative = {
+        word
+        for word in _fallback_words(query[-_FALLBACK_MAX_TEXT_CHARS:])
+        if 0 < doc_freq[word] <= cutoff
+    }
+    if not informative:
+        return fallback, 0
+    scores = [
+        _FALLBACK_NAME_WEIGHT * len(name & informative)
+        + len((desc - name) & informative)
+        for name, desc in tool_words
+    ]
+    order = sorted(range(len(fallback)), key=lambda i: -scores[i])
+    return [fallback[i] for i in order], sum(1 for s in scores if s)
+
+
+def _fallback_slice(
+    ranked: list[RawTool], limit: int, *, actuation_quota: int, matched: int
+) -> list[RawTool]:
+    """
+    Cut the ranked fallback to ``limit``, reserving slots for actuation tools.
+
+    On an actuation request the best-ranked ``actuation_quota`` actuation
+    tools are kept even when keyword matches outrank them, so tools that share
+    words with the request (three ``garage_*`` scripts for "open the garage
+    door") cannot crowd HassTurnOn out. The remaining slots go to the best
+    matches of any kind, which is how a script named in "run the door history
+    script" (an actuation request; scripts are not actuation tools) still
+    binds. ``matched`` is how many tools lead ``ranked`` on a keyword match.
+    Ranked order is kept. With no matches the actuation tools lead the
+    ranking anyway, so the result is the first ``limit`` tools.
+    """
+    reserved = {
+        id(t) for t in [t for t in ranked if t["is_actuation"]][:actuation_quota]
+    }
+    others = [t for t in ranked if id(t) not in reserved]
+    rest = others[: max(0, limit - len(reserved))]
+    if (
+        not rest
+        and matched
+        and others
+        and id(others[0]) in {id(t) for t in ranked[:matched]}
+    ):
+        # The quota filled the whole limit (a limit of 1): the best keyword
+        # match still gets one slot past it, as the RAG path's safety slots
+        # sit on top of its limit, or a named script could never bind.
+        rest = others[:1]
+    keep = reserved | {id(t) for t in rest}
+    return [t for t in ranked if id(t) in keep]
+
+
 def _get_fallback_tools(
     config: RunnableConfig,
     allowed_api_ids: set[str],
@@ -1637,7 +1765,7 @@ def _tool_retrieval_fallback_reason(
     store: BaseStore | None,
     config: RunnableConfig,
 ) -> tuple[str, bool, bool, bool]:
-    """Return a concise reason for falling back to keyword-filtered tools."""
+    """Return a concise reason for falling back to keyword-ranked tools."""
     tool_index_ready, tool_indexing_in_progress, tool_index_failed = _tool_index_state(
         config
     )
@@ -2468,8 +2596,9 @@ async def _retrieve_tools(  # noqa: PLR0915
 
     # 3. Fallback: vector store unavailable or index not yet ready.
     # Still apply the limit so the user-configured cap is always respected.
-    # Prioritize actuation tools for actuation queries; for read-only open-state
-    # queries promote GetLiveContext to the front; otherwise use declaration order.
+    # Tools are ranked by keyword overlap with the query (issue #757); ties keep
+    # this order: actuation tools first for actuation queries, otherwise
+    # GetLiveContext, then other read-only tools, then actuation tools.
     if not all_candidates:
         fallback = _get_fallback_tools(config, allowed_api_ids)
         (
@@ -2484,16 +2613,6 @@ async def _retrieve_tools(  # noqa: PLR0915
             fallback_reason += (
                 f"; live-tool filter dropped {live_filter_dropped} candidate(s)"
             )
-        LOGGER.warning(
-            "Tool retrieval using keyword-filtered fallback: %s "
-            "(limit=%d, total=%d, ready=%s, indexing=%s, failed=%s).",
-            fallback_reason,
-            limit,
-            len(fallback),
-            tool_index_ready,
-            tool_indexing_in_progress,
-            tool_index_failed,
-        )
         if _query_needs_actuation_safety(query):
             actuation = [t for t in fallback if t["is_actuation"]]
             rest = [t for t in fallback if not t["is_actuation"]]
@@ -2507,7 +2626,25 @@ async def _retrieve_tools(  # noqa: PLR0915
             ]
             actuation = [t for t in fallback if t["is_actuation"]]
             fallback = live_context + non_actuation + actuation
-        all_candidates = fallback[:limit]
+        fallback, matched = _rank_fallback_by_query(fallback, ranking_query)
+        LOGGER.warning(
+            "Tool retrieval using keyword-ranked fallback: %s "
+            "(limit=%d, total=%d, matched=%d, ready=%s, indexing=%s, failed=%s).",
+            fallback_reason,
+            limit,
+            len(fallback),
+            matched,
+            tool_index_ready,
+            tool_indexing_in_progress,
+            tool_index_failed,
+        )
+        # Same share the RAG path's safety_cap gives actuation tools.
+        actuation_quota = (
+            max(1, limit * 3 // 4) if _query_needs_actuation_safety(query) else 0
+        )
+        all_candidates = _fallback_slice(
+            fallback, limit, actuation_quota=actuation_quota, matched=matched
+        )
 
     # 3b. For read-only open-state queries, force-bind GetLiveContext, promote
     # it to the front, and drop actuation tools (they are not needed).

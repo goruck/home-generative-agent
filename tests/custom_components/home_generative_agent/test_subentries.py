@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -80,6 +81,7 @@ from custom_components.home_generative_agent.const import (
     FEATURE_CATEGORY_MAP,
     FEATURE_DEFS,
     MODEL_CATEGORY_SPECS,
+    RECOMMENDED_OLLAMA_URL,
     RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
     RECOMMENDED_OPENAI_EMBEDDING_MODEL,
     RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
@@ -4409,6 +4411,7 @@ def _thinking_flow(
         "type": "form",
         "data_schema": kwargs["data_schema"],
         "errors": kwargs.get("errors"),
+        "description_placeholders": kwargs.get("description_placeholders"),
     }
     flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
         "type": "abort",
@@ -5009,3 +5012,639 @@ async def test_stt_flow_keeps_other_fields_when_model_name_is_missing(
     assert (result.get("errors") or {}).get("base") == "invalid_model"
     assert _schema_marker(result, "language").default() == "cs"
     assert _schema_marker(result, "extra_body").default() == '{"hotwords": "Frigate"}'
+
+
+# ---------------------------------------------------------------------------
+# Un-pulled Ollama embedding model (issue #757)
+# ---------------------------------------------------------------------------
+
+_FLOW_MODULE = "custom_components.home_generative_agent.flows.feature_subentry_flow"
+
+
+def _ollama_provider(pid: str, url: str) -> DummySubentry:
+    return DummySubentry(
+        pid,
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        f"Ollama {pid}",
+        {
+            "provider_type": "ollama",
+            "capabilities": ["chat", "embedding"],
+            "settings": {"base_url": url},
+        },
+    )
+
+
+def _ollama_embedding_entry(
+    feature_type: str = "embedding",
+) -> tuple[DummyEntry, DummySubentry]:
+    primary = _ollama_provider("prov1", "http://ollama:11434")
+    fallback = _ollama_provider("prov2", "http://fallback:11434")
+    feature = DummySubentry(
+        "feature1",
+        SUBENTRY_TYPE_FEATURE,
+        "Feature",
+        {"feature_type": feature_type, "model_provider_id": "prov1"},
+    )
+    entry = DummyEntry()
+    entry.subentries = {
+        primary.subentry_id: primary,
+        fallback.subentry_id: fallback,
+        feature.subentry_id: feature,
+    }
+    return entry, feature
+
+
+_NO_TABLE = object()
+
+
+def _serve_ollama(
+    monkeypatch: pytest.MonkeyPatch,
+    listings: dict[str, list[str] | None],
+    dims: dict[str, int] | None = None,
+    store: object = _NO_TABLE,
+) -> list[str]:
+    """
+    Answer /api/tags per server; None is an unreachable server.
+
+    Returns the URLs the submit-time check fetched, in order. The form's
+    model dropdown (list_ollama_models) sees the same listings. ``dims`` is
+    the vector size /api/show reports per server; a server not in it does not
+    report one. ``store`` is the store column's size: by default no table yet
+    (so a new store's 1024 applies), None for a database that cannot be asked.
+    """
+    fetched: list[str] = []
+    sizes = dims or {}
+
+    async def _dims(_hass: HomeAssistant, url: str, *_: Any) -> int | None:
+        return sizes.get(url)
+
+    async def _store(_pool: Any, *, default: int | None) -> int | None:
+        return default if store is _NO_TABLE else cast("int | None", store)
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils."
+        "fetch_ollama_embedding_dims",
+        _dims,
+    )
+    monkeypatch.setattr(f"{_FLOW_MODULE}.async_store_vector_dims", _store)
+
+    async def _fetch(_hass: HomeAssistant, url: str, *_: Any) -> list[str] | None:
+        fetched.append(url)
+        return listings.get(url)
+
+    async def _list(_hass: HomeAssistant, url: str, *_: Any) -> list[str]:
+        return listings.get(url) or []
+
+    monkeypatch.setattr(f"{_FLOW_MODULE}.fetch_ollama_models", _fetch)
+    monkeypatch.setattr(f"{_FLOW_MODULE}.list_ollama_models", _list)
+    return fetched
+
+
+async def _submit_embedding_model(
+    flow: FeatureSubentryFlow,
+    user_input: dict[str, Any],
+    feature_type: str = "embedding",
+) -> Any:
+    await flow.async_step_user()
+    await getattr(flow, f"async_step_{feature_type}")({"model_provider_id": "prov1"})
+    return await flow.async_step_feature_model(user_input)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("installed", "submitted", "saved"),
+    [
+        # The #755 report: a typed name the server never pulled.
+        (["mxbai-embed-large:latest"], "qwen3-embedding:0.6b", False),
+        # A server that answered with no models lacks this one too.
+        ([], "qwen3-embedding:0.6b", False),
+        # An untagged name is the server's ":latest".
+        (["mxbai-embed-large:latest"], "mxbai-embed-large", True),
+        # Unreachable, or no model listing: can't tell, so saving is allowed.
+        (None, "qwen3-embedding:0.6b", True),
+    ],
+)
+async def test_feature_flow_rejects_unpulled_ollama_embedding_model(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+    installed: list[str] | None,
+    submitted: str,
+    *,
+    saved: bool,
+) -> None:
+    """The embedding form refuses a model the Ollama server does not have."""
+    _serve_ollama(monkeypatch, {"http://ollama:11434": installed})
+    entry, feature = _ollama_embedding_entry()
+    flow = _thinking_flow(hass, entry, feature)
+
+    result = await _submit_embedding_model(flow, {CONF_FEATURE_MODEL_NAME: submitted})
+
+    if saved:
+        assert result.get("type") == "abort"
+        assert feature.data[CONF_FEATURE_MODEL][CONF_FEATURE_MODEL_NAME] == submitted
+    else:
+        assert result.get("type") == "form"
+        assert result.get("errors") == {"base": "ollama_model_not_installed"}
+        assert CONF_FEATURE_MODEL not in feature.data
+
+
+@pytest.mark.asyncio
+async def test_feature_flow_refuses_wrong_size_embedding_model(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A model of another vector size is refused; submitting again saves it.
+
+    The #755 follow-up: nomic-embed-text is installed but produces 768-dimension
+    vectors, which a 1024-dimension store rejects on every write. The override
+    covers a server that reports its size wrong.
+    """
+    _serve_ollama(
+        monkeypatch,
+        {"http://ollama:11434": ["nomic-embed-text:latest"]},
+        dims={"http://ollama:11434": 768},
+    )
+    entry, feature = _ollama_embedding_entry()
+    flow = _thinking_flow(hass, entry, feature)
+
+    first = await _submit_embedding_model(
+        flow, {CONF_FEATURE_MODEL_NAME: "nomic-embed-text"}
+    )
+
+    assert first.get("type") == "form"
+    assert first.get("errors") == {"base": "ollama_embedding_dims_mismatch"}
+    placeholders = first.get("description_placeholders") or {}
+    assert placeholders["dims"] == "768"
+    assert placeholders["expected"] == "1024"
+    assert placeholders["url"] == "http://ollama:11434"
+    assert CONF_FEATURE_MODEL not in feature.data
+
+    second = await flow.async_step_feature_model(
+        {CONF_FEATURE_MODEL_NAME: "nomic-embed-text"}
+    )
+
+    assert second.get("type") == "abort"
+    assert (
+        feature.data[CONF_FEATURE_MODEL][CONF_FEATURE_MODEL_NAME] == "nomic-embed-text"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("reported", "saved"), [(768, True), (1024, False)])
+async def test_feature_flow_holds_the_model_to_the_existing_store(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+    reported: int,
+    *,
+    saved: bool,
+) -> None:
+    """A store first created at 768 keeps 768, so 768 fits and 1024 does not."""
+    _serve_ollama(
+        monkeypatch,
+        {"http://ollama:11434": ["m:latest"]},
+        dims={"http://ollama:11434": reported},
+        store=768,
+    )
+    entry, feature = _ollama_embedding_entry()
+    flow = _thinking_flow(hass, entry, feature)
+
+    result = await _submit_embedding_model(flow, {CONF_FEATURE_MODEL_NAME: "m"})
+
+    if saved:
+        assert result.get("type") == "abort"
+    else:
+        assert result.get("errors") == {"base": "ollama_embedding_dims_mismatch"}
+        assert (result.get("description_placeholders") or {})["expected"] == "768"
+
+
+@pytest.mark.asyncio
+async def test_feature_flow_names_only_the_wrong_size_fallback(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A fallback of the wrong size alone gets the fallback error, naming it.
+
+    Choosing another model would break the right-size primary, so the advice
+    is to match the primary's build there or drop that fallback.
+    """
+    _serve_ollama(
+        monkeypatch,
+        {"http://ollama:11434": ["m:latest"], "http://fallback:11434": ["m:latest"]},
+        dims={"http://ollama:11434": 1024, "http://fallback:11434": 768},
+    )
+    entry, feature = _ollama_embedding_entry()
+    flow = _thinking_flow(hass, entry, feature)
+
+    result = await _submit_embedding_model(
+        flow,
+        {CONF_FEATURE_MODEL_NAME: "m", CONF_FEATURE_FALLBACK_PROVIDER_IDS: ["prov2"]},
+    )
+
+    assert result.get("errors") == {"base": "ollama_fallback_embedding_dims_mismatch"}
+    assert (result.get("description_placeholders") or {})[
+        "url"
+    ] == "http://fallback:11434"
+
+
+@pytest.mark.asyncio
+async def test_feature_flow_overrides_each_refusal_once(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Missing on one server and the wrong size on another: two refusals, then save.
+
+    Each resubmit skips only the checks already seen to fail, so the two
+    errors never alternate for the same input.
+    """
+    _serve_ollama(
+        monkeypatch,
+        {
+            "http://ollama:11434": ["other:latest"],
+            "http://fallback:11434": ["m:latest"],
+        },
+        dims={"http://fallback:11434": 768},
+    )
+    entry, feature = _ollama_embedding_entry()
+    flow = _thinking_flow(hass, entry, feature)
+    user_input = {
+        CONF_FEATURE_MODEL_NAME: "m",
+        CONF_FEATURE_FALLBACK_PROVIDER_IDS: ["prov2"],
+    }
+
+    first = await _submit_embedding_model(flow, dict(user_input))
+    second = await flow.async_step_feature_model(dict(user_input))
+    third = await flow.async_step_feature_model(dict(user_input))
+
+    assert first.get("errors") == {"base": "ollama_model_not_installed"}
+    # Only the fallback has the model, and it is the wrong size.
+    assert second.get("errors") == {"base": "ollama_fallback_embedding_dims_mismatch"}
+    assert third.get("type") == "abort"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("entry_data", "runtime_data", "expected"),
+    [
+        # A loaded entry: its live pool, and a new store's size if no table.
+        ({}, "pool", ("pool", 1024)),
+        # Setup already made the store: a missing table is not a new one.
+        ({"vectors_bootstrapped": True}, "pool", ("pool", None)),
+        # Not loaded: no pool, so the size cannot be read.
+        ({}, None, (None, 1024)),
+    ],
+)
+async def test_feature_flow_reads_store_size_from_the_entry(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+    entry_data: dict[str, Any],
+    runtime_data: str | None,
+    expected: tuple[str | None, int | None],
+) -> None:
+    """The size check asks the running entry's own database."""
+    _serve_ollama(monkeypatch, {"http://ollama:11434": ["m:latest"]})
+    seen: list[tuple[Any, int | None]] = []
+    pool = object()
+
+    async def _store(store_pool: Any, *, default: int | None) -> int | None:
+        seen.append((store_pool, default))
+        return None
+
+    monkeypatch.setattr(f"{_FLOW_MODULE}.async_store_vector_dims", _store)
+    entry, feature = _ollama_embedding_entry()
+    entry.data.update(entry_data)
+    if runtime_data is not None:
+        entry.runtime_data = SimpleNamespace(pool=pool)  # type: ignore[attr-defined]
+    flow = _thinking_flow(hass, entry, feature)
+
+    await _submit_embedding_model(flow, {CONF_FEATURE_MODEL_NAME: "m"})
+
+    want_pool = pool if expected[0] == "pool" else None
+    assert seen == [(want_pool, expected[1])]
+
+
+@pytest.mark.asyncio
+async def test_feature_flow_rechecks_a_server_that_comes_back(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    An override covers only the servers that answered when it was given.
+
+    A fallback that was unreachable on the first submit and answers on the
+    resubmit without the model is refused, not waved through.
+    """
+    listings: dict[str, list[str] | None] = {
+        "http://ollama:11434": ["other:latest"],
+        "http://fallback:11434": None,
+    }
+    _serve_ollama(monkeypatch, listings)
+    entry, feature = _ollama_embedding_entry()
+    flow = _thinking_flow(hass, entry, feature)
+    user_input = {
+        CONF_FEATURE_MODEL_NAME: "m",
+        CONF_FEATURE_FALLBACK_PROVIDER_IDS: ["prov2"],
+    }
+
+    first = await _submit_embedding_model(flow, dict(user_input))
+    listings["http://fallback:11434"] = ["other:latest"]
+    second = await flow.async_step_feature_model(dict(user_input))
+
+    assert first.get("errors") == {"base": "ollama_model_not_installed"}
+    assert second.get("errors") == {"base": "ollama_model_not_installed"}
+    assert (second.get("description_placeholders") or {})["url"] == (
+        "http://ollama:11434, http://fallback:11434"
+    )
+
+
+@pytest.mark.asyncio
+async def test_feature_flow_ignores_a_size_without_a_listing(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A server that could not list its models is not judged on its size.
+
+    Its size request runs alongside the listing (one timeout, not two), but
+    without a listing nothing says it has the model, so the size is ignored.
+    """
+    _serve_ollama(
+        monkeypatch, {"http://ollama:11434": None}, dims={"http://ollama:11434": 768}
+    )
+    entry, feature = _ollama_embedding_entry()
+    flow = _thinking_flow(hass, entry, feature)
+
+    result = await _submit_embedding_model(flow, {CONF_FEATURE_MODEL_NAME: "m"})
+
+    assert result.get("type") == "abort"
+
+
+@pytest.mark.asyncio
+async def test_feature_flow_rechecks_a_size_that_was_unknown(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A size override covers only the sizes the user was shown.
+
+    The primary is refused for its size while a fallback's size is unknown;
+    when the fallback reports a wrong size on the resubmit, it is refused too.
+    """
+    dims: dict[str, int] = {"http://ollama:11434": 768}
+    _serve_ollama(
+        monkeypatch,
+        {"http://ollama:11434": ["m:latest"], "http://fallback:11434": ["m:latest"]},
+        dims=dims,
+    )
+    entry, feature = _ollama_embedding_entry()
+    flow = _thinking_flow(hass, entry, feature)
+    user_input = {
+        CONF_FEATURE_MODEL_NAME: "m",
+        CONF_FEATURE_FALLBACK_PROVIDER_IDS: ["prov2"],
+    }
+
+    first = await _submit_embedding_model(flow, dict(user_input))
+    dims["http://fallback:11434"] = 384
+    second = await flow.async_step_feature_model(dict(user_input))
+
+    assert first.get("errors") == {"base": "ollama_embedding_dims_mismatch"}
+    assert second.get("errors") == {"base": "ollama_embedding_dims_mismatch"}
+    assert (second.get("description_placeholders") or {})["url"] == (
+        "http://ollama:11434 (768), http://fallback:11434 (384)"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("dims", "store"),
+    [
+        ({"http://ollama:11434": 1024}, _NO_TABLE),
+        # The server does not report the model's size.
+        ({}, _NO_TABLE),
+        # The database cannot be asked for the store's size.
+        ({"http://ollama:11434": 768}, None),
+    ],
+)
+async def test_feature_flow_saves_right_or_unknown_size_embedding_model(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+    dims: dict[str, int],
+    store: object,
+) -> None:
+    """A model of the right size saves, and so does one whose fit is unknown."""
+    _serve_ollama(
+        monkeypatch,
+        {"http://ollama:11434": ["mxbai-embed-large:latest"]},
+        dims=dims,
+        store=store,
+    )
+    entry, feature = _ollama_embedding_entry()
+    flow = _thinking_flow(hass, entry, feature)
+
+    result = await _submit_embedding_model(
+        flow, {CONF_FEATURE_MODEL_NAME: "mxbai-embed-large"}
+    )
+
+    assert result.get("type") == "abort"
+    assert (
+        feature.data[CONF_FEATURE_MODEL][CONF_FEATURE_MODEL_NAME] == "mxbai-embed-large"
+    )
+
+
+@pytest.mark.asyncio
+async def test_feature_flow_saves_refused_model_on_second_submit(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Submitting a refused name again saves it, trimmed."""
+    _serve_ollama(monkeypatch, {"http://ollama:11434": ["mxbai-embed-large:latest"]})
+    entry, feature = _ollama_embedding_entry()
+    flow = _thinking_flow(hass, entry, feature)
+
+    first = await _submit_embedding_model(
+        flow, {CONF_FEATURE_MODEL_NAME: " custom-embed "}
+    )
+    assert first.get("errors") == {"base": "ollama_model_not_installed"}
+    second = await flow.async_step_feature_model(
+        {CONF_FEATURE_MODEL_NAME: "custom-embed"}
+    )
+
+    assert second.get("type") == "abort"
+    assert feature.data[CONF_FEATURE_MODEL][CONF_FEATURE_MODEL_NAME] == "custom-embed"
+
+
+@pytest.mark.asyncio
+async def test_feature_flow_refuses_model_missing_on_fallback_server(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A selected Ollama fallback provider is checked too (#749)."""
+    fetched = _serve_ollama(
+        monkeypatch,
+        {
+            "http://ollama:11434": ["qwen3-embedding:0.6b"],
+            "http://fallback:11434": ["mxbai-embed-large:latest"],
+        },
+    )
+    entry, feature = _ollama_embedding_entry()
+    flow = _thinking_flow(hass, entry, feature)
+
+    result = await _submit_embedding_model(
+        flow,
+        {
+            CONF_FEATURE_MODEL_NAME: "qwen3-embedding:0.6b",
+            CONF_FEATURE_FALLBACK_PROVIDER_IDS: ["prov2"],
+        },
+    )
+
+    assert result.get("errors") == {"base": "ollama_model_not_installed"}
+    assert fetched == ["http://ollama:11434", "http://fallback:11434"]
+
+
+@pytest.mark.asyncio
+async def test_feature_flow_rechecks_a_model_removed_since_render(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dropdown's cached list cannot vouch for a model removed since."""
+    listings: dict[str, list[str] | None] = {
+        "http://ollama:11434": ["qwen3-embedding:0.6b"]
+    }
+    fetched = _serve_ollama(monkeypatch, listings)
+    entry, feature = _ollama_embedding_entry()
+    flow = _thinking_flow(hass, entry, feature)
+    await flow.async_step_user()
+    await flow.async_step_embedding({"model_provider_id": "prov1"})
+
+    listings["http://ollama:11434"] = ["mxbai-embed-large:latest"]
+    result = await flow.async_step_feature_model(
+        {CONF_FEATURE_MODEL_NAME: "qwen3-embedding:0.6b"}
+    )
+
+    assert result.get("errors") == {"base": "ollama_model_not_installed"}
+    assert fetched == ["http://ollama:11434"]
+
+
+@pytest.mark.asyncio
+async def test_feature_flow_accepts_model_pulled_while_form_open(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A model pulled after the form rendered is accepted on submit."""
+    listings: dict[str, list[str] | None] = {
+        "http://ollama:11434": ["mxbai-embed-large:latest"]
+    }
+    _serve_ollama(monkeypatch, listings)
+    entry, feature = _ollama_embedding_entry()
+    flow = _thinking_flow(hass, entry, feature)
+    await flow.async_step_user()
+    await flow.async_step_embedding({"model_provider_id": "prov1"})
+
+    listings["http://ollama:11434"] = ["qwen3-embedding:0.6b"]
+    result = await flow.async_step_feature_model(
+        {CONF_FEATURE_MODEL_NAME: "qwen3-embedding:0.6b"}
+    )
+
+    assert result.get("type") == "abort"
+
+
+@pytest.mark.asyncio
+async def test_feature_flow_does_not_check_chat_models(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A chat model fails loudly on first use, so only embeddings are checked."""
+    fetched = _serve_ollama(
+        monkeypatch, {"http://ollama:11434": ["mxbai-embed-large:latest"]}
+    )
+    entry, feature = _ollama_embedding_entry("conversation")
+    flow = _thinking_flow(hass, entry, feature)
+
+    result = await _submit_embedding_model(
+        flow, {CONF_FEATURE_MODEL_NAME: "not-pulled:7b"}, "conversation"
+    )
+
+    assert result.get("type") == "abort"
+    assert fetched == []
+
+
+@pytest.mark.asyncio
+async def test_feature_flow_skips_ollama_fallback_behind_other_primary(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Behind an OpenAI primary, the submitted name is OpenAI's model.
+
+    An Ollama fallback embeds with the separately resolved Ollama model, so
+    checking the submitted name there would refuse a working setup; the
+    startup check covers that server with the right model.
+    """
+    fetched = _serve_ollama(monkeypatch, {"http://fallback:11434": ["x:latest"]})
+    entry, feature = _ollama_embedding_entry()
+    entry.subentries["prov1"] = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "OpenAI",
+        {"provider_type": "openai", "capabilities": ["chat", "embedding"]},
+    )
+    flow = _thinking_flow(hass, entry, feature)
+
+    result = await _submit_embedding_model(
+        flow,
+        {
+            CONF_FEATURE_MODEL_NAME: "text-embedding-3-small",
+            CONF_FEATURE_FALLBACK_PROVIDER_IDS: ["prov2"],
+        },
+    )
+
+    assert result.get("type") == "abort"
+    assert fetched == []
+
+
+@pytest.mark.asyncio
+async def test_feature_flow_override_does_not_cover_a_new_server(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resubmitting overrides only the servers the model was refused on."""
+    _serve_ollama(
+        monkeypatch,
+        {
+            "http://ollama:11434": ["mxbai-embed-large:latest"],
+            "http://fallback:11434": ["mxbai-embed-large:latest"],
+        },
+    )
+    entry, feature = _ollama_embedding_entry()
+    flow = _thinking_flow(hass, entry, feature)
+
+    first = await _submit_embedding_model(flow, {CONF_FEATURE_MODEL_NAME: "custom"})
+    second = await flow.async_step_feature_model(
+        {
+            CONF_FEATURE_MODEL_NAME: "custom",
+            CONF_FEATURE_FALLBACK_PROVIDER_IDS: ["prov2"],
+        }
+    )
+
+    assert first.get("errors") == {"base": "ollama_model_not_installed"}
+    assert second.get("errors") == {"base": "ollama_model_not_installed"}
+    assert CONF_FEATURE_MODEL not in feature.data
+
+
+@pytest.mark.asyncio
+async def test_feature_flow_checks_primary_at_its_runtime_url(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A primary with no base_url embeds at the default URL, so that is checked."""
+    fetched = _serve_ollama(monkeypatch, {})
+    entry, feature = _ollama_embedding_entry()
+    entry.subentries["prov1"].data["settings"] = {"chat_url": "http://chat:11434"}
+    flow = _thinking_flow(hass, entry, feature)
+
+    await _submit_embedding_model(flow, {CONF_FEATURE_MODEL_NAME: "custom"})
+
+    assert fetched == [RECOMMENDED_OLLAMA_URL]
+
+
+@pytest.mark.asyncio
+async def test_feature_flow_blank_model_name_keeps_the_default(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A whitespace-only name is not saved as an empty model."""
+    _serve_ollama(monkeypatch, {"http://ollama:11434": ["mxbai-embed-large:latest"]})
+    entry, feature = _ollama_embedding_entry()
+    flow = _thinking_flow(hass, entry, feature)
+
+    result = await _submit_embedding_model(flow, {CONF_FEATURE_MODEL_NAME: "   "})
+
+    assert result.get("type") == "abort"
+    assert feature.data[CONF_FEATURE_MODEL].get(CONF_FEATURE_MODEL_NAME) != ""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
@@ -47,6 +48,8 @@ from ..const import (  # noqa: TID252
     CONF_FEATURE_MODEL_REASONING_BUDGET,
     CONF_FEATURE_MODEL_REASONING_BY_MODEL,
     CONF_FEATURE_MODEL_TEMPERATURE,
+    CONF_VECTORS_BOOTSTRAPPED,
+    EMBEDDING_MODEL_DIMS,
     FEATURE_CATEGORY_MAP,
     FEATURE_DEFS,
     KEEPALIVE_MAX_SECONDS,
@@ -63,16 +66,25 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_OLLAMA_CONTEXT_SIZE,
     RECOMMENDED_OLLAMA_REASONING,
     RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE,
+    RECOMMENDED_OLLAMA_URL,
     RECOMMENDED_OLLAMA_VLM_KEEPALIVE,
     SUBENTRY_TYPE_DATABASE,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
 )
 from ..core.db_utils import build_postgres_uri  # noqa: TID252
+from ..core.embedding_model_guard import async_store_vector_dims  # noqa: TID252
 from ..core.utils import (  # noqa: TID252
     CannotConnectError,
     InvalidAuthError,
+    fetch_ollama_models,
+    format_embedding_dims,
     list_ollama_models,
+    normalized_ollama_url,
+    ollama_embedding_dims,
+    ollama_model_installed,
+    ollama_provider_settings_url,
+    redact_url,
     validate_db_uri,
 )
 from .localization import async_common_translation
@@ -462,6 +474,11 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
         self._active_feature: str | None = None
         self._pending_provider_id: str | None = None
         self._ollama_model_cache: dict[str, list[str]] = {}
+        # The embedding model and servers last refused, with the checks the
+        # user has already seen fail. Submitting the same input again skips
+        # those checks, so a spelling the name check cannot match (#757) or a
+        # misreported vector size (#755) never locks a working model out.
+        self._embedding_refusal: tuple[tuple[Any, ...], frozenset[str]] | None = None
 
     def _schedule_reload(self) -> None:
         entry = self._get_entry()
@@ -983,8 +1000,10 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
             settings = (
                 provider_subentry.data.get("settings", {}) if provider_subentry else {}
             )
-            ollama_url = settings.get("base_url")
-            if isinstance(ollama_url, str) and ollama_url:
+            # Keyed like the submit-time check, so a list it refreshed shows
+            # up in the dropdown when the form re-renders with its error.
+            ollama_url = normalized_ollama_url(settings.get("base_url"))
+            if ollama_url:
                 cached = self._ollama_model_cache.get(ollama_url)
                 if cached is None:
                     cached = await list_ollama_models(self.hass, ollama_url)
@@ -1070,11 +1089,38 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
         if category == "chat" and provider_type in _REASONING_CHOICES:
             _add_reasoning_schema(schema, provider_type, existing_model, defaults)
 
+        if user_input is not None and (
+            refusal := await self._async_ollama_embedding_refusal(
+                category, provider_id, user_input
+            )
+        ):
+            # Caught here rather than at runtime, where an un-pulled embedding
+            # model (#757) or one of the wrong vector size (#755) only shows up
+            # as failed writes on every memory search and a failed tool index.
+            error, placeholders = refusal
+            return self.async_show_form(
+                step_id="feature_model",
+                data_schema=self.add_suggested_values_to_schema(
+                    vol.Schema(schema), user_input
+                ),
+                errors={"base": error},
+                description_placeholders={
+                    "provider_notice": provider_notice,
+                    "feature_name": FEATURE_DEFS[feature_type]["name"],
+                    "model": str(user_input.get(CONF_FEATURE_MODEL_NAME, "")).strip(),
+                    **placeholders,
+                },
+            )
+
         if user_input is not None:
             provider_type = _provider_type_for_id(entry, provider_id)
             model_data = dict(defaults)
             model_data.update(existing_model)
             submitted_name = user_input.get(CONF_FEATURE_MODEL_NAME)
+            if isinstance(submitted_name, str):
+                # A stray space would be sent to the server as part of the name;
+                # a blank name falls back to the existing or default model.
+                submitted_name = submitted_name.strip() or None
             reasoning_val, budget_val, by_model = _resolve_submitted_thinking(
                 user_input, existing_model, submitted_name, category
             )
@@ -1129,6 +1175,141 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                 "feature_name": FEATURE_DEFS[feature_type]["name"],
             },
         )
+
+    async def _async_ollama_embedding_refusal(
+        self,
+        category: str | None,
+        provider_id: str,
+        user_input: dict[str, Any],
+    ) -> tuple[str, dict[str, str]] | None:
+        """
+        Return the error and placeholders refusing the embedding model, if any.
+
+        Checks an Ollama primary and every Ollama fallback provider submitted
+        with it, since they all embed with this one model (#749): first that
+        each server has the model, then that the servers that have it produce
+        vectors of the memory store's size. Only the embedding model is
+        checked: a missing chat or vision model fails loudly on the user's
+        first request, an embedding model fails in the background. Whatever a
+        server or the database cannot tell is skipped, since an unknown answer
+        must not block saving; a server that lists no models lacks this one.
+        Submitting a refused input again skips the checks it already failed.
+        """
+        model, urls = self._ollama_embedding_servers(category, provider_id, user_input)
+        if not urls:
+            self._embedding_refusal = None
+            return None
+        entry = self._get_entry()
+        bootstrapped = bool(entry.data.get(CONF_VECTORS_BOOTSTRAPPED))
+        # Always ask the servers: the cached lists predate the form, and a
+        # model may have been pulled or removed since it rendered. The store
+        # read and the size requests do not depend on the listings, so all
+        # three run together and one slow server costs a single timeout. An
+        # Ollama primary creates a new store at EMBEDDING_MODEL_DIMS; an
+        # existing one keeps the size it was created with.
+        expected, listings, reported = await asyncio.gather(
+            async_store_vector_dims(
+                getattr(getattr(entry, "runtime_data", None), "pool", None),
+                default=None if bootstrapped else EMBEDDING_MODEL_DIMS,
+            ),
+            asyncio.gather(*(fetch_ollama_models(self.hass, url) for url in urls)),
+            ollama_embedding_dims(self.hass, urls, model),
+        )
+        missing: list[str] = []
+        present: list[str] = []
+        for url, installed in zip(urls, listings, strict=True):
+            if installed is None:
+                continue
+            self._ollama_model_cache[url] = installed
+            (present if ollama_model_installed(model, installed) else missing).append(
+                url
+            )
+        sizes = {url: reported[url] for url in present if url in reported}
+        # The override covers only what the user was shown: the same model on
+        # the same servers, which answered the same way, against the same
+        # store. A fallback added on the resubmit, or a server that was
+        # unreachable or did not report a size and now does, is checked again.
+        key = (
+            model,
+            tuple(urls),
+            tuple(present),
+            tuple(missing),
+            tuple(sorted(sizes.items())),
+            expected,
+        )
+        overridden = (
+            self._embedding_refusal[1]
+            if self._embedding_refusal and self._embedding_refusal[0] == key
+            else frozenset()
+        )
+        if missing and "missing" not in overridden:
+            self._embedding_refusal = (key, overridden | {"missing"})
+            return "ollama_model_not_installed", {
+                "url": ", ".join(redact_url(url) for url in missing)
+            }
+        wrong = (
+            {url: dims for url, dims in sizes.items() if dims != expected}
+            if expected is not None
+            else {}
+        )
+        if wrong and "dims" not in overridden:
+            self._embedding_refusal = (key, overridden | {"dims"})
+            servers, dims = format_embedding_dims(wrong)
+            # The primary is urls[0]. When only fallbacks are wrong, choosing
+            # another model would break the primary; their fix differs.
+            error = (
+                "ollama_embedding_dims_mismatch"
+                if urls[0] in wrong
+                else "ollama_fallback_embedding_dims_mismatch"
+            )
+            return error, {"url": servers, "dims": dims, "expected": str(expected)}
+        self._embedding_refusal = None
+        return None
+
+    def _ollama_embedding_servers(
+        self,
+        category: str | None,
+        provider_id: str,
+        user_input: dict[str, Any],
+    ) -> tuple[str, list[str]]:
+        """
+        Return the submitted embedding model and the Ollama servers to check.
+
+        No servers unless this is the embedding feature with an Ollama primary
+        and a model name.
+        """
+        if category != "embedding":
+            return "", []
+        raw_model = user_input.get(CONF_FEATURE_MODEL_NAME)
+        model = raw_model.strip() if isinstance(raw_model, str) else ""
+        if not model:
+            return "", []
+        entry = self._get_entry()
+        # The submitted name is the Ollama embedding model only when Ollama is
+        # the primary; behind another primary, Ollama fallbacks embed with the
+        # separately resolved Ollama model, which the startup check verifies.
+        if _provider_type_for_id(entry, provider_id) != "ollama":
+            return "", []
+        fallback_ids = user_input.get(CONF_FEATURE_FALLBACK_PROVIDER_IDS) or []
+        if not isinstance(fallback_ids, list):
+            fallback_ids = [str(fallback_ids)]
+        urls: list[str] = []
+        for pid in [provider_id, *fallback_ids]:
+            if _provider_type_for_id(entry, pid) != "ollama":
+                continue
+            provider = entry.subentries.get(pid)
+            settings = provider.data.get("settings", {}) if provider else {}
+            # Resolved as runtime does: the primary embeds at its base_url (or
+            # the default), a fallback at the URL setup keys its provider by.
+            url = (
+                normalized_ollama_url(settings.get("base_url"))
+                or RECOMMENDED_OLLAMA_URL
+                if pid == provider_id
+                else ollama_provider_settings_url(settings)
+            )
+            if url not in urls:
+                urls.append(url)
+        return model, urls
 
     async def async_step_conversation(
         self, user_input: dict[str, Any] | None = None
