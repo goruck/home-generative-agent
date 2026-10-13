@@ -595,6 +595,7 @@ class SentinelEngine:
         pin_verified = False
         # Returning to the configured level after lowering it is not an increase.
         if require_pin and level > max(current_level, base_level):
+            self._require_stored_pin()
             if not pin:
                 msg = (
                     "A PIN is required to increase the autonomy level. "
@@ -624,16 +625,28 @@ class SentinelEngine:
             expires_at.isoformat(),
         )
 
-    def _verify_level_increase_pin(self, pin: str) -> None:
-        """Raise HomeAssistantError unless ``pin`` matches the stored hash."""
+    def _require_stored_pin(self) -> tuple[str, str]:
+        """
+        Return the stored PIN hash and salt, or raise saying how to set one.
+
+        The gate can be on with no PIN stored (an Advanced save before #762
+        that checked the box with the PIN blank). Nothing can match then, so
+        say what to change rather than asking the caller for a PIN.
+        """
         pin_hash = str(self._options.get(CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH, ""))
         pin_salt = str(self._options.get(CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT, ""))
         if not pin_hash or not pin_salt:
             msg = (
-                "Sentinel level-increase PIN validation is enabled, but no PIN "
-                "hash is configured."
+                "Sentinel requires a PIN to raise the autonomy level, but none "
+                "is set. Set one in Sentinel setup (Advanced), or turn off "
+                "'Require PIN for autonomy level increases'."
             )
             raise HomeAssistantError(msg)
+        return pin_hash, pin_salt
+
+    def _verify_level_increase_pin(self, pin: str) -> None:
+        """Raise HomeAssistantError unless ``pin`` matches the stored hash."""
+        pin_hash, pin_salt = self._require_stored_pin()
         if not verify_pin(str(pin), hashed=pin_hash, salt=pin_salt):
             msg = "Invalid PIN for autonomy level increase."
             raise HomeAssistantError(msg)

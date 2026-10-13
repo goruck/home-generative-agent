@@ -150,10 +150,13 @@ def test_set_autonomy_level_level_decrease_never_requires_pin() -> None:
 
 def test_set_autonomy_level_increase_blocked_without_pin() -> None:
     """Level increase is blocked when require_pin is True and no PIN is provided."""
+    pin_hash, pin_salt = hash_pin("1234")
     engine = _make_engine(
         options={
             CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: True,
             CONF_SENTINEL_AUTONOMY_LEVEL: 0,
+            CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH: pin_hash,
+            CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT: pin_salt,
         }
     )
     with pytest.raises(HomeAssistantError, match="PIN is required"):

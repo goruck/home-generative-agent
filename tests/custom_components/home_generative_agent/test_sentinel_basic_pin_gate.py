@@ -442,3 +442,16 @@ async def test_advanced_gate_with_a_hash_but_no_salt_is_refused(
         }
     )
     assert result.get("errors") == {"base": "pin_required"}
+
+
+@pytest.mark.parametrize("pin", [None, "4321"])
+def test_gate_with_no_stored_pin_says_how_to_set_one(pin: str | None) -> None:
+    """With the flag on and no PIN stored, both calls name the fix."""
+    engine = _engine_for(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: True,
+        }
+    )
+    with pytest.raises(HomeAssistantError, match=r"none is set\. Set one in Sentinel"):
+        engine.set_autonomy_level("test-entry-1", 3, pin=pin)
