@@ -59,7 +59,7 @@ from langgraph.store.postgres import AsyncPostgresStore
 from langgraph.store.postgres.base import PostgresIndexConfig
 from ollama import ResponseError as OllamaResponseError
 from psycopg.rows import DictRow, dict_row
-from psycopg_pool import AsyncConnectionPool, PoolTimeout
+from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
 
 from .agent.tools import VLMPromptOverrides, analyze_image
@@ -237,9 +237,12 @@ from .const import (
 )
 from .core.anthropic_client import SharedClientChatAnthropic, async_prime_async_client
 from .core.database_guard import (
+    async_check_database_reachable,
     async_clear_database_issue,
     async_ensure_pgvector,
     async_sync_database_issue,
+    database_unreachable,
+    is_connection_failure,
 )
 from .core.db_utils import parse_postgres_uri
 from .core.embedding_model_guard import (
@@ -2649,12 +2652,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     # "Configured" is a property of the entry, not of the connection: clear
     # the not-configured issue before the pool is even built, so a database
-    # that is configured but unreachable (both `return False` exits below)
-    # never leaves a stale issue claiming the subentry does not exist.
+    # that is configured but unreachable (the retry raised below) never leaves
+    # a stale issue claiming the subentry does not exist.
     if db_uri is not None:
         async_sync_database_issue(hass, entry.entry_id, database_missing=False)
 
     if db_uri is not None:
+        # An unreachable database retries setup with backoff instead of
+        # failing it for good (#748); this connect also gives the card the
+        # server's reason, which the pool's timeout would hide.
+        await async_check_database_reachable(db_uri)
         pool: AsyncConnectionPool[AsyncConnection[DictRow]] | None = (
             AsyncConnectionPool(
                 conninfo=db_uri,
@@ -2664,11 +2671,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 open=False,
             )
         )
-        try:
-            await pool.open()
-        except PoolTimeout:
-            LOGGER.exception("Error opening postgresql db.")
-            return False
+        # Does not wait for a connection (psycopg-pool's open defaults to
+        # wait=False), so it cannot fail on an unreachable server; the first
+        # use below does.
+        await pool.open()
 
         try:
             # Initialize database for long-term memory.
@@ -2731,6 +2737,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             # it; HA shows it on the integration card and logs it.
             if isinstance(err, ConfigEntryError):
                 raise
+            # The database went away after the preflight connect (a restart
+            # mid-setup): retry, as for one that was down from the start.
+            if is_connection_failure(err):
+                raise database_unreachable(err) from err
             LOGGER.exception("Postgresql setup failed; pool closed.")
             return False
     else:

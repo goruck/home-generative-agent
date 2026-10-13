@@ -443,6 +443,9 @@
     },
     "pgvector_not_available": {
       "message": "Server PostgreSQL s databází {database} nemá nainstalované rozšíření pgvector. Použijte PostgreSQL s pgvector (aplikaci PostgreSQL with pgvector nebo obraz jako pgvector/pgvector) a poté integraci znovu načtěte."
+    },
+    "database_unreachable": {
+      "message": "Databáze PostgreSQL zatím není dostupná: {error}. Home Assistant to bude zkoušet znovu; zkontrolujte, že databáze běží a že nastavení databáze (hostitel, port, uživatel, heslo, název databáze) je správné."
     }
   },
   "options": {

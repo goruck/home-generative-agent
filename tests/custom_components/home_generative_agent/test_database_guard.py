@@ -16,9 +16,16 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import CoreState
-from homeassistant.exceptions import ConfigEntryError, HomeAssistantError
+from homeassistant.exceptions import (
+    ConfigEntryError,
+    ConfigEntryNotReady,
+    HomeAssistantError,
+)
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers import translation
+from psycopg import OperationalError
 from psycopg import errors as pg_errors
 from psycopg_pool import PoolTimeout
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -27,17 +34,25 @@ import custom_components.home_generative_agent as hga_component
 from custom_components.home_generative_agent.const import DOMAIN
 from custom_components.home_generative_agent.core import pipeline_guard
 from custom_components.home_generative_agent.core.database_guard import (
+    DATABASE_UNREACHABLE,
     ISSUE_DATABASE_NOT_CONFIGURED,
     PGVECTOR_NOT_AVAILABLE,
     PGVECTOR_NOT_PERMITTED,
     _issue_id,
+    async_check_database_reachable,
     async_clear_database_issue,
     async_ensure_pgvector,
     async_sync_database_issue,
+    database_unreachable,
+    is_connection_failure,
 )
 
 from .test_deferred_start_listener import _UnreachablePool
 from .test_fallback_setup import _fallback_setup_data, _patch_setup_dependencies
+
+# A libpq key/value DSN for a port nothing listens on. It carries a password
+# so the tests can show the message never echoes it.
+_DOWN_DSN = "host=127.0.0.1 port=1 dbname=ha_db user=ha_user password=s3cret"
 
 
 def _issue(hass: Any, entry_id: str) -> ir.IssueEntry | None:
@@ -203,10 +218,82 @@ async def test_unreachable_database_still_clears_the_not_configured_issue(
 
     monkeypatch.setattr(hga_component, "_bootstrap_db_once", _unreachable)
 
-    result = await cast("Any", hga_component).async_setup_entry(hass, entry)
+    with pytest.raises(ConfigEntryNotReady):
+        await cast("Any", hga_component).async_setup_entry(hass, entry)
 
-    assert result is False
     assert _issue(hass, entry.entry_id) is None
+
+
+# ---------------------------------------------------------------------------
+# unreachable database retries setup (#748)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_preflight_reports_the_servers_reason() -> None:
+    """A refused connection becomes a retry that carries libpq's summary."""
+    with pytest.raises(ConfigEntryNotReady) as exc_info:
+        await async_check_database_reachable(_DOWN_DSN)
+
+    err = exc_info.value
+    assert err.translation_key == DATABASE_UNREACHABLE
+    detail = (err.translation_placeholders or {})["error"]
+    assert "127.0.0.1" in detail
+    assert "s3cret" not in detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_home_assistant_retries_an_entry_whose_database_is_down(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through HA's own setup: SETUP_RETRY with the reason, not SETUP_ERROR."""
+    entry = _prepare_entry(hass, monkeypatch)
+    _patch_configured_database(monkeypatch, _ReachablePool)
+    monkeypatch.setattr(
+        hga_component,
+        "build_database_uri_from_entry",
+        lambda _e: _DOWN_DSN,
+    )
+    # The real preflight, against a port nothing listens on.
+    monkeypatch.setattr(
+        hga_component, "async_check_database_reachable", async_check_database_reachable
+    )
+
+    # ConfigEntry.async_setup is where HA turns the exception into a state and
+    # a scheduled retry; the manager's wrapper would first set up the
+    # conversation and recorder dependencies, which the test env lacks.
+    # Component setup loads the integration's translations and marks it loaded
+    # before any entry is set up (homeassistant/setup.py); the card's reason is
+    # rendered from them.
+    await translation.async_load_integrations(hass, {DOMAIN})
+    hass.config.components.add(DOMAIN)
+    async with entry.setup_lock:
+        await entry.async_setup(hass)
+
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert entry.reason is not None
+    assert entry.reason.startswith("Cannot reach the PostgreSQL database yet:")
+    assert "127.0.0.1" in entry.reason
+    assert "s3cret" not in entry.reason
+
+
+def test_connection_failures_are_told_from_bugs() -> None:
+    """Only a failure to reach the server is retried."""
+    assert is_connection_failure(OperationalError("down"))
+    assert is_connection_failure(PoolTimeout("timeout"))
+    assert not is_connection_failure(RuntimeError("bug"))
+    assert not is_connection_failure(pg_errors.UndefinedTable("no table"))
+
+
+def test_unreachable_message_keeps_only_the_first_line() -> None:
+    """The card shows the libpq summary line, not its hints."""
+    err = database_unreachable(
+        OperationalError('connection to server at "db", port 5432 failed\n\tIs it up?')
+    )
+    assert err.translation_placeholders == {
+        "error": 'connection to server at "db", port 5432 failed'
+    }
 
 
 # ---------------------------------------------------------------------------
