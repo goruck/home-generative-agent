@@ -436,6 +436,12 @@
   "exceptions": {
     "invalid_config_entry": {
       "message": "Invalid config entry provided. Got {config_entry}"
+    },
+    "pgvector_not_permitted": {
+      "message": "The pgvector extension is not enabled in PostgreSQL database {database}, and user {user} is not allowed to enable it. Enable it once as a superuser, connected to {database}: CREATE EXTENSION IF NOT EXISTS vector; then reload the integration. {user} does not need to be a superuser itself. If you already enabled pgvector, check that it was in {database}: an extension applies only to the database it was created in."
+    },
+    "pgvector_not_available": {
+      "message": "The PostgreSQL server holding database {database} does not have the pgvector extension installed. Run PostgreSQL with pgvector (the PostgreSQL with pgvector app, or an image such as pgvector/pgvector), then reload the integration."
     }
   },
   "options": {

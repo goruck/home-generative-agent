@@ -20,6 +20,16 @@ re-syncs it on every setup, and a persistent issue would outlive an
 uninstall-before-remove, where Home Assistant never reaches the integration's
 ``async_remove_entry`` hook (``ConfigEntry.async_remove`` returns on
 ``IntegrationNotFound`` first).
+
+It also checks, before the schema is set up, that a configured database can
+use pgvector (#756). The ``vector`` extension must be enabled in the
+integration's own database: langgraph's store enables it only when an
+embedding model is configured, and the person gallery's ``VECTOR`` column
+needs it either way. On a database the user brought themselves it is often
+missing (enabled in another database, or the server has no pgvector), and
+enabling it takes a superuser. Setup then failed with a bare PostgreSQL
+error; it now fails with a message that says which problem it is and how to
+fix it.
 """
 
 from __future__ import annotations
@@ -27,14 +37,22 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from homeassistant.core import callback
+from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers import issue_registry as ir
+from psycopg import errors as pg_errors
 
 from ..const import DOMAIN  # noqa: TID252
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
+    from psycopg import AsyncConnection
+    from psycopg.rows import DictRow
+    from psycopg_pool import AsyncConnectionPool
 
 ISSUE_DATABASE_NOT_CONFIGURED = "database_not_configured"
+
+PGVECTOR_NOT_PERMITTED = "pgvector_not_permitted"
+PGVECTOR_NOT_AVAILABLE = "pgvector_not_available"
 
 
 def _issue_id(entry_id: str) -> str:
@@ -80,3 +98,50 @@ def async_clear_database_issue(hass: HomeAssistant, entry_id: str) -> None:
     successful setup re-raises it if the database is still missing.
     """
     ir.async_delete_issue(hass, DOMAIN, _issue_id(entry_id))
+
+
+# Always one row: the names the fix has to be run against, whether vector is
+# enabled in this database, and whether the server has pgvector at all.
+_PGVECTOR_STATE_SQL = """
+    SELECT
+        current_database() AS database,
+        current_user AS username,
+        EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') AS enabled,
+        EXISTS (
+            SELECT 1 FROM pg_available_extensions WHERE name = 'vector'
+        ) AS available
+"""
+
+
+async def async_ensure_pgvector(
+    pool: AsyncConnectionPool[AsyncConnection[DictRow]],
+) -> None:
+    """
+    Make sure the connected database can use pgvector, or fail setup clearly.
+
+    Enables the extension when the server has it and the user may create it
+    (the same statement langgraph's setup would run). Raises a translated
+    ``ConfigEntryError`` naming the database and user, as the server reports
+    them, when the server has no pgvector or the user may not enable it.
+    Other database errors propagate unchanged.
+    """
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(_PGVECTOR_STATE_SQL)
+        row = await cur.fetchone()
+        if not row or row["enabled"]:
+            return
+        names = {"database": str(row["database"]), "user": str(row["username"])}
+        if not row["available"]:
+            raise ConfigEntryError(
+                translation_domain=DOMAIN,
+                translation_key=PGVECTOR_NOT_AVAILABLE,
+                translation_placeholders=names,
+            )
+        try:
+            await cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        except pg_errors.InsufficientPrivilege as err:
+            raise ConfigEntryError(
+                translation_domain=DOMAIN,
+                translation_key=PGVECTOR_NOT_PERMITTED,
+                translation_placeholders=names,
+            ) from err

@@ -1,10 +1,12 @@
 # ruff: noqa: S101
 """
-Tests for the no-database guard (#615).
+Tests for the no-database guard (#615) and the pgvector setup error (#756).
 
 An entry with no Database subentry loads on in-memory storage. That must be
 visible (a log warning and a repair issue), and the two face-enrollment
 paths must say what is missing instead of dereferencing a ``None`` gallery.
+A configured database that cannot use pgvector must fail setup with a
+message naming the fix, not the raw PostgreSQL error.
 """
 
 from __future__ import annotations
@@ -15,8 +17,9 @@ from unittest.mock import MagicMock
 
 import pytest
 from homeassistant.core import CoreState
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import ConfigEntryError, HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
+from psycopg import errors as pg_errors
 from psycopg_pool import PoolTimeout
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -25,8 +28,11 @@ from custom_components.home_generative_agent.const import DOMAIN
 from custom_components.home_generative_agent.core import pipeline_guard
 from custom_components.home_generative_agent.core.database_guard import (
     ISSUE_DATABASE_NOT_CONFIGURED,
+    PGVECTOR_NOT_AVAILABLE,
+    PGVECTOR_NOT_PERMITTED,
     _issue_id,
     async_clear_database_issue,
+    async_ensure_pgvector,
     async_sync_database_issue,
 )
 
@@ -103,6 +109,7 @@ def _patch_configured_database(monkeypatch: pytest.MonkeyPatch, pool_cls: type) 
     # The real langgraph stores spawn background batch tasks; stub them.
     monkeypatch.setattr(hga_component, "AsyncPostgresStore", MagicMock())
     monkeypatch.setattr(hga_component, "AsyncPostgresSaver", MagicMock())
+    monkeypatch.setattr(hga_component, "async_ensure_pgvector", _async_none)
     monkeypatch.setattr(hga_component, "_bootstrap_vectors_once", _async_none)
     monkeypatch.setattr(hga_component, "migrate_person_gallery", _async_none)
     monkeypatch.setattr(hga_component, "PersonGalleryDAO", MagicMock())
@@ -310,3 +317,199 @@ async def test_enroll_person_service_refuses_before_reading_any_media(
             {"name": "Alice", "file_path": "/media/faces/alice.jpg"},
             blocking=True,
         )
+
+
+# ---------------------------------------------------------------------------
+# pgvector check before the schema setup (#756)
+# ---------------------------------------------------------------------------
+
+
+class _PgvectorPool:
+    """A pool whose one cursor answers the pgvector state query."""
+
+    def __init__(
+        self, *, enabled: bool, available: bool, create_error: Exception | None
+    ) -> None:
+        self.row = {
+            "database": "ha_db",
+            "username": "ha_user",
+            "enabled": enabled,
+            "available": available,
+        }
+        self.create_error = create_error
+        self.statements: list[str] = []
+
+    def connection(self) -> Any:
+        pool = self
+
+        async def _execute(sql: str, *_args: Any) -> None:
+            pool.statements.append(" ".join(sql.split()))
+            if sql.startswith("CREATE EXTENSION") and pool.create_error:
+                raise pool.create_error
+
+        async def _fetchone() -> dict[str, Any]:
+            return pool.row
+
+        cursor = MagicMock()
+        cursor.execute = _execute
+        cursor.fetchone = _fetchone
+        cursor.__aenter__ = _async_self
+        cursor.__aexit__ = _async_none
+        conn = MagicMock()
+        conn.cursor = MagicMock(return_value=cursor)
+        conn.__aenter__ = _async_self
+        conn.__aexit__ = _async_none
+        return conn
+
+
+def _created_extension(pool: _PgvectorPool) -> bool:
+    return "CREATE EXTENSION IF NOT EXISTS vector" in pool.statements
+
+
+@pytest.mark.asyncio
+async def test_enabled_pgvector_passes_without_creating_it() -> None:
+    """The usual case: one read-only query, nothing else."""
+    pool = _PgvectorPool(enabled=True, available=True, create_error=None)
+
+    await async_ensure_pgvector(cast("Any", pool))
+
+    assert len(pool.statements) == 1
+    assert not _created_extension(pool)
+
+
+@pytest.mark.asyncio
+async def test_available_pgvector_is_enabled_when_the_user_may() -> None:
+    """
+    Enabled up front, embeddings or not.
+
+    langgraph's store enables it only with an embedding model configured, and
+    the person gallery's VECTOR column needs it either way.
+    """
+    pool = _PgvectorPool(enabled=False, available=True, create_error=None)
+
+    await async_ensure_pgvector(cast("Any", pool))
+
+    assert _created_extension(pool)
+
+
+@pytest.mark.asyncio
+async def test_pgvector_the_user_may_not_enable_names_the_fix() -> None:
+    """The #756 case: pgvector on the server, not enabled here, no superuser."""
+    denied = pg_errors.InsufficientPrivilege(
+        'permission denied to create extension "vector"'
+    )
+    pool = _PgvectorPool(enabled=False, available=True, create_error=denied)
+
+    with pytest.raises(ConfigEntryError) as excinfo:
+        await async_ensure_pgvector(cast("Any", pool))
+
+    assert excinfo.value.translation_domain == DOMAIN
+    assert excinfo.value.translation_key == PGVECTOR_NOT_PERMITTED
+    assert excinfo.value.translation_placeholders == {
+        "database": "ha_db",
+        "user": "ha_user",
+    }
+    assert excinfo.value.__cause__ is denied
+
+
+@pytest.mark.asyncio
+async def test_server_without_pgvector_names_the_fix() -> None:
+    """No pgvector on the server: say so, and do not try to create it."""
+    pool = _PgvectorPool(enabled=False, available=False, create_error=None)
+
+    with pytest.raises(ConfigEntryError) as excinfo:
+        await async_ensure_pgvector(cast("Any", pool))
+
+    assert excinfo.value.translation_key == PGVECTOR_NOT_AVAILABLE
+    assert excinfo.value.translation_placeholders == {
+        "database": "ha_db",
+        "user": "ha_user",
+    }
+    assert not _created_extension(pool)
+
+
+@pytest.mark.asyncio
+async def test_other_errors_creating_pgvector_propagate() -> None:
+    """Only a permission error has the superuser fix; others stay generic."""
+    pool = _PgvectorPool(
+        enabled=False,
+        available=True,
+        create_error=pg_errors.UndefinedFile("could not load library"),
+    )
+
+    with pytest.raises(pg_errors.UndefinedFile):
+        await async_ensure_pgvector(cast("Any", pool))
+
+
+class _TrackedPool(_ReachablePool):
+    """A reachable pool that remembers every instance setup builds."""
+
+    instances: list[_TrackedPool] = []  # noqa: RUF012
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        _TrackedPool.instances.append(self)
+
+
+@pytest.mark.asyncio
+async def test_pgvector_failure_fails_setup_before_the_schema(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Setup raises the translated error, closes the pool, touches no schema.
+
+    The check runs before the bootstrap and the gallery migration, so neither
+    can fail first with a bare error (the gallery's VECTOR column fails with
+    `type "vector" does not exist` when no embedding model is configured).
+    """
+    entry = _prepare_entry(hass, monkeypatch)
+    _TrackedPool.instances = []
+    _patch_configured_database(monkeypatch, _TrackedPool)
+    error = ConfigEntryError(
+        translation_domain=DOMAIN,
+        translation_key=PGVECTOR_NOT_PERMITTED,
+        translation_placeholders={"database": "ha_db", "user": "ha_user"},
+    )
+
+    async def _ensure(*_args: Any) -> None:
+        raise error
+
+    schema_steps: list[str] = []
+
+    async def _step(*_args: Any, **_kwargs: Any) -> None:
+        schema_steps.append("ran")
+
+    monkeypatch.setattr(hga_component, "async_ensure_pgvector", _ensure)
+    monkeypatch.setattr(hga_component, "_bootstrap_db_once", _step)
+    monkeypatch.setattr(hga_component, "_bootstrap_vectors_once", _step)
+    monkeypatch.setattr(hga_component, "migrate_person_gallery", _step)
+
+    with pytest.raises(ConfigEntryError) as excinfo:
+        await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert excinfo.value is error
+    assert schema_steps == []
+    assert [pool.close_calls for pool in _TrackedPool.instances] == [1]
+
+
+@pytest.mark.asyncio
+async def test_other_schema_errors_keep_the_generic_failure(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Anything that is not pgvector still logs and returns False, as before."""
+    entry = _prepare_entry(hass, monkeypatch)
+    _TrackedPool.instances = []
+    _patch_configured_database(monkeypatch, _TrackedPool)
+
+    denied = pg_errors.InsufficientPrivilege("permission denied for table store")
+
+    async def _bootstrap(*_args: Any, **_kwargs: Any) -> None:
+        raise denied
+
+    monkeypatch.setattr(hga_component, "_bootstrap_db_once", _bootstrap)
+
+    result = await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert result is False
+    assert "Postgresql setup failed" in caplog.text
+    assert [pool.close_calls for pool in _TrackedPool.instances] == [1]

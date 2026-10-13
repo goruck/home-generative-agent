@@ -64,7 +64,7 @@ Most AI conversation integrations are prompt passthroughs: they forward your wor
 | --- | --- |
 | Home Assistant | 2026.8.0 minimum (3.43.3 and later); 2026.9 (probatio schema core) and 2026.10 supported |
 | HACS | Required for the recommended install path; manual install is also supported |
-| PostgreSQL with pgvector | Provided as a bundled HA app (step 1 below) |
+| PostgreSQL with pgvector | Provided as a bundled HA app (step 1 below), or your own server; see [Using your own PostgreSQL](docs/installation.md#using-your-own-postgresql) |
 | Model provider | At least one of: OpenAI, Gemini, Anthropic, Ollama, or any OpenAI-compatible server |
 | Edge GPU server *(optional)* | Ollama, vLLM, llama.cpp, or LiteLLM for local model serving |
 | face-service *(optional)* | An external service for face recognition in camera analysis. Also powers Sentinel's unknown-person rules, which never fire unless face recognition is enabled (the `face_recognition` option, off by default) with this service configured |
