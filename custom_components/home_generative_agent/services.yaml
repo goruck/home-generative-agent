@@ -251,7 +251,7 @@ sentinel_set_autonomy_level:
           mode: box
     pin:
       name: PIN
-      description: PIN required when increasing the level and require_pin_for_level_increase is enabled.
+      description: PIN required to raise the level when a level-increase PIN is set in Sentinel setup.
       required: false
       selector:
         text:
