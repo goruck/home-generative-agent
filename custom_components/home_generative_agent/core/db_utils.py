@@ -2,7 +2,14 @@
 
 from collections.abc import Iterable, Mapping
 from typing import Any
-from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlunsplit
+from urllib.parse import (
+    parse_qsl,
+    quote,
+    unquote,
+    urlencode,
+    urlparse,
+    urlunsplit,
+)
 
 from homeassistant.const import (
     CONF_HOST,
@@ -63,8 +70,11 @@ def _build_postgres_params(
 
 def build_postgres_uri(data: dict[str, Any]) -> str:
     """Build a PostgreSQL URI from validated database form data."""
-    username = data[CONF_USERNAME]
-    password = data[CONF_PASSWORD]
+    # Percent-encoded so an '@', ':', '/', '?' or '#' in either cannot end the
+    # field early: libpq would read the rest as the host and echo it, part of
+    # the password included, in its connection error (#748).
+    username = quote(str(data[CONF_USERNAME]), safe="")
+    password = quote(str(data[CONF_PASSWORD]), safe="")
     host = data[CONF_HOST]
     port = data.get(CONF_PORT)
     db_name = data[CONF_DB_NAME]

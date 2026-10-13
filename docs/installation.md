@@ -119,7 +119,9 @@ Install the Blueprints from the `blueprints/` directory to create automations th
 
 ### "Cannot reach the PostgreSQL database yet"
 
-If the integration cannot connect to its database when it starts or reloads, its card shows **Failed to set up, will retry** with this message and the server's reason, for example `Connection refused` or `password authentication failed for user "ha_user"`. Home Assistant retries on its own, waiting 5 seconds at first and longer each time, up to every 10 minutes, so a database that starts after Home Assistant, or restarts during a reload, is picked up without a manual reload. If the message persists, check that the database is running and that the Database subentry's host, port, user, password and database name are correct; fix the settings and the next retry uses them.
+If the integration cannot connect to its database when it starts or reloads, its card shows **Failed to set up, will retry** with this message and the server's reason, for example `Connection refused` or `password authentication failed for user "ha_user"`. Home Assistant retries on its own, so a database that starts after Home Assistant, or restarts during a reload, is picked up without a manual reload. While Home Assistant is still starting, the first retry comes once startup finishes; after that it waits 5 seconds at first and longer each time, up to every 10 minutes. If the message persists, check that the database is running and that the Database subentry's host, port, user, password and database name are correct. Saving corrected settings there reloads the integration at once.
+
+If the card instead says **The Database settings were rejected before connecting**, a setting is one PostgreSQL does not accept, usually an unknown name under the Database subentry's extra connection parameters. Fix it there; setup is not retried until you do.
 
 ### Using your own PostgreSQL
 

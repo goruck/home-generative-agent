@@ -103,7 +103,7 @@ def _patch_setup(
 
 @pytest.mark.asyncio
 async def test_database_lost_mid_setup_retries_and_closes_the_pool(
-    hass: Any, monkeypatch: pytest.MonkeyPatch
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A pool timeout after the preflight retries setup instead of failing it."""
     entry = MockConfigEntry(domain=DOMAIN, data={})
@@ -125,11 +125,13 @@ async def test_database_lost_mid_setup_retries_and_closes_the_pool(
     }
     assert pool_holder["pool"].open_called is True
     assert pool_holder["pool"].close_called is True
+    # A lost connection is a retry, not a migration bug.
+    assert "Error migrating" not in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_non_connection_failure_still_fails_setup(
-    hass: Any, monkeypatch: pytest.MonkeyPatch
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A bug in the schema step is not retried; the pool is still closed."""
     entry = MockConfigEntry(domain=DOMAIN, data={})
@@ -146,13 +148,19 @@ async def test_non_connection_failure_still_fails_setup(
 
     assert result is False
     assert pool_holder["pool"].close_called is True
+    assert "Error migrating person_gallery database schema." in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_unreachable_database_retries_before_building_the_pool(
     hass: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The preflight's retry fires before any pool exists to leak."""
+    """
+    The preflight's retry fires before any provider work or pool.
+
+    Each retry while the database is down then costs one connect attempt: no
+    provider probes, no new clients, no model-fallback notices.
+    """
     entry = MockConfigEntry(domain=DOMAIN, data={})
     entry.add_to_hass(hass)
     pool_holder: dict[str, DummyPool] = {}
@@ -163,7 +171,11 @@ async def test_unreachable_database_retries_before_building_the_pool(
     async def _never(*_args: Any, **_kwargs: Any) -> None:
         raise AssertionError
 
+    def _no_provider_work(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError
+
     _patch_setup(monkeypatch, pool_holder, _never, reachable=_unreachable)
+    monkeypatch.setattr(hga_component, "resolve_runtime_options", _no_provider_work)
 
     with pytest.raises(ConfigEntryNotReady):
         await cast("Any", hga_component).async_setup_entry(hass, entry)

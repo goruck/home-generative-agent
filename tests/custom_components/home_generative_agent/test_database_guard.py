@@ -34,6 +34,7 @@ import custom_components.home_generative_agent as hga_component
 from custom_components.home_generative_agent.const import DOMAIN
 from custom_components.home_generative_agent.core import pipeline_guard
 from custom_components.home_generative_agent.core.database_guard import (
+    DATABASE_INVALID_SETTINGS,
     DATABASE_UNREACHABLE,
     ISSUE_DATABASE_NOT_CONFIGURED,
     PGVECTOR_NOT_AVAILABLE,
@@ -46,6 +47,7 @@ from custom_components.home_generative_agent.core.database_guard import (
     database_unreachable,
     is_connection_failure,
 )
+from custom_components.home_generative_agent.core.db_utils import build_postgres_uri
 
 from .test_deferred_start_listener import _UnreachablePool
 from .test_fallback_setup import _fallback_setup_data, _patch_setup_dependencies
@@ -284,6 +286,96 @@ def test_connection_failures_are_told_from_bugs() -> None:
     assert is_connection_failure(PoolTimeout("timeout"))
     assert not is_connection_failure(RuntimeError("bug"))
     assert not is_connection_failure(pg_errors.UndefinedTable("no table"))
+
+
+@pytest.mark.parametrize(
+    "err",
+    [
+        pg_errors.ConnectionFailure("lost"),  # 08006
+        pg_errors.AdminShutdown("terminating connection"),  # 57P01
+        pg_errors.CannotConnectNow("the database system is starting up"),
+        pg_errors.TooManyConnections("too many clients"),  # 53300
+    ],
+)
+def test_server_connection_errors_are_retried(err: Exception) -> None:
+    """A server that drops or refuses the connection is retried."""
+    assert is_connection_failure(err)
+
+
+@pytest.mark.parametrize(
+    "err",
+    [
+        # An hnsw index over pgvector's 2000-dimension limit.
+        pg_errors.ProgramLimitExceeded("column cannot have more than 2000"),
+        pg_errors.DiskFull("could not extend file"),
+        pg_errors.QueryCanceled("statement timeout"),
+        pg_errors.LockNotAvailable("could not obtain lock"),
+    ],
+)
+def test_server_side_operational_errors_are_not_retried(err: Exception) -> None:
+    """
+    An OperationalError the server raised about the work is permanent.
+
+    Retrying it would loop every 10 minutes behind a "cannot reach" message.
+    """
+    assert not is_connection_failure(err)
+
+
+@pytest.mark.asyncio
+async def test_settings_libpq_rejects_fail_setup_with_their_reason() -> None:
+    """An unknown connection option cannot be fixed by a retry."""
+    with pytest.raises(ConfigEntryError) as exc_info:
+        await async_check_database_reachable(f"{_DOWN_DSN} not_an_option=1")
+
+    err = exc_info.value
+    assert err.translation_key == DATABASE_INVALID_SETTINGS
+    detail = (err.translation_placeholders or {})["error"]
+    assert "not_an_option" in detail
+    assert "s3cret" not in detail
+
+
+@pytest.mark.parametrize("password", ["p@ssw0rd", "a/b?c#d:e%f g"])
+def test_database_uri_keeps_special_characters_in_the_password(
+    password: str,
+) -> None:
+    """The password is read back whole by libpq, not as part of the host."""
+    from psycopg.conninfo import conninfo_to_dict  # noqa: PLC0415
+
+    uri = build_postgres_uri(
+        {
+            "username": "ha@user",
+            "password": password,
+            "host": "127.0.0.1",
+            "port": 1,
+            "db_name": "ha_db",
+        }
+    )
+
+    parsed = conninfo_to_dict(uri)
+    assert parsed["password"] == password
+    assert parsed["user"] == "ha@user"
+    assert parsed["host"] == "127.0.0.1"
+
+
+@pytest.mark.asyncio
+async def test_unreachable_reason_never_echoes_a_password_with_an_at_sign() -> None:
+    """Unencoded, 'p@ssw0rd' made libpq report host 'ssw0rd@127.0.0.1'."""
+    uri = build_postgres_uri(
+        {
+            "username": "ha_user",
+            "password": "p@ssw0rd",
+            "host": "127.0.0.1",
+            "port": 1,
+            "db_name": "ha_db",
+        }
+    )
+
+    with pytest.raises(ConfigEntryNotReady) as exc_info:
+        await async_check_database_reachable(uri)
+
+    detail = (exc_info.value.translation_placeholders or {})["error"]
+    assert "127.0.0.1" in detail
+    assert "ssw0rd" not in detail
 
 
 def test_unreachable_message_keeps_only_the_first_line() -> None:

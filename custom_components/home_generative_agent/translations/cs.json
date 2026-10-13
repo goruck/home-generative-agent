@@ -446,6 +446,9 @@
     },
     "database_unreachable": {
       "message": "Databáze PostgreSQL zatím není dostupná: {error}. Home Assistant to bude zkoušet znovu; zkontrolujte, že databáze běží a že nastavení databáze (hostitel, port, uživatel, heslo, název databáze) je správné."
+    },
+    "database_invalid_settings": {
+      "message": "Nastavení databáze bylo odmítnuto ještě před připojením: {error}. Opravte dodatečné parametry připojení (nebo jiná nastavení) v podpoložce Databáze; integrace se po uložení znovu načte."
     }
   },
   "options": {

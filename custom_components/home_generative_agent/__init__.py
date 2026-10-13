@@ -1900,6 +1900,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     _ensure_default_feature_subentries(hass, entry)
     _assign_first_provider_if_needed(hass, entry)
 
+    db_uri = build_database_uri_from_entry(entry)
+
+    # "Configured" is a property of the entry, not of the connection: clear
+    # the not-configured issue before connecting, so a database that is
+    # configured but unreachable (the retry raised below) never leaves a stale
+    # issue claiming the subentry does not exist.
+    if db_uri is not None:
+        async_sync_database_issue(hass, entry.entry_id, database_missing=False)
+        # An unreachable database retries setup with backoff instead of
+        # failing it for good (#748); this connect also gives the card the
+        # server's reason, which the pool's timeout would hide. It runs before
+        # any provider probe or client build, so a retry while the database
+        # is down costs one connect attempt and sends no fallback notices.
+        await async_check_database_reachable(db_uri)
+
     # Resolve effective options (data + options + subentries).
     options = resolve_runtime_options(entry)
     conf = dict(options)
@@ -2648,20 +2663,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         "row_factory": dict_row,
     }
 
-    db_uri = build_database_uri_from_entry(entry)
-
-    # "Configured" is a property of the entry, not of the connection: clear
-    # the not-configured issue before the pool is even built, so a database
-    # that is configured but unreachable (the retry raised below) never leaves
-    # a stale issue claiming the subentry does not exist.
     if db_uri is not None:
-        async_sync_database_issue(hass, entry.entry_id, database_missing=False)
-
-    if db_uri is not None:
-        # An unreachable database retries setup with backoff instead of
-        # failing it for good (#748); this connect also gives the card the
-        # server's reason, which the pool's timeout would hide.
-        await async_check_database_reachable(db_uri)
         pool: AsyncConnectionPool[AsyncConnection[DictRow]] | None = (
             AsyncConnectionPool(
                 conninfo=db_uri,
@@ -2693,8 +2695,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             # Migrate person gallery DB schema (if needed)
             try:
                 await migrate_person_gallery(pool)
-            except Exception:
-                LOGGER.exception("Error migrating person_gallery database schema.")
+            except Exception as err:
+                # A lost connection is retried below; logging it here would
+                # read as a migration bug.
+                if not is_connection_failure(err):
+                    LOGGER.exception("Error migrating person_gallery database schema.")
                 raise
 
             person_gallery = PersonGalleryDAO(pool, hass)

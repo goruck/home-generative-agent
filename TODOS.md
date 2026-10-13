@@ -2362,6 +2362,19 @@ This is the same allowlist-omission class as #480 and as the triage options fixe
 
 ---
 
+### Two database connect probes that can drift apart
+
+**What:** `validate_db_uri` (`core/utils.py`, used by the Database subentry and Advanced setup forms) and `async_check_database_reachable` (`core/database_guard.py`, run at the start of setup since #748) each connect once to test the database. They differ in timeout (5 s against 10 s), in the conninfo checks done first (the form checks the scheme and host with `urlparse`; setup leaves that to libpq), and in error mapping (the form turns every `psycopg.Error` into `CannotConnectError`; setup splits `OperationalError` into a retry and other errors into a setup failure).
+
+**Why:** Review finding on PR #764 (2026-10-13), left as a follow-up: both work today, but a later change to one (a new timeout, a TLS option, an error case) will not reach the other.
+
+**How to apply:** Keep one async connect helper that raises the `psycopg` error, and let each caller map it: the forms to `CannotConnectError`/`InvalidAuthError`, setup to `ConfigEntryNotReady`/`ConfigEntryError`. Run it on the event loop (psycopg's async connect) instead of in an executor.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
 ## Completed
 
 ### `replace_partial` drops tool calls when it re-commits the last entry
