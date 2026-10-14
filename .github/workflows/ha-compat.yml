@@ -1,0 +1,82 @@
+name: "HA compatibility"
+
+# Keeps the integration and its test environment in step with Home Assistant.
+# See scripts/check_ha_versions.py for what each check covers.
+#
+# - "Pinned HA" runs on every PR: requirements/test.txt's homeassistant and
+#   pytest-homeassistant-custom-component pins agree, test pins HA also pins
+#   match HA, and manifest.json resolves against HA's package constraints.
+# - "Newest HA" runs daily against the newest HA release on PyPI, betas
+#   included: the manifest must resolve against its constraints (a conflict
+#   there fails setup for every user on that version), and the suite runs
+#   against it once a matching plugin release exists. A failure here is a
+#   heads-up during HA's beta week, not a PR blocker.
+
+on:
+  push:
+    branches:
+      - "main"
+  pull_request:
+    branches:
+      - "main"
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pinned:
+    name: "Pinned HA"
+    if: github.event_name != 'schedule'
+    runs-on: "ubuntu-latest"
+    steps:
+        - name: "Checkout the repository"
+          uses: "actions/checkout@v7"
+
+        - name: "Set up Python"
+          uses: actions/setup-python@v7.0.0
+          with:
+            python-version: "3.14"
+
+        - name: "Install uv"
+          run: python3 -m pip install uv
+
+        - name: "Check pins against Home Assistant"
+          run: python3 scripts/check_ha_versions.py pins
+
+  newest:
+    name: "Newest HA"
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: "ubuntu-latest"
+    steps:
+        - name: "Checkout the repository"
+          uses: "actions/checkout@v7"
+
+        - name: "Set up Python"
+          uses: actions/setup-python@v7.0.0
+          with:
+            python-version: "3.14"
+
+        - name: "Install uv"
+          run: python3 -m pip install uv
+
+        - name: "Check the manifest against the newest HA"
+          id: check
+          run: >-
+            python3 scripts/check_ha_versions.py latest
+            --requirements-out "$RUNNER_TEMP/test-newest.txt"
+            --constraints-out "$RUNNER_TEMP/constraints-newest.txt"
+
+        # Installed the way HA installs the integration: the manifest's pins
+        # under HA's package constraints.
+        - name: "Install requirements for HA ${{ steps.check.outputs.ha_version }}"
+          if: steps.check.outputs.run_tests == 'true'
+          run: |
+            python3 -m pip install -r "$RUNNER_TEMP/test-newest.txt"
+            python3 -m pip install -r requirements_runtime_manifest.txt -c "$RUNNER_TEMP/constraints-newest.txt"
+
+        - name: "Test against HA ${{ steps.check.outputs.ha_version }}"
+          if: steps.check.outputs.run_tests == 'true'
+          run: PYTHONPATH="$PWD" python3 -m pytest
