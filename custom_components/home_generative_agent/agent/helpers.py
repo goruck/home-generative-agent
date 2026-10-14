@@ -463,8 +463,12 @@ class PinReply:
 
     # The message can hold the PIN, so keep it out of reprs and logs.
     text: str = field(repr=False)
-    # Set once a PIN from this message has authorized an action.
+    # Set once a PIN from this message has been checked against the stored PIN,
+    # right or wrong, so one message is one attempt.
     spent: bool = False
+    # Set once a refused PIN has been checked for the diagnostic warning, so
+    # the hash runs at most once per message.
+    refusal_checked: bool = False
 
 
 # How long a pending PIN confirmation stays valid. Mirrors the expiry check in
@@ -482,7 +486,8 @@ MAX_PENDING_ACTIONS = 16
 PIN_AWAITING_USER_REPLY = "awaiting_user_pin"
 
 # Spoken digits as speech-to-text may write them, in the languages the PIN
-# messages ship in (pin_messages.py); Czech also without diacritics.
+# messages ship in (pin_messages.py); Czech also without diacritics, except
+# "pet" and "tri", which are English words.
 _SPOKEN_DIGITS = {
     "zero": "0",
     "one": "1",
@@ -502,11 +507,9 @@ _SPOKEN_DIGITS = {
     "dvě": "2",
     "dve": "2",
     "tři": "3",
-    "tri": "3",
     "čtyři": "4",
     "ctyri": "4",
     "pět": "5",
-    "pet": "5",
     "šest": "6",
     "sest": "6",
     "sedm": "7",
@@ -514,53 +517,177 @@ _SPOKEN_DIGITS = {
     "devět": "9",
     "devet": "9",
 }
-_WORD_RE = re.compile(r"[^\W\d_]+")
-# A number standing alone: digits, optionally joined by "." "-" ":" "/" into a
-# compound such as a date, time, decimal or phone number. Letters or digits
-# on either side mean it is part of something else ("abc1234xyz").
-_NUMBER_RE = re.compile(r"(?<!\w)\d+(?:[.\-:/]\d+)*(?!\w)")
-# What may separate digits that are read out one by one ("1, 2, 3, 4").
-_DIGIT_GAP_RE = re.compile(r"[\s,\-]*")
+# "Oh" for zero, read as a digit only before another digit ("one oh four").
+_SPOKEN_ZERO = "oh"
+# Words that may join digits read out one by one ("1, 2, 3 and 4"; Czech "a").
+_DIGIT_JOINERS = frozenset({"and", "a"})
+# A token of the message: a word or number, a run of whitespace, or one other
+# character.
+_TOKEN_RE = re.compile(r"\w+|\s+|.", re.DOTALL)
+# What may stand between digits read out one by one ("1, 2, 3 and 4",
+# "1-2-3-4", "1. 2. 3. 4."). Only whitespace joins longer groups ("12 34").
+_DIGIT_SEPARATORS = frozenset(",.-\u2013\u2014")
+# Joiners inside a compound written with no spaces, such as a time, date,
+# decimal, phone number or IP address ("12:34", "2024-10-14", "12,5",
+# "555-1234", "1.1.1.1"), which is never read as a PIN or split into one.
+_DASHES = frozenset("-\u2013\u2014")
+_COMPOUND_JOINERS = frozenset(".:/,") | _DASHES
+
+
+def _ascii_digits(text: str) -> str:
+    """Return the text with Unicode digits (Arabic-Indic, full-width) as ASCII."""
+    return "".join(
+        str(unicodedata.decimal(char)) if char.isdecimal() else char for char in text
+    )
+
+
+def _compound_end(tokens: list[str], index: int) -> int:
+    """Return the index of the last token of the number starting at index."""
+    end = index
+    while (
+        end + 2 < len(tokens)
+        and tokens[end + 1] in _COMPOUND_JOINERS
+        and tokens[end + 2].isdigit()
+    ):
+        end += 2
+    return end
+
+
+def _compound_digits(parts: list[str], joiners: set[str]) -> str | None:
+    """Return the digits of "1,234" or "1-2-3-4", None for any other compound."""
+    if joiners <= {",", *_DASHES} and all(len(part) == 1 for part in parts):
+        return "".join(parts)
+    if (
+        joiners == {","}
+        and len(parts[0]) <= 3  # noqa: PLR2004
+        and all(len(part) == 3 for part in parts[1:])  # noqa: PLR2004
+    ):
+        return "".join(parts)
+    return None
+
+
+def _number_items(text: str) -> list[tuple[str, str, bool]]:
+    """
+    Split the text into digit items, separators and breaks.
+
+    Each item is (kind, value, numeral): kind "digits" with the digits and
+    whether they were written as numerals, "sep" with the separator, or
+    "break" for anything that ends a number.
+    """
+    tokens = _TOKEN_RE.findall(_ascii_digits(text))
+    items: list[tuple[str, str, bool]] = []
+
+    def digit_follows(index: int) -> bool:
+        for token in tokens[index + 1 :]:
+            lowered = token.lower()
+            if token.isspace() or token in _DIGIT_SEPARATORS or lowered == "oh":
+                continue
+            return token.isdigit() or lowered in _SPOKEN_DIGITS
+        return False
+
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        lowered = token.lower()
+        if token.isdigit():
+            end = _compound_end(tokens, index)
+            if end == index:
+                items.append(("digits", token, True))
+            else:
+                digits = _compound_digits(
+                    tokens[index : end + 1 : 2], set(tokens[index + 1 : end : 2])
+                )
+                items.append(
+                    ("digits", digits, True) if digits else ("break", "", False)
+                )
+            index = end + 1
+            continue
+        if lowered in _SPOKEN_DIGITS:
+            items.append(("digits", _SPOKEN_DIGITS[lowered], False))
+        elif lowered == _SPOKEN_ZERO and digit_follows(index):
+            items.append(("digits", "0", False))
+        elif token.isspace():
+            items.append(("sep", " ", False))
+        elif token in _DIGIT_SEPARATORS or lowered in _DIGIT_JOINERS:
+            items.append(("sep", lowered, False))
+        else:
+            # A word, a word joined to digits ("one234", "abc1234"), or any
+            # other character ends the number.
+            items.append(("break", "", False))
+        index += 1
+    return items
+
+
+def _joins(
+    previous: tuple[str, str, bool], current: tuple[str, str, bool], seps: set[str]
+) -> bool:
+    """Return True when two digit items separated by seps are one number."""
+    if not seps:  # Whitespace only: "12 34", "one two three four".
+        return True
+    if len(previous[1]) != 1 or len(current[1]) != 1:
+        return False
+    # "1. 2. 3. 4." but not "...three four. One door only."
+    return "." not in seps or (previous[2] and current[2])
+
+
+def _number_runs(text: str) -> list[str]:
+    """
+    Return the digits of each number said in the text, in order.
+
+    A number is written ("1234", "1,234"), said in groups separated by spaces
+    ("12 34"), or read out digit by digit with spaces, commas, dashes, ". " or
+    "and" between the digits ("1, 2, 3 and 4", "one two three four"). Anything
+    else ends it, and a compound such as "12:34", "12,5" or "1.1.1.1" is not a
+    number at all.
+    """
+    runs: list[str] = []
+    digits = ""
+    previous: tuple[str, str, bool] | None = None
+    seps: set[str] = set()
+    for item in _number_items(text):
+        kind, value, _ = item
+        if kind == "sep":
+            if value != " ":
+                seps.add(value)
+            continue
+        if kind == "digits" and previous is not None and _joins(previous, item, seps):
+            digits += value
+        else:
+            if digits:
+                runs.append(digits)
+            digits = value if kind == "digits" else ""
+        previous = item if kind == "digits" else None
+        seps = set()
+    if digits:
+        runs.append(digits)
+    return runs
+
+
+def pin_digits(text: str) -> str | None:
+    """Return the digits when the whole text is one number, else None."""
+    runs = _number_runs(text)
+    words = {token.lower() for token in _TOKEN_RE.findall(text) if token.isalpha()}
+    if len(runs) != 1 or not words <= {*_SPOKEN_DIGITS, _SPOKEN_ZERO, *_DIGIT_JOINERS}:
+        return None
+    return runs[0]
 
 
 def pin_in_text(pin: str, text: str) -> bool:
     """
-    Return True when the user's message contains this PIN, as a PIN.
+    Return True when one number said in the user's message is exactly the PIN.
 
-    Two forms count: the PIN as a number standing alone ("1234"), and its
-    digits read out one by one, as digits or as spoken digit words, with or
-    without separators ("1 2 3 4", "1-2-3-4", "one two three four"). A PIN
-    inside a longer number, word, date, time, decimal or phone number does not
-    count, so ordinary numbers in a message are not read as a PIN.
+    The number can be written ("1234", "1,234"), said in groups ("12 34") or
+    read out digit by digit, as digits or spoken digit words ("1, 2, 3, 4",
+    "one two three four"). The whole number must equal the PIN: a longer
+    number that contains it ("12345", "555 1234", "nine one two three four")
+    does not count, and neither does a time, date, decimal or address
+    ("12:34", "12.34", "1.2.3.4"). A number standing apart from other numbers
+    and equal to the PIN always counts, whatever it means to the user ("set
+    it to 1234", "$1234").
     """
     if not pin or not text:
         return False
-    # Unicode digits (Arabic-Indic, full-width, ...) as ASCII.
-    text = "".join(
-        str(unicodedata.decimal(char)) if char.isdecimal() else char for char in text
-    )
-    text = _WORD_RE.sub(
-        lambda m: _SPOKEN_DIGITS.get(m.group(0).lower(), m.group(0)), text
-    )
-    digits = ""
-    previous_end = None
-    for match in _NUMBER_RE.finditer(text):
-        number = match.group(0)
-        if number == pin:
-            return True
-        parts = re.split(r"[.\-:/]", number)
-        if any(len(part) != 1 for part in parts):
-            # A multi-digit number ends a run of single digits.
-            digits, previous_end = "", None
-            continue
-        joined = previous_end is not None and _DIGIT_GAP_RE.fullmatch(
-            text[previous_end : match.start()]
-        )
-        digits = (digits if joined else "") + "".join(parts)
-        previous_end = match.end()
-        if pin in digits:
-            return True
-    return False
+    return _ascii_digits(pin) in _number_runs(text)
 
 
 class CriticalActionPolicy(NamedTuple):
@@ -641,6 +768,25 @@ def register_pending_action(
         "attempts": 0,
     }
     return action_id
+
+
+def thread_has_pending_action(
+    pending_actions: Mapping[str, Mapping[str, Any]], thread_id: str | None
+) -> bool:
+    """Return True when this conversation has an unexpired pending action."""
+    if not thread_id:
+        return False
+    now = dt_util.utcnow()
+    for action in pending_actions.values():
+        if action.get("thread_id") != thread_id:
+            continue
+        try:
+            created = datetime.fromisoformat(str(action.get("created_at")))
+            if now - created <= PENDING_ACTION_TTL:
+                return True
+        except (ValueError, TypeError):
+            continue
+    return False
 
 
 def matches_critical_rule(

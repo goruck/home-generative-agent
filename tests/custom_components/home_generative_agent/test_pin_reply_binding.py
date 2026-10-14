@@ -15,9 +15,11 @@ from homeassistant.helpers import llm
 from langchain_core.messages import ToolMessage
 
 from custom_components.home_generative_agent.agent import graph
+from custom_components.home_generative_agent.agent import tools as tools_module
 from custom_components.home_generative_agent.agent.helpers import (
     PIN_AWAITING_USER_REPLY,
     PinReply,
+    pin_digits,
     pin_in_text,
 )
 from custom_components.home_generative_agent.agent.tools import confirm_sensitive_action
@@ -203,7 +205,7 @@ async def test_one_pin_message_runs_one_action_even_after_a_failure(
 
     assert isinstance(reply, dict)
     assert reply["status"] == PIN_AWAITING_USER_REPLY
-    assert "already confirmed" in reply["reason"]
+    assert "already used" in reply["reason"]
     assert api.calls == ["HassTurnOff"]
 
 
@@ -331,30 +333,49 @@ async def test_an_unexpected_error_still_uses_up_the_confirmation() -> None:
     [
         ("1234", True),
         ("my PIN is 1234.", True),
+        ("1,234", True),
+        ("12 34", True),
         ("1, 2, 3, 4", True),
+        ("1,2,3,4", True),
+        ("1, 2, 3 and 4", True),
         ("1-2-3-4", True),
+        ("1 - 2 - 3 - 4", True),
+        ("1\u20132\u20133\u20134", True),  # en dashes
+        ("1. 2. 3. 4.", True),
         ("one two three four", True),
         ("One, two, three, four.", True),
         ("jedna dva tři čtyři", True),
-        ("jedna dve tri ctyri", True),
+        ("jedna dve tři ctyri", True),
         ("unlock 2 doors, PIN 1234", True),
         ("door 1, 1234", True),
-        ("PIN 1 2 3 4, 2 doors please", True),
         ("My PIN is one two three four. One door only.", True),
         ("\u0661\u0662\u0663\u0664", True),  # Arabic-Indic digits
         ("\uff11\uff12\uff13\uff14", True),  # full-width digits
         ("51234", False),
         ("12345", False),
         ("1 2 3", False),
-        ("12 34", False),
+        ("1 2 3 4 5", False),
         ("never mind", False),
         ("", False),
-        # Ordinary numbers in a message are not a PIN (review of PR #769).
-        ("Cancel the unlock. The invoice total is 12.34 dollars.", False),
-        ("Do not unlock; the serial is abc1234xyz.", False),
-        ("Use tracking number 1234-5678.", False),
+        # A longer number that contains the PIN, and compounds (review of
+        # PR #769).
+        ("nine one two three four five", False),
+        ("555 1234", False),
         ("call 555-1234", False),
+        ("+44 1234 567890", False),
+        ("Use tracking number 1234-5678.", False),
+        ("12-34", False),
+        ("1234,56", False),
+        ("1.2.3.4", False),
+        ("12:34", False),
+        ("Cancel the unlock. The invoice total is 12.34 dollars.", False),
         ("at 12.34 please", False),
+        ("Do not unlock; the serial is abc1234xyz.", False),
+        ("one234", False),
+        ("123four", False),
+        # The PIN read out with a door number after it reads as one longer
+        # number and is refused; the user is asked again.
+        ("PIN 1 2 3 4, 2 doors please", False),
     ],
 )
 def test_pin_in_text(text: str, *, expected: bool) -> None:
@@ -370,10 +391,46 @@ def test_pin_in_text(text: str, *, expected: bool) -> None:
         ("2130", "set the thermostat to 21.30"),
         ("2021", "set bedroom to 20, 21"),
         ("2026", "Alert at 2026-10-14T12:34:56"),
+        ("1111", "ping 1.1.1.1"),
+        # "pet" and "tri" are not read as Czech digits: they are English words.
+        ("5234", "feed the pet, 2, 3, 4"),
+        ("3234", "tri 2 3 4"),
     ],
 )
 def test_dates_times_and_lists_are_not_a_pin(pin: str, text: str) -> None:
     assert pin_in_text(pin, text) is False
+
+
+@pytest.mark.parametrize(
+    ("pin", "text"),
+    [
+        ("1004", "one oh oh four"),
+        ("0123", "oh one two three"),
+        ("123456", "123 456"),
+    ],
+)
+def test_spoken_and_grouped_pins(pin: str, text: str) -> None:
+    assert pin_in_text(pin, text) is True
+
+
+def test_oh_after_the_pin_is_not_a_zero() -> None:
+    assert pin_in_text(PIN, f"{PIN} oh wait") is True
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("1234", "1234"),
+        ("1 2 3 4", "1234"),
+        ("one two three four", "1234"),
+        ("1, 2, 3 and 4", "1234"),
+        ("PIN 1234", None),
+        ("12:34", None),
+        ("12 and 34", None),
+    ],
+)
+def test_pin_digits(text: str, expected: str | None) -> None:
+    assert pin_digits(text) == expected
 
 
 def test_the_users_message_is_not_in_the_repr() -> None:
@@ -415,3 +472,167 @@ def test_a_refusal_then_completion_ends_the_pin_flow() -> None:
 
     assert graph._has_pending_pin_confirmation([prompt, refusal]) is True
     assert graph._has_pending_pin_confirmation([prompt, refusal, completed]) is False
+
+
+async def test_the_pin_as_the_user_said_it_confirms() -> None:
+    """A model passing "1 2 3 4" or words is not refused in a loop."""
+    api = _FakeAPI()
+    turns = _Turns(api)
+    action_id = turns.request_unlock()
+
+    turns.say("one two three four")
+    reply = await turns.confirm(action_id, pin="one two three four")
+
+    assert isinstance(reply, dict)
+    assert reply["status"] == "completed"
+
+
+async def test_a_wrong_pin_uses_up_the_message() -> None:
+    """One message is one attempt: a looping model cannot spend all five."""
+    api = _FakeAPI()
+    turns = _Turns(api)
+    action_id = turns.request_unlock()
+
+    turns.say("9999")
+    first = await turns.confirm(action_id, pin="9999")
+    second = await turns.confirm(action_id, pin="9999")
+
+    assert isinstance(first, str)
+    assert first.startswith("Incorrect PIN")
+    assert isinstance(second, dict)
+    assert second["status"] == PIN_AWAITING_USER_REPLY
+    assert turns.pending[action_id]["attempts"] == 1
+    assert api.calls == []
+
+
+async def test_a_wrong_pin_refused_for_not_being_in_the_message_is_not_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    api = _FakeAPI()
+    turns = _Turns(api)
+    action_id = turns.request_unlock()
+    turns.say("never mind")
+
+    with caplog.at_level(logging.WARNING):
+        await turns.confirm(action_id, pin="9999")
+
+    assert "Refused a correct critical-action PIN" not in caplog.text
+
+
+async def test_the_pin_hash_runs_once_per_message_for_the_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model looping on a refused PIN does not hash it on the event loop again."""
+    calls: list[str] = []
+
+    def _verify(pin: str, **_: Any) -> bool:
+        calls.append(pin)
+        return True
+
+    monkeypatch.setattr(tools_module, "verify_pin", _verify)
+    api = _FakeAPI()
+    turns = _Turns(api)
+    action_id = turns.request_unlock()
+    turns.say("never mind")
+
+    for _ in range(3):
+        await turns.confirm(action_id)
+
+    assert calls == [PIN]
+
+
+async def test_wrong_conversation_is_reported_before_wrong_user() -> None:
+    """Another conversation's action reads as missing, whoever asks."""
+    api = _FakeAPI()
+    satellite_a = _Turns(api, thread_id="conv-a")
+    action_id = satellite_a.request_unlock()
+    satellite_b = _Turns(api, thread_id="conv-b")
+    satellite_b.pending.update(satellite_a.pending)
+    satellite_b.config["configurable"]["user_id"] = "someone_else"
+    satellite_b.say(PIN)
+
+    reply = await satellite_b.confirm(action_id)
+
+    assert reply == "Pending action not found or expired."
+
+
+async def test_an_action_without_a_tool_name_is_dropped() -> None:
+    api = _FakeAPI()
+    turns = _Turns(api)
+    action_id = turns.request_unlock()
+    del turns.pending[action_id]["tool_name"]
+
+    turns.say(PIN)
+    await turns.confirm(action_id)
+
+    assert action_id not in turns.pending
+    assert api.calls == []
+
+
+async def test_an_action_that_cannot_run_does_not_use_up_the_message() -> None:
+    """With the HA API unavailable, nothing ran, so the user can retry."""
+    api = _FakeAPI()
+    turns = _Turns(api)
+    action_id = turns.request_unlock()
+    turns.config["configurable"]["ha_llm_api"] = None
+
+    turns.say(PIN)
+    await turns.confirm(action_id)
+
+    assert action_id in turns.pending
+    assert turns.config["configurable"]["pin_reply"].spent is False
+
+
+class _ToolStore:
+    async def aget(self, _namespace: Any, key: str) -> Any:
+        assert key == "hga_local::confirm_sensitive_action"
+        return MagicMock(
+            value={
+                "name": "confirm_sensitive_action",
+                "api_id": "hga_local",
+                "description": "Confirm.",
+                "parameters": {},
+            }
+        )
+
+
+async def test_a_second_pending_action_keeps_the_pin_tool_available() -> None:
+    """
+    One message confirms one of two actions; the other still needs a reply.
+
+    The history shows the last challenge completed, so only the store says the
+    second action is pending.
+    """
+    api = _FakeAPI()
+    turns = _Turns(api)
+    first = turns.request_unlock()
+    second = turns.request_unlock()
+    turns.say(PIN)
+    await turns.confirm(first)
+    messages: list[Any] = [
+        ToolMessage(
+            content=json.dumps({"status": "requires_pin", "action_id": first}),
+            tool_call_id="tc1",
+            name="HassTurnOff",
+        ),
+        ToolMessage(
+            content=json.dumps({"status": "completed", "action_id": first}),
+            tool_call_id="tc2",
+            name="confirm_sensitive_action",
+        ),
+    ]
+    store = cast("Any", _ToolStore())
+
+    assert second in turns.pending
+    assert await graph._get_pending_pin_tools(messages, store) == []
+    tools = await graph._get_pending_pin_tools(
+        messages, store, cast("Any", turns.config)
+    )
+    assert [tool["name"] for tool in tools] == ["confirm_sensitive_action"]
+
+    other = _Turns(api, thread_id="conv-other")
+    other.pending.update(turns.pending)
+    assert (
+        await graph._get_pending_pin_tools(messages, store, cast("Any", other.config))
+        == []
+    )

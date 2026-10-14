@@ -110,6 +110,7 @@ from .helpers import (
     maybe_fill_lock_entity,
     normalize_intent_for_alarm,
     normalize_intent_for_lock,
+    pin_digits,
     pin_in_text,
     register_pending_action,
     resolve_critical_action_policy,
@@ -993,6 +994,10 @@ async def confirm_sensitive_action(  # noqa: D417
     salt = opts.get(CONF_CRITICAL_ACTION_PIN_SALT, "")
     pending_actions = cfg.get("pending_actions", {})
     provided_pin = str(pin or "").strip()
+    if not provided_pin.isdigit():
+        # The model may pass the PIN as the user said it ("1 2 3 4", "one two
+        # three four"). A PIN of digits is checked as given.
+        provided_pin = pin_digits(provided_pin) or provided_pin
     requested_action_id = str(action_id or "").strip()
 
     resolved_action_id = _resolve_action_id(
@@ -1017,6 +1022,8 @@ async def confirm_sensitive_action(  # noqa: D417
         hass=hass,
     )
     if pin_err:
+        # One message is one attempt: a wrong PIN cannot be retried from it.
+        _spend_pin_reply(cfg)
         return pin_err
 
     result, exec_err = await _execute_pending_action(resolved_action_id, action, cfg)
@@ -1157,10 +1164,19 @@ def _warn_if_correct_pin_refused(cfg: Mapping[str, Any], provided_pin: str) -> N
     user said it in a form the matcher does not read, which would otherwise
     leave them asked for the PIN again with nothing to report.
     """
+    pin_reply = cfg.get("pin_reply")
+    if pin_reply is None or pin_reply.refusal_checked:
+        return
+    pin_reply.refusal_checked = True
     opts = cfg.get("options", {})
     pin_hash = opts.get(CONF_CRITICAL_ACTION_PIN_HASH, "")
     salt = opts.get(CONF_CRITICAL_ACTION_PIN_SALT, "")
-    if not (pin_hash and salt and provided_pin.isdigit()):
+    if not (
+        pin_hash
+        and salt
+        and provided_pin.isdigit()
+        and CRITICAL_PIN_MIN_LEN <= len(provided_pin) <= CRITICAL_PIN_MAX_LEN
+    ):
         return
     if verify_pin(provided_pin, hashed=pin_hash, salt=salt):
         LOGGER.warning(
@@ -1188,10 +1204,15 @@ def _claim_pending_action(cfg: Mapping[str, Any], action_id: str) -> bool:
     """
     if cfg.get("pending_actions", {}).pop(action_id, None) is None:
         return False
+    _spend_pin_reply(cfg)
+    return True
+
+
+def _spend_pin_reply(cfg: Mapping[str, Any]) -> None:
+    """Mark the user's PIN message as used for this turn."""
     pin_reply = cfg.get("pin_reply")
     if pin_reply is not None:  # Always set here: the refusal requires it.
         pin_reply.spent = True
-    return True
 
 
 async def _execute_pending_action(

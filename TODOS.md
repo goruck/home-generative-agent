@@ -4,7 +4,7 @@
 
 ### PIN-flow detection reads English text and tracks one challenge at a time
 
-**What:** `_has_pending_pin_confirmation` (`agent/graph.py`) decides whether `confirm_sensitive_action` is force-injected on the user's next turn. It keeps a flow pending after a wrong PIN by matching `"Incorrect PIN"`, but that reply is Czech on a Czech install ("Nesprávný PIN. Akce nebyla provedena."), and an invalid-format reply (`pin_invalid_format`, e.g. a mistranscribed spoken PIN) is not recognized in any language, so the flow reads as resolved while the action is still pending. It also does not correlate replies with action ids: for `requires_pin(A) → requires_pin(B) → completed(A) → awaiting_user_pin(B)` it returns False at A's completion, so B's PIN reply loses guaranteed access to the confirm tool. Retrieval may still offer it, so the effect is an unreliable retry, not a bypass.
+**What:** `_has_pending_pin_confirmation` (`agent/graph.py`) decides whether `confirm_sensitive_action` is force-injected on the user's next turn. It keeps a flow pending after a wrong PIN by matching `"Incorrect PIN"`, but that reply is Czech on a Czech install ("Nesprávný PIN. Akce nebyla provedena."), and an invalid-format reply (`pin_invalid_format`, e.g. a mistranscribed spoken PIN) is not recognized in any language, so the flow reads as resolved while the action is still pending. It also does not correlate replies with action ids: for `requires_pin(A) → requires_pin(B) → completed(A) → awaiting_user_pin(B)` it returns False at A's completion. PR #769 covers that case from the other side (`_get_pending_pin_tools` also injects the tool while the conversation has an unexpired action in the pending store), so what is left is the language and invalid-format cases, which matter after that store entry is gone or for the text the detector feeds elsewhere.
 
 **Why:** First filed from my review of PR #769 (2026-10-14); the full review (red team, Codex P2 x2) confirmed it and added the invalid-format and multi-action cases. Pre-existing; PR #769 made only its own refusal (`awaiting_user_pin`) a JSON status.
 
@@ -88,14 +88,28 @@
 
 ### PIN confirmation test gaps left after PR #769
 
-**What:** The second review pass's testing specialist named five gaps, each with a stub: (1) one PIN message installing two held automations (no automation test keeps one `PinReply` across confirmations, so moving the spend off the automation path stays green); (2) a wrong PIN then the right one from the same message (a mutation spending before the PIN check stays green); (3) a test sending confirmations through `graph._run_langchain_tool` inside a runnable, which checks that `PinReply` and `pending_actions` keep their identity through LangChain's config handling (verified by a scratch probe in the review, not by a test); (4) a caller with no `thread_id` confirming by id and without one; (5) rows where a single-digit run and a whole number share a message.
+**What:** The second review pass's testing specialist named five gaps, each with a stub; the third pass's fix cycle closed two (a wrong PIN now spends the message, pinned by `test_a_wrong_pin_uses_up_the_message`; mixed single-digit and whole-number rows are in the `pin_in_text` table). Three remain: (1) one PIN message installing two held automations (no automation test keeps one `PinReply` across confirmations, so moving the spend off the automation path stays green); (2) a test sending confirmations through `graph._run_langchain_tool` inside a runnable, which checks that `PinReply` and `pending_actions` keep their identity through LangChain's config handling (verified by a scratch probe in the review, not by a test); (3) a caller with no `thread_id` confirming by id and without one.
 
 **Why:** Full review of PR #769 (2026-10-14). The maintainer chose to defer the test gaps.
 
-**How to apply:** Add the five tests to `tests/custom_components/home_generative_agent/test_pin_reply_binding.py` and `test_add_automation_pin.py` from the stubs in the review; mutation-check each against the behavior it pins.
+**How to apply:** Add the three tests to `tests/custom_components/home_generative_agent/test_pin_reply_binding.py` and `test_add_automation_pin.py` from the stubs in the review; mutation-check each against the behavior it pins.
 
 **Effort:** S
 **Priority:** P2
+**Depends on:** None
+
+---
+
+### The pending-action store evicts across conversations, and any later message number can be a PIN source
+
+**What:** Two findings from the third review pass of PR #769 left as they are. (1) `register_pending_action` caps the shared store at `MAX_PENDING_ACTIONS` (16) by evicting the oldest entry from any conversation, so a conversation that loops on challenges can push out another satellite's pending unlock, which then reads as "not found or expired". (2) A number standing alone in any later message of the same conversation that equals the PIN confirms one pending action if the model passes the PIN (which it may hold from earlier in the history): "set the heater to 1500" confirms when the PIN is 1500. The docs state this; it needs both the PIN in the model's context and a coincidental equal number in the user's message.
+
+**Why:** Third review pass of PR #769 (2026-10-14), Claude adversarial (INVESTIGATE). Not fixed in that PR because the fix cycle limit was reached and neither is a bypass: (1) is a denial of a pending action, (2) needs the user to say the PIN's exact number.
+
+**How to apply:** (1) Cap per `thread_id` (for example 4 per conversation) before the global cap, and evict the oldest of the registering conversation first. (2) Accept a PIN only in the turn that directly follows a `requires_pin` reply or in the turn that created the action, and test "set the heater to 1500" two turns after a challenge.
+
+**Effort:** S
+**Priority:** P3
 **Depends on:** None
 
 ---
@@ -2473,7 +2487,7 @@ incrementing `attempts`, so a chatty model cannot burn the user's budget.
 **Priority:** P2
 **Depends on:** v3.41.1
 
-**Resolution:** Fixed together with "A confirmed critical action that fails can be re-run without a new PIN" (PR #769). `conversation.py` puts the user's message for the turn into the configurable as a `PinReply` (`agent/helpers.py`), and `confirm_sensitive_action` refuses, before the PIN is checked and without counting an attempt, any PIN that `pin_in_text` does not find in that message (a number standing alone, or digits read out one by one with or without separators, as digits or English/Czech digit words; a PIN inside a longer number, word, date, time, decimal or phone number does not match, after the second review pass showed `12.34`, `555-1234` and `abc1234xyz` matching). The refusal is JSON with status `awaiting_user_pin`, which `_has_pending_pin_confirmation` treats as still pending. A first version compared turn ids instead (refuse a confirm in the turn that created the action); the full review showed it only delayed history replay by one turn (an unrelated reply such as "never mind" still passed, with the confirm tool force-injected) and could lock out a model that re-issued the tool in the reply turn, so it was replaced. Pinned by `test_pin_reply_binding.py`.
+**Resolution:** Fixed together with "A confirmed critical action that fails can be re-run without a new PIN" (PR #769). `conversation.py` puts the user's message for the turn into the configurable as a `PinReply` (`agent/helpers.py`), and `confirm_sensitive_action` refuses, before the PIN is checked and without counting an attempt, any PIN that is not exactly one of the numbers `pin_in_text` reads from that message (written, in space-separated groups, or digit by digit with commas, dashes, ". " or "and" between single digits, as digits or English/Czech digit words). The match is exact, not a substring: the third review pass showed "nine one two three four five", `1234,56`, `1.1.1.1` and `one234` matching the earlier substring version. Compounds written without spaces (dates, times, decimals, phone numbers, addresses) are never read as or split into a PIN. A model that passes the PIN as the user said it ("1 2 3 4") is normalized by `pin_digits`. A verified attempt, right or wrong, spends the message, so one message is one attempt, and `_get_pending_pin_tools` keeps the confirm tool available while the conversation has an unexpired pending action, since one message confirms only one of two pending actions. The refusal is JSON with status `awaiting_user_pin`, which `_has_pending_pin_confirmation` treats as still pending. A first version compared turn ids instead (refuse a confirm in the turn that created the action); the full review showed it only delayed history replay by one turn (an unrelated reply such as "never mind" still passed, with the confirm tool force-injected) and could lock out a model that re-issued the tool in the reply turn, so it was replaced. Pinned by `test_pin_reply_binding.py`.
 
 ### `replace_partial` drops tool calls when it re-commits the last entry
 

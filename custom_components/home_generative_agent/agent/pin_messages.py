@@ -69,7 +69,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "Ask the user for the PIN."
         ),
         "pin_reply_used": (
-            "Not confirmed: the user's message already confirmed an action. "
+            "Not confirmed: the PIN in the user's current message was already used. "
             "Tell the user what happened; they can ask again."
         ),
         "action_execute_failed": (
@@ -126,7 +126,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "Požádejte uživatele o PIN."
         ),
         "pin_reply_used": (
-            "Nepotvrzeno: zpráva uživatele již potvrdila jednu akci. "
+            "Nepotvrzeno: PIN z aktuální zprávy uživatele už byl použit. "
             "Sdělte uživateli, co se stalo; může požádat znovu."
         ),
         "action_execute_failed": (

@@ -105,6 +105,7 @@ from .helpers import (
     resolve_critical_action_policy,
     sanitize_tool_args,
     sanitize_tool_text,
+    thread_has_pending_action,
     tool_call_data,
     tool_exclusions,
     tool_inclusions,
@@ -2329,9 +2330,19 @@ def _has_pending_pin_confirmation(messages: Sequence[AnyMessage]) -> bool:
 async def _get_pending_pin_tools(
     messages: list[AnyMessage],
     store: BaseStore | None,
+    config: RunnableConfig | None = None,
 ) -> list[RawTool]:
     """Return [confirm_sensitive_action] when a PIN confirmation is pending."""
-    if not _has_pending_pin_confirmation(messages):
+    cfg = (config or {}).get("configurable", {})
+    # The history shows only the last challenge. When one message confirmed
+    # one of two challenges, or the model sent no action_id with two pending,
+    # the other action is still in the store for this conversation.
+    if not (
+        _has_pending_pin_confirmation(messages)
+        or thread_has_pending_action(
+            cfg.get("pending_actions", {}), cfg.get("thread_id")
+        )
+    ):
         return []
 
     if store is None:
@@ -2576,7 +2587,7 @@ async def _retrieve_tools(  # noqa: PLR0915
             store, config, ranking_query, allowed_api_ids, live_tool_ids
         ),
         _get_actuation_safety_tools(store, config, ranking_query, allowed_api_ids),
-        _get_pending_pin_tools(state["messages"], store),
+        _get_pending_pin_tools(state["messages"], store, config),
     )
     rag_tools, rag_dropped_not_live = rag_result
 
