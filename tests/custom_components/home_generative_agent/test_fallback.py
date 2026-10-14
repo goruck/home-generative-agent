@@ -22,6 +22,7 @@ from custom_components.home_generative_agent.core.fallback import (
     _is_retryable,
     ainvoke_dropping_unsupported_params,
     invoke_dropping_unsupported_params,
+    is_model_not_found,
     unsupported_sampling_param,
     unsupported_sampling_param_in_chain,
 )
@@ -867,3 +868,174 @@ async def test_fallback_chat_rebind_failure_still_falls_over() -> None:
 def test_reasoning_effort_is_droppable() -> None:
     """A 400 rejecting reasoning_effort must be retried without it (issue #580)."""
     assert "reasoning_effort" in DROPPABLE_SAMPLING_PARAMS
+
+
+# ---------------------------------------------------------------------------
+# A provider without the model moves the chain on (#752, #759)
+# ---------------------------------------------------------------------------
+
+
+def _http_error(cls: Any, status: int, message: str) -> Exception:
+    """Build an OpenAI/Anthropic SDK status error for an HTTP response."""
+    request = httpx.Request("POST", "https://api.example.invalid/v1/x")
+    response = httpx.Response(status, request=request)
+    return cls(message, response=response, body=None)
+
+
+def _http_404(cls: Any, message: str) -> Exception:
+    """Build an OpenAI/Anthropic SDK status error for a 404 response."""
+    return _http_error(cls, 404, message)
+
+
+def _wrapped_gemini_404() -> Exception:
+    """langchain-google-genai's embeddings keep Google's 404 only as the cause."""
+    from google.api_core.exceptions import NotFound  # noqa: PLC0415
+    from langchain_google_genai._common import (  # noqa: PLC0415
+        GoogleGenerativeAIError,
+    )
+
+    try:
+        try:
+            not_found = "models/not-a-model is not found"
+            raise NotFound(not_found)  # noqa: TRY301
+        except NotFound as err:
+            msg = f"Error embedding content: {err}"
+            raise GoogleGenerativeAIError(msg) from err
+    except GoogleGenerativeAIError as wrapped:
+        return wrapped
+
+
+def _model_not_found_errors() -> list[Exception]:
+    import anthropic  # noqa: PLC0415
+    import ollama  # noqa: PLC0415
+    from google.api_core.exceptions import NotFound  # noqa: PLC0415
+
+    return [
+        ollama.ResponseError(
+            'model "nomic-embed-text" not found, try pulling it first', 404
+        ),
+        _http_404(openai.NotFoundError, "The model `gpt-x` does not exist"),
+        _http_404(anthropic.NotFoundError, "model: claude-x"),
+        NotFound("models/gemini-x is not found"),
+        _wrapped_gemini_404(),
+    ]
+
+
+@pytest.mark.parametrize(
+    "err", _model_not_found_errors(), ids=lambda e: type(e).__name__
+)
+def test_model_not_found_is_retryable(err: Exception) -> None:
+    """Each provider's 404 for a missing model moves the chain on."""
+    assert is_model_not_found(err)
+    assert _is_retryable(err) is True
+
+
+def test_other_client_errors_still_stop_the_chain() -> None:
+    """A rejected key or a bad request is not a missing model."""
+    import ollama  # noqa: PLC0415
+
+    auth = _http_error(openai.AuthenticationError, 401, "Incorrect API key")
+    bad = ollama.ResponseError("invalid input", 400)
+    for err in (auth, bad):
+        assert not is_model_not_found(err)
+        assert _is_retryable(err) is False
+
+
+def _ollama_missing(model: str = "not-pulled") -> Exception:
+    import ollama  # noqa: PLC0415
+
+    return ollama.ResponseError(f'model "{model}" not found, try pulling it first', 404)
+
+
+@pytest.mark.asyncio
+async def test_chat_primary_without_its_model_fails_over(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A missing primary chat model is logged at ERROR and the fallback answers."""
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = _ollama_missing()
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("hi")
+    breaker = CircuitBreaker(threshold=1)
+    alert = MagicMock()
+
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        circuit_breaker=breaker,
+        alert_callback=alert,
+    )
+    caplog.set_level(logging.WARNING)
+    result = await model.ainvoke(["hello"])
+
+    assert result.content == "hi"
+    assert not breaker.is_available("p1")
+    alert.assert_called_once()
+    assert alert.call_args.kwargs["fallback_to"] == "p2"
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert any("does not have the configured model" in r.getMessage() for r in errors)
+
+
+@pytest.mark.asyncio
+async def test_vlm_fallback_without_its_model_moves_on() -> None:
+    """A fallback missing its model hands over to the next one (#752)."""
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = TimeoutError("primary timed out")
+    middle = AsyncMock()
+    middle.ainvoke.side_effect = _ollama_missing("qwen2.5vl:7b")
+    last = AsyncMock()
+    last.ainvoke.return_value = FakeAIMessage("a cat")
+
+    vlm = FallbackVLM(
+        chain=[(primary, "cloud", "p1"), (middle, "edge", "p2"), (last, "cloud", "p3")]
+    )
+    result = await vlm.ainvoke(["image"])
+
+    assert result.content == "a cat"
+    last.ainvoke.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_embedding_primary_without_its_model_fails_over() -> None:
+    """The #759 case: the primary's model was never pulled; the fallback embeds."""
+    primary = AsyncMock()
+    primary.aembed_query.side_effect = _ollama_missing("mxbai-embed-large")
+    fallback = AsyncMock()
+    fallback.aembed_query.return_value = [0.5, 0.6]
+
+    emb = FallbackEmbeddings(chain=[(primary, "edge", "p1"), (fallback, "edge", "p2")])
+    assert await emb.aembed_query("hello") == [0.5, 0.6]
+
+
+@pytest.mark.asyncio
+async def test_embedding_fallback_without_its_model_moves_on() -> None:
+    """The #752 case: a fallback missing its model does not end the chain."""
+    primary = AsyncMock()
+    primary.aembed_documents.side_effect = ConnectionError("primary down")
+    middle = AsyncMock()
+    middle.aembed_documents.side_effect = _ollama_missing()
+    last = AsyncMock()
+    last.aembed_documents.return_value = [[0.7, 0.8]]
+
+    emb = FallbackEmbeddings(
+        chain=[(primary, "cloud", "p1"), (middle, "edge", "p2"), (last, "edge", "p3")]
+    )
+    assert await emb.aembed_documents(["hello"]) == [[0.7, 0.8]]
+
+
+@pytest.mark.asyncio
+async def test_missing_model_opens_the_circuit_breaker() -> None:
+    """Repeated 404s are recorded, so later calls skip the provider."""
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = _ollama_missing()
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("ok")
+    breaker = CircuitBreaker(threshold=3)
+
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        circuit_breaker=breaker,
+    )
+    for _ in range(4):
+        await model.ainvoke(["hello"])
+
+    assert primary.ainvoke.await_count == 3
