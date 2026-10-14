@@ -50,6 +50,18 @@ fi
 
 REMOTE_DEST="${HOST}:${REMOTE_CONFIG}/custom_components/${COMPONENT}/"
 
+# ── HA version check ──────────────────────────────────────────────────────────
+# Warn when the box runs a different Home Assistant than the test suite, so
+# field checks happen on the version CI tested. Never blocks the deploy.
+TESTED_HA="$(sed -n 's/^homeassistant==\(.*\)$/\1/p' "${REPO_ROOT}/requirements/test.txt")"
+BOX_HA="$(ssh "${HOST%%:*}" "ha core info --raw-json 2>/dev/null" 2>/dev/null \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["version"])' 2>/dev/null || true)"
+if [[ -n "$BOX_HA" && -n "$TESTED_HA" && "$BOX_HA" != "$TESTED_HA" ]]; then
+  echo "WARNING: the box runs Home Assistant ${BOX_HA}; tests run ${TESTED_HA}."
+  echo "  Update the box (Settings -> System -> Updates) or bump requirements/test.txt."
+  echo
+fi
+
 # ── sync ──────────────────────────────────────────────────────────────────────
 echo "Syncing ${SRC}"
 echo "     -> ${REMOTE_DEST}"

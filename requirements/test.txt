@@ -1,7 +1,7 @@
 # Home Assistant integration testing requirements
 
-homeassistant==2026.10.0
-pytest-homeassistant-custom-component==0.13.371
+homeassistant==2026.10.1
+pytest-homeassistant-custom-component==0.13.372
 # Match HA core's openai_conversation pin for this HA version: the STT platform
 # runs against core's SDK, and its constructor rules change between releases.
 openai==3.10.0
@@ -11,19 +11,19 @@ mutagen==1.48.1
 ha-ffmpeg==3.2.2
 # The network audit's zwave adapter reads Z-Wave JS node and controller objects;
 # its tests build the real ones. Pin to core's zwave_js manifest.
-zwave-js-server-python==0.74.0
+zwave-js-server-python==0.73.1
 # The UPnP/IGD adapter reads the ssdp component's discovery cache through its
 # public helper, and its tests hold a upnp config entry, so both core
 # components must import. Pin to core's ssdp and upnp manifests.
 async-upnp-client==0.48.2
-getmac==0.9.6
+getmac==0.9.5
 
 pytest==9.*
 pytest-asyncio==1.*
 
 colorlog==6.12.0
-PyTurboJPEG>=2.5.0
+PyTurboJPEG==1.8.3
 # HGA reads the Assist pipeline's streaming threshold from
 # assist_pipeline.pipeline, which imports these; pin to core's assist_pipeline manifest.
-pymicro-vad==2.1.0
-pyspeex-noise==2.0.1
+pymicro-vad==1.0.1
+pyspeex-noise==1.0.2

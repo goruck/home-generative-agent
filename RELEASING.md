@@ -61,6 +61,13 @@ Two reasons. Compatibility fixes for the new HA version cluster in the days afte
 fall into the bundle naturally. And users have already restarted for HA's update, so the
 integration's update rides a restart they were taking anyway.
 
+In the week between HA's stable and the bundle cut, move to the new HA version on both sides:
+bump `requirements/test.txt` to it (the "HA compatibility" workflow's notice names the
+`homeassistant` and `pytest-homeassistant-custom-component` versions), and update the field-test
+box, so the bundle is tested against the HA users are moving to. `scripts/deploy` warns when the
+box and the tests run different HA versions. Install HA patch releases on the box within a few
+days; keep betas off it. The workflow's daily run covers betas.
+
 Skip a month if little accumulated — don't pad a release to keep a schedule. Don't let a bundle
 run past about six weeks; long gaps make regression triage harder and leave reporters waiting.
 
@@ -113,7 +120,8 @@ who had the context, at the time they had it.
 
 ## Cutting a release
 
-1. `make lint`, `make test`, `make typecheck` all green; CI green on `main`.
+1. `make lint`, `make test`, `make typecheck` all green; CI green on `main`, including the
+   latest daily "Newest HA" run of the HA compatibility workflow.
 2. Bump `"version"` in `custom_components/home_generative_agent/manifest.json`. There is no
    VERSION file — this is the only place the version lives.
 3. In `CHANGELOG.md`, rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` and open a fresh

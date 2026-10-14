@@ -11,9 +11,20 @@ updates:
     schedule:
       interval: "weekly"
     ignore:
-      # Dependabot should not update Home Assistant as that should match the homeassistant key in hacs.json
+      # These move with Home Assistant, by hand: the test pins must equal what
+      # the tested HA version pins (its package_constraints.txt or a core
+      # component's manifest), and the plugin requires one exact HA version.
+      # The "HA compatibility" workflow (scripts/check_ha_versions.py) fails a
+      # PR that lets them drift and names the versions to bump to.
       - dependency-name: "homeassistant"
-      # openai must match HA core's openai_conversation pin for the tested HA version
-      # (and langchain-openai in manifest.json caps it), so it is bumped by hand.
+      - dependency-name: "pytest-homeassistant-custom-component"
       - dependency-name: "openai"
+      - dependency-name: "mutagen"
+      - dependency-name: "ha-ffmpeg"
+      - dependency-name: "zwave-js-server-python"
+      - dependency-name: "async-upnp-client"
+      - dependency-name: "getmac"
+      - dependency-name: "PyTurboJPEG"
+      - dependency-name: "pymicro-vad"
+      - dependency-name: "pyspeex-noise"
 
