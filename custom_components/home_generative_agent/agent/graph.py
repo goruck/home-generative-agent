@@ -426,7 +426,7 @@ def _critical_action_guard(
             "tool_name": tool_name,
             "tool_args": tool_args,
             "user": ctx.config.get("configurable", {}).get("user_id"),
-            "turn_id": ctx.config.get("configurable", {}).get("turn_id"),
+            "thread_id": ctx.config.get("configurable", {}).get("thread_id"),
         },
     )
     return ToolMessage(
@@ -2264,7 +2264,7 @@ def _last_routing_rejection_idx(recent: Sequence[AnyMessage]) -> int | None:
 
 
 def _is_awaiting_user_pin(content: str) -> bool:
-    """Return True for a confirmation refused as coming from the request turn."""
+    """Return True for a confirmation refused because the user gave no PIN."""
     try:
         data = json.loads(content)
     except (json.JSONDecodeError, ValueError):
@@ -2278,8 +2278,9 @@ def _has_pending_pin_confirmation(messages: Sequence[AnyMessage]) -> bool:
 
     Detects two cases:
 
-    Case 1 (normal flow): A ``requires_pin`` ToolMessage exists without a
-    subsequent ``confirm_sensitive_action`` call.
+    Case 1 (normal flow): A ``requires_pin`` ToolMessage exists with no later
+    ``confirm_sensitive_action`` reply that resolved it. A wrong PIN, an
+    ``awaiting_user_pin`` refusal or a routing error leave it pending.
 
     Case 2 (degraded flow): An actuation tool was routing-rejected and the model
     subsequently asked for a PIN in an AI message.  Injecting
@@ -2296,8 +2297,8 @@ def _has_pending_pin_confirmation(messages: Sequence[AnyMessage]) -> bool:
                     # Wrong PIN entered — action is still pending, keep scanning.
                     continue
                 if _is_awaiting_user_pin(content):
-                    # Confirmed in the request turn and refused before the PIN
-                    # was checked — still pending for the user's reply.
+                    # Refused before the PIN was checked (not in the user's
+                    # message) — still pending for the user's reply.
                     continue
                 if getattr(msg, "status", None) == "error":
                     # Routing or tool error on confirm_sensitive_action itself —

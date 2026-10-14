@@ -15,7 +15,10 @@ from homeassistant.helpers import llm
 from langchain_core.messages import ToolMessage
 
 from custom_components.home_generative_agent.agent import graph
-from custom_components.home_generative_agent.agent.helpers import tool_call_data
+from custom_components.home_generative_agent.agent.helpers import (
+    PinReply,
+    tool_call_data,
+)
 from custom_components.home_generative_agent.agent.tools import confirm_sensitive_action
 from custom_components.home_generative_agent.const import (
     CONF_CRITICAL_ACTION_PIN_HASH,
@@ -130,11 +133,12 @@ def _pin_config(api: _FakeAPI) -> dict[str, Any]:
                     "tool_name": "HassTurnOff",
                     "tool_args": {"domain": ["lock"], "name": "Front Door"},
                     "user": "u1",
-                    "turn_id": "turn-1",
+                    "thread_id": "conv1",
                 }
             },
             "user_id": "u1",
-            "turn_id": "turn-2",
+            "thread_id": "conv1",
+            "pin_reply": PinReply("1234"),
             "ha_llm_api": api,
             "hass": None,
         }
@@ -178,7 +182,7 @@ async def test_pin_confirmed_action_error_result_is_a_failure(
     assert api.calls == ["HassTurnOff"]
     assert "completed" not in reply
     assert "Lock jammed" in reply
-    assert "re-run the request" in reply
+    assert "can ask again" in reply
     assert "aid" not in config["configurable"]["pending_actions"]
 
 
@@ -186,11 +190,11 @@ async def test_failed_confirmed_action_cannot_be_confirmed_again(
     tool_result_cls: type,
 ) -> None:
     """
-    A failed action is not re-run by a second confirm with the same PIN.
+    A failed action is not re-run by a second confirm from the same message.
 
-    The PIN is already in the conversation, so the model could confirm again
-    in the same turn without asking the user, and a tool that half-acted
-    before reporting failure would act twice.
+    The PIN is in the user's message, so the model could confirm again in the
+    same turn without asking the user, and a tool that half-acted before
+    reporting failure would act twice.
     """
     api = _FakeAPI(tool_result_cls(data={"error": "Lock jammed"}, error=True))
     config = _pin_config(api)

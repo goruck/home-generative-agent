@@ -110,6 +110,7 @@ from .helpers import (
     maybe_fill_lock_entity,
     normalize_intent_for_alarm,
     normalize_intent_for_lock,
+    pin_in_text,
     register_pending_action,
     resolve_critical_action_policy,
     sanitize_tool_args,
@@ -860,7 +861,7 @@ def _maybe_require_pin_for_automation(
             "tool_args": {},
             "automation_config": ha_automation_config,
             "user": cfg.get("user_id"),
-            "turn_id": cfg.get("turn_id"),
+            "thread_id": cfg.get("thread_id"),
         },
     )
     return json.dumps(
@@ -974,6 +975,8 @@ async def confirm_sensitive_action(  # noqa: D417
     Only call this tool after receiving a tool response with status "requires_pin".
     That response contains the action_id to pass here. Do not call this tool
     speculatively or before the action tool has returned a "requires_pin" status.
+    Only a PIN the user wrote in their current message is accepted, and that
+    message can confirm one action.
 
     Args:
         action_id: The action ID from the "requires_pin" tool response.
@@ -992,7 +995,9 @@ async def confirm_sensitive_action(  # noqa: D417
     provided_pin = str(pin or "").strip()
     requested_action_id = str(action_id or "").strip()
 
-    resolved_action_id = _resolve_action_id(pending_actions, requested_action_id)
+    resolved_action_id = _resolve_action_id(
+        pending_actions, requested_action_id, cfg.get("thread_id")
+    )
     if resolved_action_id is None:
         return pin_msg(hass, "pending_action_not_found_or_expired")
 
@@ -1000,7 +1005,7 @@ async def confirm_sensitive_action(  # noqa: D417
     if action_err or not action:
         return action_err or pin_msg(hass, "pending_action_not_found")
 
-    refusal = _confirmation_refusal(cfg, action, resolved_action_id)
+    refusal = _confirmation_refusal(cfg, action, resolved_action_id, provided_pin)
     if refusal:
         return refusal
 
@@ -1014,19 +1019,35 @@ async def confirm_sensitive_action(  # noqa: D417
     if pin_err:
         return pin_err
 
+    # Spend the user's message before anything awaits, so one PIN message runs
+    # one action: not a re-issued action after a failure, and not a second
+    # confirmation in the same asyncio.gather batch.
+    pin_reply = cfg.get("pin_reply")
+    if pin_reply is not None:  # Always set here: the refusal requires it.
+        pin_reply.spent = True
     result, exec_err = await _execute_pending_action(resolved_action_id, action, cfg)
     return result or exec_err or pin_msg(hass, "confirmation_unable_to_process")
 
 
 def _resolve_action_id(
-    pending_actions: dict[str, dict[str, Any]], requested_action_id: str
+    pending_actions: dict[str, dict[str, Any]],
+    requested_action_id: str,
+    thread_id: str | None,
 ) -> str | None:
     """Return a valid action_id or None if it cannot be resolved safely."""
     if requested_action_id and requested_action_id in pending_actions:
         return requested_action_id
-    if not requested_action_id and len(pending_actions) == 1:
-        return next(iter(pending_actions))
-    return None
+    if requested_action_id or not thread_id:
+        return None
+    # Without an id, take the conversation's only pending action. The store is
+    # shared by every conversation, and satellites and automations share one
+    # user, so another conversation's action must never be picked up here.
+    own = [
+        key
+        for key, action in pending_actions.items()
+        if action.get("thread_id") == thread_id
+    ]
+    return own[0] if len(own) == 1 else None
 
 
 def _load_pending_action(
@@ -1095,35 +1116,37 @@ def _ensure_api(cfg: Mapping[str, Any]) -> tuple[Any | None, str | None]:
 
 
 def _confirmation_refusal(
-    cfg: Mapping[str, Any], action: Mapping[str, Any], action_id: str
+    cfg: Mapping[str, Any],
+    action: Mapping[str, Any],
+    action_id: str,
+    provided_pin: str,
 ) -> str | None:
     """Return why this caller may not confirm the action, before any PIN check."""
     hass = cfg.get("hass")
     if _is_wrong_user(cfg, action):
         return pin_msg(hass, "pending_action_wrong_user")
-    if _is_request_turn(cfg, action):
-        # Refused before the PIN is checked, so no attempt is counted.
-        return json.dumps(
-            {
-                "status": PIN_AWAITING_USER_REPLY,
-                "action_id": action_id,
-                "reason": pin_msg(hass, "pin_awaiting_user_reply"),
-            }
-        )
-    return None
-
-
-def _is_request_turn(cfg: Mapping[str, Any], action: Mapping[str, Any]) -> bool:
-    """
-    Return True when a confirmation arrives in the turn that asked for the PIN.
-
-    The user can only answer a PIN prompt in a later turn, so a PIN supplied in
-    the same turn came from the model: guessed, or reused from earlier in the
-    conversation to confirm a re-issued action. Without a turn id the source
-    of the PIN cannot be told, so the confirmation is refused.
-    """
-    turn_id = cfg.get("turn_id")
-    return not turn_id or action.get("turn_id") == turn_id
+    thread_id = cfg.get("thread_id")
+    if not thread_id or action.get("thread_id") != thread_id:
+        # Another conversation's action reads as missing, so its id is not
+        # confirmed to exist.
+        return pin_msg(hass, "pending_action_not_found_or_expired")
+    # Refused before the PIN is checked, so no attempt is counted.
+    pin_reply = cfg.get("pin_reply")
+    if pin_reply is None or not pin_in_text(provided_pin, pin_reply.text):
+        # The PIN came from the model (guessed, or reused from earlier in the
+        # conversation), not from the user's message for this turn.
+        reason = "pin_awaiting_user_reply"
+    elif pin_reply.spent:
+        reason = "pin_reply_used"
+    else:
+        return None
+    return json.dumps(
+        {
+            "status": PIN_AWAITING_USER_REPLY,
+            "action_id": action_id,
+            "reason": pin_msg(hass, reason),
+        }
+    )
 
 
 def _is_wrong_user(cfg: Mapping[str, Any], action: Mapping[str, Any]) -> bool:

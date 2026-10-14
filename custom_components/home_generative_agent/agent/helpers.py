@@ -8,7 +8,7 @@ import json
 import logging
 import re
 import weakref
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from functools import partial
 from types import ModuleType
@@ -450,9 +450,19 @@ class ConfigurableData(TypedDict, total=False):
     hass: HomeAssistant
     user_id: str
     ha_llm_api: Any
-    # Unique per conversation turn. A pending PIN action records the turn that
-    # created it, and is never confirmed in that same turn.
-    turn_id: str
+    thread_id: str
+    # The user's message for this turn. A PIN confirmation is accepted only
+    # when the PIN is in it, and runs at most one action.
+    pin_reply: PinReply
+
+
+@dataclass(slots=True)
+class PinReply:
+    """The user's message for one conversation turn, as a PIN source."""
+
+    text: str
+    # Set once a PIN from this message has authorized an action.
+    spent: bool = False
 
 
 # How long a pending PIN confirmation stays valid. Mirrors the expiry check in
@@ -464,9 +474,61 @@ PENDING_ACTION_TTL = timedelta(minutes=10)
 # loop cannot grow the store without bound.
 MAX_PENDING_ACTIONS = 16
 
-# Status of a confirmation refused because it arrived in the turn that asked
-# for the PIN. The action stays pending for the user's reply.
+# Status of a confirmation refused because the PIN is not in the user's
+# message for this turn, or that message already authorized an action. The
+# action stays pending for the user's reply.
 PIN_AWAITING_USER_REPLY = "awaiting_user_pin"
+
+# Spoken digits as speech-to-text may write them, in the languages the PIN
+# messages ship in (pin_messages.py).
+_SPOKEN_DIGITS = {
+    "zero": "0",
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
+    "nula": "0",
+    "jedna": "1",
+    "jeden": "1",
+    "jedno": "1",
+    "dva": "2",
+    "dvě": "2",
+    "tři": "3",
+    "čtyři": "4",
+    "pět": "5",
+    "šest": "6",
+    "sedm": "7",
+    "osm": "8",
+    "devět": "9",
+}
+_WORD_RE = re.compile(r"[^\W\d_]+")
+# Digits separated only by spaces, commas, dots or dashes ("1, 2, 3, 4",
+# "12 34") are read as one number, the way a transcript spells a PIN out.
+_DIGIT_GROUP_RE = re.compile(r"\d(?:[\s,.\-]*\d)*")
+
+
+def pin_in_text(pin: str, text: str) -> bool:
+    """
+    Return True when the user's message contains exactly this PIN.
+
+    Matches the PIN as a whole number, written as digits or as spoken digit
+    words, with or without separators between the digits. A PIN inside a
+    longer number does not match.
+    """
+    if not pin or not text:
+        return False
+    spoken = _WORD_RE.sub(
+        lambda m: _SPOKEN_DIGITS.get(m.group(0).lower(), m.group(0)), text
+    )
+    for group in _DIGIT_GROUP_RE.findall(spoken):
+        if re.sub(r"\D", "", group) == pin or pin in re.split(r"\D+", group):
+            return True
+    return False
 
 
 class CriticalActionPolicy(NamedTuple):

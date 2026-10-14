@@ -65,12 +65,17 @@ _MESSAGES: dict[str, dict[str, str]] = {
         ),
         "ha_llm_api_unavailable": "Home Assistant LLM API unavailable.",
         "pin_awaiting_user_reply": (
-            "Not confirmed: the PIN must come from the user's reply. "
-            "Ask the user for the PIN and end your turn."
+            "Not confirmed: the PIN must be in the user's current message. "
+            "Ask the user for the PIN."
+        ),
+        "pin_reply_used": (
+            "Not confirmed: the user's message already confirmed an action. "
+            "Tell the user what happened; they can ask again."
         ),
         "action_execute_failed": (
             "Failed to execute action: {err}. "
-            "The confirmation was used up; please re-run the request."
+            "The confirmation was used up; tell the user the action failed "
+            "and that they can ask again."
         ),
         "pending_automation_invalid": (
             "Pending automation is invalid; please re-run the request."
@@ -117,12 +122,17 @@ _MESSAGES: dict[str, dict[str, str]] = {
         ),
         "ha_llm_api_unavailable": "LLM API Home Assistantu není k dispozici.",
         "pin_awaiting_user_reply": (
-            "Nepotvrzeno: PIN musí pocházet z odpovědi uživatele. "
-            "Požádejte uživatele o PIN a ukončete svůj tah."
+            "Nepotvrzeno: PIN musí být v aktuální zprávě uživatele. "
+            "Požádejte uživatele o PIN."
+        ),
+        "pin_reply_used": (
+            "Nepotvrzeno: zpráva uživatele již potvrdila jednu akci. "
+            "Sdělte uživateli, co se stalo; může požádat znovu."
         ),
         "action_execute_failed": (
             "Akci se nepodařilo provést: {err}. "
-            "Potvrzení bylo použito; zopakujte prosím požadavek."
+            "Potvrzení bylo použito; sdělte uživateli, že akce selhala "
+            "a že může požádat znovu."
         ),
         "pending_automation_invalid": (
             "Čekající automatizace je neplatná; zopakujte prosím požadavek."

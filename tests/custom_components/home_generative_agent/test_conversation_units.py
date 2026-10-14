@@ -2075,6 +2075,19 @@ def test_render_system_prompt_volatile_template_error_raises(
     assert calls[1] == ha_llm.DATE_TIME_PROMPT
 
 
+def test_each_turn_gets_its_own_pin_reply() -> None:
+    """
+    Pin the wiring: a fresh PinReply from this turn's text, plus the thread.
+
+    A PinReply cached across turns would let one PIN message confirm actions
+    in later turns. The full turn cannot be driven in this venv (the HA
+    conversation stack is stubbed), so pin the source.
+    """
+    src = inspect.getsource(HGAConversationEntity._async_handle_message_active)
+    assert '"pin_reply": PinReply(user_input.text),' in src
+    assert '"thread_id": conversation_id,' in src
+
+
 def test_handle_message_passes_volatile_prompt_to_the_graph() -> None:
     """Pin the call-site wiring: the volatile part must reach the graph config."""
     src = inspect.getsource(HGAConversationEntity._async_handle_message_active)

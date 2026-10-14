@@ -45,6 +45,7 @@ from langchain_core.messages import (
 from .agent.automation_targets import normalize_notify_service
 from .agent.graph import workflow
 from .agent.helpers import (
+    PinReply,
     active_llm_api_ids,
     chat_log_tool_result,
     filter_excluded_tools,
@@ -1924,7 +1925,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "configurable": {
                 "thread_id": conversation_id,
                 "user_id": clean_user_name,
-                "turn_id": ulid.ulid_now(),
+                # A PIN confirmation is accepted only from this message.
+                "pin_reply": PinReply(user_input.text),
                 "requester_is_admin": requester_is_admin,
                 "chat_model": base_llm,
                 "chat_model_options": runtime_data.chat_model_options,

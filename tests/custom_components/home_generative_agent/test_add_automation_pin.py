@@ -15,7 +15,11 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.agent import tools as tools_module
-from custom_components.home_generative_agent.agent.helpers import MAX_PENDING_ACTIONS
+from custom_components.home_generative_agent.agent.helpers import (
+    MAX_PENDING_ACTIONS,
+    PIN_AWAITING_USER_REPLY,
+    PinReply,
+)
 from custom_components.home_generative_agent.agent.tools import (
     add_automation,
     confirm_sensitive_action,
@@ -38,9 +42,8 @@ _confirm = cast("AddAutomationTool", cast("Any", confirm_sensitive_action).corou
 async def confirm_tool(
     action_id: str, pin: str, *, config: dict[str, Any], store: Any
 ) -> str:
-    """Confirm as the user's reply to the PIN prompt, which is a new turn."""
-    configurable = config["configurable"]
-    configurable["turn_id"] = f"turn-{int(configurable['turn_id'][5:]) + 1}"
+    """Confirm as the user's reply to the PIN prompt: a new message with the PIN."""
+    config["configurable"]["pin_reply"] = PinReply(pin)
     return await _confirm(action_id, pin, config=config, store=store)
 
 
@@ -125,7 +128,8 @@ def _config(hass: Any, options: dict[str, Any]) -> dict[str, Any]:
             "options": options,
             "pending_actions": {},
             "user_id": "user1",
-            "turn_id": "turn-0",
+            "thread_id": "conv1",
+            "pin_reply": PinReply("add the automation"),
             "ha_llm_api": None,
         }
     }
@@ -261,6 +265,31 @@ async def test_confirming_pin_writes_the_held_automation(tmp_path: Path) -> None
     assert written[0]["actions"][0]["action"] == "lock.unlock"
     assert config["configurable"]["pending_actions"] == {}
     assert hass.services.calls == [("automation", "reload")]
+
+
+@pytest.mark.asyncio
+async def test_a_pin_the_user_did_not_write_cannot_install_the_automation(
+    tmp_path: Path,
+) -> None:
+    """
+    A confirmation whose PIN is not in the user's message is refused.
+
+    The hold records the conversation, and nothing is written or counted.
+    """
+    hass = _fake_hass(tmp_path)
+    config = _config(hass, _pin_options())
+
+    challenge = json.loads(
+        await add_automation_tool(automation_yaml=UNLOCK_YAML, config=config)
+    )
+    action_id = challenge["action_id"]
+    pending = config["configurable"]["pending_actions"][action_id]
+    reply = json.loads(await _confirm(action_id, PIN, config=config, store=None))
+
+    assert reply["status"] == PIN_AWAITING_USER_REPLY
+    assert pending["thread_id"] == "conv1"
+    assert pending["attempts"] == 0
+    assert not (tmp_path / "automations.yaml").exists() or _written(tmp_path) == []
 
 
 @pytest.mark.asyncio
@@ -440,6 +469,7 @@ async def test_pending_automation_without_a_config_is_rejected(tmp_path: Path) -
         "tool_args": {},
         "created_at": dt_util.utcnow().isoformat(),
         "user": "user1",
+        "thread_id": "conv1",
         "attempts": 0,
     }
 

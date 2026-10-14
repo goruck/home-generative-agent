@@ -2,13 +2,69 @@
 
 ## Agent
 
-### A wrong PIN on a non-English install ends the PIN flow's tool injection
+### PIN-flow detection reads English text and tracks one challenge at a time
 
-**What:** `_has_pending_pin_confirmation` (`agent/graph.py`) keeps a PIN flow pending after a wrong PIN by matching `"Incorrect PIN"` in the `confirm_sensitive_action` reply. That reply comes from `pin_msg(hass, "pin_incorrect")`, which is Czech on a Czech install ("Nesprávný PIN. Akce nebyla provedena."), so the match fails, the flow reads as resolved, and `confirm_sensitive_action` is not force-injected on the user's next try. Retrieval may still offer it, so the effect is an unreliable retry, not a bypass.
+**What:** `_has_pending_pin_confirmation` (`agent/graph.py`) decides whether `confirm_sensitive_action` is force-injected on the user's next turn. It keeps a flow pending after a wrong PIN by matching `"Incorrect PIN"`, but that reply is Czech on a Czech install ("Nesprávný PIN. Akce nebyla provedena."), and an invalid-format reply (`pin_invalid_format`, e.g. a mistranscribed spoken PIN) is not recognized in any language, so the flow reads as resolved while the action is still pending. It also does not correlate replies with action ids: for `requires_pin(A) → requires_pin(B) → completed(A) → awaiting_user_pin(B)` it returns False at A's completion, so B's PIN reply loses guaranteed access to the confirm tool. Retrieval may still offer it, so the effect is an unreliable retry, not a bypass.
 
-**Why:** Found in the review of the PIN request-turn guard (2026-10-14). Pre-existing; that PR made its own refusal language-independent (a JSON `status`) but left this match alone to keep scope.
+**Why:** First filed from my review of PR #769 (2026-10-14); the full review (red team, Codex P2 x2) confirmed it and added the invalid-format and multi-action cases. Pre-existing; PR #769 made only its own refusal (`awaiting_user_pin`) a JSON status.
 
-**How to apply:** Return the wrong-PIN reply as JSON with a status (as `awaiting_user_pin` does) and check the status, or compare against every language's `pin_incorrect` string. Add a cs test next to `test_pin_detection.py`.
+**How to apply:** Return every recoverable confirmation reply (`pin_incorrect`, `pin_invalid_format`) as JSON with a status and the `action_id`, like `awaiting_user_pin`, and have the detector track the set of unresolved `requires_pin` action ids, removing one only on a terminal reply for that id. Add a cs test and the A/B ordering test next to `test_pin_detection.py`.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** None
+
+---
+
+### A PIN refusal that hits the action-round limit ends with a generic apology
+
+**What:** A model that keeps calling `confirm_sensitive_action` without the user's PIN gets `awaiting_user_pin` each time; on the third action round `_tool_loop_guard` (`agent/graph.py`) replies "I wasn't able to complete this request after several tool-use attempts…" and the user is never asked for the PIN. On a voice satellite the mic then closes. Separately, HA keeps a satellite listening only when the reply ends with "?", so a model that writes "Please say your PIN." makes the user say the wake word again. And a re-issued critical call leaves the earlier pending action behind: after one of two duplicates is confirmed, the other stays confirmable for its 10 minutes by a later message that contains the PIN.
+
+**Why:** Claude adversarial and red-team findings in the full review of PR #769 (2026-10-14). Left out of that PR by the maintainer's scope choice.
+
+**How to apply:** In `_tool_loop_guard`, when the last ToolMessage is an `awaiting_user_pin` refusal, reply with a fixed localized "What is your PIN?" instead of the apology (or end the turn right after the first refusal). Tell the model in `CRITICAL_ACTION_PROMPT` to ask for the PIN as a question. When `_execute_pending_action` claims an action, drop the same conversation's other pending actions with the same `tool_name` and `tool_args`.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** None
+
+---
+
+### A confirmed action can run on two LLM APIs when its tool is missing from the routing map
+
+**What:** `MultiLLMAPI.async_call_tool` (`conversation.py`) falls back to trying every API in turn when the tool name is not in this turn's routing map, and moves on after `HomeAssistantError` or `vol.Invalid`. A PIN reply's retrieved tools may not include the original actuation tool, so its confirmed execution can take that path; if two APIs expose a tool of that name, the first can actuate and then raise, and the second actuates again. The pending action is already claimed, so this is the one way a single confirmation can still act twice.
+
+**Why:** Codex P1 in the full review of PR #769 (2026-10-14), confirmed against the code; pre-existing, and needs two APIs exposing the same tool name. Left out of that PR by the maintainer's scope choice.
+
+**How to apply:** Record the owning `api_id` on the pending action when `_critical_action_guard` registers it (from the turn's routing map), and have `_execute_pending_action` call that API directly. Never fall through to another API after an execution error.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** None
+
+---
+
+### The five-attempt PIN limit is per pending action, not per user or conversation
+
+**What:** `register_pending_action` (`agent/helpers.py`) starts every action at `attempts: 0`, and `_validate_pin_for_action` allows five wrong PINs per action. Re-requesting the action gets five more, without limit, so the cap does not bound guessing a 4-digit PIN from a satellite.
+
+**Why:** Security specialist and Claude adversarial findings in the full review of PR #769 (2026-10-14); pre-existing. PR #769's refusals count no attempt, so they do not change it.
+
+**How to apply:** Keep a failed-attempt counter per conversation (and per user) in `runtime_data`, with a lockout window, checked in `_validate_pin_for_action` alongside the per-action count. Log lockouts at WARNING.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** None
+
+---
+
+### A timeout or unexpected error after a confirmation is claimed keeps the PIN flow "pending"
+
+**What:** `_execute_pending_action` claims the action before calling the tool. If the call is cancelled by the per-tool timeout (`graph.py`, `asyncio.wait_for`) or raises something other than `HomeAssistantError`/`vol.Invalid`, the tool node returns a `status="error"` ToolMessage, which `_has_pending_pin_confirmation` treats as "PIN never checked, keep pending". The confirm tool is force-injected next turn, and the user's PIN gets "not found or expired", with no word on whether the device acted.
+
+**Why:** Testing specialist and Claude adversarial findings in the full review of PR #769 (2026-10-14). Execution is still at most once.
+
+**How to apply:** Catch the remaining exceptions after the claim in `_execute_pending_action` and return the `action_execute_failed` reply ("may or may not have acted" for a timeout), so the detector sees a terminal reply.
 
 **Effort:** S
 **Priority:** P3
@@ -2349,7 +2405,7 @@ This is the same allowlist-omission class as #480 and as the triage options fixe
 **Priority:** P2
 **Depends on:** None
 
-**Resolution:** `_execute_pending_action` now claims the pending action (pops it) before calling the tool, as `_execute_pending_automation` already did, so a failed execute uses up the confirmation and the reply asks the user to re-run the request. Claiming first also closes a second path found while testing: two confirmations of one action in an `asyncio.gather` batch both passed the PIN check and both ran. Pinned by `test_failed_confirmed_action_cannot_be_confirmed_again`, `test_raised_error_uses_up_the_confirmation` and `test_concurrent_confirmations_run_the_action_once`. Claiming alone left one path: in the same turn the model could re-issue the tool and confirm the new prompt with the PIN from history (one more round under `_MAX_ACTION_ROUNDS`), so the same PR also requires the PIN to come from a turn after the prompt; see the next entry.
+**Resolution:** `_execute_pending_action` now claims the pending action (pops it) before calling the tool, as `_execute_pending_automation` already did, so a failed execute uses up the confirmation and the reply asks the user to re-run the request. Claiming first also closes a second path found while testing: two confirmations of one action in an `asyncio.gather` batch both passed the PIN check and both ran. Pinned by `test_failed_confirmed_action_cannot_be_confirmed_again`, `test_raised_error_uses_up_the_confirmation` and `test_concurrent_confirmations_run_the_action_once`. Claiming alone left one path: in the same turn the model could re-issue the tool and confirm the new prompt with the same PIN. The same PR therefore spends the user's PIN message on the first verified confirmation (`PinReply.spent`, set before anything awaits), so one message runs one action, and pending actions now record their conversation (`thread_id`), which a confirmation must match; see the next entry.
 
 ### The model invents a PIN before the user supplies one
 
@@ -2389,7 +2445,7 @@ incrementing `attempts`, so a chatty model cannot burn the user's budget.
 **Priority:** P2
 **Depends on:** v3.41.1
 
-**Resolution:** Fixed together with "A confirmed critical action that fails can be re-run without a new PIN". Each conversation turn gets a `turn_id` (`conversation.py`), every pending action records the turn that created it (`_critical_action_guard` in `agent/graph.py`, the `add_automation` PIN hold in `agent/tools.py`), and `confirm_sensitive_action` refuses a confirmation from that same turn, or from a config with no turn id, before the PIN is checked, so no attempt is counted. The refusal is JSON with status `awaiting_user_pin`, which `_has_pending_pin_confirmation` treats as still pending, so the confirm tool is force-injected when the user replies. The system prompt now tells the model to end its turn after asking. Pinned by `tests/.../test_pin_request_turn.py`.
+**Resolution:** Fixed together with "A confirmed critical action that fails can be re-run without a new PIN" (PR #769). `conversation.py` puts the user's message for the turn into the configurable as a `PinReply` (`agent/helpers.py`), and `confirm_sensitive_action` refuses, before the PIN is checked and without counting an attempt, any PIN that `pin_in_text` does not find in that message (digits with or without separators, or English/Czech digit words; a PIN inside a longer number does not match). The refusal is JSON with status `awaiting_user_pin`, which `_has_pending_pin_confirmation` treats as still pending. A first version compared turn ids instead (refuse a confirm in the turn that created the action); the full review showed it only delayed history replay by one turn (an unrelated reply such as "never mind" still passed, with the confirm tool force-injected) and could lock out a model that re-issued the tool in the reply turn, so it was replaced. Pinned by `test_pin_reply_binding.py`.
 
 ### `replace_partial` drops tool calls when it re-commits the last entry
 
