@@ -64,7 +64,10 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "Pending action is invalid; missing tool name."
         ),
         "ha_llm_api_unavailable": "Home Assistant LLM API unavailable.",
-        "action_execute_failed": "Failed to execute action: {err}",
+        "action_execute_failed": (
+            "Failed to execute action: {err}. "
+            "The confirmation was used up; please re-run the request."
+        ),
         "pending_automation_invalid": (
             "Pending automation is invalid; please re-run the request."
         ),
@@ -109,7 +112,10 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "Čekající akce je neplatná; chybí název nástroje."
         ),
         "ha_llm_api_unavailable": "LLM API Home Assistantu není k dispozici.",
-        "action_execute_failed": "Akci se nepodařilo provést: {err}",
+        "action_execute_failed": (
+            "Akci se nepodařilo provést: {err}. "
+            "Potvrzení bylo použito; zopakujte prosím požadavek."
+        ),
         "pending_automation_invalid": (
             "Čekající automatizace je neplatná; zopakujte prosím požadavek."
         ),

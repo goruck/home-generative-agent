@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import llm
 from langchain_core.messages import ToolMessage
 
@@ -163,8 +165,7 @@ async def test_pin_confirmed_action_error_result_is_a_failure(
     """
     A tool that reports failure through the error flag did not lock or unlock.
 
-    It gets the same reply as a raised error, and the action stays pending so
-    the user can retry it.
+    It gets the same reply as a raised error, and the confirmation is used up.
     """
     api = _FakeAPI(tool_result_cls(data={"error": "Lock jammed"}, error=True))
     config = _pin_config(api)
@@ -175,7 +176,74 @@ async def test_pin_confirmed_action_error_result_is_a_failure(
     assert api.calls == ["HassTurnOff"]
     assert "completed" not in reply
     assert "Lock jammed" in reply
-    assert "aid" in config["configurable"]["pending_actions"]
+    assert "re-run the request" in reply
+    assert "aid" not in config["configurable"]["pending_actions"]
+
+
+async def test_failed_confirmed_action_cannot_be_confirmed_again(
+    tool_result_cls: type,
+) -> None:
+    """
+    A failed action is not re-run by a second confirm with the same PIN.
+
+    The PIN is already in the conversation, so the model could confirm again
+    in the same turn without asking the user, and a tool that half-acted
+    before reporting failure would act twice.
+    """
+    api = _FakeAPI(tool_result_cls(data={"error": "Lock jammed"}, error=True))
+    config = _pin_config(api)
+    confirm = cast("Any", confirm_sensitive_action).coroutine
+
+    await confirm("aid", "1234", config=config, store=None)
+    reply = await confirm("aid", "1234", config=config, store=None)
+
+    assert api.calls == ["HassTurnOff"]
+    assert "not found or expired" in reply
+
+
+async def test_raised_error_uses_up_the_confirmation() -> None:
+    """A tool that raises gets the same treatment as one that flags an error."""
+
+    class _RaisingAPI(_FakeAPI):
+        async def async_call_tool(self, tool_input: Any) -> Any:
+            self.calls.append(tool_input.tool_name)
+            msg = "Lock timed out"
+            raise HomeAssistantError(msg)
+
+    api = _RaisingAPI(None)
+    config = _pin_config(api)
+    confirm = cast("Any", confirm_sensitive_action).coroutine
+
+    first = await confirm("aid", "1234", config=config, store=None)
+    second = await confirm("aid", "1234", config=config, store=None)
+
+    assert "Lock timed out" in first
+    assert "not found or expired" in second
+    assert api.calls == ["HassTurnOff"]
+
+
+async def test_concurrent_confirmations_run_the_action_once(
+    tool_result_cls: type,
+) -> None:
+    """Two confirmations in one asyncio.gather batch actuate the device once."""
+
+    class _YieldingAPI(_FakeAPI):
+        async def async_call_tool(self, tool_input: Any) -> Any:
+            # Yield so the second confirmation runs while the first is in flight.
+            await asyncio.sleep(0)
+            return await super().async_call_tool(tool_input)
+
+    api = _YieldingAPI(tool_result_cls(data={"success": True, "result": "Unlocked"}))
+    config = _pin_config(api)
+    confirm = cast("Any", confirm_sensitive_action).coroutine
+
+    replies = await asyncio.gather(
+        confirm("aid", "1234", config=config, store=None),
+        confirm("aid", "1234", config=config, store=None),
+    )
+
+    assert api.calls == ["HassTurnOff"]
+    assert sum('"completed"' in reply for reply in replies) == 1
 
 
 def test_failed_live_context_is_not_rewritten_as_all_clear() -> None:

@@ -1102,7 +1102,7 @@ async def _execute_pending_action(
     action: dict[str, Any],
     cfg: Mapping[str, Any],
 ) -> tuple[str | None, str | None]:
-    """Normalize args, execute the pending action, and clear it."""
+    """Normalize args, claim the pending action, and execute it once."""
     raw_tool_name = action.get("tool_name")
     if not isinstance(raw_tool_name, str) or not raw_tool_name:
         return None, pin_msg(cfg.get("hass"), "pending_action_missing_tool_name")
@@ -1120,29 +1120,35 @@ async def _execute_pending_action(
     tool_args = normalize_intent_for_lock(tool_name, tool_args)
     tool_args = maybe_fill_lock_entity(tool_args, cfg.get("hass"))
     tool_args = sanitize_tool_args(tool_args)
+
+    # Claim the action before calling the tool, so one PIN confirmation runs
+    # the device at most once. Left pending after a failure, it could be
+    # confirmed again with the PIN already in the conversation, in the same
+    # turn and without asking the user, and a tool that half-acted before
+    # reporting failure would act twice. Claiming first also stops two
+    # confirmations in one asyncio.gather batch from both running.
+    pending_actions = cfg.get("pending_actions", {})
+    if pending_actions.pop(resolved_action_id, None) is None:
+        return None, pin_msg(cfg.get("hass"), "pending_action_not_found_or_expired")
+
     try:
         tool_input = llm.ToolInput(tool_name=tool_name, tool_args=tool_args)
         response = tool_call_data(await ha_llm_api.async_call_tool(tool_input))
     except (HomeAssistantError, vol.Invalid) as err:
-        return None, pin_msg(cfg.get("hass"), "action_execute_failed", err=repr(err))
-    if response.error:
-        # A tool that reports failure through HA 2026.10's error flag did not
-        # act: same reply as a raised error, and the action stays pending.
-        return None, pin_msg(
-            cfg.get("hass"),
-            "action_execute_failed",
-            err=json.dumps(response.data, default=str),
-        )
-
-    pending_actions = cfg.get("pending_actions", {})
-    pending_actions.pop(resolved_action_id, None)
-    return json.dumps(
-        {
-            "status": "completed",
-            "action_id": resolved_action_id,
-            "result": response.data,
-        }
-    ), None
+        failure = repr(err)
+    else:
+        if not response.error:
+            return json.dumps(
+                {
+                    "status": "completed",
+                    "action_id": resolved_action_id,
+                    "result": response.data,
+                }
+            ), None
+        # A tool that reports failure through HA 2026.10's error flag gets the
+        # same reply as a raised error.
+        failure = json.dumps(response.data, default=str)
+    return None, pin_msg(cfg.get("hass"), "action_execute_failed", err=failure)
 
 
 async def _execute_pending_automation(

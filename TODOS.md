@@ -2,20 +2,6 @@
 
 ## Agent
 
-### A confirmed critical action that fails can be re-run without a new PIN
-
-**What:** When a PIN-confirmed action fails (`_execute_pending_action` in `agent/tools.py`: a raised `HomeAssistantError`, or since #735 a `ToolResult` with `error=True`), the pending action stays queued for its 10-minute TTL so the user can retry. A correct PIN never increments `attempts`, and the PIN is already in the conversation, so the model can call `confirm_sensitive_action` again on its own, in the same turn, bounded only by the graph recursion limit. Each call actuates the device again. A tool that half-acted before reporting failure (a cover toggle, an alarm arm that timed out) can act twice.
-
-**Why:** Found by the second Claude adversarial pass in the #735 hotfix review (2026-10-08). The raised-error path has always behaved this way; #735 only made error-flag failures behave the same, as the review intended. Left out of the hotfix because a retry policy for critical actions is a design call.
-
-**How to apply:** Count executions on the pending action and drop it after one failed execute, or require a new user turn before the same action can be confirmed again (record the turn's request id on the pending action). Pin it with a test that confirms once, gets `error=True`, then calls confirm again in the same turn and asserts the device tool ran once.
-
-**Effort:** S
-**Priority:** P2
-**Depends on:** None
-
----
-
 ### Resolve the schema converter from probatio directly on HA 2026.10
 
 **What:** `_resolve_converter` in `agent/helpers.py` looks for `to_openapi` / `UNSUPPORTED` on `homeassistant.helpers.llm` first. HA 2026.10's `llm.py` imports `probatio` and no longer re-exports either name, so every 2026.10 install falls through to the fallback that checks whether `vol.Schema.__module__` starts with `probatio`. That works today (probatio 0.13.0 reports `probatio.schema`, and the box ran fine), but if the check ever misses, the code imports `voluptuous_openapi`, which 2026.10 does not install, and the module fails at import. The docstring's claim that core re-exports these names is no longer true.
@@ -2376,6 +2362,20 @@ This is the same allowlist-omission class as #480 and as the triage options fixe
 ---
 
 ## Completed
+
+### A confirmed critical action that fails can be re-run without a new PIN
+
+**What:** When a PIN-confirmed action fails (`_execute_pending_action` in `agent/tools.py`: a raised `HomeAssistantError`, or since #735 a `ToolResult` with `error=True`), the pending action stays queued for its 10-minute TTL so the user can retry. A correct PIN never increments `attempts`, and the PIN is already in the conversation, so the model can call `confirm_sensitive_action` again on its own, in the same turn, bounded only by the graph recursion limit. Each call actuates the device again. A tool that half-acted before reporting failure (a cover toggle, an alarm arm that timed out) can act twice.
+
+**Why:** Found by the second Claude adversarial pass in the #735 hotfix review (2026-10-08). The raised-error path has always behaved this way; #735 only made error-flag failures behave the same, as the review intended. Left out of the hotfix because a retry policy for critical actions is a design call.
+
+**How to apply:** Count executions on the pending action and drop it after one failed execute, or require a new user turn before the same action can be confirmed again (record the turn's request id on the pending action). Pin it with a test that confirms once, gets `error=True`, then calls confirm again in the same turn and asserts the device tool ran once.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** None
+
+**Resolution:** `_execute_pending_action` now claims the pending action (pops it) before calling the tool, as `_execute_pending_automation` already did, so a failed execute uses up the confirmation and the reply asks the user to re-run the request. Claiming first also closes a second path found while testing: two confirmations of one action in an `asyncio.gather` batch both passed the PIN check and both ran. Pinned by `test_failed_confirmed_action_cannot_be_confirmed_again`, `test_raised_error_uses_up_the_confirmation` and `test_concurrent_confirmations_run_the_action_once`.
 
 ### `replace_partial` drops tool calls when it re-commits the last entry
 
