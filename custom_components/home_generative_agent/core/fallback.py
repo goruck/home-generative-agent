@@ -159,9 +159,79 @@ def invoke_dropping_unsupported_params(
             _record_dropped_param(err, dropped)
 
 
+_HTTP_NOT_FOUND = 404
+# How far down __cause__ to look: provider wrappers re-raise the SDK's error
+# once or twice with ``raise ... from`` (langchain-google-genai wraps Gemini's).
+_MAX_CAUSE_DEPTH = 5
+
+
+def is_model_not_found(err: BaseException) -> bool:
+    """
+    Return True if the provider answered 404: it does not have this model.
+
+    Ollama says 'model "x" not found, try pulling it first'; OpenAI,
+    Anthropic and Gemini return their own 404s for an unknown model name, and
+    an OpenAI-compatible server at the wrong path does the same. Each SDK
+    carries the status differently (``status_code``, or ``code`` for Google),
+    and some wrappers keep the SDK error only as the cause, so the causes are
+    walked. ``__context__`` is not: an error raised while some caller was
+    handling a 404 (a rejected key, say) is not a missing model.
+    """
+    seen: BaseException | None = err
+    for _ in range(_MAX_CAUSE_DEPTH):
+        if seen is None:
+            return False
+        for attr in ("status_code", "code"):
+            value = getattr(seen, attr, None)
+            # HTTPStatus and plain ints compare equal to 404; grpc and str
+            # codes do not.
+            if isinstance(value, int) and value == _HTTP_NOT_FOUND:
+                return True
+        seen = seen.__cause__
+    return False
+
+
+def _log_provider_failure(
+    kind: str, provider_id: str, position: int, total: int, err: Exception
+) -> None:
+    """
+    Log a provider the chain is moving past.
+
+    A missing model is a configuration problem rather than an outage, so it
+    is logged at ERROR and says so: the chain still moves on (#752, #759), and
+    this line is how a typo or an unpulled model on the primary stays visible
+    while a fallback covers for it.
+    """
+    if is_model_not_found(err):
+        LOGGER.error(
+            "%s failed for provider %s (provider %d/%d): the provider "
+            "does not have the configured model; pull it or fix the model "
+            "name. Trying the next provider. %s",
+            kind,
+            provider_id,
+            position,
+            total,
+            _safe_err_summary(err),
+        )
+        return
+    LOGGER.warning(
+        "%s failed for provider %s (provider %d/%d): %s",
+        kind,
+        provider_id,
+        position,
+        total,
+        _safe_err_summary(err),
+    )
+
+
 def _is_retryable(err: Exception) -> bool:
     """Return True if the exception should trigger a fallback attempt."""
     if isinstance(err, FALLBACK_RETRYABLE_EXCEPTIONS):
+        return True
+    if is_model_not_found(err):
+        # The next provider may have the model; a missing one at any position
+        # moves the chain on and is recorded, so the circuit breaker can skip
+        # it (#752, #759). _log_provider_failure keeps it loud.
         return True
     if unsupported_sampling_param(err) is not None:
         # A sampling-param 400 that survived the in-provider drop retry:
@@ -489,12 +559,8 @@ class FallbackChatModel:
                 last_err = err
                 if not _is_retryable(err):
                     raise
-                LOGGER.warning(
-                    "Model call failed for provider %s (provider %d/%d): %s",
-                    provider_id,
-                    i + 1,
-                    len(self.chain),
-                    _safe_err_summary(err),
+                _log_provider_failure(
+                    "Model call", provider_id, i + 1, len(self.chain), err
                 )
                 if self.circuit_breaker:
                     self.circuit_breaker.record_failure(provider_id)
@@ -592,12 +658,8 @@ class FallbackVLM:
                 last_err = err
                 if not _is_retryable(err):
                     raise
-                LOGGER.warning(
-                    "VLM call failed for provider %s (provider %d/%d): %s",
-                    provider_id,
-                    i + 1,
-                    len(self.chain),
-                    _safe_err_summary(err),
+                _log_provider_failure(
+                    "VLM call", provider_id, i + 1, len(self.chain), err
                 )
                 if self.circuit_breaker:
                     self.circuit_breaker.record_failure(provider_id)
@@ -691,12 +753,8 @@ class FallbackEmbeddings:
                 if not _is_retryable(err):
                     raise
                 failed_providers.append(provider_id)
-                LOGGER.warning(
-                    "Embedding call failed for provider %s (provider %d/%d): %s",
-                    provider_id,
-                    i + 1,
-                    len(chain),
-                    _safe_err_summary(err),
+                _log_provider_failure(
+                    "Embedding call", provider_id, i + 1, len(chain), err
                 )
                 if self.circuit_breaker:
                     self.circuit_breaker.record_failure(provider_id)
@@ -736,12 +794,8 @@ class FallbackEmbeddings:
                 if not _is_retryable(err):
                     raise
                 failed_providers.append(provider_id)
-                LOGGER.warning(
-                    "Embedding query failed for provider %s (provider %d/%d): %s",
-                    provider_id,
-                    i + 1,
-                    len(chain),
-                    _safe_err_summary(err),
+                _log_provider_failure(
+                    "Embedding query", provider_id, i + 1, len(chain), err
                 )
                 if self.circuit_breaker:
                     self.circuit_breaker.record_failure(provider_id)
