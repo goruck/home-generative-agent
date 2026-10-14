@@ -1126,8 +1126,9 @@ CRITICAL_ACTION_PROMPT = """
 For critical actions (door/lock/garage/open), call the tool directly—do NOT ask
 for verbal confirmation first. The tool itself enforces security.
 - If a tool response has status "requires_pin", ask the user for the security PIN
-  they configured, then call "confirm_sensitive_action" with the action_id from
-  the tool response and the PIN.
+  they configured and end your turn. When the user replies with it, call
+  "confirm_sensitive_action" with the action_id from the tool response and the
+  PIN. A confirmation in the same turn as the "requires_pin" response is refused.
 - Never guess or invent a PIN. Do not proceed without a PIN. If the user refuses
   or fails, inform them and do not re-attempt the action.
 - Do not expose or repeat the PIN in responses beyond acknowledging success/failure.

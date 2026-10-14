@@ -450,6 +450,9 @@ class ConfigurableData(TypedDict, total=False):
     hass: HomeAssistant
     user_id: str
     ha_llm_api: Any
+    # Unique per conversation turn. A pending PIN action records the turn that
+    # created it, and is never confirmed in that same turn.
+    turn_id: str
 
 
 # How long a pending PIN confirmation stays valid. Mirrors the expiry check in
@@ -460,6 +463,10 @@ PENDING_ACTION_TTL = timedelta(minutes=10)
 # Hard cap on concurrently pending confirmations, so an unconfirmed challenge
 # loop cannot grow the store without bound.
 MAX_PENDING_ACTIONS = 16
+
+# Status of a confirmation refused because it arrived in the turn that asked
+# for the PIN. The action stays pending for the user's reply.
+PIN_AWAITING_USER_REPLY = "awaiting_user_pin"
 
 
 class CriticalActionPolicy(NamedTuple):

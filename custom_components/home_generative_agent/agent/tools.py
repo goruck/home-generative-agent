@@ -104,6 +104,7 @@ from .automation_targets import (
 )
 from .camera_activity import get_camera_last_events_from_states
 from .helpers import (
+    PIN_AWAITING_USER_REPLY,
     ConfigurableData,
     base_tool_name,
     maybe_fill_lock_entity,
@@ -859,6 +860,7 @@ def _maybe_require_pin_for_automation(
             "tool_args": {},
             "automation_config": ha_automation_config,
             "user": cfg.get("user_id"),
+            "turn_id": cfg.get("turn_id"),
         },
     )
     return json.dumps(
@@ -998,8 +1000,9 @@ async def confirm_sensitive_action(  # noqa: D417
     if action_err or not action:
         return action_err or pin_msg(hass, "pending_action_not_found")
 
-    if _is_wrong_user(cfg, action):
-        return pin_msg(hass, "pending_action_wrong_user")
+    refusal = _confirmation_refusal(cfg, action, resolved_action_id)
+    if refusal:
+        return refusal
 
     pin_err = _validate_pin_for_action(
         provided_pin=provided_pin,
@@ -1089,6 +1092,38 @@ def _ensure_api(cfg: Mapping[str, Any]) -> tuple[Any | None, str | None]:
     if ha_llm_api is None:
         return None, "Home Assistant LLM API unavailable."
     return ha_llm_api, None
+
+
+def _confirmation_refusal(
+    cfg: Mapping[str, Any], action: Mapping[str, Any], action_id: str
+) -> str | None:
+    """Return why this caller may not confirm the action, before any PIN check."""
+    hass = cfg.get("hass")
+    if _is_wrong_user(cfg, action):
+        return pin_msg(hass, "pending_action_wrong_user")
+    if _is_request_turn(cfg, action):
+        # Refused before the PIN is checked, so no attempt is counted.
+        return json.dumps(
+            {
+                "status": PIN_AWAITING_USER_REPLY,
+                "action_id": action_id,
+                "reason": pin_msg(hass, "pin_awaiting_user_reply"),
+            }
+        )
+    return None
+
+
+def _is_request_turn(cfg: Mapping[str, Any], action: Mapping[str, Any]) -> bool:
+    """
+    Return True when a confirmation arrives in the turn that asked for the PIN.
+
+    The user can only answer a PIN prompt in a later turn, so a PIN supplied in
+    the same turn came from the model: guessed, or reused from earlier in the
+    conversation to confirm a re-issued action. Without a turn id the source
+    of the PIN cannot be told, so the confirmation is refused.
+    """
+    turn_id = cfg.get("turn_id")
+    return not turn_id or action.get("turn_id") == turn_id
 
 
 def _is_wrong_user(cfg: Mapping[str, Any], action: Mapping[str, Any]) -> bool:

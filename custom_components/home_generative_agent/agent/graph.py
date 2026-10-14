@@ -89,6 +89,7 @@ from ..core.prompt_cache import (  # noqa: TID252
 from ..core.utils import extract_final  # noqa: TID252
 from .automation_targets import AUTOMATION_REFUSAL_PREFIX
 from .helpers import (
+    PIN_AWAITING_USER_REPLY,
     active_llm_api_ids,
     base_tool_name,
     format_tool,
@@ -425,6 +426,7 @@ def _critical_action_guard(
             "tool_name": tool_name,
             "tool_args": tool_args,
             "user": ctx.config.get("configurable", {}).get("user_id"),
+            "turn_id": ctx.config.get("configurable", {}).get("turn_id"),
         },
     )
     return ToolMessage(
@@ -2261,6 +2263,15 @@ def _last_routing_rejection_idx(recent: Sequence[AnyMessage]) -> int | None:
     return idx
 
 
+def _is_awaiting_user_pin(content: str) -> bool:
+    """Return True for a confirmation refused as coming from the request turn."""
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    return isinstance(data, dict) and data.get("status") == PIN_AWAITING_USER_REPLY
+
+
 def _has_pending_pin_confirmation(messages: Sequence[AnyMessage]) -> bool:
     """
     Return True if a PIN confirmation is pending in recent message history.
@@ -2283,6 +2294,10 @@ def _has_pending_pin_confirmation(messages: Sequence[AnyMessage]) -> bool:
                 content = msg.content if isinstance(msg.content, str) else ""
                 if "Incorrect PIN" in content:
                     # Wrong PIN entered — action is still pending, keep scanning.
+                    continue
+                if _is_awaiting_user_pin(content):
+                    # Confirmed in the request turn and refused before the PIN
+                    # was checked — still pending for the user's reply.
                     continue
                 if getattr(msg, "status", None) == "error":
                     # Routing or tool error on confirm_sensitive_action itself —

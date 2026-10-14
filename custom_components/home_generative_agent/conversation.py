@@ -1924,6 +1924,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "configurable": {
                 "thread_id": conversation_id,
                 "user_id": clean_user_name,
+                "turn_id": ulid.ulid_now(),
                 "requester_is_admin": requester_is_admin,
                 "chat_model": base_llm,
                 "chat_model_options": runtime_data.chat_model_options,

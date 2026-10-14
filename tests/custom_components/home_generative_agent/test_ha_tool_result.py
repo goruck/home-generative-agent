@@ -130,9 +130,11 @@ def _pin_config(api: _FakeAPI) -> dict[str, Any]:
                     "tool_name": "HassTurnOff",
                     "tool_args": {"domain": ["lock"], "name": "Front Door"},
                     "user": "u1",
+                    "turn_id": "turn-1",
                 }
             },
             "user_id": "u1",
+            "turn_id": "turn-2",
             "ha_llm_api": api,
             "hass": None,
         }

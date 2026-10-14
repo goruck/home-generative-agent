@@ -32,9 +32,17 @@ if TYPE_CHECKING:
 
 AddAutomationTool = Callable[..., Awaitable[str]]
 add_automation_tool = cast("AddAutomationTool", cast("Any", add_automation).coroutine)
-confirm_tool = cast(
-    "AddAutomationTool", cast("Any", confirm_sensitive_action).coroutine
-)
+_confirm = cast("AddAutomationTool", cast("Any", confirm_sensitive_action).coroutine)
+
+
+async def confirm_tool(
+    action_id: str, pin: str, *, config: dict[str, Any], store: Any
+) -> str:
+    """Confirm as the user's reply to the PIN prompt, which is a new turn."""
+    configurable = config["configurable"]
+    configurable["turn_id"] = f"turn-{int(configurable['turn_id'][5:]) + 1}"
+    return await _confirm(action_id, pin, config=config, store=store)
+
 
 PIN = "4321"
 
@@ -117,6 +125,7 @@ def _config(hass: Any, options: dict[str, Any]) -> dict[str, Any]:
             "options": options,
             "pending_actions": {},
             "user_id": "user1",
+            "turn_id": "turn-0",
             "ha_llm_api": None,
         }
     }

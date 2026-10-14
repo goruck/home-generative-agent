@@ -60,9 +60,11 @@ def _base_config(
                         "service": "lock",
                     },
                     "user": user_id,
+                    "turn_id": "turn-1",
                 }
             },
             "user_id": user_id,
+            "turn_id": "turn-2",
             "ha_llm_api": FakeAPI(),
             "hass": None,
         }

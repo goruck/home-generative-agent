@@ -2,6 +2,20 @@
 
 ## Agent
 
+### A wrong PIN on a non-English install ends the PIN flow's tool injection
+
+**What:** `_has_pending_pin_confirmation` (`agent/graph.py`) keeps a PIN flow pending after a wrong PIN by matching `"Incorrect PIN"` in the `confirm_sensitive_action` reply. That reply comes from `pin_msg(hass, "pin_incorrect")`, which is Czech on a Czech install ("Nesprávný PIN. Akce nebyla provedena."), so the match fails, the flow reads as resolved, and `confirm_sensitive_action` is not force-injected on the user's next try. Retrieval may still offer it, so the effect is an unreliable retry, not a bypass.
+
+**Why:** Found in the review of the PIN request-turn guard (2026-10-14). Pre-existing; that PR made its own refusal language-independent (a JSON `status`) but left this match alone to keep scope.
+
+**How to apply:** Return the wrong-PIN reply as JSON with a status (as `awaiting_user_pin` does) and check the status, or compare against every language's `pin_incorrect` string. Add a cs test next to `test_pin_detection.py`.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ### Resolve the schema converter from probatio directly on HA 2026.10
 
 **What:** `_resolve_converter` in `agent/helpers.py` looks for `to_openapi` / `UNSUPPORTED` on `homeassistant.helpers.llm` first. HA 2026.10's `llm.py` imports `probatio` and no longer re-exports either name, so every 2026.10 install falls through to the fallback that checks whether `vol.Schema.__module__` starts with `probatio`. That works today (probatio 0.13.0 reports `probatio.schema`, and the box ran fine), but if the check ever misses, the code imports `voluptuous_openapi`, which 2026.10 does not install, and the module fails at import. The docstring's claim that core re-exports these names is no longer true.
@@ -220,46 +234,6 @@ values back on submit, so no exclusion is lost by opening and saving the form.
 
 **Effort:** S
 **Priority:** P3
-**Depends on:** v3.41.1
-
----
-
-### The model invents a PIN before the user supplies one
-
-**What:** Field test 2026-09-12 on the live box, qwen3.8 local. "Unlock the
-garage door lock." correctly hit the PIN gate (`status: requires_pin`), and the
-model then called `confirm_sensitive_action(action_id=..., pin="1234")` in the
-SAME turn, before the user had said anything. The gate rejected it ("Incorrect
-PIN. Action not executed.") and the user's real PIN worked on the next turn, so
-nothing unsafe happened — but the guess consumed one of the five attempts
-(`max_pin_attempts = 5`, agent/tools.py:986) before the user had typed a digit.
-
-**Intermittent.** The immediately following round in the same session ("Lock the
-garage door lock" -> `requires_pin` -> user PIN -> completed) produced NO
-invented PIN: the model asked and waited. So this is nondeterministic model
-behaviour, not a reliable trigger — which argues for the deterministic guard
-rather than against it, since it cannot be caught by testing.
-
-**Why:** The system prompt already forbids it in as many words: "Never guess or
-invent a PIN. Do not proceed without a PIN." A small local model did it anyway.
-The lesson recorded on issue #571 applies exactly — a prompt clause forbidding a
-shape that is still being emitted is not enforcement; enforce it
-deterministically instead of adding another sentence.
-
-Practical impact today is a wasted attempt, not a bypass: PINs are 4-10 digits,
-so five attempts against even a 4-digit PIN is a 0.05% chance. It gets worse if
-a model emits several guesses across a multi-round turn, which
-`_MAX_ACTION_ROUNDS = 3` permits.
-
-**How to apply:** Reject a `confirm_sensitive_action` call whose PIN did not
-come from a user message in this turn — the pending-action record already
-carries the requesting user, so the guard can require that a HumanMessage
-arrived after the `requires_pin` ToolMessage before any attempt is counted. A
-model-supplied PIN with no intervening user turn should be refused WITHOUT
-incrementing `attempts`, so a chatty model cannot burn the user's budget.
-
-**Effort:** S
-**Priority:** P2
 **Depends on:** v3.41.1
 
 ---
@@ -2375,7 +2349,47 @@ This is the same allowlist-omission class as #480 and as the triage options fixe
 **Priority:** P2
 **Depends on:** None
 
-**Resolution:** `_execute_pending_action` now claims the pending action (pops it) before calling the tool, as `_execute_pending_automation` already did, so a failed execute uses up the confirmation and the reply asks the user to re-run the request. Claiming first also closes a second path found while testing: two confirmations of one action in an `asyncio.gather` batch both passed the PIN check and both ran. Pinned by `test_failed_confirmed_action_cannot_be_confirmed_again`, `test_raised_error_uses_up_the_confirmation` and `test_concurrent_confirmations_run_the_action_once`.
+**Resolution:** `_execute_pending_action` now claims the pending action (pops it) before calling the tool, as `_execute_pending_automation` already did, so a failed execute uses up the confirmation and the reply asks the user to re-run the request. Claiming first also closes a second path found while testing: two confirmations of one action in an `asyncio.gather` batch both passed the PIN check and both ran. Pinned by `test_failed_confirmed_action_cannot_be_confirmed_again`, `test_raised_error_uses_up_the_confirmation` and `test_concurrent_confirmations_run_the_action_once`. Claiming alone left one path: in the same turn the model could re-issue the tool and confirm the new prompt with the PIN from history (one more round under `_MAX_ACTION_ROUNDS`), so the same PR also requires the PIN to come from a turn after the prompt; see the next entry.
+
+### The model invents a PIN before the user supplies one
+
+**What:** Field test 2026-09-12 on the live box, qwen3.8 local. "Unlock the
+garage door lock." correctly hit the PIN gate (`status: requires_pin`), and the
+model then called `confirm_sensitive_action(action_id=..., pin="1234")` in the
+SAME turn, before the user had said anything. The gate rejected it ("Incorrect
+PIN. Action not executed.") and the user's real PIN worked on the next turn, so
+nothing unsafe happened — but the guess consumed one of the five attempts
+(`max_pin_attempts = 5`, agent/tools.py:986) before the user had typed a digit.
+
+**Intermittent.** The immediately following round in the same session ("Lock the
+garage door lock" -> `requires_pin` -> user PIN -> completed) produced NO
+invented PIN: the model asked and waited. So this is nondeterministic model
+behaviour, not a reliable trigger — which argues for the deterministic guard
+rather than against it, since it cannot be caught by testing.
+
+**Why:** The system prompt already forbids it in as many words: "Never guess or
+invent a PIN. Do not proceed without a PIN." A small local model did it anyway.
+The lesson recorded on issue #571 applies exactly — a prompt clause forbidding a
+shape that is still being emitted is not enforcement; enforce it
+deterministically instead of adding another sentence.
+
+Practical impact today is a wasted attempt, not a bypass: PINs are 4-10 digits,
+so five attempts against even a 4-digit PIN is a 0.05% chance. It gets worse if
+a model emits several guesses across a multi-round turn, which
+`_MAX_ACTION_ROUNDS = 3` permits.
+
+**How to apply:** Reject a `confirm_sensitive_action` call whose PIN did not
+come from a user message in this turn — the pending-action record already
+carries the requesting user, so the guard can require that a HumanMessage
+arrived after the `requires_pin` ToolMessage before any attempt is counted. A
+model-supplied PIN with no intervening user turn should be refused WITHOUT
+incrementing `attempts`, so a chatty model cannot burn the user's budget.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** v3.41.1
+
+**Resolution:** Fixed together with "A confirmed critical action that fails can be re-run without a new PIN". Each conversation turn gets a `turn_id` (`conversation.py`), every pending action records the turn that created it (`_critical_action_guard` in `agent/graph.py`, the `add_automation` PIN hold in `agent/tools.py`), and `confirm_sensitive_action` refuses a confirmation from that same turn, or from a config with no turn id, before the PIN is checked, so no attempt is counted. The refusal is JSON with status `awaiting_user_pin`, which `_has_pending_pin_confirmation` treats as still pending, so the confirm tool is force-injected when the user replies. The system prompt now tells the model to end its turn after asking. Pinned by `tests/.../test_pin_request_turn.py`.
 
 ### `replace_partial` drops tool calls when it re-commits the last entry
 

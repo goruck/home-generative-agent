@@ -64,6 +64,10 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "Pending action is invalid; missing tool name."
         ),
         "ha_llm_api_unavailable": "Home Assistant LLM API unavailable.",
+        "pin_awaiting_user_reply": (
+            "Not confirmed: the PIN must come from the user's reply. "
+            "Ask the user for the PIN and end your turn."
+        ),
         "action_execute_failed": (
             "Failed to execute action: {err}. "
             "The confirmation was used up; please re-run the request."
@@ -112,6 +116,10 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "Čekající akce je neplatná; chybí název nástroje."
         ),
         "ha_llm_api_unavailable": "LLM API Home Assistantu není k dispozici.",
+        "pin_awaiting_user_reply": (
+            "Nepotvrzeno: PIN musí pocházet z odpovědi uživatele. "
+            "Požádejte uživatele o PIN a ukončete svůj tah."
+        ),
         "action_execute_failed": (
             "Akci se nepodařilo provést: {err}. "
             "Potvrzení bylo použito; zopakujte prosím požadavek."
