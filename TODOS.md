@@ -2310,19 +2310,6 @@ This is the same allowlist-omission class as #480 and as the triage options fixe
 
 ---
 
-### A configured but unreachable database ends in SETUP_ERROR with no repair issue and no retry
-
-**What:** When a Database subentry exists but the server cannot be reached, `async_setup_entry` returns `False` from the bootstrap block, which Home Assistant treats as a terminal `SETUP_ERROR` (no retry) with no translated reason and, since v3.39.1 clears the not-configured issue as soon as a subentry exists, no repair issue either. Two things make this common: Basic setup writes the `localhost` defaults with no connection test (the Advanced step validates, Basic does not), and a pgvector add-on that starts after Home Assistant on a cold boot hits the same path. Note also that psycopg-pool's `open()` defaults to `wait=False`, so the `except PoolTimeout` around `pool.open()` is dead code; the failure surfaces one block later in the broad `except Exception`.
-
-**Why:** Red-team finding during the review of the #615 fix (v3.39.1). Deferred by user decision (2026-09-09): the right fix changes retry semantics for every install and needs field validation on cold boot, so it does not belong in a bug-fix release.
-
-**How to apply:** Raise `ConfigEntryNotReady` (with a translated reason naming host/port) instead of returning `False` on the unreachable path so Home Assistant retries with backoff; raise a `database_unreachable` repair issue (`is_fixable=False`, host/port placeholders, en/cs/strings parity) alongside it and clear it on a successful setup; delete the dead `PoolTimeout` branch or pass `wait=True` to `pool.open()` so it becomes live; and run `validate_db_uri` in `_async_step_basic_setup` before writing the subentry, as the Advanced step already does.
-
-**Effort:** M
-**Priority:** P2
-
----
-
 ### A store worker abandoned by the unload keeps its connection and can still write
 
 **What:** `_cancel_and_wait` (`__init__.py`) gives up on a task that outlives five cancels, logs a warning, and lets `async_unload_entry` close the pool and return. psycopg's `pool.close()` does not close checked-out connections, so an abandoned langgraph batch worker keeps its connection and, if it later resumes, can upsert tool-index rows computed by the old entry over the reloaded entry's rows; the new entry's cached hashes would still describe its own data and hide the stale index. The index runner has the same shape: `rd.tool_index_task = None` runs even when the wait gave up, dropping the only handle to a task that can still set `tool_index_ready` and send `SIGNAL_TOOL_INDEX_UPDATED` (not entry-scoped).
@@ -2369,6 +2356,19 @@ This is the same allowlist-omission class as #480 and as the triage options fixe
 **Why:** Found while investigating the unload hang (2026-10-03). Deferred by user decision with the other unload follow-ups: harmless once the unload is bounded, but it doubles the reload cost and widens every reload race.
 
 **How to apply:** Keep one trigger (the listener covers UI deletion too) and add a test that a Sentinel options save produces exactly one reload.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
+### Two database connect probes that can drift apart
+
+**What:** `validate_db_uri` (`core/utils.py`, used by the Database subentry and Advanced setup forms) and `async_check_database_reachable` (`core/database_guard.py`, run at the start of setup since #748) each connect once to test the database. They differ in timeout (5 s against 10 s), in the conninfo checks done first (the form checks the scheme and host with `urlparse`; setup leaves that to libpq), and in error mapping (the form turns every `psycopg.Error` into `CannotConnectError`; setup splits `OperationalError` into a retry and other errors into a setup failure).
+
+**Why:** Review finding on PR #764 (2026-10-13), left as a follow-up: both work today, but a later change to one (a new timeout, a TLS option, an error case) will not reach the other.
+
+**How to apply:** Keep one async connect helper that raises the `psycopg` error, and let each caller map it: the forms to `CannotConnectError`/`InvalidAuthError`, setup to `ConfigEntryNotReady`/`ConfigEntryError`. Run it on the event loop (psycopg's async connect) instead of in an executor.
 
 **Effort:** S
 **Priority:** P3

@@ -443,6 +443,12 @@
     },
     "pgvector_not_available": {
       "message": "The PostgreSQL server holding database {database} does not have the pgvector extension installed. Run PostgreSQL with pgvector (the PostgreSQL with pgvector app, or an image such as pgvector/pgvector), then reload the integration."
+    },
+    "database_unreachable": {
+      "message": "Cannot reach the PostgreSQL database yet: {error}. Home Assistant will keep retrying; check that the database is running and that the Database settings (host, port, user, password, database name) are correct."
+    },
+    "database_invalid_settings": {
+      "message": "The Database settings were rejected before connecting: {error}. Fix the extra connection parameters (or other Database settings) in the Database subentry; the integration reloads when you save them."
     }
   },
   "options": {

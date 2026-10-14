@@ -275,6 +275,10 @@ def _fallback_setup_data() -> FallbackSetupData:
     )
 
 
+async def _async_noop(*_args: Any, **_kwargs: Any) -> None:
+    return None
+
+
 def _patch_setup_dependencies(
     hass: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -319,6 +323,9 @@ def _patch_setup_dependencies(
         hga_component, "build_model_deployments", lambda *_args: data.deployments
     )
     monkeypatch.setattr(hga_component, "build_database_uri_from_entry", lambda _e: None)
+    # Tests that switch a database on get a reachable one unless they say
+    # otherwise; the real preflight would open a socket (#748).
+    monkeypatch.setattr(hga_component, "async_check_database_reachable", _async_noop)
     monkeypatch.setattr(
         hga_component,
         "configured_ollama_urls",

@@ -4,7 +4,12 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
-from homeassistant.config_entries import ConfigSubentryFlow, SubentryFlowResult
+from homeassistant.config_entries import (
+    ConfigEntryState,
+    ConfigSubentry,
+    ConfigSubentryFlow,
+    SubentryFlowResult,
+)
 from homeassistant.const import (
     CONF_HOST,
     CONF_PASSWORD,
@@ -53,6 +58,19 @@ class PgVectorDbSubentryFlow(ConfigSubentryFlow):
     one.
 
     """
+
+    def _async_update_and_reload_if_down(
+        self, subentry: ConfigSubentry, data: dict[str, Any]
+    ) -> SubentryFlowResult:
+        """Save the new settings; reload an entry that is not running."""
+        entry = self._get_entry()
+        result = self.async_update_and_abort(entry, subentry, data=data)
+        # An entry waiting to retry, or failed, on these settings has no
+        # update listener to reload it; reload now so the fix applies at once
+        # instead of at the next retry, up to 10 minutes away (#748).
+        if entry.state in (ConfigEntryState.SETUP_RETRY, ConfigEntryState.SETUP_ERROR):
+            self.hass.config_entries.async_schedule_reload(entry.entry_id)
+        return result
 
     async def async_step_set_options(
         self, user_input: dict[str, Any] | None = None
@@ -120,8 +138,8 @@ class PgVectorDbSubentryFlow(ConfigSubentryFlow):
             elif current_subentry is None:
                 return self.async_create_entry(title="Database", data=user_input)
             else:
-                return self.async_update_and_abort(
-                    self._get_entry(), current_subentry, data=user_input
+                return self._async_update_and_reload_if_down(
+                    current_subentry, user_input
                 )
 
         schema: VolDictType = {

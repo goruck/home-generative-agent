@@ -16,9 +16,16 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import CoreState
-from homeassistant.exceptions import ConfigEntryError, HomeAssistantError
+from homeassistant.exceptions import (
+    ConfigEntryError,
+    ConfigEntryNotReady,
+    HomeAssistantError,
+)
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers import translation
+from psycopg import OperationalError
 from psycopg import errors as pg_errors
 from psycopg_pool import PoolTimeout
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -27,17 +34,27 @@ import custom_components.home_generative_agent as hga_component
 from custom_components.home_generative_agent.const import DOMAIN
 from custom_components.home_generative_agent.core import pipeline_guard
 from custom_components.home_generative_agent.core.database_guard import (
+    DATABASE_INVALID_SETTINGS,
+    DATABASE_UNREACHABLE,
     ISSUE_DATABASE_NOT_CONFIGURED,
     PGVECTOR_NOT_AVAILABLE,
     PGVECTOR_NOT_PERMITTED,
     _issue_id,
+    async_check_database_reachable,
     async_clear_database_issue,
     async_ensure_pgvector,
     async_sync_database_issue,
+    database_unreachable,
+    is_connection_failure,
 )
+from custom_components.home_generative_agent.core.db_utils import build_postgres_uri
 
 from .test_deferred_start_listener import _UnreachablePool
 from .test_fallback_setup import _fallback_setup_data, _patch_setup_dependencies
+
+# A libpq key/value DSN for a port nothing listens on. It carries a password
+# so the tests can show the message never echoes it.
+_DOWN_DSN = "host=127.0.0.1 port=1 dbname=ha_db user=ha_user password=s3cret"
 
 
 def _issue(hass: Any, entry_id: str) -> ir.IssueEntry | None:
@@ -203,10 +220,172 @@ async def test_unreachable_database_still_clears_the_not_configured_issue(
 
     monkeypatch.setattr(hga_component, "_bootstrap_db_once", _unreachable)
 
-    result = await cast("Any", hga_component).async_setup_entry(hass, entry)
+    with pytest.raises(ConfigEntryNotReady):
+        await cast("Any", hga_component).async_setup_entry(hass, entry)
 
-    assert result is False
     assert _issue(hass, entry.entry_id) is None
+
+
+# ---------------------------------------------------------------------------
+# unreachable database retries setup (#748)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_preflight_reports_the_servers_reason() -> None:
+    """A refused connection becomes a retry that carries libpq's summary."""
+    with pytest.raises(ConfigEntryNotReady) as exc_info:
+        await async_check_database_reachable(_DOWN_DSN)
+
+    err = exc_info.value
+    assert err.translation_key == DATABASE_UNREACHABLE
+    detail = (err.translation_placeholders or {})["error"]
+    assert "127.0.0.1" in detail
+    assert "s3cret" not in detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enable_custom_integrations")
+async def test_home_assistant_retries_an_entry_whose_database_is_down(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through HA's own setup: SETUP_RETRY with the reason, not SETUP_ERROR."""
+    entry = _prepare_entry(hass, monkeypatch)
+    _patch_configured_database(monkeypatch, _ReachablePool)
+    monkeypatch.setattr(
+        hga_component,
+        "build_database_uri_from_entry",
+        lambda _e: _DOWN_DSN,
+    )
+    # The real preflight, against a port nothing listens on.
+    monkeypatch.setattr(
+        hga_component, "async_check_database_reachable", async_check_database_reachable
+    )
+
+    # ConfigEntry.async_setup is where HA turns the exception into a state and
+    # a scheduled retry; the manager's wrapper would first set up the
+    # conversation and recorder dependencies, which the test env lacks.
+    # Component setup loads the integration's translations and marks it loaded
+    # before any entry is set up (homeassistant/setup.py); the card's reason is
+    # rendered from them.
+    await translation.async_load_integrations(hass, {DOMAIN})
+    hass.config.components.add(DOMAIN)
+    async with entry.setup_lock:
+        await entry.async_setup(hass)
+
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert entry.reason is not None
+    assert entry.reason.startswith("Cannot reach the PostgreSQL database yet:")
+    assert "127.0.0.1" in entry.reason
+    assert "s3cret" not in entry.reason
+
+
+def test_connection_failures_are_told_from_bugs() -> None:
+    """Only a failure to reach the server is retried."""
+    assert is_connection_failure(OperationalError("down"))
+    assert is_connection_failure(PoolTimeout("timeout"))
+    assert not is_connection_failure(RuntimeError("bug"))
+    assert not is_connection_failure(pg_errors.UndefinedTable("no table"))
+
+
+@pytest.mark.parametrize(
+    "err",
+    [
+        pg_errors.ConnectionFailure("lost"),  # 08006
+        pg_errors.AdminShutdown("terminating connection"),  # 57P01
+        pg_errors.CannotConnectNow("the database system is starting up"),
+        pg_errors.TooManyConnections("too many clients"),  # 53300
+    ],
+)
+def test_server_connection_errors_are_retried(err: Exception) -> None:
+    """A server that drops or refuses the connection is retried."""
+    assert is_connection_failure(err)
+
+
+@pytest.mark.parametrize(
+    "err",
+    [
+        # An hnsw index over pgvector's 2000-dimension limit.
+        pg_errors.ProgramLimitExceeded("column cannot have more than 2000"),
+        pg_errors.DiskFull("could not extend file"),
+        pg_errors.QueryCanceled("statement timeout"),
+        pg_errors.LockNotAvailable("could not obtain lock"),
+    ],
+)
+def test_server_side_operational_errors_are_not_retried(err: Exception) -> None:
+    """
+    An OperationalError the server raised about the work is permanent.
+
+    Retrying it would loop every 10 minutes behind a "cannot reach" message.
+    """
+    assert not is_connection_failure(err)
+
+
+@pytest.mark.asyncio
+async def test_settings_libpq_rejects_fail_setup_with_their_reason() -> None:
+    """An unknown connection option cannot be fixed by a retry."""
+    with pytest.raises(ConfigEntryError) as exc_info:
+        await async_check_database_reachable(f"{_DOWN_DSN} not_an_option=1")
+
+    err = exc_info.value
+    assert err.translation_key == DATABASE_INVALID_SETTINGS
+    detail = (err.translation_placeholders or {})["error"]
+    assert "not_an_option" in detail
+    assert "s3cret" not in detail
+
+
+@pytest.mark.parametrize("password", ["p@ssw0rd", "a/b?c#d:e%f g"])
+def test_database_uri_keeps_special_characters_in_the_password(
+    password: str,
+) -> None:
+    """The password is read back whole by libpq, not as part of the host."""
+    from psycopg.conninfo import conninfo_to_dict  # noqa: PLC0415
+
+    uri = build_postgres_uri(
+        {
+            "username": "ha@user",
+            "password": password,
+            "host": "127.0.0.1",
+            "port": 1,
+            "db_name": "ha_db",
+        }
+    )
+
+    parsed = conninfo_to_dict(uri)
+    assert parsed["password"] == password
+    assert parsed["user"] == "ha@user"
+    assert parsed["host"] == "127.0.0.1"
+
+
+@pytest.mark.asyncio
+async def test_unreachable_reason_never_echoes_a_password_with_an_at_sign() -> None:
+    """Unencoded, 'p@ssw0rd' made libpq report host 'ssw0rd@127.0.0.1'."""
+    uri = build_postgres_uri(
+        {
+            "username": "ha_user",
+            "password": "p@ssw0rd",
+            "host": "127.0.0.1",
+            "port": 1,
+            "db_name": "ha_db",
+        }
+    )
+
+    with pytest.raises(ConfigEntryNotReady) as exc_info:
+        await async_check_database_reachable(uri)
+
+    detail = (exc_info.value.translation_placeholders or {})["error"]
+    assert "127.0.0.1" in detail
+    assert "ssw0rd" not in detail
+
+
+def test_unreachable_message_keeps_only_the_first_line() -> None:
+    """The card shows the libpq summary line, not its hints."""
+    err = database_unreachable(
+        OperationalError('connection to server at "db", port 5432 failed\n\tIs it up?')
+    )
+    assert err.translation_placeholders == {
+        "error": 'connection to server at "db", port 5432 failed'
+    }
 
 
 # ---------------------------------------------------------------------------
