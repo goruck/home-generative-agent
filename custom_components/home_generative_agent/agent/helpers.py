@@ -7,8 +7,9 @@ import importlib
 import json
 import logging
 import re
+import unicodedata
 import weakref
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from functools import partial
 from types import ModuleType
@@ -460,7 +461,8 @@ class ConfigurableData(TypedDict, total=False):
 class PinReply:
     """The user's message for one conversation turn, as a PIN source."""
 
-    text: str
+    # The message can hold the PIN, so keep it out of reprs and logs.
+    text: str = field(repr=False)
     # Set once a PIN from this message has authorized an action.
     spent: bool = False
 
@@ -480,7 +482,7 @@ MAX_PENDING_ACTIONS = 16
 PIN_AWAITING_USER_REPLY = "awaiting_user_pin"
 
 # Spoken digits as speech-to-text may write them, in the languages the PIN
-# messages ship in (pin_messages.py).
+# messages ship in (pin_messages.py); Czech also without diacritics.
 _SPOKEN_DIGITS = {
     "zero": "0",
     "one": "1",
@@ -498,35 +500,65 @@ _SPOKEN_DIGITS = {
     "jedno": "1",
     "dva": "2",
     "dvě": "2",
+    "dve": "2",
     "tři": "3",
+    "tri": "3",
     "čtyři": "4",
+    "ctyri": "4",
     "pět": "5",
+    "pet": "5",
     "šest": "6",
+    "sest": "6",
     "sedm": "7",
     "osm": "8",
     "devět": "9",
+    "devet": "9",
 }
 _WORD_RE = re.compile(r"[^\W\d_]+")
-# Digits separated only by spaces, commas, dots or dashes ("1, 2, 3, 4",
-# "12 34") are read as one number, the way a transcript spells a PIN out.
-_DIGIT_GROUP_RE = re.compile(r"\d(?:[\s,.\-]*\d)*")
+# A number standing alone: digits, optionally joined by "." "-" ":" "/" into a
+# compound such as a date, time, decimal or phone number. Letters or digits
+# on either side mean it is part of something else ("abc1234xyz").
+_NUMBER_RE = re.compile(r"(?<!\w)\d+(?:[.\-:/]\d+)*(?!\w)")
+# What may separate digits that are read out one by one ("1, 2, 3, 4").
+_DIGIT_GAP_RE = re.compile(r"[\s,\-]*")
 
 
 def pin_in_text(pin: str, text: str) -> bool:
     """
-    Return True when the user's message contains exactly this PIN.
+    Return True when the user's message contains this PIN, as a PIN.
 
-    Matches the PIN as a whole number, written as digits or as spoken digit
-    words, with or without separators between the digits. A PIN inside a
-    longer number does not match.
+    Two forms count: the PIN as a number standing alone ("1234"), and its
+    digits read out one by one, as digits or as spoken digit words, with or
+    without separators ("1 2 3 4", "1-2-3-4", "one two three four"). A PIN
+    inside a longer number, word, date, time, decimal or phone number does not
+    count, so ordinary numbers in a message are not read as a PIN.
     """
     if not pin or not text:
         return False
-    spoken = _WORD_RE.sub(
+    # Unicode digits (Arabic-Indic, full-width, ...) as ASCII.
+    text = "".join(
+        str(unicodedata.decimal(char)) if char.isdecimal() else char for char in text
+    )
+    text = _WORD_RE.sub(
         lambda m: _SPOKEN_DIGITS.get(m.group(0).lower(), m.group(0)), text
     )
-    for group in _DIGIT_GROUP_RE.findall(spoken):
-        if re.sub(r"\D", "", group) == pin or pin in re.split(r"\D+", group):
+    digits = ""
+    previous_end = None
+    for match in _NUMBER_RE.finditer(text):
+        number = match.group(0)
+        if number == pin:
+            return True
+        parts = re.split(r"[.\-:/]", number)
+        if any(len(part) != 1 for part in parts):
+            # A multi-digit number ends a run of single digits.
+            digits, previous_end = "", None
+            continue
+        joined = previous_end is not None and _DIGIT_GAP_RE.fullmatch(
+            text[previous_end : match.start()]
+        )
+        digits = (digits if joined else "") + "".join(parts)
+        previous_end = match.end()
+        if pin in digits:
             return True
     return False
 

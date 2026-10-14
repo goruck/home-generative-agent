@@ -72,6 +72,34 @@
 
 ---
 
+### Sentinel's "Ask agent" handoff text is treated as a user-written PIN source
+
+**What:** `_outcome_for_handoff` (`notify/actions.py`) passes a generated Sentinel prompt (finding evidence, device names, readings, timestamps) to `conversation.process`. `conversation.py` wraps every turn's text in `PinReply`, so the generated text is checked by `pin_in_text` as if a person wrote it. The handoff conversation is fresh, so the model has no PIN from history, but a model that tries the numbers in the prompt as PIN guesses succeeds when the PIN equals one of them standing alone (a year such as 2026, a reading such as 1234 W); each wrong guess counts one of the five attempts.
+
+**Why:** Codex P1 in the second review pass of PR #769 (2026-10-14), verified against the code. The bounded matcher from the same PR removes the date/time/decimal forms, but a bare number in the prompt still counts. The maintainer chose to defer it.
+
+**How to apply:** Have the handoff call `conversation.process` with its own `Context`, record that context id in a short-lived set on `runtime_data`, and in `conversation.py` give a turn whose `user_input.context.id` is in the set an empty `PinReply`, so no generated text can confirm. Test that a handoff turn refuses a confirmation whose PIN is in its prompt.
+
+**Effort:** S
+**Priority:** P1
+**Depends on:** None
+
+---
+
+### PIN confirmation test gaps left after PR #769
+
+**What:** The second review pass's testing specialist named five gaps, each with a stub: (1) one PIN message installing two held automations (no automation test keeps one `PinReply` across confirmations, so moving the spend off the automation path stays green); (2) a wrong PIN then the right one from the same message (a mutation spending before the PIN check stays green); (3) a test sending confirmations through `graph._run_langchain_tool` inside a runnable, which checks that `PinReply` and `pending_actions` keep their identity through LangChain's config handling (verified by a scratch probe in the review, not by a test); (4) a caller with no `thread_id` confirming by id and without one; (5) rows where a single-digit run and a whole number share a message.
+
+**Why:** Full review of PR #769 (2026-10-14). The maintainer chose to defer the test gaps.
+
+**How to apply:** Add the five tests to `tests/custom_components/home_generative_agent/test_pin_reply_binding.py` and `test_add_automation_pin.py` from the stubs in the review; mutation-check each against the behavior it pins.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** None
+
+---
+
 ### Resolve the schema converter from probatio directly on HA 2026.10
 
 **What:** `_resolve_converter` in `agent/helpers.py` looks for `to_openapi` / `UNSUPPORTED` on `homeassistant.helpers.llm` first. HA 2026.10's `llm.py` imports `probatio` and no longer re-exports either name, so every 2026.10 install falls through to the fallback that checks whether `vol.Schema.__module__` starts with `probatio`. That works today (probatio 0.13.0 reports `probatio.schema`, and the box ran fine), but if the check ever misses, the code imports `voluptuous_openapi`, which 2026.10 does not install, and the module fails at import. The docstring's claim that core re-exports these names is no longer true.
@@ -2445,7 +2473,7 @@ incrementing `attempts`, so a chatty model cannot burn the user's budget.
 **Priority:** P2
 **Depends on:** v3.41.1
 
-**Resolution:** Fixed together with "A confirmed critical action that fails can be re-run without a new PIN" (PR #769). `conversation.py` puts the user's message for the turn into the configurable as a `PinReply` (`agent/helpers.py`), and `confirm_sensitive_action` refuses, before the PIN is checked and without counting an attempt, any PIN that `pin_in_text` does not find in that message (digits with or without separators, or English/Czech digit words; a PIN inside a longer number does not match). The refusal is JSON with status `awaiting_user_pin`, which `_has_pending_pin_confirmation` treats as still pending. A first version compared turn ids instead (refuse a confirm in the turn that created the action); the full review showed it only delayed history replay by one turn (an unrelated reply such as "never mind" still passed, with the confirm tool force-injected) and could lock out a model that re-issued the tool in the reply turn, so it was replaced. Pinned by `test_pin_reply_binding.py`.
+**Resolution:** Fixed together with "A confirmed critical action that fails can be re-run without a new PIN" (PR #769). `conversation.py` puts the user's message for the turn into the configurable as a `PinReply` (`agent/helpers.py`), and `confirm_sensitive_action` refuses, before the PIN is checked and without counting an attempt, any PIN that `pin_in_text` does not find in that message (a number standing alone, or digits read out one by one with or without separators, as digits or English/Czech digit words; a PIN inside a longer number, word, date, time, decimal or phone number does not match, after the second review pass showed `12.34`, `555-1234` and `abc1234xyz` matching). The refusal is JSON with status `awaiting_user_pin`, which `_has_pending_pin_confirmation` treats as still pending. A first version compared turn ids instead (refuse a confirm in the turn that created the action); the full review showed it only delayed history replay by one turn (an unrelated reply such as "never mind" still passed, with the confirm tool force-injected) and could lock out a model that re-issued the tool in the reply turn, so it was replaced. Pinned by `test_pin_reply_binding.py`.
 
 ### `replace_partial` drops tool calls when it re-commits the last entry
 

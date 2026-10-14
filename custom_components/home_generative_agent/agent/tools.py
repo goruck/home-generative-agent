@@ -1019,12 +1019,6 @@ async def confirm_sensitive_action(  # noqa: D417
     if pin_err:
         return pin_err
 
-    # Spend the user's message before anything awaits, so one PIN message runs
-    # one action: not a re-issued action after a failure, and not a second
-    # confirmation in the same asyncio.gather batch.
-    pin_reply = cfg.get("pin_reply")
-    if pin_reply is not None:  # Always set here: the refusal requires it.
-        pin_reply.spent = True
     result, exec_err = await _execute_pending_action(resolved_action_id, action, cfg)
     return result or exec_err or pin_msg(hass, "confirmation_unable_to_process")
 
@@ -1035,9 +1029,14 @@ def _resolve_action_id(
     thread_id: str | None,
 ) -> str | None:
     """Return a valid action_id or None if it cannot be resolved safely."""
-    if requested_action_id and requested_action_id in pending_actions:
-        return requested_action_id
-    if requested_action_id or not thread_id:
+    if not thread_id:
+        return None
+    if requested_action_id:
+        # Another conversation's action reads as missing before any other
+        # check, so no reply tells this caller it exists.
+        action = pending_actions.get(requested_action_id)
+        if action and action.get("thread_id") == thread_id:
+            return requested_action_id
         return None
     # Without an id, take the conversation's only pending action. The store is
     # shared by every conversation, and satellites and automations share one
@@ -1127,14 +1126,15 @@ def _confirmation_refusal(
         return pin_msg(hass, "pending_action_wrong_user")
     thread_id = cfg.get("thread_id")
     if not thread_id or action.get("thread_id") != thread_id:
-        # Another conversation's action reads as missing, so its id is not
-        # confirmed to exist.
+        # _resolve_action_id already refuses another conversation's action;
+        # kept so this check never depends on how the id was resolved.
         return pin_msg(hass, "pending_action_not_found_or_expired")
     # Refused before the PIN is checked, so no attempt is counted.
     pin_reply = cfg.get("pin_reply")
     if pin_reply is None or not pin_in_text(provided_pin, pin_reply.text):
         # The PIN came from the model (guessed, or reused from earlier in the
         # conversation), not from the user's message for this turn.
+        _warn_if_correct_pin_refused(cfg, provided_pin)
         reason = "pin_awaiting_user_reply"
     elif pin_reply.spent:
         reason = "pin_reply_used"
@@ -1149,10 +1149,49 @@ def _confirmation_refusal(
     )
 
 
+def _warn_if_correct_pin_refused(cfg: Mapping[str, Any], provided_pin: str) -> None:
+    """
+    Log a correct PIN refused because it is not in the user's message.
+
+    Either the model reused the PIN from earlier in the conversation, or the
+    user said it in a form the matcher does not read, which would otherwise
+    leave them asked for the PIN again with nothing to report.
+    """
+    opts = cfg.get("options", {})
+    pin_hash = opts.get(CONF_CRITICAL_ACTION_PIN_HASH, "")
+    salt = opts.get(CONF_CRITICAL_ACTION_PIN_SALT, "")
+    if not (pin_hash and salt and provided_pin.isdigit()):
+        return
+    if verify_pin(provided_pin, hashed=pin_hash, salt=salt):
+        LOGGER.warning(
+            "Refused a correct critical-action PIN that is not in the user's "
+            "current message: the model took it from earlier in the conversation, "
+            "or the user's PIN was transcribed in a form that is not read as "
+            "digits. Ask the user to say or type the PIN digits."
+        )
+
+
 def _is_wrong_user(cfg: Mapping[str, Any], action: Mapping[str, Any]) -> bool:
     requester_id = cfg.get("user_id")
     action_owner = action.get("user")
     return bool(requester_id and action_owner and requester_id != action_owner)
+
+
+def _claim_pending_action(cfg: Mapping[str, Any], action_id: str) -> bool:
+    """
+    Take the action out of the store and spend the user's PIN message on it.
+
+    Called right before the action runs, with nothing awaited in between, so
+    one confirmation runs the action at most once (also across confirmations
+    in one asyncio.gather batch) and one PIN message runs one action: not a
+    second one, and not this one again after it fails.
+    """
+    if cfg.get("pending_actions", {}).pop(action_id, None) is None:
+        return False
+    pin_reply = cfg.get("pin_reply")
+    if pin_reply is not None:  # Always set here: the refusal requires it.
+        pin_reply.spent = True
+    return True
 
 
 async def _execute_pending_action(
@@ -1163,6 +1202,8 @@ async def _execute_pending_action(
     """Normalize args, claim the pending action, and execute it once."""
     raw_tool_name = action.get("tool_name")
     if not isinstance(raw_tool_name, str) or not raw_tool_name:
+        # Nothing can ever run it, so do not keep it until the TTL sweep.
+        cfg.get("pending_actions", {}).pop(resolved_action_id, None)
         return None, pin_msg(cfg.get("hass"), "pending_action_missing_tool_name")
     tool_name = raw_tool_name
 
@@ -1179,14 +1220,7 @@ async def _execute_pending_action(
     tool_args = maybe_fill_lock_entity(tool_args, cfg.get("hass"))
     tool_args = sanitize_tool_args(tool_args)
 
-    # Claim the action before calling the tool, so one PIN confirmation runs
-    # the device at most once. Left pending after a failure, it could be
-    # confirmed again with the PIN already in the conversation, in the same
-    # turn and without asking the user, and a tool that half-acted before
-    # reporting failure would act twice. Claiming first also stops two
-    # confirmations in one asyncio.gather batch from both running.
-    pending_actions = cfg.get("pending_actions", {})
-    if pending_actions.pop(resolved_action_id, None) is None:
+    if not _claim_pending_action(cfg, resolved_action_id):
         return None, pin_msg(cfg.get("hass"), "pending_action_not_found_or_expired")
 
     try:
@@ -1220,12 +1254,7 @@ async def _execute_pending_automation(
     if hass is None or not isinstance(automation_config, dict):
         return None, pin_msg(hass, "pending_automation_invalid")
 
-    # Claim the action before writing. Tool calls in one model batch run under
-    # asyncio.gather, so two confirmations of the same action_id would both
-    # pass PIN verification and both append the automation if the entry were
-    # only removed afterwards.
-    pending_actions = cfg.get("pending_actions", {})
-    if pending_actions.pop(resolved_action_id, None) is None:
+    if not _claim_pending_action(cfg, resolved_action_id):
         return None, pin_msg(hass, "pending_action_not_found_or_expired")
 
     try:

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -331,21 +332,68 @@ async def test_an_unexpected_error_still_uses_up_the_confirmation() -> None:
         ("1234", True),
         ("my PIN is 1234.", True),
         ("1, 2, 3, 4", True),
-        ("12 34", True),
         ("1-2-3-4", True),
         ("one two three four", True),
         ("One, two, three, four.", True),
         ("jedna dva tři čtyři", True),
+        ("jedna dve tri ctyri", True),
         ("unlock 2 doors, PIN 1234", True),
+        ("door 1, 1234", True),
+        ("PIN 1 2 3 4, 2 doors please", True),
+        ("My PIN is one two three four. One door only.", True),
+        ("\u0661\u0662\u0663\u0664", True),  # Arabic-Indic digits
+        ("\uff11\uff12\uff13\uff14", True),  # full-width digits
         ("51234", False),
         ("12345", False),
         ("1 2 3", False),
+        ("12 34", False),
         ("never mind", False),
         ("", False),
+        # Ordinary numbers in a message are not a PIN (review of PR #769).
+        ("Cancel the unlock. The invoice total is 12.34 dollars.", False),
+        ("Do not unlock; the serial is abc1234xyz.", False),
+        ("Use tracking number 1234-5678.", False),
+        ("call 555-1234", False),
+        ("at 12.34 please", False),
     ],
 )
 def test_pin_in_text(text: str, *, expected: bool) -> None:
     assert pin_in_text(PIN, text) is expected
+
+
+@pytest.mark.parametrize(
+    ("pin", "text"),
+    [
+        ("2024", "remind me on 2024-10-14"),
+        ("1014", "on 10-14 at 9"),
+        ("1230", "at 12.30 please"),
+        ("2130", "set the thermostat to 21.30"),
+        ("2021", "set bedroom to 20, 21"),
+        ("2026", "Alert at 2026-10-14T12:34:56"),
+    ],
+)
+def test_dates_times_and_lists_are_not_a_pin(pin: str, text: str) -> None:
+    assert pin_in_text(pin, text) is False
+
+
+def test_the_users_message_is_not_in_the_repr() -> None:
+    assert PIN not in repr(PinReply(f"my PIN is {PIN}"))
+
+
+async def test_a_correct_pin_refused_for_not_being_in_the_message_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A voice user whose PIN is transcribed unreadably is not left in silence."""
+    api = _FakeAPI()
+    turns = _Turns(api)
+    action_id = turns.request_unlock()
+    turns.say("twelve thirty-four")
+
+    with caplog.at_level(logging.WARNING):
+        await turns.confirm(action_id)
+
+    assert "Refused a correct critical-action PIN" in caplog.text
+    assert PIN not in caplog.text
 
 
 def test_a_refusal_then_completion_ends_the_pin_flow() -> None:

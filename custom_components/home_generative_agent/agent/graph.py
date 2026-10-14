@@ -2264,7 +2264,12 @@ def _last_routing_rejection_idx(recent: Sequence[AnyMessage]) -> int | None:
 
 
 def _is_awaiting_user_pin(content: str) -> bool:
-    """Return True for a confirmation refused because the user gave no PIN."""
+    """
+    Return True for a confirmation refused before the PIN was checked.
+
+    The PIN was not in the user's current message, or that message already
+    confirmed an action.
+    """
     try:
         data = json.loads(content)
     except (json.JSONDecodeError, ValueError):
@@ -2298,7 +2303,7 @@ def _has_pending_pin_confirmation(messages: Sequence[AnyMessage]) -> bool:
                     continue
                 if _is_awaiting_user_pin(content):
                     # Refused before the PIN was checked (not in the user's
-                    # message) — still pending for the user's reply.
+                    # message, or the message already used) — still pending.
                     continue
                 if getattr(msg, "status", None) == "error":
                     # Routing or tool error on confirm_sensitive_action itself —
