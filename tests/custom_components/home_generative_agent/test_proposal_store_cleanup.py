@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-import datetime
+import datetime as dt
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -36,8 +36,8 @@ def _store_with_records(records: list[dict[str, Any]]) -> ProposalStore:
 
 
 def _days_ago(days: float) -> str:
-    dt = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=days)
-    return dt.isoformat()
+    stamp = dt.datetime.now(dt.UTC) - dt.timedelta(days=days)
+    return stamp.isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -156,8 +156,7 @@ async def test_cleanup_does_not_call_save_when_nothing_removed() -> None:
 @pytest.mark.asyncio
 async def test_cleanup_naive_datetime_treated_as_utc() -> None:
     naive_old = (
-        datetime.datetime.now(datetime.UTC)
-        - datetime.timedelta(days=_UNSUPPORTED_TTL_DAYS + 2)
+        dt.datetime.now(dt.UTC) - dt.timedelta(days=_UNSUPPORTED_TTL_DAYS + 2)
     ).replace(tzinfo=None)
     record = _make_proposal("c13", "unsupported", naive_old.isoformat())
     store = _store_with_records([record])
@@ -181,7 +180,7 @@ async def test_approved_at_stamped_on_first_approval() -> None:
     assert updated is True
     assert "approved_at" in store._records[0]
     # Must be a valid ISO-8601 timestamp.
-    parsed = datetime.datetime.fromisoformat(store._records[0]["approved_at"])
+    parsed = dt.datetime.fromisoformat(store._records[0]["approved_at"])
     assert parsed.tzinfo is not None  # timezone-aware
 
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import datetime
+import datetime as dt
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -79,9 +79,7 @@ class ProposalStore:
         self._records so that list mutation is safe. Records with a missing or
         unparseable created_at are left in place rather than silently dropped.
         """
-        cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(
-            days=_UNSUPPORTED_TTL_DAYS
-        )
+        cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(days=_UNSUPPORTED_TTL_DAYS)
         keep: list[dict[str, Any]] = []
         removed = 0
         for record in list(self._records):
@@ -93,9 +91,9 @@ class ProposalStore:
                 if created_raw is None:
                     keep.append(record)
                     continue
-                created_at = datetime.datetime.fromisoformat(str(created_raw))
+                created_at = dt.datetime.fromisoformat(str(created_raw))
                 if created_at.tzinfo is None:
-                    created_at = created_at.replace(tzinfo=datetime.UTC)
+                    created_at = created_at.replace(tzinfo=dt.UTC)
             except (ValueError, TypeError):
                 keep.append(record)
                 continue
