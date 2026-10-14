@@ -941,6 +941,30 @@ def test_other_client_errors_still_stop_the_chain() -> None:
         assert _is_retryable(err) is False
 
 
+def _auth_error_raised_in_a_404_handler() -> Exception:
+    """Return a 401 raised while a 404 was handled: the 404 is only context."""
+    import ollama  # noqa: PLC0415
+
+    try:
+        try:
+            not_found = "model not found"
+            raise ollama.ResponseError(not_found, 404)  # noqa: TRY301
+        except ollama.ResponseError:
+            raise _http_error(
+                openai.AuthenticationError, 401, "Incorrect API key"
+            ) from None
+    except openai.AuthenticationError as err:
+        return err
+
+
+def test_error_raised_while_handling_a_404_is_not_a_missing_model() -> None:
+    """Only an explicit cause counts: a 401 raised in a 404 handler still stops."""
+    err = _auth_error_raised_in_a_404_handler()
+    assert err.__context__ is not None
+    assert not is_model_not_found(err)
+    assert _is_retryable(err) is False
+
+
 def _ollama_missing(model: str = "not-pulled") -> Exception:
     import ollama  # noqa: PLC0415
 

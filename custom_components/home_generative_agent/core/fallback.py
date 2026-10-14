@@ -160,8 +160,8 @@ def invoke_dropping_unsupported_params(
 
 
 _HTTP_NOT_FOUND = 404
-# How far down __cause__/__context__ to look: provider wrappers re-raise the
-# SDK's error once or twice (langchain-google-genai wraps Gemini's).
+# How far down __cause__ to look: provider wrappers re-raise the SDK's error
+# once or twice with ``raise ... from`` (langchain-google-genai wraps Gemini's).
 _MAX_CAUSE_DEPTH = 5
 
 
@@ -173,8 +173,9 @@ def is_model_not_found(err: BaseException) -> bool:
     Anthropic and Gemini return their own 404s for an unknown model name, and
     an OpenAI-compatible server at the wrong path does the same. Each SDK
     carries the status differently (``status_code``, or ``code`` for Google),
-    and some wrappers keep the SDK error only as the cause, so the chain is
-    walked.
+    and some wrappers keep the SDK error only as the cause, so the causes are
+    walked. ``__context__`` is not: an error raised while some caller was
+    handling a 404 (a rejected key, say) is not a missing model.
     """
     seen: BaseException | None = err
     for _ in range(_MAX_CAUSE_DEPTH):
@@ -186,7 +187,7 @@ def is_model_not_found(err: BaseException) -> bool:
             # codes do not.
             if isinstance(value, int) and value == _HTTP_NOT_FOUND:
                 return True
-        seen = seen.__cause__ or seen.__context__
+        seen = seen.__cause__
     return False
 
 
