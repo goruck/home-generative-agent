@@ -70,19 +70,6 @@
 
 ---
 
-### The PIN prompt does not say which action it confirms, deterministically
-
-**What:** The `requires_pin` payload carries a `reason` ("Critical action requires PIN confirmation."), and the model writes the prompt the user hears. Nothing the user sees is generated from the pending action itself, so a model misled by text it read (a camera description, a device name) can describe a different action than the one the PIN will run.
-
-**Why:** Fourth review pass of PR #769, third cycle (2026-10-15), Claude adversarial: the trust boundary of the PIN is the model's description of the action.
-
-**How to apply:** Build a "Confirming: unlock Front Door" line from the pending action (tool name, target names, automation alias) in `_critical_action_guard` and the automation hold, and append it to the spoken reply deterministically in `conversation.py`, so it does not depend on the model repeating it.
-
-**Effort:** M
-**Priority:** P2
-
----
-
 ### A PIN-confirmed action's error text still reaches the log
 
 **What:** `_execute_pending_action` and `_execute_pending_automation` (`agent/tools.py`) hand the model only the error type after the claim, but `LOGGER.exception` logs the full exception, whose message can hold a URL with a token or a file path. The log is readable by every admin and often pasted into issues.
@@ -2459,6 +2446,21 @@ This is the same allowlist-omission class as #480 and as the triage options fixe
 ---
 
 ## Completed
+
+### The PIN prompt does not say which action it confirms, deterministically
+
+**What:** The `requires_pin` payload carries a `reason` ("Critical action requires PIN confirmation."), and the model writes the prompt the user hears. Nothing the user sees is generated from the pending action itself, so a model misled by text it read (a camera description, a device name) can describe a different action than the one the PIN will run.
+
+**Why:** Fourth review pass of PR #769, third cycle (2026-10-15), Claude adversarial: the trust boundary of the PIN is the model's description of the action.
+
+**How to apply:** Build a "Confirming: unlock Front Door" line from the pending action (tool name, target names, automation alias) in `_critical_action_guard` and the automation hold, and append it to the spoken reply deterministically in `conversation.py`, so it does not depend on the model repeating it.
+
+**Effort:** M
+**Priority:** P2
+
+**Completed:** PR #769 (2026-10-15), after a field test where the model asked for the PIN "to lock" the door while the held call was HassTurnOff, which unlocked it. `describe_pending_action` (pin_messages.py) names the held action, HassTurnOn/HassTurnOff on a lock as lock/unlock the way HA runs them. `_async_add_pin_lines` (conversation.py) joins "Your PIN will confirm: …" for every prompt awaiting the next message and "PIN accepted: …" after a confirmed action to the reply, streamed as a delta so a speaking pipeline says it. The `requires_pin` payload also carries `action`. Same PR: `_append_on_off_partners` (graph.py) binds HassTurnOn and HassTurnOff together, so the model cannot be left with only the opposite command.
+
+---
 
 ### A tool timeout after a confirmation is claimed keeps the PIN flow "pending"
 

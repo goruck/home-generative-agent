@@ -24,7 +24,15 @@ fall back to the English string automatically.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
+
+from .helpers import (
+    base_tool_name,
+    is_on_off_intent,
+    normalize_intent_for_lock,
+    sanitize_tool_text,
+)
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -108,6 +116,15 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "user's PIN. Ask for that PIN first; the user can request this one "
             "afterwards."
         ),
+        "pin_confirm_line": "Your PIN will confirm: {action}.",
+        "pin_done_line": "PIN accepted: {action}.",
+        "action_lock": "lock {target}",
+        "action_unlock": "unlock {target}",
+        "action_turn_on": "turn on {target}",
+        "action_turn_off": "turn off {target}",
+        "action_service": "{service} {target}",
+        "action_automation": 'add the automation "{target}"',
+        "action_unnamed_target": "an unnamed device",
     },
     "cs": {
         "automation_pin_unset": (
@@ -187,6 +204,15 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "požádejte o PIN k té čekající akci; o tuto akci může uživatel "
             "požádat potom."
         ),
+        "pin_confirm_line": "Váš PIN potvrdí: {action}.",
+        "pin_done_line": "PIN přijat: {action}.",
+        "action_lock": "zamknout {target}",
+        "action_unlock": "odemknout {target}",
+        "action_turn_on": "zapnout {target}",
+        "action_turn_off": "vypnout {target}",
+        "action_service": "{service} {target}",
+        "action_automation": "přidat automatizaci „{target}“",
+        "action_unnamed_target": "nepojmenované zařízení",
     },
 }
 
@@ -216,3 +242,60 @@ def pin_msg(hass: HomeAssistant | None, key: str, /, **kwargs: Any) -> str:
     table = _MESSAGES.get(language, _MESSAGES[_DEFAULT_LANGUAGE])
     template = table.get(key) or _MESSAGES[_DEFAULT_LANGUAGE].get(key) or key
     return template.format(**kwargs) if kwargs else template
+
+
+# Longest target name the action line repeats. The name comes from the model.
+_ACTION_TARGET_MAX_LEN = 80
+
+
+def _action_target(hass: HomeAssistant | None, value: Any) -> str:
+    """Return the target as one bounded line, or the unnamed-device words."""
+    if isinstance(value, list):
+        value = ", ".join(str(v) for v in value if v)
+    text = " ".join(str(value or "").split())
+    if not text:
+        return pin_msg(hass, "action_unnamed_target")
+    return sanitize_tool_text(text, limit=_ACTION_TARGET_MAX_LEN)
+
+
+def describe_pending_action(
+    hass: HomeAssistant | None, action: Mapping[str, Any]
+) -> str:
+    """
+    Name the action a PIN confirms, from what will run, not from the model.
+
+    An on/off intent on a lock is named the way Home Assistant runs it:
+    HassTurnOn locks and HassTurnOff unlocks, whatever service the model
+    added. Field test 2026-10-15: the model asked for the PIN "to lock the
+    door" while the held call was HassTurnOff, and the PIN unlocked it.
+    """
+    tool_name = str(action.get("tool_name") or "")
+    if tool_name == "add_automation":
+        config = action.get("automation_config")
+        alias = config.get("alias") if isinstance(config, Mapping) else None
+        return pin_msg(hass, "action_automation", target=_action_target(hass, alias))
+
+    raw_args = action.get("tool_args")
+    tool_args: dict[str, Any] = dict(raw_args) if isinstance(raw_args, Mapping) else {}
+    target = _action_target(
+        hass,
+        tool_args.get("name")
+        or tool_args.get("entity_id")
+        or tool_args.get("entity_ids")
+        or tool_args.get("area"),
+    )
+    if is_on_off_intent(tool_name):
+        turns_on = base_tool_name(tool_name) == "HassTurnOn"
+        if normalize_intent_for_lock(tool_name, tool_args).get("domain") == ["lock"]:
+            key = "action_lock" if turns_on else "action_unlock"
+        else:
+            key = "action_turn_on" if turns_on else "action_turn_off"
+        return pin_msg(hass, key, target=target)
+
+    service = str(tool_args.get("service") or base_tool_name(tool_name))
+    return pin_msg(
+        hass,
+        "action_service",
+        service=sanitize_tool_text(service.replace("_", " "), limit=40),
+        target=target,
+    )

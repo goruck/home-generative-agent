@@ -111,7 +111,7 @@ from .helpers import (
     tool_inclusions,
     tool_index_key,
 )
-from .pin_messages import pin_msg
+from .pin_messages import describe_pending_action, pin_msg
 from .token_counter import count_tokens_cross_provider
 
 if TYPE_CHECKING:
@@ -423,16 +423,14 @@ def _critical_action_guard(
 
     configurable = ctx.config.get("configurable", {})
     pin_reply = configurable.get("pin_reply")
-    action_id = register_pending_action(
-        ctx.pending_actions,
-        {
-            "tool_name": tool_name,
-            "tool_args": tool_args,
-            "user": configurable.get("user_id"),
-            "thread_id": configurable.get("thread_id"),
-            "turn_id": pin_reply.turn_id if pin_reply is not None else None,
-        },
-    )
+    action = {
+        "tool_name": tool_name,
+        "tool_args": tool_args,
+        "user": configurable.get("user_id"),
+        "thread_id": configurable.get("thread_id"),
+        "turn_id": pin_reply.turn_id if pin_reply is not None else None,
+    }
+    action_id = register_pending_action(ctx.pending_actions, action)
     if action_id is None:
         # Another protected request is already waiting for this turn's PIN
         # prompt; the user asks for this one after answering it.
@@ -447,6 +445,7 @@ def _critical_action_guard(
             {
                 "status": "requires_pin",
                 "action_id": action_id,
+                "action": describe_pending_action(ctx.hass, action),
                 "reason": pin_msg(ctx.hass, "direct_requires_pin_reason"),
             }
         ),
@@ -1342,6 +1341,49 @@ async def _append_history_tool(  # noqa: PLR0913
         store, config, "get_entity_history", {"hga_local"}, live_tool_ids
     )
     return candidates if fetched is None else [*candidates, fetched]
+
+
+_ON_OFF_PARTNER = {"HassTurnOn": "HassTurnOff", "HassTurnOff": "HassTurnOn"}
+
+
+async def _append_on_off_partners(
+    candidates: list[RawTool],
+    store: BaseStore,
+    config: RunnableConfig,
+    live_tool_ids: set[tuple[str, str]] | None,
+) -> list[RawTool]:
+    """
+    Bind the other half of HassTurnOn/HassTurnOff when ranking bound one.
+
+    For a lock, HassTurnOn locks and HassTurnOff unlocks. Field test
+    2026-10-15: "Block the playroom, block" ranked only HassTurnOff, the
+    model's lock call was rejected as not retrieved, and it fell back to the
+    one it had, which unlocked the door. Looked up in the same API, and an
+    excluded tool is never bound (the raw index keeps excluded rows when the
+    live filter is off; see `_append_included_tools`).
+    """
+    excluded_names = tool_exclusions(config.get("configurable", {}).get("options", {}))
+    bound = {base_tool_name(t["name"]) for t in candidates}
+    for tool in candidates:
+        base = base_tool_name(tool["name"])
+        partner = _ON_OFF_PARTNER.get(base)
+        if partner is None or partner in bound:
+            continue
+        # Spelled like the bound one ("intent__HassTurnOff" → "intent__HassTurnOn").
+        fetched = await _get_tool_by_name(
+            store,
+            config,
+            tool["name"].removesuffix(base) + partner,
+            {tool["api_id"]},
+            live_tool_ids,
+        )
+        if fetched is None or is_tool_excluded(
+            fetched["name"], excluded_names.get(fetched["api_id"], ())
+        ):
+            continue
+        candidates = [*candidates, fetched]
+        bound.add(partner)
+    return candidates
 
 
 # How many trailing HUMAN turns establish automation-creation context for
@@ -2759,6 +2801,12 @@ async def _retrieve_tools(  # noqa: PLR0915
     # including follow-ups to one. Before 3e so inclusions dedupe against it.
     all_candidates = await _append_history_tool(
         all_candidates, store, config, query, state["messages"], live_tool_ids
+    )
+
+    # 3h. Bind HassTurnOn and HassTurnOff together. Before 3e so inclusions
+    # dedupe against it.
+    all_candidates = await _append_on_off_partners(
+        all_candidates, store, config, live_tool_ids
     )
 
     # 3e. Force-bind the user's always-included tools (issue #579). A

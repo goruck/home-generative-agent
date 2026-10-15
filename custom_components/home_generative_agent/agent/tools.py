@@ -121,7 +121,7 @@ from .helpers import (
     sanitize_tool_text,
     tool_call_data,
 )
-from .pin_messages import pin_msg
+from .pin_messages import describe_pending_action, pin_msg
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Mapping
@@ -867,23 +867,22 @@ def _maybe_require_pin_for_automation(
         LOGGER.error("Cannot gate critical automation: no pending action store.")
         return pin_msg(cfg.get("hass"), "automation_pending_store_unavailable")
 
-    action_id = register_pending_action(
-        pending_actions,
-        {
-            "tool_name": "add_automation",
-            "tool_args": {},
-            "automation_config": ha_automation_config,
-            "user": cfg.get("user_id"),
-            "thread_id": cfg.get("thread_id"),
-            "turn_id": _turn_id(cfg),
-        },
-    )
+    action = {
+        "tool_name": "add_automation",
+        "tool_args": {},
+        "automation_config": ha_automation_config,
+        "user": cfg.get("user_id"),
+        "thread_id": cfg.get("thread_id"),
+        "turn_id": _turn_id(cfg),
+    }
+    action_id = register_pending_action(pending_actions, action)
     if action_id is None:
         return pin_msg(cfg.get("hass"), "pin_one_action_at_a_time")
     return json.dumps(
         {
             "status": "requires_pin",
             "action_id": action_id,
+            "action": describe_pending_action(cfg.get("hass"), action),
             "reason": pin_msg(
                 cfg.get("hass"),
                 "automation_requires_pin_reason",
@@ -1271,6 +1270,13 @@ def _claim_pending_action(cfg: Mapping[str, Any], action_id: str) -> bool:
     return True
 
 
+def _record_confirmed(cfg: Mapping[str, Any], action: Mapping[str, Any]) -> None:
+    """Record on the user's message the action its PIN ran, for the reply."""
+    pin_reply = cfg.get("pin_reply")
+    if pin_reply is not None:
+        pin_reply.confirmed = describe_pending_action(cfg.get("hass"), action)
+
+
 def _spend_pin_reply(cfg: Mapping[str, Any]) -> None:
     """Mark the user's PIN message as used for this turn."""
     pin_reply = cfg.get("pin_reply")
@@ -1325,6 +1331,7 @@ async def _execute_pending_action(
         reply_key, failure = "action_outcome_unknown", type(err).__name__
     else:
         if not response.error:
+            _record_confirmed(cfg, action)
             return json.dumps(
                 {
                     "status": "completed",
@@ -1364,6 +1371,7 @@ async def _execute_pending_automation(
         # The type only: the message can hold paths or tokens.
         return None, pin_msg(hass, "automation_outcome_unknown", err=type(err).__name__)
 
+    _record_confirmed(cfg, action)
     return json.dumps(
         {"status": "completed", "action_id": resolved_action_id, "result": result}
     ), None

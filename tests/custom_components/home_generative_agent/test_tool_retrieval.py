@@ -3476,6 +3476,7 @@ async def test_retrieve_tools_fallback_named_script_binds_at_limit_one() -> None
 
     The best keyword match still gets one slot past it, or "run the door
     history script" (an actuation request) could never bind the script.
+    HassTurnOff is bound outside the limit as HassTurnOn's partner.
     """
     config = _index_down_config(
         1, "HassTurnOn", "HassTurnOff", "GetLiveContext", "script__door_history"
@@ -3487,8 +3488,12 @@ async def test_retrieve_tools_fallback_named_script_binds_at_limit_one() -> None
         _fallback_state("run the door history script"), config, store=store
     )
 
-    assert {"HassTurnOn", "script__door_history"} <= result["tool_routing_map"].keys()
-    assert "HassTurnOff" not in result["tool_routing_map"]
+    assert result["tool_routing_map"].keys() == {
+        "HassTurnOn",
+        "HassTurnOff",
+        "script__door_history",
+        "GetLiveContext",
+    }
 
 
 def test_rank_fallback_reads_only_the_start_of_huge_descriptions() -> None:
@@ -3503,3 +3508,109 @@ def test_rank_fallback_reads_only_the_start_of_huge_descriptions() -> None:
     # "garage" is in the kept prefix; "telescope", far past it, is not read.
     assert ranked[0]["name"] == "alpha"
     assert matched == 1
+
+
+# ---------------------------------------------------------------------------
+# HassTurnOn / HassTurnOff are bound together
+# ---------------------------------------------------------------------------
+
+
+def _on_off_store(ranked: str) -> MagicMock:
+    """
+    Store replicating the 2026-10-15 field log: only one of the pair ranks.
+
+    "Block the playroom, block" bound intent__HassTurnOff but not
+    intent__HassTurnOn, so the model's lock call was rejected and it called
+    HassTurnOff, which unlocks a lock.
+    """
+    store = MagicMock()
+    store.asearch = AsyncMock(
+        return_value=[
+            _make_search_item("alarm_control", score=0.4, api_id="hga_local"),
+            _make_search_item(ranked, score=0.3, is_actuation=True),
+        ]
+    )
+    rows = {
+        f"assist::{name}": _make_search_item(name, score=0.0, is_actuation=True)
+        for name in ("intent__HassTurnOn", "intent__HassTurnOff")
+    }
+
+    async def aget(namespace: Any, key: str = "", **_kwargs: Any) -> Any:  # noqa: ARG001
+        return rows.get(key)
+
+    store.aget = AsyncMock(side_effect=aget)
+    return store
+
+
+def _on_off_config(*live: str, exclusions: Any = None) -> RunnableConfig:
+    options: dict[str, Any] = {
+        "llm_hass_api": ["assist"],
+        "tool_relevance_threshold": 0.15,
+    }
+    if exclusions is not None:
+        options["tool_exclusions"] = exclusions
+    configurable: dict[str, Any] = {
+        "options": options,
+        "tool_index_ready": True,
+        "langchain_tools": {"alarm_control": MagicMock()},
+    }
+    if live:
+        configurable["ha_llm_api"] = _live_llm_api(*live)
+    return cast("RunnableConfig", {"configurable": configurable})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ranked", "partner"),
+    [
+        ("intent__HassTurnOff", "intent__HassTurnOn"),
+        ("intent__HassTurnOn", "intent__HassTurnOff"),
+    ],
+)
+async def test_retrieve_tools_binds_the_on_off_partner(
+    ranked: str, partner: str
+) -> None:
+    result = await _retrieve_tools(
+        _history_state("Block the playroom, block."),
+        _on_off_config("intent__HassTurnOn", "intent__HassTurnOff"),
+        store=_on_off_store(ranked),
+    )
+    assert ranked in result["tool_routing_map"]
+    assert result["tool_routing_map"][partner] == "assist"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_does_not_bind_a_partner_that_is_not_live() -> None:
+    result = await _retrieve_tools(
+        _history_state("Block the playroom, block."),
+        _on_off_config("intent__HassTurnOff"),
+        store=_on_off_store("intent__HassTurnOff"),
+    )
+    assert "intent__HassTurnOn" not in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_does_not_bind_an_excluded_partner() -> None:
+    """With the live filter off, the raw index still holds excluded tools."""
+    result = await _retrieve_tools(
+        _history_state("Block the playroom, block."),
+        _on_off_config(exclusions={"assist": ["intent__HassTurnOn"]}),
+        store=_on_off_store("intent__HassTurnOff"),
+    )
+    assert "intent__HassTurnOff" in result["tool_routing_map"]
+    assert "intent__HassTurnOn" not in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_binds_no_on_off_tool_when_neither_ranked() -> None:
+    store = _on_off_store("intent__HassTurnOff")
+    store.asearch = AsyncMock(
+        return_value=[_make_search_item("alarm_control", score=0.4, api_id="hga_local")]
+    )
+    result = await _retrieve_tools(
+        _history_state("what's the weather"),
+        _on_off_config("intent__HassTurnOn", "intent__HassTurnOff"),
+        store=store,
+    )
+    assert "intent__HassTurnOn" not in result["tool_routing_map"]
+    assert "intent__HassTurnOff" not in result["tool_routing_map"]

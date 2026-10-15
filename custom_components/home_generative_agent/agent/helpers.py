@@ -474,6 +474,9 @@ class PinReply:
     # Identifies this turn: a pending action records the turn that created it
     # and the one turn whose message may answer its PIN prompt.
     turn_id: str = field(default_factory=ulid.ulid_now)
+    # The action this message's PIN ran, as `describe_pending_action` names
+    # it, so the reply can say what ran in words the model did not choose.
+    confirmed: str = ""
 
 
 # How long a pending PIN confirmation stays valid, used by the sweep here and
@@ -1002,6 +1005,23 @@ def keep_pin_prompts(
     """
     for action in pending_actions.values():
         keep_pin_prompt(action, reply)
+
+
+def prompts_awaiting_reply(
+    pending_actions: Mapping[str, dict[str, Any]], reply: PinReply
+) -> list[dict[str, Any]]:
+    """
+    Return the actions whose PIN prompt the user's next message may answer.
+
+    A prompt made this turn, and one this turn answered that was kept for
+    another message (`keep_pin_prompt`).
+    """
+    return [
+        action
+        for action in pending_actions.values()
+        if action.get("turn_id") == reply.turn_id
+        or (action.get("reply_turn") == reply.turn_id and action.get("renew"))
+    ]
 
 
 def thread_has_pending_action(
