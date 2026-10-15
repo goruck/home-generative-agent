@@ -65,8 +65,17 @@ _MESSAGES: dict[str, dict[str, str]] = {
         ),
         "ha_llm_api_unavailable": "Home Assistant LLM API unavailable.",
         "pin_awaiting_user_reply": (
-            "Not confirmed: the PIN must be in the user's current message. "
-            "Ask the user for the PIN."
+            "Not confirmed: the PIN must be in the user's current message."
+        ),
+        "pin_retry_next_message": (
+            "The user can say the PIN again in their next message."
+        ),
+        "pin_say_digits": (
+            "Ask the user to say the PIN digits one by one in their next message."
+        ),
+        "pin_request_again": (
+            "That was the last reply this PIN prompt takes; the user has to make "
+            "the request again."
         ),
         "pin_reply_used": (
             "Not confirmed: the PIN in the user's current message was already used. "
@@ -80,9 +89,24 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "pending_automation_invalid": (
             "Pending automation is invalid; please re-run the request."
         ),
-        "automation_install_failed": (
-            "Failed to install the automation: {err}. "
-            "The confirmation was used up; please request the automation again."
+        "action_outcome_unknown": (
+            "The action may have run, but it ended with an unexpected error: "
+            "{err}. The confirmation was used up. Do not repeat the action; "
+            "tell the user to check the device before asking again."
+        ),
+        "automation_outcome_unknown": (
+            "The automation may have been installed, but the install ended with "
+            "an unexpected error: {err}. The confirmation was used up. Do not "
+            "repeat it; tell the user to check their automations first."
+        ),
+        "pin_reply_to_prompt_only": (
+            "Not confirmed: the PIN is accepted only in the user's reply to "
+            "this action's PIN prompt. Ask the user for the PIN now."
+        ),
+        "pin_one_action_at_a_time": (
+            "Not requested: another protected action is already waiting for the "
+            "user's PIN. Ask for that PIN first; the user can request this one "
+            "afterwards."
         ),
     },
     "cs": {
@@ -122,8 +146,15 @@ _MESSAGES: dict[str, dict[str, str]] = {
         ),
         "ha_llm_api_unavailable": "LLM API Home Assistantu není k dispozici.",
         "pin_awaiting_user_reply": (
-            "Nepotvrzeno: PIN musí být v aktuální zprávě uživatele. "
-            "Požádejte uživatele o PIN."
+            "Nepotvrzeno: PIN musí být v aktuální zprávě uživatele."
+        ),
+        "pin_retry_next_message": "Uživatel může PIN zopakovat v další zprávě.",
+        "pin_say_digits": (
+            "Požádejte uživatele, aby v další zprávě řekl číslice PINu jednu po druhé."
+        ),
+        "pin_request_again": (
+            "To byla poslední odpověď, kterou tato výzva k PINu přijímá; "
+            "uživatel musí požadavek zopakovat."
         ),
         "pin_reply_used": (
             "Nepotvrzeno: PIN z aktuální zprávy uživatele už byl použit. "
@@ -137,9 +168,24 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "pending_automation_invalid": (
             "Čekající automatizace je neplatná; zopakujte prosím požadavek."
         ),
-        "automation_install_failed": (
-            "Automatizaci se nepodařilo nainstalovat: {err}. "
-            "Potvrzení bylo použito; požádejte prosím o automatizaci znovu."
+        "action_outcome_unknown": (
+            "Akce možná proběhla, ale skončila neočekávanou chybou: {err}. "
+            "Potvrzení bylo použito. Akci neopakujte; požádejte uživatele, "
+            "aby před dalším požadavkem zkontroloval zařízení."
+        ),
+        "automation_outcome_unknown": (
+            "Automatizace možná byla nainstalována, ale instalace skončila "
+            "neočekávanou chybou: {err}. Potvrzení bylo použito. Neopakujte ji; "
+            "požádejte uživatele, aby nejdřív zkontroloval své automatizace."
+        ),
+        "pin_reply_to_prompt_only": (
+            "Nepotvrzeno: PIN se přijímá jen v odpovědi uživatele na výzvu "
+            "k PINu pro tuto akci. Požádejte uživatele o PIN."
+        ),
+        "pin_one_action_at_a_time": (
+            "Nevyžádáno: na PIN uživatele už čeká jiná chráněná akce. Nejdřív "
+            "požádejte o PIN k té čekající akci; o tuto akci může uživatel "
+            "požádat potom."
         ),
     },
 }

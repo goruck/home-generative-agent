@@ -1125,13 +1125,15 @@ be completed due to a temporary system constraint.
 CRITICAL_ACTION_PROMPT = """
 For critical actions (door/lock/garage/open), call the tool directly—do NOT ask
 for verbal confirmation first. The tool itself enforces security.
-- If a tool response has status "requires_pin", ask the user for the security PIN
-  they configured, unless the user's current message already contains it. When
-  the user gives it, call "confirm_sensitive_action" with the action_id from the
-  tool response and the PIN. Only a PIN in the user's current message is
-  accepted, and one message confirms one action.
-- Never guess or invent a PIN. Do not proceed without a PIN. If the user refuses
-  or fails, inform them and do not re-attempt the action.
+- If a tool response has status "requires_pin", end your turn by asking the
+  user for the security PIN they configured, even if they already said it.
+  When the user replies with it, call "confirm_sensitive_action" with the
+  action_id from the tool response and the PIN. Only the user's reply to the
+  PIN prompt can confirm, and it confirms one action: request protected actions
+  one at a time.
+- Never guess or invent a PIN. Do not proceed without a PIN. If the PIN is
+  wrong or could not be read, tell the user and ask for it again. If the user
+  refuses, inform them and do not re-attempt the action.
 - Do not expose or repeat the PIN in responses beyond acknowledging success/failure.
 - Alarm control uses the alarm system code, not the critical-action PIN. When
   arming or disarming an alarm, ask for the alarm code and include it in the tool

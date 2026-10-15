@@ -421,15 +421,27 @@ def _critical_action_guard(
         )
         return None
 
+    configurable = ctx.config.get("configurable", {})
+    pin_reply = configurable.get("pin_reply")
     action_id = register_pending_action(
         ctx.pending_actions,
         {
             "tool_name": tool_name,
             "tool_args": tool_args,
-            "user": ctx.config.get("configurable", {}).get("user_id"),
-            "thread_id": ctx.config.get("configurable", {}).get("thread_id"),
+            "user": configurable.get("user_id"),
+            "thread_id": configurable.get("thread_id"),
+            "turn_id": pin_reply.turn_id if pin_reply is not None else None,
         },
     )
+    if action_id is None:
+        # Another protected request is already waiting for this turn's PIN
+        # prompt; the user asks for this one after answering it.
+        return ToolMessage(
+            content=pin_msg(ctx.hass, "pin_one_action_at_a_time"),
+            tool_call_id=tool_call.get("id"),
+            name=tool_name,
+            status="error",
+        )
     return ToolMessage(
         content=json.dumps(
             {
@@ -2268,8 +2280,9 @@ def _is_awaiting_user_pin(content: str) -> bool:
     """
     Return True for a confirmation refused before the PIN was checked.
 
-    The PIN was not in the user's current message, or that message already
-    confirmed an action.
+    The message was not the reply to the action's PIN prompt, the PIN was not
+    in it, or it was already used (a PIN from it failed, or it confirmed an
+    action).
     """
     try:
         data = json.loads(content)
@@ -2334,9 +2347,9 @@ async def _get_pending_pin_tools(
 ) -> list[RawTool]:
     """Return [confirm_sensitive_action] when a PIN confirmation is pending."""
     cfg = (config or {}).get("configurable", {})
-    # The history shows only the last challenge. When one message confirmed
-    # one of two challenges, or the model sent no action_id with two pending,
-    # the other action is still in the store for this conversation.
+    # The store, not only the history: the history is trimmed to a lookback
+    # window and its detector reads English text, while the store holds the
+    # conversation's action until its reply turn ends.
     if not (
         _has_pending_pin_confirmation(messages)
         or thread_has_pending_action(

@@ -2080,12 +2080,37 @@ def test_each_turn_gets_its_own_pin_reply() -> None:
     Pin the wiring: a fresh PinReply from this turn's text, plus the thread.
 
     A PinReply cached across turns would let one PIN message confirm actions
-    in later turns. The full turn cannot be driven in this venv (the HA
-    conversation stack is stubbed), so pin the source.
+    in later turns, and skipping start_pin_turn would leave a PIN prompt
+    answerable after the user moved on. The full turn cannot be driven in
+    this venv (the HA conversation stack is stubbed), so pin the source.
     """
     src = inspect.getsource(HGAConversationEntity._async_handle_message_active)
-    assert '"pin_reply": PinReply(user_input.text),' in src
+    assert "start_pin_turn(" in src
+    assert "runtime_data.pending_actions, conversation_id, user_input.text" in src
     assert '"thread_id": conversation_id,' in src
+
+
+def test_the_pin_turn_starts_before_any_early_return() -> None:
+    """
+    A turn that returns early still answers, and so ends, a waiting PIN prompt.
+
+    Pass 3: "never mind, show my dashboard" returned before start_pin_turn,
+    so the message after it could still confirm the abandoned unlock. Only
+    discarded STT noise, which is not the user speaking, comes first.
+    """
+    src = inspect.getsource(HGAConversationEntity._async_handle_message_active)
+    start = src.index("start_pin_turn(")
+    assert src.index("_is_stt_hallucination(") < start
+    assert start < src.index("self._async_init_llm_apis(")
+    assert start < src.index("_is_dashboard_request(")
+    # The noise drop is the only return before it.
+    assert src[:start].count("return conversation.ConversationResult(") == 1
+
+
+def test_a_failed_turn_keeps_its_pin_prompt_open() -> None:
+    """Pin the wiring: a turn that failed lets the user send the PIN again."""
+    src = inspect.getsource(HGAConversationEntity._async_handle_message_active)
+    assert src.count("keep_pin_prompts(") >= 2
 
 
 def test_handle_message_passes_volatile_prompt_to_the_graph() -> None:

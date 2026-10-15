@@ -134,11 +134,12 @@ def _pin_config(api: _FakeAPI) -> dict[str, Any]:
                     "tool_args": {"domain": ["lock"], "name": "Front Door"},
                     "user": "u1",
                     "thread_id": "conv1",
+                    "reply_turn": "turn2",
                 }
             },
             "user_id": "u1",
             "thread_id": "conv1",
-            "pin_reply": PinReply("1234"),
+            "pin_reply": PinReply("1234", turn_id="turn2"),
             "ha_llm_api": api,
             "hass": None,
         }
@@ -184,27 +185,10 @@ async def test_pin_confirmed_action_error_result_is_a_failure(
     assert "Lock jammed" in reply
     assert "can ask again" in reply
     assert "aid" not in config["configurable"]["pending_actions"]
-
-
-async def test_failed_confirmed_action_cannot_be_confirmed_again(
-    tool_result_cls: type,
-) -> None:
-    """
-    A failed action is not re-run by a second confirm from the same message.
-
-    The PIN is in the user's message, so the model could confirm again in the
-    same turn without asking the user, and a tool that half-acted before
-    reporting failure would act twice.
-    """
-    api = _FakeAPI(tool_result_cls(data={"error": "Lock jammed"}, error=True))
-    config = _pin_config(api)
-    confirm = cast("Any", confirm_sensitive_action).coroutine
-
-    await confirm("aid", "1234", config=config, store=None)
-    reply = await confirm("aid", "1234", config=config, store=None)
-
+    # Not re-run by a second confirm: the confirmation was used up.
+    again = await confirm("aid", "1234", config=config, store=None)
+    assert "not found or expired" in again
     assert api.calls == ["HassTurnOff"]
-    assert "not found or expired" in reply
 
 
 async def test_raised_error_uses_up_the_confirmation() -> None:

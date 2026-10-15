@@ -12,6 +12,7 @@ import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
@@ -104,9 +105,11 @@ from .automation_targets import (
 )
 from .camera_activity import get_camera_last_events_from_states
 from .helpers import (
+    PENDING_ACTION_TTL,
     PIN_AWAITING_USER_REPLY,
     ConfigurableData,
     base_tool_name,
+    keep_pin_prompt,
     maybe_fill_lock_entity,
     normalize_intent_for_alarm,
     normalize_intent_for_lock,
@@ -128,6 +131,15 @@ if TYPE_CHECKING:
     from langchain_core.runnables.base import RunnableSerializable
 
 LOGGER = logging.getLogger(__name__)
+
+# Limit on a PIN confirmation, counted from the start of the tool call. Below
+# the graph's per-tool timeout (graph.py, 30 s), so an action that is slow
+# after its claim is answered as "may have run" here.
+POST_CLAIM_TIMEOUT_S = 25
+
+# Wrong PINs allowed for one pending action, carried over to a request that
+# replaces it.
+MAX_PIN_ATTEMPTS = 5
 
 
 @tool(parse_docstring=True)
@@ -863,8 +875,11 @@ def _maybe_require_pin_for_automation(
             "automation_config": ha_automation_config,
             "user": cfg.get("user_id"),
             "thread_id": cfg.get("thread_id"),
+            "turn_id": _turn_id(cfg),
         },
     )
+    if action_id is None:
+        return pin_msg(cfg.get("hass"), "pin_one_action_at_a_time")
     return json.dumps(
         {
             "status": "requires_pin",
@@ -976,8 +991,8 @@ async def confirm_sensitive_action(  # noqa: D417
     Only call this tool after receiving a tool response with status "requires_pin".
     That response contains the action_id to pass here. Do not call this tool
     speculatively or before the action tool has returned a "requires_pin" status.
-    Only a PIN the user wrote in their current message is accepted, and that
-    message can confirm one action.
+    Only the user's reply to the PIN prompt can confirm, with the PIN written in
+    that reply, and it confirms one action.
 
     Args:
         action_id: The action ID from the "requires_pin" tool response.
@@ -987,17 +1002,22 @@ async def confirm_sensitive_action(  # noqa: D417
     if "configurable" not in config:
         return "Configuration not found. Please check your setup."
 
+    # The action must finish inside the graph's own tool timeout, counted from
+    # here, so a slow device gets the "may have run" reply rather than a
+    # timeout that reads as still pending.
+    deadline = asyncio.get_running_loop().time() + POST_CLAIM_TIMEOUT_S
     cfg = cast("ConfigurableData", config.get("configurable", {}))
     hass = cfg.get("hass")
     opts = cfg.get("options", {})
     pin_hash = opts.get(CONF_CRITICAL_ACTION_PIN_HASH, "")
     salt = opts.get(CONF_CRITICAL_ACTION_PIN_SALT, "")
     pending_actions = cfg.get("pending_actions", {})
-    provided_pin = str(pin or "").strip()
-    if not provided_pin.isdigit():
-        # The model may pass the PIN as the user said it ("1 2 3 4", "one two
-        # three four"). A PIN of digits is checked as given.
-        provided_pin = pin_digits(provided_pin) or provided_pin
+    raw_pin = str(pin or "").strip()
+    # The model may pass the PIN as the user said it ("1 2 3 4", "one two
+    # three four", "PIN 1234", full-width digits). The message check and the
+    # hash check must see the same ASCII digits, which is also how setup
+    # stores the PIN.
+    provided_pin = pin_digits(raw_pin) or raw_pin
     requested_action_id = str(action_id or "").strip()
 
     resolved_action_id = _resolve_action_id(
@@ -1010,10 +1030,15 @@ async def confirm_sensitive_action(  # noqa: D417
     if action_err or not action:
         return action_err or pin_msg(hass, "pending_action_not_found")
 
-    refusal = _confirmation_refusal(cfg, action, resolved_action_id, provided_pin)
+    refusal, pin_not_in_message = _confirmation_refusal(
+        cfg, action, resolved_action_id, provided_pin
+    )
     if refusal:
+        if pin_not_in_message:
+            await _warn_if_correct_pin_refused(cfg, provided_pin)
         return refusal
 
+    attempts_before = action.get("attempts", 0)
     pin_err = _validate_pin_for_action(
         provided_pin=provided_pin,
         pin_hash=pin_hash,
@@ -1022,11 +1047,23 @@ async def confirm_sensitive_action(  # noqa: D417
         hass=hass,
     )
     if pin_err:
-        # One message is one attempt: a wrong PIN cannot be retried from it.
-        _spend_pin_reply(cfg)
+        attempts = action.get("attempts", 0)
+        if attempts != attempts_before:
+            # A wrong PIN: one message is one attempt, so it cannot be
+            # retried from the same message. A value that never reached the
+            # hash (wrong format) leaves the message usable.
+            _spend_pin_reply(cfg)
+        if attempts < MAX_PIN_ATTEMPTS and pin_hash and salt:
+            # A typo or a misheard PIN: the user can answer again in their
+            # next message, unless the prompt has taken all its replies.
+            kept = keep_pin_prompt(action, cfg.get("pin_reply"))
+            hint = "pin_retry_next_message" if kept else "pin_request_again"
+            pin_err = f"{pin_err} {pin_msg(hass, hint)}"
         return pin_err
 
-    result, exec_err = await _execute_pending_action(resolved_action_id, action, cfg)
+    result, exec_err = await _execute_pending_action(
+        resolved_action_id, action, cfg, deadline
+    )
     return result or exec_err or pin_msg(hass, "confirmation_unable_to_process")
 
 
@@ -1070,7 +1107,7 @@ def _load_pending_action(
     if created_at:
         try:
             ts = datetime.fromisoformat(created_at)
-            expired = dt_util.utcnow() - ts > timedelta(minutes=10)
+            expired = dt_util.utcnow() - ts > PENDING_ACTION_TTL
         except (ValueError, TypeError):
             # TypeError covers a timezone-naive stored timestamp.
             pending_actions.pop(resolved_action_id, None)
@@ -1092,7 +1129,6 @@ def _validate_pin_for_action(
     hass: HomeAssistant | None = None,
 ) -> str | None:
     """Validate PIN format and value against stored hash/salt."""
-    max_pin_attempts = 5
     if not pin_hash or not salt:
         return pin_msg(hass, "pin_not_configured")
     if not provided_pin.isdigit() or not (
@@ -1105,7 +1141,7 @@ def _validate_pin_for_action(
             max_len=CRITICAL_PIN_MAX_LEN,
         )
     attempts = int(action.get("attempts", 0) or 0)
-    if attempts >= max_pin_attempts:
+    if attempts >= MAX_PIN_ATTEMPTS:
         return pin_msg(hass, "pin_too_many_attempts")
     if not verify_pin(provided_pin, hashed=pin_hash, salt=salt):
         action["attempts"] = attempts + 1
@@ -1123,40 +1159,57 @@ def _ensure_api(cfg: Mapping[str, Any]) -> tuple[Any | None, str | None]:
 
 def _confirmation_refusal(
     cfg: Mapping[str, Any],
-    action: Mapping[str, Any],
+    action: dict[str, Any],
     action_id: str,
     provided_pin: str,
-) -> str | None:
-    """Return why this caller may not confirm the action, before any PIN check."""
+) -> tuple[str | None, bool]:
+    """
+    Return why this caller may not confirm the action, before any PIN check.
+
+    The flag is True when the refusal is a PIN that is not in the user's
+    message, which the caller checks for the diagnostic warning. That refusal
+    also keeps the prompt for the user's next message: they answered, but
+    their PIN could not be read.
+    """
     hass = cfg.get("hass")
     if _is_wrong_user(cfg, action):
-        return pin_msg(hass, "pending_action_wrong_user")
+        return pin_msg(hass, "pending_action_wrong_user"), False
     thread_id = cfg.get("thread_id")
     if not thread_id or action.get("thread_id") != thread_id:
         # _resolve_action_id already refuses another conversation's action;
         # kept so this check never depends on how the id was resolved.
-        return pin_msg(hass, "pending_action_not_found_or_expired")
+        return pin_msg(hass, "pending_action_not_found_or_expired"), False
     # Refused before the PIN is checked, so no attempt is counted.
     pin_reply = cfg.get("pin_reply")
-    if pin_reply is None or not pin_in_text(provided_pin, pin_reply.text):
+    not_in_message = False
+    hint = None
+    if pin_reply is None or action.get("reply_turn") != pin_reply.turn_id:
+        # Only the user's reply to this action's prompt can confirm it: not
+        # the message that started it (a request made, or injected, during
+        # this turn), and not a later one (the user moved on).
+        reason = "pin_reply_to_prompt_only"
+    elif not pin_in_text(provided_pin, pin_reply.text):
         # The PIN came from the model (guessed, or reused from earlier in the
         # conversation), not from the user's message for this turn.
-        _warn_if_correct_pin_refused(cfg, provided_pin)
+        not_in_message = True
         reason = "pin_awaiting_user_reply"
+        kept = keep_pin_prompt(action, pin_reply)
+        hint = "pin_say_digits" if kept else "pin_request_again"
     elif pin_reply.spent:
         reason = "pin_reply_used"
     else:
-        return None
+        return None, False
+    text = pin_msg(hass, reason)
+    if hint:
+        text = f"{text} {pin_msg(hass, hint)}"
     return json.dumps(
-        {
-            "status": PIN_AWAITING_USER_REPLY,
-            "action_id": action_id,
-            "reason": pin_msg(hass, reason),
-        }
-    )
+        {"status": PIN_AWAITING_USER_REPLY, "action_id": action_id, "reason": text}
+    ), not_in_message
 
 
-def _warn_if_correct_pin_refused(cfg: Mapping[str, Any], provided_pin: str) -> None:
+async def _warn_if_correct_pin_refused(
+    cfg: Mapping[str, Any], provided_pin: str
+) -> None:
     """
     Log a correct PIN refused because it is not in the user's message.
 
@@ -1165,20 +1218,24 @@ def _warn_if_correct_pin_refused(cfg: Mapping[str, Any], provided_pin: str) -> N
     leave them asked for the PIN again with nothing to report.
     """
     pin_reply = cfg.get("pin_reply")
-    if pin_reply is None or pin_reply.refusal_checked:
-        return
-    pin_reply.refusal_checked = True
     opts = cfg.get("options", {})
     pin_hash = opts.get(CONF_CRITICAL_ACTION_PIN_HASH, "")
     salt = opts.get(CONF_CRITICAL_ACTION_PIN_SALT, "")
-    if not (
-        pin_hash
-        and salt
-        and provided_pin.isdigit()
-        and CRITICAL_PIN_MIN_LEN <= len(provided_pin) <= CRITICAL_PIN_MAX_LEN
+    if (
+        pin_reply is None
+        or pin_reply.refusal_checked
+        or not (pin_hash and salt and provided_pin.isdigit())
+        or not CRITICAL_PIN_MIN_LEN <= len(provided_pin) <= CRITICAL_PIN_MAX_LEN
     ):
         return
-    if verify_pin(provided_pin, hashed=pin_hash, salt=salt):
+    # Only a value that could be the PIN uses up the one hash per message, so
+    # a junk first call does not hide a correct PIN refused later.
+    pin_reply.refusal_checked = True
+    check = partial(verify_pin, provided_pin, hashed=pin_hash, salt=salt)
+    # The hash is slow, and this only feeds a log line: keep it off the loop.
+    hass = cfg.get("hass")
+    correct = await hass.async_add_executor_job(check) if hass else check()
+    if correct:
         LOGGER.warning(
             "Refused a correct critical-action PIN that is not in the user's "
             "current message: the model took it from earlier in the conversation, "
@@ -1191,6 +1248,12 @@ def _is_wrong_user(cfg: Mapping[str, Any], action: Mapping[str, Any]) -> bool:
     requester_id = cfg.get("user_id")
     action_owner = action.get("user")
     return bool(requester_id and action_owner and requester_id != action_owner)
+
+
+def _turn_id(cfg: Mapping[str, Any]) -> str | None:
+    """Return this turn's id, which a pending action records as its own."""
+    pin_reply = cfg.get("pin_reply")
+    return pin_reply.turn_id if pin_reply is not None else None
 
 
 def _claim_pending_action(cfg: Mapping[str, Any], action_id: str) -> bool:
@@ -1219,6 +1282,7 @@ async def _execute_pending_action(
     resolved_action_id: str,
     action: dict[str, Any],
     cfg: Mapping[str, Any],
+    deadline: float,
 ) -> tuple[str | None, str | None]:
     """Normalize args, claim the pending action, and execute it once."""
     raw_tool_name = action.get("tool_name")
@@ -1229,7 +1293,9 @@ async def _execute_pending_action(
     tool_name = raw_tool_name
 
     if tool_name == "add_automation":
-        return await _execute_pending_automation(resolved_action_id, action, cfg)
+        return await _execute_pending_automation(
+            resolved_action_id, action, cfg, deadline
+        )
 
     ha_llm_api, api_err = _ensure_api(cfg)
     if api_err or ha_llm_api is None:
@@ -1244,11 +1310,19 @@ async def _execute_pending_action(
     if not _claim_pending_action(cfg, resolved_action_id):
         return None, pin_msg(cfg.get("hass"), "pending_action_not_found_or_expired")
 
+    reply_key = "action_execute_failed"
     try:
         tool_input = llm.ToolInput(tool_name=tool_name, tool_args=tool_args)
-        response = tool_call_data(await ha_llm_api.async_call_tool(tool_input))
+        async with asyncio.timeout_at(deadline):
+            response = tool_call_data(await ha_llm_api.async_call_tool(tool_input))
     except (HomeAssistantError, vol.Invalid) as err:
         failure = repr(err)
+    except Exception as err:
+        # Claimed already, so the device may have acted: say so rather than
+        # let the error end the turn with the action looking still pending.
+        LOGGER.exception("PIN-confirmed %s ended with an unexpected error", tool_name)
+        # The type only: the message can hold URLs or tokens.
+        reply_key, failure = "action_outcome_unknown", type(err).__name__
     else:
         if not response.error:
             return json.dumps(
@@ -1261,13 +1335,14 @@ async def _execute_pending_action(
         # A tool that reports failure through HA 2026.10's error flag gets the
         # same reply as a raised error.
         failure = json.dumps(response.data, default=str)
-    return None, pin_msg(cfg.get("hass"), "action_execute_failed", err=failure)
+    return None, pin_msg(cfg.get("hass"), reply_key, err=failure)
 
 
 async def _execute_pending_automation(
     resolved_action_id: str,
     action: dict[str, Any],
     cfg: Mapping[str, Any],
+    deadline: float,
 ) -> tuple[str | None, str | None]:
     """Write a PIN-confirmed automation and clear the pending action."""
     hass = cfg.get("hass")
@@ -1279,9 +1354,15 @@ async def _execute_pending_automation(
         return None, pin_msg(hass, "pending_action_not_found_or_expired")
 
     try:
-        result = await _async_write_automation(hass, automation_config)
-    except (HomeAssistantError, OSError, yaml.YAMLError) as err:
-        return None, pin_msg(hass, "automation_install_failed", err=repr(err))
+        async with asyncio.timeout_at(deadline):
+            result = await _async_write_automation(hass, automation_config)
+    except Exception as err:
+        # Claimed already, and any step can fail after the file was appended
+        # (the reload, or a timeout, which is also an OSError): never tell
+        # the user to request it again, which could install it twice.
+        LOGGER.exception("PIN-confirmed automation ended with an error")
+        # The type only: the message can hold paths or tokens.
+        return None, pin_msg(hass, "automation_outcome_unknown", err=type(err).__name__)
 
     return json.dumps(
         {"status": "completed", "action_id": resolved_action_id, "result": result}

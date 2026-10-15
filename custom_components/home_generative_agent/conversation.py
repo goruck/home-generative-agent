@@ -45,16 +45,17 @@ from langchain_core.messages import (
 from .agent.automation_targets import normalize_notify_service
 from .agent.graph import workflow
 from .agent.helpers import (
-    PinReply,
     active_llm_api_ids,
     chat_log_tool_result,
     filter_excluded_tools,
     format_tool,
     is_actuation_tool,
+    keep_pin_prompts,
     langchain_tool_parameters_json,
     resolve_critical_action_policy,
     safe_convert,
     sanitize_tool_text,
+    start_pin_turn,
     tool_exclusions,
     tool_index_key,
 )
@@ -1577,9 +1578,9 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         tools: list[dict[str, Any]] | None,
         acknowledgement: VoiceAck | None = None,
         ack_index: int | None = None,
-    ) -> None:
+    ) -> bool:
         """
-        Handle the streaming astream_events path.
+        Handle the streaming astream_events path; return True if it failed.
 
         ``ack_index`` is where a turn-start acknowledgement was committed, so
         recovery does not mistake it for the reply.
@@ -1710,6 +1711,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             _LOGGER.exception("Failed to retrieve final state for tracing.")
 
         await self._async_ensure_reply_after_ack(chat_log, ack_index, stream_error)
+        return stream_error is not None
 
     async def _async_add_spoken_reply(
         self, chat_log: conversation.ChatLog, text: str
@@ -1820,10 +1822,30 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         runtime_data = self.entry.runtime_data
         options = runtime_data.options
 
+        # Silently drop phantom STT transcriptions of silence/background noise.
+        if _is_stt_hallucination(
+            user_input.text,
+            _get_stt_hallucination_patterns(options),
+            _get_stt_hallucination_exact_patterns(options),
+        ):
+            _LOGGER.debug("Ignoring hallucinated STT input: %s", user_input.text)
+            return conversation.ConversationResult(
+                response=intent_response, conversation_id=conversation_id
+            )
+
+        # A PIN confirmation is accepted only from this message, and a PIN
+        # prompt waiting in this conversation is answered by it or not at all,
+        # so this runs before any other early return. A turn that fails keeps
+        # the prompt for the user's next message (keep_pin_prompts).
+        pin_reply = start_pin_turn(
+            runtime_data.pending_actions, conversation_id, user_input.text
+        )
+
         # Multi-API initialization
         try:
             llm_api = await self._async_init_llm_apis(llm_context)
         except HomeAssistantError as err:
+            keep_pin_prompts(runtime_data.pending_actions, pin_reply)
             intent_response.async_set_error(
                 intent.IntentResponseErrorCode.UNKNOWN,
                 str(err),
@@ -1839,15 +1861,6 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 "Please enable 'Schema-first JSON for YAML requests' in "
                 "HGA's configuration and try again"
             )
-            return conversation.ConversationResult(
-                response=intent_response, conversation_id=conversation_id
-            )
-
-        # Silently drop phantom STT transcriptions of silence/background noise.
-        noise_patterns = _get_stt_hallucination_patterns(options)
-        exact_noise_patterns = _get_stt_hallucination_exact_patterns(options)
-        if _is_stt_hallucination(user_input.text, noise_patterns, exact_noise_patterns):
-            _LOGGER.debug("Ignoring hallucinated STT input: %s", user_input.text)
             return conversation.ConversationResult(
                 response=intent_response, conversation_id=conversation_id
             )
@@ -1925,8 +1938,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "configurable": {
                 "thread_id": conversation_id,
                 "user_id": clean_user_name,
-                # A PIN confirmation is accepted only from this message.
-                "pin_reply": PinReply(user_input.text),
+                "pin_reply": pin_reply,
                 "requester_is_admin": requester_is_admin,
                 "chat_model": base_llm,
                 "chat_model_options": runtime_data.chat_model_options,
@@ -1978,6 +1990,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     app, app_input, app_config, chat_log, tools
                 )
             except HomeAssistantError as err:
+                keep_pin_prompts(runtime_data.pending_actions, pin_reply)
                 intent_response.async_set_error(
                     intent.IntentResponseErrorCode.UNKNOWN,
                     str(err),
@@ -1985,16 +1998,17 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 return conversation.ConversationResult(
                     response=intent_response, conversation_id=conversation_id
                 )
-        else:
-            await self._async_run_astream(
-                app,
-                app_input,
-                app_config,
-                chat_log,
-                tools,
-                ack,
-                ack_index,
-            )
+        elif await self._async_run_astream(
+            app,
+            app_input,
+            app_config,
+            chat_log,
+            tools,
+            ack,
+            ack_index,
+        ):
+            # The stream failed: the user's reply may never have been answered.
+            keep_pin_prompts(runtime_data.pending_actions, pin_reply)
 
         # Guard against a turn that committed no reply (e.g. a HomeAssistantError
         # swallowed mid-stream and a state recovery that raised too). Earlier
