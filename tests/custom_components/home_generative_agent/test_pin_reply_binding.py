@@ -180,6 +180,10 @@ async def test_only_the_request_turn_refusal_ends_the_turn() -> None:
     before_the_prompt = await turns.confirm(action_id)
     assert isinstance(before_the_prompt, dict)
     assert before_the_prompt[PIN_REFUSAL_ENDS_TURN] is True
+    # The model reads this next turn, right before the user's PIN: it must
+    # not be told to ask again (that would drop the prompt).
+    assert "next message is the reply" in before_the_prompt["reason"]
+    assert "Ask the user" not in before_the_prompt["reason"]
     # The turn ends here, so a fixed line must exist for the reply, or the
     # user would hear a failure (testing review).
     assert prompts_awaiting_reply(
@@ -202,6 +206,22 @@ async def test_only_the_request_turn_refusal_ends_the_turn() -> None:
     assert used["status"] == PIN_AWAITING_USER_REPLY
     assert PIN_REFUSAL_ENDS_TURN not in used
     assert api.calls == ["HassTurnOff"]
+
+
+async def test_the_last_wrong_pin_tells_the_model_the_request_is_over() -> None:
+    """Attempts carry across a re-request; the fifth wrong PIN gets a next step too."""
+    api = _FakeAPI()
+    turns = _Turns(api)
+    action_id = turns.request_unlock()
+    turns.pending[action_id]["attempts"] = 4  # carried from an earlier request
+
+    turns.say("0000")
+    reply = await turns.confirm(action_id, "0000")
+
+    assert isinstance(reply, str)
+    assert "Incorrect PIN" in reply
+    assert "make the request again" in reply
+    assert api.calls == []
 
 
 async def test_the_users_pin_reply_confirms() -> None:

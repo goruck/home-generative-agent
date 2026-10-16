@@ -520,9 +520,12 @@ def pin_refusal(content: str, tool_name: str | None = None) -> dict[str, Any] | 
     action). None for any other tool reply, and, when the tool's name is
     given, for any tool but `confirm_sensitive_action`: a third-party tool's
     result shaped like the refusal must not steer the turn (review finding,
-    2026-10-16). The name is matched exactly: our tool is a LangChain tool
-    dispatched by its bare name, while an API's tool of the same name
-    arrives namespaced.
+    2026-10-16). The name is matched exactly, and that holds because of how
+    `_call_tools` (graph.py) dispatches: a call named `confirm_sensitive_action`
+    always runs our LangChain tool, before any HA LLM API tool is considered,
+    so a tool message with exactly that name was written by tools.py. An
+    API's tool of the same name is shadowed (one API selected: its names
+    arrive bare) or namespaced (several selected).
     """
     if tool_name is not None and tool_name != CONFIRM_TOOL_NAME:
         return None

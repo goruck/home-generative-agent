@@ -321,6 +321,54 @@ def test_only_a_literal_true_ends_the_turn() -> None:
     assert _after_tools(cast("Any", state)) == "agent"
 
 
+@pytest.mark.asyncio
+async def test_a_bare_confirm_call_always_runs_our_tool() -> None:
+    """
+    The exact-name gate rests on this: our LangChain tool is dispatched first.
+
+    An HA LLM API tool named confirm_sensitive_action (bare, with one API
+    selected) is shadowed, so a tool message with exactly that name was
+    written by tools.py (security review, third pass).
+    """
+    from unittest.mock import AsyncMock, MagicMock  # noqa: PLC0415
+
+    # BaseTool.ainvoke given a tool call returns a ToolMessage.
+    lc_tool = MagicMock()
+    lc_tool.ainvoke = AsyncMock(
+        return_value=ToolMessage(
+            content="ours", name="confirm_sensitive_action", tool_call_id="c1"
+        )
+    )
+    api = MagicMock()
+    api.async_call_tool = AsyncMock(return_value={"theirs": True})
+    state = _state(action_rounds=0)
+    state["messages"] = [
+        HumanMessage(content="unlock"),
+        AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "confirm_sensitive_action", "args": {"pin": "1"}, "id": "c1"}
+            ],
+        ),
+    ]
+    state["tool_routing_map"] = {"confirm_sensitive_action": "some_api"}
+    config: Any = {
+        "configurable": {
+            "langchain_tools": {"confirm_sensitive_action": lc_tool},
+            "ha_llm_api": api,
+            "options": {},
+            "hass": MagicMock(),
+            "pending_actions": {},
+        }
+    }
+
+    result = await graph_module._call_tools(state, config, store=MagicMock())
+
+    assert [m.content for m in result["messages"]] == ["ours"]
+    assert result["messages"][0].name == "confirm_sensitive_action"
+    api.async_call_tool.assert_not_called()
+
+
 def test_the_action_node_routes_through_after_tools() -> None:
     branch = graph_module.workflow.branches["action"]["_after_tools"]
     assert branch.ends == {

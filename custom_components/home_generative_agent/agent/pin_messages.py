@@ -116,6 +116,11 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "an unexpected error: {err}. The confirmation was used up. Do not "
             "repeat it; tell the user to check their automations first."
         ),
+        "pin_reply_next_message": (
+            "Not confirmed: the PIN is accepted only in the user's reply to "
+            "this action's PIN prompt. The user is being asked for the PIN now; "
+            "their next message is the reply. Confirm with the PIN from it."
+        ),
         "pin_reply_to_prompt_only": (
             "Not confirmed: the PIN is accepted only in the user's reply to "
             "this action's PIN prompt. Ask the user for the PIN now."
@@ -226,6 +231,11 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "Automatizace možná byla nainstalována, ale instalace skončila "
             "neočekávanou chybou: {err}. Potvrzení bylo použito. Neopakujte ji; "
             "požádejte uživatele, aby nejdřív zkontroloval své automatizace."
+        ),
+        "pin_reply_next_message": (
+            "Nepotvrzeno: PIN se přijímá jen v odpovědi uživatele na výzvu "
+            "k PINu pro tuto akci. Uživatel je o PIN právě žádán; jeho další "
+            "zpráva je odpověď. Potvrďte PINem z ní."
         ),
         "pin_reply_to_prompt_only": (
             "Nepotvrzeno: PIN se přijímá jen v odpovědi uživatele na výzvu "

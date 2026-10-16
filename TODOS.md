@@ -16,6 +16,19 @@
 
 ---
 
+### An empty model reply passes the no-reply guard in schema-first mode
+
+**What:** `_async_finish_reply` (conversation.py) judges a turn by the type of the last chat_log entry, not by whether it says anything. In schema-first (ainvoke) mode a model reply with empty content and no tool calls is backfilled as an `AssistantContent` with no text, so the guard adds no apology, the user gets a blank bubble (and a satellite nothing), and the empty `AIMessage` stays in the checkpoint for the next model call. `_call_model`'s empty-reply fallback covers only a reply that follows a `ToolMessage`.
+
+**Why:** Codex adversarial finding in the review of the loop-guard fix (2026-10-16); inherited, not introduced there. The streamed path is covered by its own recovery (`_normalize_ai_content("")` is None, so the failure text is added).
+
+**How to apply:** In `_async_finish_reply`, treat an `AssistantContent` with no content and no tool calls as no reply; in `_call_model`, apply the empty-reply fallback to a first response too, so the checkpoint never ends on an empty assistant message. Test both in `test_conversation_units.py` next to the no-reply cases.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
 ### A cancelled turn leaves the model's tool calls unanswered in the checkpoint
 
 **What:** When a streamed turn is cancelled (the client disconnects, or the pipeline aborts) after the model's tool-call message was checkpointed and before the `action` node committed its results, the thread ends on an `AIMessage` with tool calls and no `ToolMessage`. The next turn sends that history to the provider; OpenAI and Anthropic reject an assistant tool call with no result, so the conversation fails until trimming drops the exchange. `_get_synthetic_rejections` (conversation.py) repairs only HA's chat log, never the checkpoint, and the round-limit guard's new "not run" results (`_unanswered_calls`, graph.py) run only on the guard path.
