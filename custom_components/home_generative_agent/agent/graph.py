@@ -89,6 +89,7 @@ from ..core.prompt_cache import (  # noqa: TID252
 from ..core.utils import extract_final  # noqa: TID252
 from .automation_targets import AUTOMATION_REFUSAL_PREFIX
 from .helpers import (
+    PIN_AWAITING_USER_REPLY,
     active_llm_api_ids,
     base_tool_name,
     format_tool,
@@ -98,22 +99,26 @@ from .helpers import (
     langchain_tool_parameters_json,
     matches_critical_rule,
     maybe_fill_lock_entity,
+    minimal_payload_for_domain,
     normalize_intent_for_alarm,
     normalize_intent_for_lock,
+    parse_tool_response,
+    pending_action_expired,
     register_pending_action,
     resolve_critical_action_policy,
     sanitize_tool_args,
     sanitize_tool_text,
+    thread_has_pending_action,
     tool_call_data,
     tool_exclusions,
     tool_inclusions,
     tool_index_key,
 )
-from .pin_messages import pin_msg
+from .pin_messages import describe_pending_action, pin_msg
 from .token_counter import count_tokens_cross_provider
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from homeassistant.core import HomeAssistant
     from langchain_core.runnables import RunnableConfig
@@ -419,19 +424,31 @@ def _critical_action_guard(
         )
         return None
 
-    action_id = register_pending_action(
-        ctx.pending_actions,
-        {
-            "tool_name": tool_name,
-            "tool_args": tool_args,
-            "user": ctx.config.get("configurable", {}).get("user_id"),
-        },
-    )
+    configurable = ctx.config.get("configurable", {})
+    pin_reply = configurable.get("pin_reply")
+    action = {
+        "tool_name": tool_name,
+        "tool_args": tool_args,
+        "user": configurable.get("user_id"),
+        "thread_id": configurable.get("thread_id"),
+        "turn_id": pin_reply.turn_id if pin_reply is not None else None,
+    }
+    action_id = register_pending_action(ctx.pending_actions, action)
+    if action_id is None:
+        # Another protected request is already waiting for this turn's PIN
+        # prompt; the user asks for this one after answering it.
+        return ToolMessage(
+            content=pin_msg(ctx.hass, "pin_one_action_at_a_time"),
+            tool_call_id=tool_call.get("id"),
+            name=tool_name,
+            status="error",
+        )
     return ToolMessage(
         content=json.dumps(
             {
                 "status": "requires_pin",
                 "action_id": action_id,
+                "action": describe_pending_action(ctx.hass, action),
                 "reason": pin_msg(ctx.hass, "direct_requires_pin_reason"),
             }
         ),
@@ -457,7 +474,7 @@ async def _run_ha_tool(
     except (HomeAssistantError, vol.Invalid) as err:
         return _make_tool_error(repr(err), tool_name, tool_call.get("id") or "")
 
-    content_str, status = _parse_tool_response(response.data, prepared_args)
+    content_str, status = parse_tool_response(response.data, prepared_args)
     if response.error:
         status = "error"
     return ToolMessage(
@@ -506,76 +523,11 @@ def _prepare_tool_args(
         return critical_guard, tool_args
 
     # Reduce payload to the minimal arguments HA expects (avoids extra-key errors).
-    tool_args = _minimal_payload_for_domain(tool_args)
+    tool_args = minimal_payload_for_domain(tool_args)
     tool_args = sanitize_tool_args(tool_args)
     return None, tool_args
 
 
-def _parse_tool_response(
-    response: Any, tool_args: dict[str, Any]
-) -> tuple[str, str | None]:
-    """Return (content, status) from a tool response."""
-    parsed: dict[str, Any] | None = None
-    if isinstance(response, dict):
-        parsed = response
-    elif isinstance(response, str):
-        try:
-            parsed = json.loads(response)
-        except json.JSONDecodeError:
-            parsed = None
-
-    status: str | None = None
-    content_str = json.dumps(response)
-    if parsed is None:
-        return content_str, status
-
-    warning = parsed.get("warning")
-    success_val = parsed.get("success", True)
-    result_text = (
-        parsed.get("result_text") or parsed.get("response") or parsed.get("result")
-    )
-    inferred_state = parsed.get("inferred_state")
-
-    domains = tool_args.get("domain") or []
-    domains = domains if isinstance(domains, list) else [domains]
-    is_alarm = any(str(d).lower() == "alarm_control_panel" for d in domains)
-    service = str(tool_args.get("service") or "").lower()
-
-    if warning:
-        status = "error"
-        content_str = str(result_text or warning)
-    elif success_val is False:
-        status = "error"
-        content_str = str(result_text or "Action failed.")
-    elif is_alarm:
-        if "arm" in service and inferred_state not in {
-            "armed",
-            "armed_home",
-            "armed_away",
-            "armed_night",
-            "arming",
-        }:
-            status = "error"
-            content_str = str(
-                result_text
-                or f"Alarm did not change state (panel_state={inferred_state})."
-            )
-        if "disarm" in service and inferred_state not in {
-            "disarmed",
-            "disarming",
-        }:
-            status = "error"
-            content_str = str(
-                result_text
-                or f"Alarm did not change state (panel_state={inferred_state})."
-            )
-
-    return content_str, status
-
-
-# Bare name of HA's live-state tool. HA exposes it namespaced
-# (`homeassistant__GetLiveContext`), so every comparison and every
-# force-injection must go through the base name -- see `base_tool_name`.
 LIVE_CONTEXT_TOOL = "GetLiveContext"
 
 
@@ -1327,6 +1279,50 @@ async def _append_history_tool(  # noqa: PLR0913
         store, config, "get_entity_history", {"hga_local"}, live_tool_ids
     )
     return candidates if fetched is None else [*candidates, fetched]
+
+
+_ON_OFF_PARTNER = {"HassTurnOn": "HassTurnOff", "HassTurnOff": "HassTurnOn"}
+
+
+async def _append_on_off_partners(
+    candidates: list[RawTool],
+    store: BaseStore,
+    config: RunnableConfig,
+    live_tool_ids: set[tuple[str, str]] | None,
+) -> list[RawTool]:
+    """
+    Bind the other half of HassTurnOn/HassTurnOff when ranking bound one.
+
+    For a lock, HassTurnOn locks and HassTurnOff unlocks. Field test
+    2026-10-15: "Block the playroom, block" ranked only HassTurnOff, the
+    model's lock call was rejected as not retrieved, and it fell back to the
+    one it had, which unlocked the door. Looked up in the same API, and an
+    excluded tool is never bound (the raw index keeps excluded rows when the
+    live filter is off; see `_append_included_tools`).
+    """
+    excluded_names = tool_exclusions(config.get("configurable", {}).get("options", {}))
+    # Per API: another server's same-named tool is not this one's partner.
+    bound = {(t["api_id"], base_tool_name(t["name"])) for t in candidates}
+    for tool in candidates:
+        base = base_tool_name(tool["name"])
+        partner = _ON_OFF_PARTNER.get(base)
+        if partner is None or (tool["api_id"], partner) in bound:
+            continue
+        # Spelled like the bound one ("intent__HassTurnOff" → "intent__HassTurnOn").
+        partner_name = tool["name"].removesuffix(base) + partner
+        excluded = excluded_names.get(tool["api_id"], ())
+        if is_tool_excluded(partner_name, excluded):
+            # Before the store round-trip: with the live filter on, an excluded
+            # tool misses the index and falls through to the fallback scan.
+            continue
+        fetched = await _get_tool_by_name(
+            store, config, partner_name, {tool["api_id"]}, live_tool_ids
+        )
+        if fetched is None or is_tool_excluded(fetched["name"], excluded):
+            continue
+        candidates = [*candidates, fetched]
+        bound.add((tool["api_id"], partner))
+    return candidates
 
 
 # How many trailing HUMAN turns establish automation-creation context for
@@ -2261,14 +2257,30 @@ def _last_routing_rejection_idx(recent: Sequence[AnyMessage]) -> int | None:
     return idx
 
 
+def _is_awaiting_user_pin(content: str) -> bool:
+    """
+    Return True for a confirmation refused before the PIN was checked.
+
+    The message was not the reply to the action's PIN prompt, the PIN was not
+    in it, or it was already used (a PIN from it failed, or it confirmed an
+    action).
+    """
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    return isinstance(data, dict) and data.get("status") == PIN_AWAITING_USER_REPLY
+
+
 def _has_pending_pin_confirmation(messages: Sequence[AnyMessage]) -> bool:
     """
     Return True if a PIN confirmation is pending in recent message history.
 
     Detects two cases:
 
-    Case 1 (normal flow): A ``requires_pin`` ToolMessage exists without a
-    subsequent ``confirm_sensitive_action`` call.
+    Case 1 (normal flow): A ``requires_pin`` ToolMessage exists with no later
+    ``confirm_sensitive_action`` reply that resolved it. A wrong PIN, an
+    ``awaiting_user_pin`` refusal or a routing error leave it pending.
 
     Case 2 (degraded flow): An actuation tool was routing-rejected and the model
     subsequently asked for a PIN in an AI message.  Injecting
@@ -2283,6 +2295,10 @@ def _has_pending_pin_confirmation(messages: Sequence[AnyMessage]) -> bool:
                 content = msg.content if isinstance(msg.content, str) else ""
                 if "Incorrect PIN" in content:
                     # Wrong PIN entered — action is still pending, keep scanning.
+                    continue
+                if _is_awaiting_user_pin(content):
+                    # Refused before the PIN was checked (not in the user's
+                    # message, or the message already used) — still pending.
                     continue
                 if getattr(msg, "status", None) == "error":
                     # Routing or tool error on confirm_sensitive_action itself —
@@ -2308,9 +2324,19 @@ def _has_pending_pin_confirmation(messages: Sequence[AnyMessage]) -> bool:
 async def _get_pending_pin_tools(
     messages: list[AnyMessage],
     store: BaseStore | None,
+    config: RunnableConfig | None = None,
 ) -> list[RawTool]:
     """Return [confirm_sensitive_action] when a PIN confirmation is pending."""
-    if not _has_pending_pin_confirmation(messages):
+    cfg = (config or {}).get("configurable", {})
+    # The store, not only the history: the history is trimmed to a lookback
+    # window and its detector reads English text, while the store holds the
+    # conversation's action until its reply turn ends.
+    if not (
+        _has_pending_pin_confirmation(messages)
+        or thread_has_pending_action(
+            cfg.get("pending_actions", {}), cfg.get("thread_id")
+        )
+    ):
         return []
 
     if store is None:
@@ -2345,7 +2371,7 @@ async def _get_pending_pin_tools(
         )
         return []
     LOGGER.debug("PIN flow active: force-injecting confirm_sensitive_action")
-    return [
+    tools = [
         RawTool(
             name=val["name"],
             api_id=val["api_id"],
@@ -2354,6 +2380,51 @@ async def _get_pending_pin_tools(
             is_actuation=val.get("is_actuation", False),
         )
     ]
+    if config is not None:
+        tools.extend(await _get_held_action_tools(store, config, cfg))
+    return tools
+
+
+async def _get_held_action_tools(
+    store: BaseStore, config: RunnableConfig, cfg: Mapping[str, Any]
+) -> list[RawTool]:
+    """
+    Return the tools of this conversation's pending actions.
+
+    The design lets the model re-issue the held request in the PIN reply turn
+    (after a wrong PIN, or when it believes the prompt expired), but the reply
+    itself ("1234") ranks no actuation tool, so the re-issue was rejected as
+    not retrieved (field test 2026-10-15). The pending action names its tool.
+    """
+    thread_id = cfg.get("thread_id")
+    if not thread_id:
+        return []
+    now = dt_util.utcnow()
+    names = sorted(
+        {
+            str(action["tool_name"])
+            for action in cfg.get("pending_actions", {}).values()
+            if action.get("thread_id") == thread_id
+            and action.get("tool_name")
+            and action.get("tool_name") != "add_automation"
+            and not pending_action_expired(action, now)
+        }
+    )
+    if not names:
+        return []
+    allowed_api_ids = _get_allowed_api_ids(config)
+    live_tool_ids = _get_live_tool_ids(config)
+    excluded_names = tool_exclusions(config.get("configurable", {}).get("options", {}))
+    tools: list[RawTool] = []
+    for name in names:
+        fetched = await _get_tool_by_name(
+            store, config, name, allowed_api_ids, live_tool_ids
+        )
+        if fetched is not None and not is_tool_excluded(
+            fetched["name"], excluded_names.get(fetched["api_id"], ())
+        ):
+            tools.append(fetched)
+    return tools
 
 
 def _tool_lookup_targets(
@@ -2555,7 +2626,7 @@ async def _retrieve_tools(  # noqa: PLR0915
             store, config, ranking_query, allowed_api_ids, live_tool_ids
         ),
         _get_actuation_safety_tools(store, config, ranking_query, allowed_api_ids),
-        _get_pending_pin_tools(state["messages"], store),
+        _get_pending_pin_tools(state["messages"], store, config),
     )
     rag_tools, rag_dropped_not_live = rag_result
 
@@ -2725,6 +2796,12 @@ async def _retrieve_tools(  # noqa: PLR0915
     # never evicts a RAG/safety selection. Deliberately after step 3b's
     # actuation strip: "always included" means always.
     all_candidates = await _append_included_tools(
+        all_candidates, store, config, live_tool_ids
+    )
+
+    # 3h. Bind HassTurnOn and HassTurnOff together. After 3e, so an
+    # always-included one gets its partner too; it dedupes by (api, name).
+    all_candidates = await _append_on_off_partners(
         all_candidates, store, config, live_tool_ids
     )
 
@@ -3318,9 +3395,13 @@ def _is_critical_action(
             domain = ""
 
     # Treat HA intent tools on locks as critical even without a service arg.
+    # The domain of an entity id the model gave counts too: with no domain
+    # and no service the call would otherwise run with no PIN at all.
     if is_on_off_intent(tool_name):
         domains = tool_args.get("domain") or []
         domains = domains if isinstance(domains, list) else [domains]
+        if not domains and domain:
+            domains = [domain]
         if any(str(d).lower() == "lock" for d in domains):
             return True
         if any(str(d).lower() == "alarm_control_panel" for d in domains):
@@ -3348,56 +3429,6 @@ _LIVE_CONTEXT_KEYS = ("name", "domain", "area")
 def _live_context_args(tool_args: dict[str, Any]) -> dict[str, Any]:
     """Keep only the filters GetLiveContext accepts; models add entity_id too."""
     return {key: tool_args[key] for key in _LIVE_CONTEXT_KEYS if tool_args.get(key)}
-
-
-def _minimal_payload_for_domain(tool_args: dict[str, Any]) -> dict[str, Any]:
-    """Return a reduced payload for HA services to avoid extra keys."""
-    domains = tool_args.get("domain") or []
-    domains = domains if isinstance(domains, list) else [domains]
-    domain = str(domains[0]).lower() if domains else ""
-
-    def slugify(name: str) -> str:
-        return str(name).strip().lower().replace(" ", "_")
-
-    if domain == "lock":
-        name = tool_args.get("name")
-        entity_id = tool_args.get("entity_id")
-        if not entity_id and name:
-            entity_id = f"lock.{slugify(str(name))}"
-        payload: dict[str, Any] = {
-            "domain": ["lock"],
-            "service": tool_args.get("service"),
-        }
-        # The payload must carry a target NAME. HA's turn-on/turn-off intents
-        # resolve targets from name/area/floor and never read an `entity_id`
-        # slot (`helpers/intent.py` contains no such lookup), while `domains`
-        # alone already satisfies `MatchTargetsConstraints.has_constraints` --
-        # so domain+entity_id sails past the "cannot target all devices" guard
-        # and matches EVERY exposed lock. `_filter_by_name` accepts an entity
-        # id as the name value, so one key narrows both shapes to one entity.
-        if target := (name or entity_id):
-            payload["name"] = target
-        if entity_id:
-            payload["entity_id"] = entity_id
-        if code := tool_args.get("code"):
-            payload["code"] = code
-        return payload
-
-    if domain == "alarm_control_panel":
-        payload = {
-            "domain": ["alarm_control_panel"],
-            "service": tool_args.get("service"),
-        }
-        if entity_id := tool_args.get("entity_id"):
-            payload["entity_id"] = entity_id
-        if code := tool_args.get("code"):
-            payload["code"] = code
-        if state := tool_args.get("state"):
-            payload["state"] = state
-        return payload
-
-    # Default: return sanitized args.
-    return tool_args
 
 
 async def _call_tools(

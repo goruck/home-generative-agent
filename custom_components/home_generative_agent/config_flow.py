@@ -41,6 +41,7 @@ from .agent.helpers import (
     api_id_is_form_representable,
     normalize_api_tool_map,
     normalize_llm_api_value,
+    normalize_pin,
     sanitize_tool_text,
     split_tool_index_key,
     tool_index_key,
@@ -950,15 +951,20 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         if CONF_CRITICAL_ACTION_PIN not in user_input:
             return None
 
-        raw = _get_str(user_input, CONF_CRITICAL_ACTION_PIN)
+        # Stored as ASCII digits, the form confirmations compare: a PIN typed
+        # in full-width or Arabic-Indic digits is the same PIN.
+        raw = normalize_pin(_get_str(user_input, CONF_CRITICAL_ACTION_PIN))
         options.pop(CONF_CRITICAL_ACTION_PIN, None)
         if not raw:
             options.pop(CONF_CRITICAL_ACTION_PIN_HASH, None)
             options.pop(CONF_CRITICAL_ACTION_PIN_SALT, None)
             return None
 
+        # ASCII digits once folded, the only form confirmation hashes: a
+        # digit that does not fold (str.isdigit accepts some) could never be
+        # confirmed.
         if (
-            not raw.isdigit()
+            not (raw.isascii() and raw.isdecimal())
             or not CRITICAL_PIN_MIN_LEN <= len(raw) <= CRITICAL_PIN_MAX_LEN
         ):
             return "invalid_pin"

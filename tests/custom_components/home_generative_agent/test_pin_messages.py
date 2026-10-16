@@ -23,6 +23,15 @@ _DUMMY_KWARGS: dict[str, Any] = {
     "min_len": 4,
     "max_len": 10,
     "err": "err",
+    "action": "action",
+    "target": "target",
+    "service": "service",
+    "name": "name",
+    "kind": "kind",
+    "area": "area",
+    "floor": "floor",
+    "domain": "domain",
+    "count": 2,
 }
 
 
@@ -66,22 +75,22 @@ def test_templates_format_cleanly():
 
 
 def test_none_hass_falls_back_to_english():
-    assert pin_msg(None, "pin_incorrect") == "Incorrect PIN. Action not executed."
+    assert pin_msg(None, "pin_incorrect").startswith("Incorrect PIN.")
 
 
 def test_unsupported_language_falls_back_to_english():
     hass = _fake_hass("de")
-    assert pin_msg(hass, "pin_incorrect") == "Incorrect PIN. Action not executed."
+    assert pin_msg(hass, "pin_incorrect").startswith("Incorrect PIN.")
 
 
 def test_czech_language_resolves_czech_string():
     hass = _fake_hass("cs")
-    assert pin_msg(hass, "pin_incorrect") == "Nesprávný PIN. Akce nebyla provedena."
+    assert pin_msg(hass, "pin_incorrect").startswith("Nesprávný PIN.")
 
 
 def test_region_suffix_resolves_base_language():
     hass = _fake_hass("cs-CZ")
-    assert pin_msg(hass, "pin_incorrect") == "Nesprávný PIN. Akce nebyla provedena."
+    assert pin_msg(hass, "pin_incorrect").startswith("Nesprávný PIN.")
 
 
 def test_unknown_key_returns_the_key_itself():
@@ -104,4 +113,5 @@ def test_validate_pin_for_action_threads_hass_language():
         action={"attempts": 0},
         hass=_fake_hass("cs"),
     )
-    assert result == "Nesprávný PIN. Akce nebyla provedena."
+    assert result is not None
+    assert result.startswith("Nesprávný PIN. Akce nebyla provedena.")

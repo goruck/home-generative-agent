@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import importlib
 import inspect
 import re
@@ -2075,6 +2076,66 @@ def test_render_system_prompt_volatile_template_error_raises(
     assert calls[1] == ha_llm.DATE_TIME_PROMPT
 
 
+def test_each_turn_gets_its_own_pin_reply() -> None:
+    """
+    Pin the wiring: a fresh PinReply from this turn's text, plus the thread.
+
+    A PinReply cached across turns would let one PIN message confirm actions
+    in later turns, and skipping start_pin_turn would leave a PIN prompt
+    answerable after the user moved on. The full turn cannot be driven in
+    this venv (the HA conversation stack is stubbed), so pin the source.
+    """
+    src = inspect.getsource(HGAConversationEntity._async_handle_message_active)
+    assert "start_pin_turn(" in src
+    assert "runtime_data.pending_actions, conversation_id, user_input.text" in src
+    assert '"thread_id": conversation_id,' in src
+
+
+def test_the_pin_turn_starts_before_any_early_return() -> None:
+    """
+    A turn that returns early still answers, and so ends, a waiting PIN prompt.
+
+    Pass 3: "never mind, show my dashboard" returned before start_pin_turn,
+    so the message after it could still confirm the abandoned unlock. Only
+    discarded STT noise, which is not the user speaking, comes first.
+    """
+    src = inspect.getsource(HGAConversationEntity._async_handle_message_active)
+    start = src.index("start_pin_turn(")
+    assert src.index("_is_stt_hallucination(") < start
+    assert start < src.index("self._async_init_llm_apis(")
+    assert start < src.index("_is_dashboard_request(")
+    # The noise drop is the only return before it.
+    assert src[:start].count("return conversation.ConversationResult(") == 1
+
+
+def test_a_failed_turn_keeps_its_pin_prompt_open() -> None:
+    """Pin the wiring: a turn that failed lets the user send the PIN again."""
+    src = inspect.getsource(HGAConversationEntity._async_handle_message_active)
+    assert src.count("keep_pin_prompts(") >= 2
+
+
+def test_the_pin_lines_are_added_after_the_reply() -> None:
+    """
+    Pin the wiring: the action line joins the turn's final reply.
+
+    After the run and the no-reply guard, so it is joined to the reply the
+    turn returns, and after keep_pin_prompts, so a failed turn's kept
+    prompt is named too.
+    """
+    src = inspect.getsource(HGAConversationEntity._async_handle_message_active)
+    finish = src.index("await self._async_finish_reply(")
+    call = src[finish : src.index(")", finish)]
+    assert "runtime_data.pending_actions" in call
+    assert "pin_reply" in call
+    assert src.rindex("keep_pin_prompts(") < finish
+    assert finish < src.index("return conversation.async_get_result_from_chat_log(")
+    assert "streamed=not options.get(CONF_SCHEMA_FIRST_YAML, False)" in src[finish:]
+    finish_src = inspect.getsource(HGAConversationEntity._async_finish_reply)
+    assert finish_src.index("I'm sorry, I was unable to respond.") < finish_src.index(
+        "await self._async_add_pin_lines("
+    )
+
+
 def test_handle_message_passes_volatile_prompt_to_the_graph() -> None:
     """Pin the call-site wiring: the volatile part must reach the graph config."""
     src = inspect.getsource(HGAConversationEntity._async_handle_message_active)
@@ -2225,9 +2286,11 @@ class _DeltaChatLog:
     a test can tell a spoken reply from one added directly.
     """
 
-    def __init__(self, content: list[Any]) -> None:
+    def __init__(self, content: list[Any], *, listening: bool = True) -> None:
         self.content = content
         self.heard: list[dict[str, Any]] = []
+        # The Assist pipeline's listener; None when no pipeline is running.
+        self.delta_listener: Any = (lambda *_args: None) if listening else None
 
     async def async_add_delta_content_stream(self, agent_id: str, stream: Any) -> Any:
         async for delta in stream:
@@ -2378,3 +2441,374 @@ async def test_recovered_reply_after_a_tool_call_is_added_and_spoken() -> None:
 
     assert [d.get("content") for d in chat_log.heard] == [give_up]
     assert tool_call in chat_log.content, "the tool call must not be replaced"
+
+
+# ---------------------------------------------------------------------------
+# The line naming the action a PIN confirms (field test 2026-10-15)
+# ---------------------------------------------------------------------------
+
+_PLAYROOM = {"name": "Playroom Door Lock", "domain": ["lock"]}
+_LINE = 'Your PIN will confirm: unlock "Playroom Door Lock".'
+
+
+@pytest.fixture
+def frozen_assistant_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Make AssistantContent a frozen dataclass, as HA's is.
+
+    The suite's stubs are bare classes; the join copies the reply with
+    dataclasses.replace, which needs the real shape.
+    """
+
+    @dataclasses.dataclass(frozen=True)
+    class _AssistantContent:
+        agent_id: str
+        content: str | None = None
+        tool_calls: list[Any] | None = None
+        role: str = "assistant"
+
+    monkeypatch.setattr(ha_conversation, "AssistantContent", _AssistantContent)
+
+
+def _pin_entity(language: str = "en") -> Any:
+    entity = _ack_entity()
+    entity.hass = types.SimpleNamespace(config=types.SimpleNamespace(language=language))
+    return entity
+
+
+def _assistant_reply(text: str) -> Any:
+    return _mk_content(
+        ha_conversation.AssistantContent,
+        agent_id=HGA_AGENT_ID,
+        content=text,
+        tool_calls=None,
+    )
+
+
+def _pin_prompt(pending: dict[str, Any], text: str) -> Any:
+    """Open a turn and hold an unlock for its PIN, as the guard does."""
+    from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+        register_pending_action,
+        start_pin_turn,
+    )
+
+    reply = start_pin_turn(pending, "conv1", text)
+    register_pending_action(
+        pending,
+        {
+            "tool_name": "HassTurnOff",
+            "tool_args": dict(_PLAYROOM),
+            "user": "robot",
+            "thread_id": "conv1",
+            "turn_id": reply.turn_id,
+        },
+    )
+    return reply
+
+
+async def test_the_prompt_names_the_held_action_whatever_the_model_said(
+    frozen_assistant_content: None,  # noqa: ARG001
+) -> None:
+    """The field test: the model said "lock", the held action is an unlock."""
+    pending: dict[str, Any] = {}
+    reply = _pin_prompt(pending, "Block the playroom, block.")
+    model_text = "I need a security PIN to lock the playroom door. What's the PIN?"
+    chat_log = _DeltaChatLog([_assistant_reply(model_text)])
+
+    await HGAConversationEntity._async_add_pin_lines(
+        _pin_entity(), cast("Any", chat_log), pending, reply, streamed=True
+    )
+
+    line = 'Your PIN will confirm: unlock "Playroom Door Lock".'
+    # Spoken, so a pipeline already streaming speech says it.
+    assert [h["content"].strip() for h in chat_log.heard] == [line]
+    # One reply holds both, so the turn's result shows both. The line goes
+    # first: the reply keeps the model's closing question, which is what
+    # keeps a satellite listening for the PIN (ChatLog.continue_conversation).
+    assert len(chat_log.content) == 1
+    assert chat_log.content[0].content == f"{line}\n\n{model_text}"
+    assert chat_log.content[0].content.endswith("?")
+    # Delivered, so the next message may answer it.
+    assert all(action["disclosed"] for action in pending.values())
+
+
+async def test_a_confirmed_action_is_named_after_it_runs(
+    frozen_assistant_content: None,  # noqa: ARG001
+) -> None:
+    pending: dict[str, Any] = {}
+    from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+        start_pin_turn,
+    )
+
+    reply = start_pin_turn(pending, "conv1", "1234")
+    reply.confirmed = 'unlock "Playroom Door Lock"'
+    reply.outcome = "done"
+    chat_log = _DeltaChatLog([_assistant_reply("The playroom door is now locked.")])
+
+    await HGAConversationEntity._async_add_pin_lines(
+        _pin_entity(), cast("Any", chat_log), pending, reply, streamed=True
+    )
+
+    assert chat_log.content[-1].content == (
+        'PIN accepted: unlock "Playroom Door Lock".\n\nThe playroom door is now locked.'
+    )
+
+
+async def test_a_turn_without_a_prompt_or_confirmation_is_left_alone(
+    frozen_assistant_content: None,  # noqa: ARG001
+) -> None:
+    pending: dict[str, Any] = {}
+    from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+        start_pin_turn,
+    )
+
+    reply = start_pin_turn(pending, "conv1", "what time is it")
+    chat_log = _DeltaChatLog([_assistant_reply("It's noon.")])
+
+    await HGAConversationEntity._async_add_pin_lines(
+        _pin_entity(), cast("Any", chat_log), pending, reply, streamed=True
+    )
+
+    assert chat_log.heard == []
+    assert chat_log.content[-1].content == "It's noon."
+
+
+async def test_the_line_is_added_in_czech(
+    frozen_assistant_content: None,  # noqa: ARG001
+) -> None:
+    pending: dict[str, Any] = {}
+    reply = _pin_prompt(pending, "odemkni dveře")
+    chat_log = _DeltaChatLog([_assistant_reply("Zadejte PIN.")])
+
+    await HGAConversationEntity._async_add_pin_lines(
+        _pin_entity("cs"), cast("Any", chat_log), pending, reply, streamed=True
+    )
+
+    # "Zadejte PIN." ends with no question mark, so the fixed question follows.
+    assert chat_log.content[-1].content == (
+        "Váš PIN potvrdí: odemknout „Playroom Door Lock“.\n\nZadejte PIN. Jaký je váš PIN?"
+    )
+
+
+async def test_without_a_reply_to_join_the_line_is_its_own_reply(
+    frozen_assistant_content: None,  # noqa: ARG001
+) -> None:
+    pending: dict[str, Any] = {}
+    reply = _pin_prompt(pending, "unlock the playroom door")
+    user = _mk_content(ha_conversation.UserContent, content="unlock the playroom door")
+    chat_log = _DeltaChatLog([user])
+
+    await HGAConversationEntity._async_add_pin_lines(
+        _pin_entity(), cast("Any", chat_log), pending, reply, streamed=True
+    )
+
+    assert chat_log.content[0] is user
+    # The line is the whole reply: it ends with a question, so a satellite
+    # keeps listening for the PIN.
+    assert chat_log.content[-1].content == f"{_LINE} What is your PIN?"
+    assert all(action["disclosed"] for action in pending.values())
+
+
+async def test_a_prompt_reply_without_a_question_gets_one(
+    frozen_assistant_content: None,  # noqa: ARG001
+) -> None:
+    """
+    A prompt reply that ends without a question mark gets the fixed question.
+
+    Field test 2026-10-15: the model wrote "Please enter the PIN." and the
+    satellite stopped listening. HA keeps the mic open only for a reply that
+    ends with a question mark, so one is added in fixed words, spoken too.
+    """
+    pending: dict[str, Any] = {}
+    reply = _pin_prompt(pending, "unlock the playroom door")
+    model_text = "I need a security PIN to unlock the playroom door. Please enter it."
+    chat_log = _DeltaChatLog([_assistant_reply(model_text)])
+
+    await HGAConversationEntity._async_add_pin_lines(
+        _pin_entity(), cast("Any", chat_log), pending, reply, streamed=True
+    )
+
+    assert [h["content"] for h in chat_log.heard] == [f"{_LINE} What is your PIN?"]
+    assert chat_log.content[-1].content == f"{_LINE}\n\n{model_text} What is your PIN?"
+    assert chat_log.content[-1].content.endswith("?")
+
+
+async def test_a_prompt_reply_that_already_asks_is_left_as_is(
+    frozen_assistant_content: None,  # noqa: ARG001
+) -> None:
+    pending: dict[str, Any] = {}
+    reply = _pin_prompt(pending, "unlock the playroom door")
+    chat_log = _DeltaChatLog([_assistant_reply("What is your PIN?")])
+
+    await HGAConversationEntity._async_add_pin_lines(
+        _pin_entity(), cast("Any", chat_log), pending, reply, streamed=True
+    )
+
+    assert chat_log.content[-1].content == f"{_LINE}\n\nWhat is your PIN?"
+    assert [h["content"] for h in chat_log.heard] == [_LINE]
+
+
+async def test_a_done_line_does_not_add_a_question(
+    frozen_assistant_content: None,  # noqa: ARG001
+) -> None:
+    pending: dict[str, Any] = {}
+    from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+        start_pin_turn,
+    )
+
+    reply = start_pin_turn(pending, "conv1", "1234")
+    reply.confirmed = 'unlock "Playroom Door Lock"'
+    reply.outcome = "done"
+    chat_log = _DeltaChatLog([_assistant_reply("Done.")])
+
+    await HGAConversationEntity._async_add_pin_lines(
+        _pin_entity(), cast("Any", chat_log), pending, reply, streamed=True
+    )
+
+    assert chat_log.content[-1].content == (
+        'PIN accepted: unlock "Playroom Door Lock".\n\nDone.'
+    )
+
+
+async def test_the_line_does_not_replace_a_tool_call(
+    frozen_assistant_content: None,  # noqa: ARG001
+) -> None:
+    """The model ended on the tool call that asked for the PIN (a failed stream)."""
+    pending: dict[str, Any] = {}
+    reply = _pin_prompt(pending, "unlock the playroom door")
+    tool_call = _mk_content(
+        ha_conversation.AssistantContent,
+        agent_id=HGA_AGENT_ID,
+        content="",
+        tool_calls=[object()],
+    )
+    chat_log = _DeltaChatLog([tool_call])
+
+    await HGAConversationEntity._async_add_pin_lines(
+        _pin_entity(), cast("Any", chat_log), pending, reply, streamed=True
+    )
+
+    assert chat_log.content[0] is tool_call
+    assert chat_log.content[-1].content == f"{_LINE} What is your PIN?"
+    assert all(action["disclosed"] for action in pending.values())
+
+
+async def test_without_a_pipeline_the_line_is_joined_without_a_delta(
+    frozen_assistant_content: None,  # noqa: ARG001
+) -> None:
+    """
+    One replacement when no pipeline listens for deltas.
+
+    conversation.process: the chat log's subscribers would otherwise see the
+    reply, the line and the join as three additions (Red Team, 2026-10-15).
+    """
+    pending: dict[str, Any] = {}
+    reply = _pin_prompt(pending, "unlock the playroom door")
+    chat_log = _DeltaChatLog([_assistant_reply("What is your PIN?")], listening=False)
+
+    await HGAConversationEntity._async_add_pin_lines(
+        _pin_entity(), cast("Any", chat_log), pending, reply, streamed=True
+    )
+
+    assert chat_log.heard == []
+    assert len(chat_log.content) == 1
+    assert chat_log.content[0].content == f"{_LINE}\n\nWhat is your PIN?"
+
+
+async def test_a_reply_that_was_not_streamed_is_spoken_whole(
+    frozen_assistant_content: None,  # noqa: ARG001
+) -> None:
+    """
+    Schema-first mode commits the reply without deltas: speak the joined reply.
+
+    Streaming only the line would make a pipeline past HA's 60-character
+    threshold speak the line and skip the reply (Codex, 2026-10-15).
+    """
+    pending: dict[str, Any] = {}
+    reply = _pin_prompt(pending, "unlock the playroom door")
+    model_text = (
+        "I need the security PIN to unlock the playroom door. What is your PIN?"
+    )
+    chat_log = _DeltaChatLog([_assistant_reply(model_text)])
+
+    await HGAConversationEntity._async_add_pin_lines(
+        _pin_entity(), cast("Any", chat_log), pending, reply, streamed=False
+    )
+
+    assert [h["content"] for h in chat_log.heard] == [f"{_LINE}\n\n{model_text}"]
+    assert len(chat_log.content) == 1
+    assert chat_log.content[0].content == f"{_LINE}\n\n{model_text}"
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        ("failed", 'PIN accepted, but unlock "Playroom Door Lock" failed.'),
+        (
+            "unknown",
+            'PIN accepted; unlock "Playroom Door Lock" may have run. Check the device.',
+        ),
+    ],
+)
+async def test_a_failed_or_unknown_outcome_is_said_in_fixed_words(
+    frozen_assistant_content: None,  # noqa: ARG001
+    outcome: str,
+    expected: str,
+) -> None:
+    pending: dict[str, Any] = {}
+    from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+        start_pin_turn,
+    )
+
+    reply = start_pin_turn(pending, "conv1", "1234")
+    reply.confirmed = 'unlock "Playroom Door Lock"'
+    reply.outcome = outcome
+    chat_log = _DeltaChatLog([_assistant_reply("Sorry, that did not work.")])
+
+    await HGAConversationEntity._async_add_pin_lines(
+        _pin_entity(), cast("Any", chat_log), pending, reply, streamed=True
+    )
+
+    assert chat_log.content[-1].content == f"{expected}\n\nSorry, that did not work."
+
+
+async def test_a_turn_with_no_reply_but_a_prompt_ends_with_the_line(
+    frozen_assistant_content: None,  # noqa: ARG001
+) -> None:
+    """
+    No apology: the prompt is the reply.
+
+    "Try again" would be wrong next to "PIN accepted" (Claude adversarial,
+    2026-10-15).
+    """
+    pending: dict[str, Any] = {}
+    reply = _pin_prompt(pending, "unlock the playroom door")
+    chat_log = _DeltaChatLog([])
+
+    await HGAConversationEntity._async_finish_reply(
+        _pin_entity(), cast("Any", chat_log), pending, reply, streamed=True
+    )
+
+    assert [c.content for c in chat_log.content] == [f"{_LINE} What is your PIN?"]
+    assert len(chat_log.heard) == 1
+    assert all(action["disclosed"] for action in pending.values())
+
+
+async def test_a_turn_with_no_reply_and_no_prompt_still_apologizes(
+    frozen_assistant_content: None,  # noqa: ARG001
+) -> None:
+    pending: dict[str, Any] = {}
+    from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+        start_pin_turn,
+    )
+
+    reply = start_pin_turn(pending, "conv1", "hello")
+    chat_log = _DeltaChatLog([])
+
+    await HGAConversationEntity._async_finish_reply(
+        _pin_entity(), cast("Any", chat_log), pending, reply, streamed=True
+    )
+
+    assert [c.content for c in chat_log.content] == [
+        "I'm sorry, I was unable to respond. Please try again."
+    ]

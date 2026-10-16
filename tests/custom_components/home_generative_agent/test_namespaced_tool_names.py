@@ -21,7 +21,6 @@ import pytest
 from custom_components.home_generative_agent.agent.graph import (
     _is_critical_action,
     _is_live_context_tool,
-    _minimal_payload_for_domain,
     _tool_lookup_targets,
 )
 from custom_components.home_generative_agent.agent.helpers import (
@@ -31,6 +30,9 @@ from custom_components.home_generative_agent.agent.helpers import (
     normalize_intent_for_alarm,
     normalize_intent_for_lock,
     sanitize_tool_args,
+)
+from custom_components.home_generative_agent.agent.helpers import (
+    minimal_payload_for_domain as _minimal_payload_for_domain,
 )
 
 LOCK_RULES = [{"domain": "lock", "service": "unlock"}]
@@ -105,6 +107,45 @@ def test_lock_intent_is_critical_under_any_spelling(tool_name: str) -> None:
     """
     args = {"name": "Garage Door Lock", "domain": ["lock"]}
     assert _is_critical_action(args, LOCK_RULES, tool_name)
+
+
+@pytest.mark.parametrize("tool_name", ["HassTurnOff", "intent__HassTurnOff"])
+def test_a_lock_named_only_by_its_entity_id_is_critical(tool_name: str) -> None:
+    """
+    No `domain`, a name without "lock", an entity id: still the PIN gate.
+
+    The lock normalizer needs the domain or "lock" in the name, and the
+    generic rule match needs a service, so this shape ran with no PIN at all
+    (fourth review round of PR #769, 2026-10-15). The entity id's domain
+    counts.
+    """
+    args = {"name": "Front Door", "entity_id": "lock.front_door"}
+    assert _is_critical_action(args, LOCK_RULES, tool_name)
+
+
+def test_lock_payload_keeps_the_area_or_floor_and_reads_all_as_no_name() -> None:
+    """A lock call for a place acts on that place; "all" lets an entity id win."""
+    payload = _minimal_payload_for_domain({"domain": ["lock"], "area": "Garage"})
+    assert payload["area"] == "Garage"
+    assert "name" not in payload
+    payload = _minimal_payload_for_domain({"domain": ["lock"], "floor": "Upstairs"})
+    assert payload["floor"] == "Upstairs"
+    payload = _minimal_payload_for_domain(
+        {"domain": ["lock"], "name": "all", "entity_id": "lock.front_door"}
+    )
+    assert payload["name"] == "lock.front_door"
+    payload = _minimal_payload_for_domain(
+        {"domain": ["lock"], "entity_ids": ["lock.front_door", "lock.back_door"]}
+    )
+    assert payload["name"] == "lock.front_door"
+    # Any other domain: an entity id with no name is sent as the name.
+    payload = _minimal_payload_for_domain(
+        {"domain": ["cover"], "entity_id": "cover.garage"}
+    )
+    assert payload["name"] == "cover.garage"
+    assert _minimal_payload_for_domain({"entity_id": "cover.garage"}) == {
+        "entity_id": "cover.garage"
+    }
 
 
 @pytest.mark.parametrize(

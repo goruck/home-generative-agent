@@ -7,8 +7,9 @@ import importlib
 import json
 import logging
 import re
+import unicodedata
 import weakref
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from functools import partial
 from types import ModuleType
@@ -450,16 +451,366 @@ class ConfigurableData(TypedDict, total=False):
     hass: HomeAssistant
     user_id: str
     ha_llm_api: Any
+    thread_id: str
+    # The user's message for this turn. A PIN confirmation is accepted only
+    # when the PIN is in it, and runs at most one action.
+    pin_reply: PinReply
 
 
-# How long a pending PIN confirmation stays valid. Mirrors the expiry check in
-# `_load_pending_action`, which is lazy and only ever inspects the one action
-# being confirmed.
+@dataclass(slots=True)
+class PinReply:
+    """The user's message for one conversation turn, as a PIN source."""
+
+    # The message can hold the PIN, so keep it out of reprs and logs.
+    text: str = field(repr=False)
+    # Set when a PIN from this message fails the check (one message is one
+    # attempt) or its action is claimed to run (one message runs one action).
+    # A correct PIN whose action cannot start, such as with no HA LLM API,
+    # leaves it unset, so the user's reply can still be used once it can.
+    spent: bool = False
+    # Set once a refused PIN has been checked for the diagnostic warning, so
+    # the hash runs at most once per message.
+    refusal_checked: bool = False
+    # Identifies this turn: a pending action records the turn that created it
+    # and the one turn whose message may answer its PIN prompt.
+    turn_id: str = field(default_factory=ulid.ulid_now)
+    # The action this message's PIN was accepted for, as
+    # `describe_pending_action` names it, so the reply can say what happened
+    # in words the model did not choose, and how it ended (`outcome`).
+    confirmed: str = ""
+    outcome: str = ""
+
+
+# How a PIN-confirmed action ended, for `PinReply.outcome`.
+PIN_OUTCOME_DONE = "done"
+PIN_OUTCOME_FAILED = "failed"
+# An error or timeout after the claim: the device may have acted.
+PIN_OUTCOME_UNKNOWN = "unknown"
+
+
+# How long a pending PIN confirmation stays valid, used by the sweep here and
+# by `_load_pending_action` (tools.py) for the one action being confirmed. A
+# prompt is normally dropped sooner, by the turn after its last reply turn.
 PENDING_ACTION_TTL = timedelta(minutes=10)
+
+# How many of the user's messages may answer one PIN prompt: the first reply,
+# plus a retry after a wrong or unreadable PIN or a failed turn.
+MAX_PIN_REPLIES = 3
 
 # Hard cap on concurrently pending confirmations, so an unconfirmed challenge
 # loop cannot grow the store without bound.
 MAX_PENDING_ACTIONS = 16
+
+# Status of a confirmation refused before the PIN is checked: the message is
+# not the reply to the action's PIN prompt, the PIN is not in it, or it was
+# already used. The action stays pending for the user's reply.
+PIN_AWAITING_USER_REPLY = "awaiting_user_pin"
+
+# Spoken digits as speech-to-text may write them, in the languages the PIN
+# messages ship in (pin_messages.py); Czech also without diacritics, except
+# "pet" and "tri", which are English words.
+_SPOKEN_DIGITS = {
+    "zero": "0",
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
+    "nula": "0",
+    "jedna": "1",
+    "jeden": "1",
+    "jedno": "1",
+    "dva": "2",
+    "dvě": "2",
+    "dve": "2",
+    "tři": "3",
+    "čtyři": "4",
+    "ctyri": "4",
+    "pět": "5",
+    "šest": "6",
+    "sest": "6",
+    "sedm": "7",
+    "osm": "8",
+    "devět": "9",
+    "devet": "9",
+}
+# "Oh" for zero, read as a digit only next to another digit ("one oh four",
+# "one two three oh").
+_SPOKEN_ZERO = "oh"
+# Words that may join digits read out one by one ("1, 2, 3 and 4"; Czech "a").
+_DIGIT_JOINERS = frozenset({"and", "a"})
+# A token of the message: a word or number, a run of whitespace, or one other
+# character.
+_TOKEN_RE = re.compile(r"\w+|\s+|.", re.DOTALL)
+# What may stand between digits read out one by one ("1, 2, 3 and 4",
+# "1-2-3-4", "1. 2. 3. 4."). Only whitespace joins longer groups ("12 34").
+_DIGIT_SEPARATORS = frozenset(",.-\u2013\u2014")
+_DASHES = frozenset("-\u2013\u2014\u2212")
+# Between digit groups with spaces around them, these make a range, date or
+# time ("555 - 1234", "2026 / 10 / 15", "12 : 34"): never a PIN or part of one.
+_RANGE_SEPARATORS = _DASHES | {"/", ":"}
+# Units glued to a number make it a measurement ("21°", "1234%"), not a PIN.
+_UNIT_MARKS = frozenset("\u00b0%\u2030")
+# Joiners inside a compound written with no spaces, such as a time, date,
+# decimal, phone number or IP address ("12:34", "2024-10-14", "12,5",
+# "555-1234", "1.1.1.1", or an Arabic decimal or thousands mark), which
+# is never read as a PIN or split into one.
+_COMPOUND_JOINERS = frozenset(".:/,\u066b\u066c") | _DASHES
+# Invisible characters speech-to-text or a paste can leave inside a number.
+_INVISIBLE = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff"))
+
+
+def _ascii_digits(text: str) -> str:
+    """
+    Return the text in compatibility form (NFKC), with Unicode digits as ASCII.
+
+    NFKC composes Czech digit words typed or transcribed as a letter plus a
+    combining mark ("tři") into one word, and folds full-width, circled and
+    superscript characters to plain ones, punctuation included (full-width
+    "1234.56" is the decimal 1234.56). Arabic-Indic and other decimal digits
+    then read as ASCII; invisible joiners are removed, so "1\u200b234" is
+    1234.
+    """
+    return "".join(
+        str(unicodedata.decimal(char)) if char.isdecimal() else char
+        for char in unicodedata.normalize("NFKC", text).translate(_INVISIBLE)
+    )
+
+
+def _is_number(token: str) -> bool:
+    """Return True for a token of ASCII decimal digits only."""
+    return token.isascii() and token.isdecimal()
+
+
+def _compound_end(tokens: list[str], index: int) -> int:
+    """Return the index of the last token of the number starting at index."""
+    end = index
+    while (
+        end + 2 < len(tokens)
+        and tokens[end + 1] in _COMPOUND_JOINERS
+        # A digit first is enough: "1234.56kWh" is one compound.
+        and tokens[end + 2][:1].isascii()
+        and tokens[end + 2][:1].isdecimal()
+    ):
+        end += 2
+    return end
+
+
+def _is_digit_list(parts: list[str], joiners: set[str]) -> bool:
+    """Return True for digits read out one by one with no spaces ("1,2,3,4")."""
+    return joiners <= {",", *_DASHES} and all(
+        len(part) == 1 and _is_number(part) for part in parts
+    )
+
+
+def _thousands(parts: list[str], joiners: set[str]) -> str | None:
+    """Return the digits of a number with thousands commas ("1,234"), else None."""
+    if (
+        joiners == {","}
+        and all(_is_number(part) for part in parts)
+        and len(parts[0]) <= 3  # noqa: PLR2004
+        and all(len(part) == 3 for part in parts[1:])  # noqa: PLR2004
+    ):
+        return "".join(parts)
+    return None
+
+
+def _compound_items(tokens: list[str]) -> list[tuple[str, str, bool]]:
+    """Return the items of a number written with no spaces ("1234", "1,2,3,4")."""
+    parts, joiners = tokens[::2], tokens[1::2]
+    if not joiners:
+        return [("digits", parts[0], True)]
+    if _is_digit_list(parts, set(joiners)):
+        # One digit at a time, so it joins digits around it like "1, 2, 3, 4"
+        # does: "1,2,3,4, 5" is one longer number.
+        items: list[tuple[str, str, bool]] = [("digits", parts[0], True)]
+        for joiner, part in zip(joiners, parts[1:], strict=True):
+            items.extend((("sep", joiner, False), ("digits", part, True)))
+        return items
+    if digits := _thousands(parts, set(joiners)):
+        return [("digits", digits, True)]
+    return [("compound", "", True)]
+
+
+def _number_items(text: str) -> list[tuple[str, str, bool]]:
+    """
+    Split the text into digit items, separators and breaks.
+
+    Each item is (kind, value, numeral): kind "digits" with the digits and
+    whether they were written as numerals, "compound" for a time, date,
+    decimal or address (no digits of its own), "sep" with the separator, or
+    "break" for anything that ends a number.
+    """
+    tokens = _TOKEN_RE.findall(_ascii_digits(text))
+    items: list[tuple[str, str, bool]] = []
+
+    # Whether a digit comes next, past separators, joining words and other
+    # "oh"s, for each token: one backward pass, so a long run of "oh"s stays
+    # linear.
+    digit_next = [False] * (len(tokens) + 1)
+    for position in range(len(tokens) - 1, -1, -1):
+        following = tokens[position + 1] if position + 1 < len(tokens) else ""
+        lowered = following.lower()
+        if (
+            following.isspace()
+            or following in _DIGIT_SEPARATORS
+            or lowered in _DIGIT_JOINERS
+            or lowered == _SPOKEN_ZERO
+        ):
+            digit_next[position] = digit_next[position + 1]
+        else:
+            digit_next[position] = _is_number(following) or lowered in _SPOKEN_DIGITS
+
+    def after_digit() -> bool:
+        # Whitespace and separators only between the last digit and here.
+        for kind, _, _ in reversed(items):
+            if kind != "sep":
+                return kind == "digits"
+        return False
+
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        lowered = token.lower()
+        if _is_number(token):
+            end = _compound_end(tokens, index)
+            if end + 1 < len(tokens) and tokens[end + 1] in _UNIT_MARKS:
+                items.append(("compound", "", True))
+                index = end + 2
+                continue
+            items.extend(_compound_items(tokens[index : end + 1]))
+            index = end + 1
+            continue
+        if lowered in _SPOKEN_DIGITS:
+            items.append(("digits", _SPOKEN_DIGITS[lowered], False))
+        elif lowered == _SPOKEN_ZERO and (digit_next[index] or after_digit()):
+            items.append(("digits", "0", False))
+        elif token.isspace():
+            items.append(("sep", " ", False))
+        elif (
+            token in _DIGIT_SEPARATORS
+            or token in _RANGE_SEPARATORS
+            or lowered in _DIGIT_JOINERS
+        ):
+            items.append(("sep", lowered, False))
+        else:
+            # A word, a word joined to digits ("one234", "abc1234"), a digit
+            # that is not a decimal digit ("①"), or any other character ends
+            # the number.
+            items.append(("break", "", False))
+        index += 1
+    return items
+
+
+def _joins(
+    previous: tuple[str, str, bool], current: tuple[str, str, bool], seps: set[str]
+) -> bool:
+    """Return True when two digit items separated by seps are one number."""
+    if not seps:
+        # Whitespace only: "12 34", "one two three four", "555 one two three
+        # four" (one longer number, never its last four digits).
+        return True
+    if seps & _RANGE_SEPARATORS - _DASHES:
+        return False
+    if len(previous[1]) != 1 or len(current[1]) != 1:
+        return False
+    # "1. 2. 3. 4." but not "...three four. One door only."
+    return "." not in seps or (previous[2] and current[2])
+
+
+def _number_runs(text: str) -> list[str]:
+    """
+    Return the digits of each number said in the text, in order.
+
+    A number is written ("1234", "1,234"), said in groups separated by spaces
+    ("12 34"), or read out digit by digit with spaces, commas, dashes, ". " or
+    "and" between the digits ("1, 2, 3 and 4", "one two three four"). Anything
+    else ends it. A compound ("12:34", "12,5", "1.1.1.1", "1234.56kWh", "21°",
+    "50%") or a range ("555 - 1234", "2026 / 10 / 15") is not a number at all,
+    and neither is a number next to one with only spaces between ("1234
+    56.78").
+    """
+    runs: list[str] = []
+    digits = ""
+    # Inside a compound or range, whose parts are not numbers of their own.
+    in_compound = False
+    previous: tuple[str, str, bool] | None = None
+    seps: set[str] = set()
+    for item in _number_items(text):
+        kind, value, _ = item
+        if kind == "sep":
+            if value != " ":
+                seps.add(value)
+            continue
+        numeric = kind in {"digits", "compound"}
+        if numeric and previous is not None:
+            if (
+                kind == "digits"
+                and previous[0] == "digits"
+                and _joins(previous, item, seps)
+            ):
+                if not in_compound:
+                    digits += value
+                previous, seps = item, set()
+                continue
+            if seps & _RANGE_SEPARATORS or (
+                not seps and "compound" in {kind, previous[0]}
+            ):
+                digits, in_compound = "", True
+                previous, seps = item, set()
+                continue
+        if digits:
+            runs.append(digits)
+        in_compound = kind == "compound"
+        digits = value if kind == "digits" else ""
+        previous = item if numeric else None
+        seps = set()
+    if digits:
+        runs.append(digits)
+    return runs
+
+
+def pin_digits(text: str) -> str | None:
+    """
+    Return the digits of the one number in the text, else None.
+
+    For the PIN as the model passes it, which may be said in words or
+    labelled ("one two three four", "PIN 1234"); two numbers give None.
+    """
+    runs = _number_runs(text)
+    return runs[0] if len(runs) == 1 else None
+
+
+def normalize_pin(pin: str) -> str:
+    """
+    Return a PIN as entered, folded the way the user's message is read.
+
+    Full-width, circled, superscript and Arabic-Indic digits become ASCII, so
+    setup stores the PIN that confirmation hashes.
+    """
+    return _ascii_digits(pin.strip())
+
+
+def pin_in_text(pin: str, text: str) -> bool:
+    """
+    Return True when one number said in the user's message is exactly the PIN.
+
+    The number can be written ("1234", "1,234"), said in groups ("12 34") or
+    read out digit by digit, as digits or spoken digit words ("1, 2, 3, 4",
+    "one two three four"). The whole number must equal the PIN: a longer
+    number that contains it ("12345", "555 1234", "nine one two three four")
+    does not count, and neither does a time, date, decimal or address
+    ("12:34", "12.34", "1.2.3.4"). A number standing apart from other numbers
+    and equal to the PIN always counts, whatever it means to the user ("set
+    it to 1234", "$1234").
+    """
+    if not pin or not text:
+        return False
+    return _ascii_digits(pin) in _number_runs(text)
 
 
 class CriticalActionPolicy(NamedTuple):
@@ -496,38 +847,112 @@ def resolve_critical_action_policy(options: Mapping[str, Any]) -> CriticalAction
     )
 
 
+def pending_action_expired(action: Mapping[str, Any], now: datetime) -> bool:
+    """
+    Return True when a pending action is past its TTL or has no usable time.
+
+    A record with no usable timestamp could never expire, so it counts as
+    expired; a timezone-naive one cannot be compared with the aware `now`.
+    """
+    created_at = action.get("created_at")
+    if not isinstance(created_at, str):
+        return True
+    try:
+        return now - datetime.fromisoformat(created_at) > PENDING_ACTION_TTL
+    except (ValueError, TypeError):
+        return True
+
+
+def _request_key(action: Mapping[str, Any]) -> tuple[Any, Any, Any]:
+    """
+    Return what makes two pending actions the same request.
+
+    The arguments as they would run (intent normalized, sanitized, names
+    casefolded), and the automation without the id add_automation generates
+    on every call, so a model re-issuing the request unchanged is recognized.
+    """
+    tool_name = action.get("tool_name")
+    tool_args = action.get("tool_args") or {}
+    if isinstance(tool_name, str) and isinstance(tool_args, dict):
+        tool_args = normalize_intent_for_alarm(tool_name, tool_args)
+        tool_args = sanitize_tool_args(normalize_intent_for_lock(tool_name, tool_args))
+        tool_args = {
+            key: value.casefold() if key == "name" and isinstance(value, str) else value
+            for key, value in tool_args.items()
+        }
+    automation = action.get("automation_config")
+    if isinstance(automation, dict):
+        automation = {key: value for key, value in automation.items() if key != "id"}
+    return tool_name, tool_args, automation
+
+
+def _same_request(existing: Mapping[str, Any], action: Mapping[str, Any]) -> bool:
+    """Return True when the action re-issues the existing one unchanged."""
+    return _request_key(existing) == _request_key(action)
+
+
 def register_pending_action(
     pending_actions: dict[str, dict[str, Any]],
     action: dict[str, Any],
-) -> str:
+) -> str | None:
     """
     Store a pending PIN-confirmation action and return its action ID.
 
-    Sweeps expired entries and caps the store on every registration. Without
-    this the dict only ever shrinks when a specific action ID is confirmed, so
-    every challenge the model abandons is retained for the life of the config
-    entry — and once more than one entry accumulates, the single-pending-action
-    convenience path in ``_resolve_action_id`` stops resolving.
+    Sweeps expired entries and caps the store on every registration, so
+    challenges the model abandons are not kept for the life of the entry.
+
+    A conversation has at most one pending action per user, so the user's PIN
+    only ever confirms their latest request: with two, the model would choose
+    which one the PIN runs. A new request replaces one from an earlier turn,
+    keeping its failed attempts so a new request does not reset the limit. A
+    second, different request in the same turn is refused (None): the first
+    one's prompt is already on its way to the user.
+
+    Re-issuing the same request keeps its prompt, so the model calling the
+    tool again in the reply turn is not locked out. Re-issued in the reply
+    turn, the request was most likely repeated by the user, who now gets the
+    prompt again, so the prompt is also kept for their next message. An
+    expired action is dropped first and carries nothing.
     """
     now = dt_util.utcnow()
+    thread_id = action.get("thread_id")
+    carried: dict[str, Any] = {}
     for key, existing in list(pending_actions.items()):
-        created_at = existing.get("created_at")
-        if not isinstance(created_at, str):
-            # A record with no usable timestamp can never expire, so skipping
-            # it would make it immortal and let the cap evict live entries
-            # around it. `_load_pending_action` rejects it anyway.
+        if pending_action_expired(existing, now):
             pending_actions.pop(key, None)
-            continue
-        try:
-            created = datetime.fromisoformat(created_at)
-            expired = now - created > PENDING_ACTION_TTL
-        except (ValueError, TypeError):
-            # TypeError covers a timezone-naive stored timestamp, which cannot
-            # be compared against the aware `now`. One malformed record must
-            # not break every later registration.
-            pending_actions.pop(key, None)
-            continue
-        if expired:
+        elif (
+            thread_id
+            and existing.get("thread_id") == thread_id
+            and existing.get("user") == action.get("user")
+        ):
+            if _same_request(existing, action) and existing.get("turn_id"):
+                reissued_in_reply = bool(
+                    existing.get("reply_turn")
+                    and existing.get("reply_turn") == action.get("turn_id")
+                )
+                if reissued_in_reply and not prompt_renewable(existing):
+                    # The prompt has taken all its replies, so the request
+                    # said again starts a fresh one (answered by the next
+                    # message) rather than one that promises a reply it
+                    # cannot take. The attempts still carry over.
+                    carried = {}
+                else:
+                    carried = {
+                        name: existing[name]
+                        for name in (
+                            "turn_id",
+                            "reply_turn",
+                            "replies",
+                            "renew",
+                            "disclosed",
+                        )
+                        if name in existing
+                    }
+                    if reissued_in_reply:
+                        carried["renew"] = True
+            elif existing.get("turn_id") == action.get("turn_id"):
+                return None
+            carried["attempts"] = int(existing.get("attempts", 0) or 0)
             pending_actions.pop(key, None)
 
     while len(pending_actions) >= MAX_PENDING_ACTIONS:
@@ -536,10 +961,136 @@ def register_pending_action(
     action_id = ulid.ulid_now()
     pending_actions[action_id] = {
         **action,
-        "created_at": now.isoformat(),
         "attempts": 0,
+        **carried,
+        "created_at": now.isoformat(),
     }
     return action_id
+
+
+def start_pin_turn(
+    pending_actions: dict[str, dict[str, Any]], thread_id: str, text: str
+) -> PinReply:
+    """
+    Open a user turn in a conversation and return its message as a PinReply.
+
+    A pending action is answered by the user's next message or not at all:
+    the first turn after the one that created it is its reply turn, and the
+    turn after that drops it. A prompt the user moved on from ("never mind",
+    or just another request) cannot be confirmed later by a number that
+    happens to equal the PIN.
+
+    While the user is still answering, the prompt is kept for one more
+    message: after a wrong or unreadable PIN, the request repeated, or a
+    turn that failed (see `keep_pin_prompts`), up to MAX_PIN_REPLIES replies.
+    Expired actions are dropped here too, and so is a prompt whose fixed line
+    (`disclose_pin_prompts`) was never delivered: the turn that made it was
+    cancelled or failed before its reply, so the user was never told, in
+    words the model did not choose, what their PIN would run.
+    """
+    reply = PinReply(text)
+    turn_id = reply.turn_id
+    now = dt_util.utcnow()
+    for key, action in list(pending_actions.items()):
+        if pending_action_expired(action, now):
+            pending_actions.pop(key, None)
+            continue
+        if action.get("thread_id") != thread_id or action.get("turn_id") == turn_id:
+            continue
+        if not action.get("disclosed"):
+            pending_actions.pop(key, None)
+            continue
+        replies = int(action.get("replies", 0) or 0)
+        renew = action.pop("renew", False) and prompt_renewable(action)
+        if action.get("reply_turn") is None or renew:
+            action["reply_turn"] = turn_id
+            action["replies"] = replies + 1
+        else:
+            pending_actions.pop(key, None)
+    return reply
+
+
+def keep_pin_prompt(action: dict[str, Any], reply: PinReply | None) -> bool:
+    """
+    Keep the action's prompt for the user's next message, if this turn answers it.
+
+    Returns False when it is not kept: this is not the prompt's reply turn, or
+    the prompt has taken its MAX_PIN_REPLIES replies.
+    """
+    if reply is None or action.get("reply_turn") != reply.turn_id:
+        return False
+    if not prompt_renewable(action):
+        return False
+    action["renew"] = True
+    return True
+
+
+def prompt_renewable(action: Mapping[str, Any]) -> bool:
+    """Return True while the prompt has not taken all its MAX_PIN_REPLIES replies."""
+    return int(action.get("replies", 0) or 0) < MAX_PIN_REPLIES
+
+
+def keep_pin_prompts(
+    pending_actions: dict[str, dict[str, Any]], reply: PinReply
+) -> None:
+    """
+    Keep every prompt this turn answers for the user's next message.
+
+    For a turn that failed (a model or graph error): the user's reply never
+    got an answer, so they can send the PIN again.
+    """
+    for action in pending_actions.values():
+        keep_pin_prompt(action, reply)
+
+
+def prompts_awaiting_reply(
+    pending_actions: Mapping[str, dict[str, Any]], reply: PinReply
+) -> list[dict[str, Any]]:
+    """
+    Return the actions whose PIN prompt the user's next message may answer.
+
+    A prompt made this turn, and one this turn answered that was kept for
+    another message (`keep_pin_prompt`), while it can still take one.
+    """
+    return [
+        action
+        for action in pending_actions.values()
+        if action.get("turn_id") == reply.turn_id
+        or (
+            action.get("reply_turn") == reply.turn_id
+            and action.get("renew")
+            and prompt_renewable(action)
+        )
+    ]
+
+
+def disclose_pin_prompts(
+    pending_actions: Mapping[str, dict[str, Any]], reply: PinReply
+) -> list[dict[str, Any]]:
+    """
+    Mark the prompts this turn's reply names as delivered, and return them.
+
+    Called once the fixed line naming each action is in the reply. Only a
+    disclosed prompt can be answered (`start_pin_turn`): the user has been
+    told, in words the model did not choose, what their PIN would run.
+    """
+    actions = prompts_awaiting_reply(pending_actions, reply)
+    for action in actions:
+        action["disclosed"] = True
+    return actions
+
+
+def thread_has_pending_action(
+    pending_actions: Mapping[str, Mapping[str, Any]], thread_id: str | None
+) -> bool:
+    """Return True when this conversation has an unexpired pending action."""
+    if not thread_id:
+        return False
+    now = dt_util.utcnow()
+    return any(
+        action.get("thread_id") == thread_id and not pending_action_expired(action, now)
+        for action in pending_actions.values()
+    )
 
 
 def matches_critical_rule(
@@ -582,6 +1133,167 @@ def matches_critical_rule(
             continue
         return True
     return False
+
+
+def _payload_target(tool_args: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    """
+    Return the (name, entity_id) a payload may carry, as HA will read them.
+
+    HA reads a name of "all" as no name, so a single entity id the model gave
+    is the better target; a list of ids is read like one id.
+    """
+    name = tool_args.get("name")
+    if name == INTENT_NAME_ALL or not isinstance(name, str) or not name:
+        name = None
+    entity_id = tool_args.get("entity_id") or tool_args.get("entity_ids")
+    if isinstance(entity_id, list):
+        entity_id = entity_id[0] if entity_id else None
+    if not isinstance(entity_id, str) or not entity_id:
+        entity_id = None
+    return name, entity_id
+
+
+def _lock_payload(
+    tool_args: Mapping[str, Any], name: str | None, entity_id: str | None
+) -> dict[str, Any]:
+    """Return the payload for a lock intent, narrowed to one lock or one place."""
+    if not entity_id and name:
+        slug = str(name).strip().lower().replace(" ", "_")
+        entity_id = f"lock.{slug}"
+    payload: dict[str, Any] = {
+        "domain": ["lock"],
+        "service": tool_args.get("service"),
+    }
+    # The payload must carry a target NAME. HA's turn-on/turn-off intents
+    # resolve targets from name/area/floor and never read an `entity_id`
+    # slot (`helpers/intent.py` contains no such lookup), while `domains`
+    # alone already satisfies `MatchTargetsConstraints.has_constraints` --
+    # so domain+entity_id sails past the "cannot target all devices" guard
+    # and matches EVERY exposed lock. `_filter_by_name` accepts an entity
+    # id as the name value, so one key narrows both shapes to one entity.
+    if target := (name or entity_id):
+        payload["name"] = target
+    if entity_id:
+        payload["entity_id"] = entity_id
+    # The area or floor the user named narrows a call with no name to
+    # the locks there, rather than every lock in the home.
+    for key in ("area", "floor"):
+        if value := tool_args.get(key):
+            payload[key] = value
+    if code := tool_args.get("code"):
+        payload["code"] = code
+    return payload
+
+
+def _alarm_payload(tool_args: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the payload for an alarm panel intent."""
+    payload: dict[str, Any] = {
+        "domain": ["alarm_control_panel"],
+        "service": tool_args.get("service"),
+    }
+    for key in ("entity_id", "code", "state"):
+        if value := tool_args.get(key):
+            payload[key] = value
+    return payload
+
+
+def minimal_payload_for_domain(tool_args: dict[str, Any]) -> dict[str, Any]:
+    """
+    Return a reduced payload for HA services to avoid extra keys.
+
+    The normal tool path applies this after the critical-action guard, and
+    the PIN confirmation applies it to the held call before running it, so
+    the two send the same payload (the fixed line names what this sends).
+    """
+    domains = tool_args.get("domain") or []
+    domains = domains if isinstance(domains, list) else [domains]
+    domain = str(domains[0]).lower() if domains else ""
+    name, entity_id = _payload_target(tool_args)
+
+    if domain == "lock":
+        return _lock_payload(tool_args, name, entity_id)
+    if domain == "alarm_control_panel":
+        return _alarm_payload(tool_args)
+    # Any other domain: HA's intents ignore an entity id, so without a name
+    # the whole domain acts. An entity id the model gave is sent as the name
+    # (`_filter_by_name` accepts one), which narrows the call to that device.
+    if domain and not name and entity_id:
+        return {**tool_args, "name": entity_id}
+    return tool_args
+
+
+# The target name Home Assistant's intents read as "no name".
+INTENT_NAME_ALL = "all"
+
+
+def parse_tool_response(
+    response: Any, tool_args: dict[str, Any]
+) -> tuple[str, str | None]:
+    """
+    Return (content, status) from a tool response.
+
+    Shared by the normal tool path and the PIN confirmation, so a tool that
+    reports failure in its payload (`success: false`, a `warning`, an alarm
+    that did not change state) reads as a failure on both.
+    """
+    parsed: dict[str, Any] | None = None
+    if isinstance(response, dict):
+        parsed = response
+    elif isinstance(response, str):
+        try:
+            decoded = json.loads(response)
+        except json.JSONDecodeError:
+            decoded = None
+        # A JSON list, number or bool carries no status fields.
+        parsed = decoded if isinstance(decoded, dict) else None
+
+    status: str | None = None
+    content_str = json.dumps(response, default=str)
+    if parsed is None:
+        return content_str, status
+
+    warning = parsed.get("warning")
+    success_val = parsed.get("success", True)
+    result_text = (
+        parsed.get("result_text") or parsed.get("response") or parsed.get("result")
+    )
+    inferred_state = parsed.get("inferred_state")
+
+    domains = tool_args.get("domain") or []
+    domains = domains if isinstance(domains, list) else [domains]
+    is_alarm = any(str(d).lower() == "alarm_control_panel" for d in domains)
+    service = str(tool_args.get("service") or "").lower()
+
+    if warning:
+        status = "error"
+        content_str = str(result_text or warning)
+    elif success_val is False:
+        status = "error"
+        content_str = str(result_text or "Action failed.")
+    elif is_alarm:
+        if "arm" in service and inferred_state not in {
+            "armed",
+            "armed_home",
+            "armed_away",
+            "armed_night",
+            "arming",
+        }:
+            status = "error"
+            content_str = str(
+                result_text
+                or f"Alarm did not change state (panel_state={inferred_state})."
+            )
+        if "disarm" in service and inferred_state not in {
+            "disarmed",
+            "disarming",
+        }:
+            status = "error"
+            content_str = str(
+                result_text
+                or f"Alarm did not change state (panel_state={inferred_state})."
+            )
+
+    return content_str, status
 
 
 def sanitize_tool_args(tool_args: dict[str, Any]) -> dict[str, Any]:

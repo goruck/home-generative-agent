@@ -9,6 +9,7 @@ from typing import Any, cast
 
 import pytest
 
+from custom_components.home_generative_agent.agent.helpers import PinReply
 from custom_components.home_generative_agent.agent.tools import confirm_sensitive_action
 from custom_components.home_generative_agent.const import (
     CONF_CRITICAL_ACTION_PIN_HASH,
@@ -60,9 +61,15 @@ def _base_config(
                         "service": "lock",
                     },
                     "user": user_id,
+                    "thread_id": "conv1",
+                    # Waiting for the reply this config stands for.
+                    "reply_turn": "turn2",
                 }
             },
             "user_id": user_id,
+            "thread_id": "conv1",
+            # The user's reply carries the PIN under test.
+            "pin_reply": PinReply(pin, turn_id="turn2"),
             "ha_llm_api": FakeAPI(),
             "hass": None,
         }
@@ -96,9 +103,10 @@ async def test_wrong_user() -> None:
 
 @pytest.mark.asyncio
 async def test_invalid_pin_format() -> None:
-    """Test invalid PIN format."""
+    """Test invalid PIN format: the user's reply is too short to be a PIN."""
     config = _base_config("1234", "aid")
-    result = await confirm_tool("aid", "abcd", config=config, store=None)
+    config["configurable"]["pin_reply"] = PinReply("12", turn_id="turn2")
+    result = await confirm_tool("aid", "12", config=config, store=None)
     assert "Invalid PIN" in result
 
 
@@ -107,6 +115,7 @@ async def test_incorrect_pin_increments_attempts() -> None:
     """Test incorrect PIN increments attempts."""
     config = _base_config("1234", "aid")
     pending = config["configurable"]["pending_actions"]["aid"]
+    config["configurable"]["pin_reply"] = PinReply("0000", turn_id="turn2")
     result = await confirm_tool("aid", "0000", config=config, store=None)
     assert result.startswith("Incorrect PIN")
     assert pending["attempts"] == 1

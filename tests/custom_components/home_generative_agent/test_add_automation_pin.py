@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
@@ -15,7 +16,15 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.agent import tools as tools_module
-from custom_components.home_generative_agent.agent.helpers import MAX_PENDING_ACTIONS
+from custom_components.home_generative_agent.agent.helpers import (
+    MAX_PENDING_ACTIONS,
+    PIN_AWAITING_USER_REPLY,
+    PIN_OUTCOME_DONE,
+    PIN_OUTCOME_UNKNOWN,
+    PinReply,
+    disclose_pin_prompts,
+    start_pin_turn,
+)
 from custom_components.home_generative_agent.agent.tools import (
     add_automation,
     confirm_sensitive_action,
@@ -32,9 +41,21 @@ if TYPE_CHECKING:
 
 AddAutomationTool = Callable[..., Awaitable[str]]
 add_automation_tool = cast("AddAutomationTool", cast("Any", add_automation).coroutine)
-confirm_tool = cast(
-    "AddAutomationTool", cast("Any", confirm_sensitive_action).coroutine
-)
+_confirm = cast("AddAutomationTool", cast("Any", confirm_sensitive_action).coroutine)
+
+
+async def confirm_tool(
+    action_id: str, pin: str, *, config: dict[str, Any], store: Any
+) -> str:
+    """Confirm as the user's reply to the PIN prompt: a new message with the PIN."""
+    configurable = config["configurable"]
+    # The request turn ended by naming the prompt, as conversation.py does.
+    disclose_pin_prompts(configurable["pending_actions"], configurable["pin_reply"])
+    configurable["pin_reply"] = start_pin_turn(
+        configurable["pending_actions"], configurable["thread_id"], pin
+    )
+    return await _confirm(action_id, pin, config=config, store=store)
+
 
 PIN = "4321"
 
@@ -102,10 +123,15 @@ class FakeBus:
 def _fake_hass(tmp_path: Path) -> Any:
     """Build a minimal hass stand-in with an empty automations.yaml."""
     (tmp_path / "automations.yaml").write_text("", encoding="utf-8")
+
+    async def _executor_job(target: Callable[..., Any], *args: Any) -> Any:
+        return target(*args)
+
     return SimpleNamespace(
         config=SimpleNamespace(config_dir=str(tmp_path)),
         services=FakeServices(),
         bus=FakeBus(),
+        async_add_executor_job=_executor_job,
     )
 
 
@@ -117,6 +143,8 @@ def _config(hass: Any, options: dict[str, Any]) -> dict[str, Any]:
             "options": options,
             "pending_actions": {},
             "user_id": "user1",
+            "thread_id": "conv1",
+            "pin_reply": PinReply("add the automation"),
             "ha_llm_api": None,
         }
     }
@@ -255,6 +283,31 @@ async def test_confirming_pin_writes_the_held_automation(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_a_pin_the_user_did_not_write_cannot_install_the_automation(
+    tmp_path: Path,
+) -> None:
+    """
+    A confirmation whose PIN is not in the user's message is refused.
+
+    The hold records the conversation, and nothing is written or counted.
+    """
+    hass = _fake_hass(tmp_path)
+    config = _config(hass, _pin_options())
+
+    challenge = json.loads(
+        await add_automation_tool(automation_yaml=UNLOCK_YAML, config=config)
+    )
+    action_id = challenge["action_id"]
+    pending = config["configurable"]["pending_actions"][action_id]
+    reply = json.loads(await _confirm(action_id, PIN, config=config, store=None))
+
+    assert reply["status"] == PIN_AWAITING_USER_REPLY
+    assert pending["thread_id"] == "conv1"
+    assert pending["attempts"] == 0
+    assert not (tmp_path / "automations.yaml").exists() or _written(tmp_path) == []
+
+
+@pytest.mark.asyncio
 async def test_wrong_pin_does_not_write_the_automation(tmp_path: Path) -> None:
     """An incorrect PIN leaves the automation pending and uninstalled."""
     hass = _fake_hass(tmp_path)
@@ -267,7 +320,7 @@ async def test_wrong_pin_does_not_write_the_automation(tmp_path: Path) -> None:
         challenge["action_id"], "9999", config=config, store=None
     )
 
-    assert result == "Incorrect PIN. Action not executed."
+    assert result.startswith("Incorrect PIN. Action not executed.")
     assert _written(tmp_path) == []
     assert len(config["configurable"]["pending_actions"]) == 1
 
@@ -390,17 +443,46 @@ async def test_expired_pending_automation_is_not_written(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_too_many_wrong_pins_locks_out_the_automation(tmp_path: Path) -> None:
-    """Attempt exhaustion blocks the write even if the right PIN arrives later."""
+async def test_a_wrong_pin_keeps_the_automation_prompt_for_one_more_reply(
+    tmp_path: Path,
+) -> None:
+    """
+    A typo is answered in the next message; guessing stays bounded.
+
+    One message is one attempt, and a prompt is kept open for at most three
+    replies, so the PIN cannot be guessed against one held automation.
+    """
     hass = _fake_hass(tmp_path)
     config = _config(hass, _pin_options())
 
     challenge = json.loads(
         await add_automation_tool(automation_yaml=UNLOCK_YAML, config=config)
     )
-    for _ in range(5):
-        await confirm_tool(challenge["action_id"], "9999", config=config, store=None)
+    wrong = await confirm_tool(
+        challenge["action_id"], "9999", config=config, store=None
+    )
+    result = await confirm_tool(challenge["action_id"], PIN, config=config, store=None)
 
+    assert wrong.startswith("Incorrect PIN")
+    assert json.loads(result)["status"] == "completed"
+    assert len(_written(tmp_path)) == 1
+
+
+@pytest.mark.asyncio
+async def test_too_many_wrong_pins_locks_out_the_automation(tmp_path: Path) -> None:
+    """
+    Attempt exhaustion blocks the write even if the right PIN arrives.
+
+    Failed attempts carry over to a request that replaces the held one in its
+    reply turn, so the limit is reachable; set it directly here.
+    """
+    hass = _fake_hass(tmp_path)
+    config = _config(hass, _pin_options())
+
+    challenge = json.loads(
+        await add_automation_tool(automation_yaml=UNLOCK_YAML, config=config)
+    )
+    config["configurable"]["pending_actions"][challenge["action_id"]]["attempts"] = 5
     result = await confirm_tool(challenge["action_id"], PIN, config=config, store=None)
 
     assert "Too many incorrect attempts" in result
@@ -431,6 +513,8 @@ async def test_pending_automation_without_a_config_is_rejected(tmp_path: Path) -
         "tool_args": {},
         "created_at": dt_util.utcnow().isoformat(),
         "user": "user1",
+        "thread_id": "conv1",
+        "turn_id": config["configurable"]["pin_reply"].turn_id,
         "attempts": 0,
     }
 
@@ -445,11 +529,12 @@ async def test_write_failure_is_reported_and_consumes_the_confirmation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    A failed write is reported honestly and the confirmation is spent.
+    A failed write says the automation may exist, and the confirmation is spent.
 
     The pending action is claimed *before* the write so two confirmations of
-    the same action_id in one concurrent tool batch cannot both install it, so
-    a failure cannot leave a retryable entry behind. The message says so.
+    the same action_id in one concurrent tool batch cannot both install it.
+    Any step after the claim can fail once the file was appended (the reload
+    does), so the reply never asks for the automation again.
     """
     hass = _fake_hass(tmp_path)
     config = _config(hass, _pin_options())
@@ -459,17 +544,48 @@ async def test_write_failure_is_reported_and_consumes_the_confirmation(
     )
 
     async def _boom(*_args: Any, **_kwargs: Any) -> str:
-        msg = "disk full"
+        msg = "disk full at /config/automations.yaml"
         raise OSError(msg)
 
     monkeypatch.setattr(tools_module, "_async_write_automation", _boom)
 
     result = await confirm_tool(challenge["action_id"], PIN, config=config, store=None)
 
-    assert "Failed to install the automation" in result
-    assert "request the automation again" in result
+    assert "may have been installed" in result
+    assert "/config" not in result
     assert _written(tmp_path) == []
     assert config["configurable"]["pending_actions"] == {}
+    # Said in fixed words too: "PIN accepted; add the automation … may have run."
+    pin_reply = config["configurable"]["pin_reply"]
+    assert pin_reply.outcome == PIN_OUTCOME_UNKNOWN
+    assert pin_reply.confirmed.startswith('add the automation "Unlock when I get home"')
+    assert "lock.unlock" in pin_reply.confirmed
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_install_error_says_the_automation_may_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An error after the claim may follow a partial write: say so, do not raise."""
+    hass = _fake_hass(tmp_path)
+    config = _config(hass, _pin_options())
+
+    challenge = json.loads(
+        await add_automation_tool(automation_yaml=UNLOCK_YAML, config=config)
+    )
+
+    async def _boom(*_args: Any, **_kwargs: Any) -> str:
+        msg = "integration bug"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(tools_module, "_async_write_automation", _boom)
+
+    result = await confirm_tool(challenge["action_id"], PIN, config=config, store=None)
+
+    assert "may have been installed" in result
+    assert "integration bug" not in result
+    assert config["configurable"]["pending_actions"] == {}
+    assert config["configurable"]["pin_reply"].outcome == PIN_OUTCOME_UNKNOWN
 
 
 @pytest.mark.asyncio
@@ -484,9 +600,11 @@ async def test_a_confirmed_automation_cannot_be_installed_twice(
         await add_automation_tool(automation_yaml=UNLOCK_YAML, config=config)
     )
     first = await confirm_tool(challenge["action_id"], PIN, config=config, store=None)
+    first_reply = config["configurable"]["pin_reply"]
     second = await confirm_tool(challenge["action_id"], PIN, config=config, store=None)
 
     assert json.loads(first)["status"] == "completed"
+    assert first_reply.outcome == PIN_OUTCOME_DONE
     assert second == "Pending action not found or expired."
     assert len(_written(tmp_path)) == 1
 
@@ -632,3 +750,79 @@ async def test_malformed_pending_record_does_not_break_registration(
     assert "naive" not in pending
     assert "missing" not in pending
     assert len(pending) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_slow_install_after_the_claim_says_it_may_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A timeout after the claim gets the "may have been installed" reply.
+
+    TimeoutError is an OSError, so it was reported as a definite failure
+    that told the user to request the automation again (pass 3).
+    """
+    hass = _fake_hass(tmp_path)
+    config = _config(hass, _pin_options())
+
+    challenge = json.loads(
+        await add_automation_tool(automation_yaml=UNLOCK_YAML, config=config)
+    )
+
+    async def _slow(*_args: Any, **_kwargs: Any) -> str:
+        await asyncio.sleep(5)
+        return "Added automation"
+
+    monkeypatch.setattr(tools_module, "_async_write_automation", _slow)
+    monkeypatch.setattr(tools_module, "POST_CLAIM_TIMEOUT_S", 0.01)
+
+    result = await confirm_tool(challenge["action_id"], PIN, config=config, store=None)
+
+    assert "may have been installed" in result
+    assert "request the automation again" not in result
+    assert config["configurable"]["pending_actions"] == {}
+
+
+@pytest.mark.asyncio
+async def test_a_second_automation_in_one_turn_waits_for_the_first(
+    tmp_path: Path,
+) -> None:
+    """Only one protected action waits for the PIN, so the PIN runs a known one."""
+    hass = _fake_hass(tmp_path)
+    config = _config(hass, _pin_options())
+
+    await add_automation_tool(automation_yaml=UNLOCK_YAML, config=config)
+    second = await add_automation_tool(
+        automation_yaml=UNLOCK_YAML.replace("front_door", "back_door"), config=config
+    )
+
+    assert "another protected action is already waiting" in second
+    assert len(config["configurable"]["pending_actions"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_reissuing_the_automation_in_the_pin_reply_still_installs(
+    tmp_path: Path,
+) -> None:
+    """
+    The re-issued YAML gets a new generated id but is the same request.
+
+    Pass 3: comparing the whole config, generated id included, replaced the
+    challenge with one the user's reply could not confirm.
+    """
+    hass = _fake_hass(tmp_path)
+    config = _config(hass, _pin_options())
+    configurable = config["configurable"]
+
+    await add_automation_tool(automation_yaml=UNLOCK_YAML, config=config)
+    disclose_pin_prompts(configurable["pending_actions"], configurable["pin_reply"])
+    configurable["pin_reply"] = start_pin_turn(
+        configurable["pending_actions"], configurable["thread_id"], PIN
+    )
+    reissued = json.loads(
+        await add_automation_tool(automation_yaml=UNLOCK_YAML, config=config)
+    )
+    result = await _confirm(reissued["action_id"], PIN, config=config, store=None)
+
+    assert json.loads(result)["status"] == "completed"
+    assert len(_written(tmp_path)) == 1

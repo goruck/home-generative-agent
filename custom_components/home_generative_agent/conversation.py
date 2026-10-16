@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import functools
 import hashlib
 import importlib
@@ -15,7 +16,9 @@ from collections import deque
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
+
+    from .agent.helpers import PinReply
 
 import homeassistant.util.dt as dt_util
 import voluptuous as vol
@@ -45,18 +48,25 @@ from langchain_core.messages import (
 from .agent.automation_targets import normalize_notify_service
 from .agent.graph import workflow
 from .agent.helpers import (
+    PIN_OUTCOME_FAILED,
+    PIN_OUTCOME_UNKNOWN,
     active_llm_api_ids,
     chat_log_tool_result,
+    disclose_pin_prompts,
     filter_excluded_tools,
     format_tool,
     is_actuation_tool,
+    keep_pin_prompts,
     langchain_tool_parameters_json,
+    prompts_awaiting_reply,
     resolve_critical_action_policy,
     safe_convert,
     sanitize_tool_text,
+    start_pin_turn,
     tool_exclusions,
     tool_index_key,
 )
+from .agent.pin_messages import describe_pending_action, pin_msg
 from .agent.rag_embedding_text import (
     strip_for_embedding,
     truncate_for_embedding_index,
@@ -147,6 +157,11 @@ _TOOL_INDEX_DELTA_TIMEOUT_S = 30.0
 # the eviction sweep has to page explicitly or it would see a tenth of the
 # index and "evict" nothing.
 _TOOL_INDEX_PAGE_SIZE = 100
+
+
+# What HA's ChatLog.continue_conversation reads as "keep listening": the reply
+# ends with a question mark (Latin, Greek or fullwidth).
+_CONTINUE_MARKS = ("?", ";", "\uff1f")
 
 
 def _recommit_final_assistant_content(chat_log: conversation.ChatLog) -> None:
@@ -1576,12 +1591,16 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         tools: list[dict[str, Any]] | None,
         acknowledgement: VoiceAck | None = None,
         ack_index: int | None = None,
-    ) -> None:
+        pin_lines_pending: Callable[[], bool] | None = None,
+    ) -> bool:
         """
-        Handle the streaming astream_events path.
+        Handle the streaming astream_events path; return True if it failed.
 
         ``ack_index`` is where a turn-start acknowledgement was committed, so
-        recovery does not mistake it for the reply.
+        recovery does not mistake it for the reply. ``pin_lines_pending`` says
+        whether the turn's PIN lines will replace the reply afterwards, in
+        which case the final recommit is left to them, so a chat_log
+        subscriber sees the reply once.
         """
         hass = self.hass
         ack = acknowledgement or VoiceAck()
@@ -1605,6 +1624,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         # if the client disconnects or the conversation turn is aborted.
         stream_task = hass.async_create_task(_run_streaming_task())
         stream_error: Exception | None = None
+        cancelled = False
         try:
             await stream_task
         except HomeAssistantError as err:
@@ -1616,6 +1636,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             )
         except asyncio.CancelledError:
             # Hard kill: cancel the background graph run if the consumer has left.
+            cancelled = True
             stream_task.cancel()
             raise
         except Exception as err:
@@ -1631,7 +1652,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 # Non-blocking wait to allow generators to close.
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await stream_task
-            _recommit_final_assistant_content(chat_log)
+            if cancelled or pin_lines_pending is None or not pin_lines_pending():
+                _recommit_final_assistant_content(chat_log)
 
         try:
             final_state = await app.aget_state(config)
@@ -1709,6 +1731,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             _LOGGER.exception("Failed to retrieve final state for tracing.")
 
         await self._async_ensure_reply_after_ack(chat_log, ack_index, stream_error)
+        return stream_error is not None
 
     async def _async_add_spoken_reply(
         self, chat_log: conversation.ChatLog, text: str
@@ -1721,6 +1744,13 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         arrives as chat_log deltas and skips the final result. A reply added
         directly would be shown but never heard.
         """
+        await self._async_stream_text(chat_log, text)
+        _recommit_final_assistant_content(chat_log)
+
+    async def _async_stream_text(
+        self, chat_log: conversation.ChatLog, text: str
+    ) -> None:
+        """Deliver text as one assistant delta; the stream commits it as content."""
 
         async def _reply() -> AsyncIterator[AssistantContentDeltaDict]:
             yield AssistantContentDeltaDict(role="assistant", content=text)
@@ -1729,7 +1759,94 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             self.entity_id, _reply()
         ):
             pass
-        _recommit_final_assistant_content(chat_log)
+
+    def _pin_lines(
+        self, pending_actions: dict[str, dict[str, Any]], pin_reply: PinReply
+    ) -> list[str]:
+        """Return the fixed lines this turn's reply must carry, in order."""
+        lines: list[str] = []
+        if pin_reply.confirmed:
+            key = {
+                PIN_OUTCOME_FAILED: "pin_failed_line",
+                PIN_OUTCOME_UNKNOWN: "pin_unknown_line",
+            }.get(pin_reply.outcome, "pin_done_line")
+            lines.append(pin_msg(self.hass, key, action=pin_reply.confirmed))
+        lines.extend(
+            pin_msg(
+                self.hass,
+                "pin_confirm_line",
+                action=describe_pending_action(self.hass, action),
+            )
+            for action in prompts_awaiting_reply(pending_actions, pin_reply)
+        )
+        return lines
+
+    async def _async_add_pin_lines(
+        self,
+        chat_log: conversation.ChatLog,
+        pending_actions: dict[str, dict[str, Any]],
+        pin_reply: PinReply,
+        *,
+        streamed: bool,
+    ) -> None:
+        """
+        Say which action the PIN ran or will confirm, in fixed words.
+
+        The model's reply names the action in its own words, which can be
+        wrong: in a field test it asked for the PIN "to lock the door" while
+        the held call unlocked it. These lines are built from the action
+        itself and go in front of the reply, so the turn's result shows them
+        and the reply still ends with the model's question, which is what
+        keeps a satellite listening for the PIN (ChatLog.continue_conversation
+        reads the last character). They are also spoken when a pipeline is
+        listening for deltas: only the lines when the reply was streamed,
+        the joined reply when it was not (schema-first mode), since a
+        pipeline past HA's streaming threshold speaks deltas alone.
+
+        Once delivered, the prompts are marked disclosed: only then can the
+        user's next message answer them (`start_pin_turn`).
+        """
+        lines = self._pin_lines(pending_actions, pin_reply)
+        if not lines:
+            return
+        text = " ".join(lines)
+        reply = chat_log.content[-1] if chat_log.content else None
+        if not (
+            isinstance(reply, conversation.AssistantContent)
+            and not reply.tool_calls
+            and reply.content
+        ):
+            # The lines are the whole reply: end with a question when a prompt
+            # waits, so a satellite keeps listening for the PIN.
+            if prompts_awaiting_reply(pending_actions, pin_reply):
+                text = f"{text} {pin_msg(self.hass, 'pin_ask_line')}"
+            await self._async_add_spoken_reply(chat_log, text)
+            disclose_pin_prompts(pending_actions, pin_reply)
+            return
+        merged = f"{text}\n\n{reply.content}"
+        if prompts_awaiting_reply(pending_actions, pin_reply) and not str(
+            reply.content
+        ).rstrip().endswith(_CONTINUE_MARKS):
+            # The model asked without a question mark ("Please enter the
+            # PIN."), which closes a satellite's microphone: HA keeps
+            # listening only when the reply ends with one (field test
+            # 2026-10-15). Ask in fixed words, spoken and shown.
+            ask = pin_msg(self.hass, "pin_ask_line")
+            text = f"{text} {ask}"
+            merged = f"{merged} {ask}"
+        if getattr(chat_log, "delta_listener", None) is not None:
+            count = len(chat_log.content)
+            await self._async_stream_text(chat_log, text if streamed else merged)
+            if len(chat_log.content) == count + 1 and chat_log.content[-2] is reply:
+                # The spoken copy is folded into the reply below.
+                del chat_log.content[-1]
+        if chat_log.content and chat_log.content[-1] is reply:
+            # One replacement, so a chat_log subscriber sees the reply once.
+            del chat_log.content[-1]
+            chat_log.async_add_assistant_content_without_tools(
+                dataclasses.replace(reply, content=merged)
+            )
+        disclose_pin_prompts(pending_actions, pin_reply)
 
     async def _async_speak_turn_start_ack(
         self, chat_log: conversation.ChatLog, ack: VoiceAck
@@ -1819,10 +1936,30 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         runtime_data = self.entry.runtime_data
         options = runtime_data.options
 
+        # Silently drop phantom STT transcriptions of silence/background noise.
+        if _is_stt_hallucination(
+            user_input.text,
+            _get_stt_hallucination_patterns(options),
+            _get_stt_hallucination_exact_patterns(options),
+        ):
+            _LOGGER.debug("Ignoring hallucinated STT input: %s", user_input.text)
+            return conversation.ConversationResult(
+                response=intent_response, conversation_id=conversation_id
+            )
+
+        # A PIN confirmation is accepted only from this message, and a PIN
+        # prompt waiting in this conversation is answered by it or not at all,
+        # so this runs before any other early return. A turn that fails keeps
+        # the prompt for the user's next message (keep_pin_prompts).
+        pin_reply = start_pin_turn(
+            runtime_data.pending_actions, conversation_id, user_input.text
+        )
+
         # Multi-API initialization
         try:
             llm_api = await self._async_init_llm_apis(llm_context)
         except HomeAssistantError as err:
+            keep_pin_prompts(runtime_data.pending_actions, pin_reply)
             intent_response.async_set_error(
                 intent.IntentResponseErrorCode.UNKNOWN,
                 str(err),
@@ -1838,15 +1975,6 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 "Please enable 'Schema-first JSON for YAML requests' in "
                 "HGA's configuration and try again"
             )
-            return conversation.ConversationResult(
-                response=intent_response, conversation_id=conversation_id
-            )
-
-        # Silently drop phantom STT transcriptions of silence/background noise.
-        noise_patterns = _get_stt_hallucination_patterns(options)
-        exact_noise_patterns = _get_stt_hallucination_exact_patterns(options)
-        if _is_stt_hallucination(user_input.text, noise_patterns, exact_noise_patterns):
-            _LOGGER.debug("Ignoring hallucinated STT input: %s", user_input.text)
             return conversation.ConversationResult(
                 response=intent_response, conversation_id=conversation_id
             )
@@ -1924,6 +2052,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "configurable": {
                 "thread_id": conversation_id,
                 "user_id": clean_user_name,
+                "pin_reply": pin_reply,
                 "requester_is_admin": requester_is_admin,
                 "chat_model": base_llm,
                 "chat_model_options": runtime_data.chat_model_options,
@@ -1975,6 +2104,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     app, app_input, app_config, chat_log, tools
                 )
             except HomeAssistantError as err:
+                keep_pin_prompts(runtime_data.pending_actions, pin_reply)
                 intent_response.async_set_error(
                     intent.IntentResponseErrorCode.UNKNOWN,
                     str(err),
@@ -1982,30 +2112,55 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 return conversation.ConversationResult(
                     response=intent_response, conversation_id=conversation_id
                 )
-        else:
-            await self._async_run_astream(
-                app,
-                app_input,
-                app_config,
-                chat_log,
-                tools,
-                ack,
-                ack_index,
-            )
+        elif await self._async_run_astream(
+            app,
+            app_input,
+            app_config,
+            chat_log,
+            tools,
+            ack,
+            ack_index,
+            pin_lines_pending=lambda: bool(
+                self._pin_lines(runtime_data.pending_actions, pin_reply)
+            ),
+        ):
+            # The stream failed: the user's reply may never have been answered.
+            keep_pin_prompts(runtime_data.pending_actions, pin_reply)
 
+        await self._async_finish_reply(
+            chat_log,
+            runtime_data.pending_actions,
+            pin_reply,
+            streamed=not options.get(CONF_SCHEMA_FIRST_YAML, False),
+        )
+        return conversation.async_get_result_from_chat_log(user_input, chat_log)
+
+    async def _async_finish_reply(
+        self,
+        chat_log: conversation.ChatLog,
+        pending_actions: dict[str, dict[str, Any]],
+        pin_reply: PinReply,
+        *,
+        streamed: bool,
+    ) -> None:
+        """End the turn's reply: never empty, and naming any PIN action."""
         # Guard against a turn that committed no reply (e.g. a HomeAssistantError
         # swallowed mid-stream and a state recovery that raised too). Earlier
         # turns' replies do not count: async_get_result_from_chat_log reads the
         # LAST entry, and HA drops the whole turn from chat_log unless we leave
-        # our mark on it (see _async_get_message_history).
-        if not chat_log.content or not isinstance(
+        # our mark on it (see _async_get_message_history). A PIN line is a
+        # reply of its own, and "try again" would be wrong next to "PIN
+        # accepted".
+        no_reply = not chat_log.content or not isinstance(
             chat_log.content[-1], conversation.AssistantContent
-        ):
+        )
+        if no_reply and not self._pin_lines(pending_actions, pin_reply):
             await self._async_add_spoken_reply(
                 chat_log, "I'm sorry, I was unable to respond. Please try again."
             )
-
-        return conversation.async_get_result_from_chat_log(user_input, chat_log)
+        await self._async_add_pin_lines(
+            chat_log, pending_actions, pin_reply, streamed=streamed
+        )
 
     async def _async_discover_provider_tools(  # noqa: PLR0913
         self,

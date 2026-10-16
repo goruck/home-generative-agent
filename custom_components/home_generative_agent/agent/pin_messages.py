@@ -20,11 +20,28 @@ on the fly and no reason to pay for or cache a completion.
 Add a new language by adding a key to ``_MESSAGES`` with the same set
 of message ids as ``"en"``. Missing keys in a non-English language
 fall back to the English string automatically.
+
+The module also builds the one deterministic sentence the user is told to
+trust: ``describe_pending_action`` names a held action from the call itself
+(the verb HA's handler runs for the domain, the target or the scope HA will
+act on), and ``conversation.py`` joins it to every reply as the
+``pin_confirm_line`` / ``pin_done_line`` family. It imports from
+``.helpers``, so ``helpers`` must never import this module.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
+
+from .helpers import (
+    INTENT_NAME_ALL,
+    base_tool_name,
+    is_on_off_intent,
+    minimal_payload_for_domain,
+    normalize_intent_for_lock,
+    sanitize_tool_text,
+)
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -64,14 +81,80 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "Pending action is invalid; missing tool name."
         ),
         "ha_llm_api_unavailable": "Home Assistant LLM API unavailable.",
-        "action_execute_failed": "Failed to execute action: {err}",
+        "pin_awaiting_user_reply": (
+            "Not confirmed: the PIN must be in the user's current message."
+        ),
+        "pin_retry_next_message": (
+            "The user can say the PIN again in their next message."
+        ),
+        "pin_say_digits": (
+            "Ask the user to say the PIN digits one by one in their next message."
+        ),
+        "pin_request_again": (
+            "That was the last reply this PIN prompt takes; the user has to make "
+            "the request again."
+        ),
+        "pin_reply_used": (
+            "Not confirmed: the PIN in the user's current message was already used. "
+            "Tell the user what happened; they can ask again."
+        ),
+        "action_execute_failed": (
+            "Failed to execute action: {err}. "
+            "The confirmation was used up; tell the user the action failed "
+            "and that they can ask again."
+        ),
         "pending_automation_invalid": (
             "Pending automation is invalid; please re-run the request."
         ),
-        "automation_install_failed": (
-            "Failed to install the automation: {err}. "
-            "The confirmation was used up; please request the automation again."
+        "action_outcome_unknown": (
+            "The action may have run, but it ended with an unexpected error: "
+            "{err}. The confirmation was used up. Do not repeat the action; "
+            "tell the user to check the device before asking again."
         ),
+        "automation_outcome_unknown": (
+            "The automation may have been installed, but the install ended with "
+            "an unexpected error: {err}. The confirmation was used up. Do not "
+            "repeat it; tell the user to check their automations first."
+        ),
+        "pin_reply_to_prompt_only": (
+            "Not confirmed: the PIN is accepted only in the user's reply to "
+            "this action's PIN prompt. Ask the user for the PIN now."
+        ),
+        "pin_one_action_at_a_time": (
+            "Not requested: another protected action is already waiting for the "
+            "user's PIN. Ask for that PIN first; the user can request this one "
+            "afterwards."
+        ),
+        "pin_confirm_line": "Your PIN will confirm: {action}.",
+        "pin_done_line": "PIN accepted: {action}.",
+        "pin_failed_line": "PIN accepted, but {action} failed.",
+        "pin_unknown_line": "PIN accepted; {action} may have run. Check the device.",
+        # Ends a reply that is only the fixed line, so a satellite keeps
+        # listening for the answer.
+        "pin_ask_line": "What is your PIN?",
+        "action_lock": "lock {target}",
+        "action_unlock": "unlock {target}",
+        "action_open": "open {target}",
+        "action_close": "close {target}",
+        "action_turn_on": "turn on {target}",
+        "action_turn_off": "turn off {target}",
+        "action_service": "{service} {target}",
+        "action_automation": "add the automation {target}",
+        "action_unnamed_automation": "add an unnamed automation",
+        "action_automation_runs": "{action}, which runs {calls}",
+        "action_calls_more": "{calls} and {count} more",
+        "action_unnamed_target": "an unnamed device",
+        # The target as HA reads it: one named device, or the scope of a
+        # call that names none (every device of the domain, in an area, on
+        # a floor).
+        "target_named": '"{name}"',
+        "target_every": "{kind}",
+        "target_every_in_area": "{kind} in {area}",
+        "target_every_on_floor": "{kind} on floor {floor}",
+        "kind_lock": "every lock",
+        "kind_cover": "every cover",
+        "kind_valve": "every valve",
+        "kind_domain": "every {domain} device",
     },
     "cs": {
         "automation_pin_unset": (
@@ -109,14 +192,75 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "Čekající akce je neplatná; chybí název nástroje."
         ),
         "ha_llm_api_unavailable": "LLM API Home Assistantu není k dispozici.",
-        "action_execute_failed": "Akci se nepodařilo provést: {err}",
+        "pin_awaiting_user_reply": (
+            "Nepotvrzeno: PIN musí být v aktuální zprávě uživatele."
+        ),
+        "pin_retry_next_message": "Uživatel může PIN zopakovat v další zprávě.",
+        "pin_say_digits": (
+            "Požádejte uživatele, aby v další zprávě řekl číslice PINu jednu po druhé."
+        ),
+        "pin_request_again": (
+            "To byla poslední odpověď, kterou tato výzva k PINu přijímá; "
+            "uživatel musí požadavek zopakovat."
+        ),
+        "pin_reply_used": (
+            "Nepotvrzeno: PIN z aktuální zprávy uživatele už byl použit. "
+            "Sdělte uživateli, co se stalo; může požádat znovu."
+        ),
+        "action_execute_failed": (
+            "Akci se nepodařilo provést: {err}. "
+            "Potvrzení bylo použito; sdělte uživateli, že akce selhala "
+            "a že může požádat znovu."
+        ),
         "pending_automation_invalid": (
             "Čekající automatizace je neplatná; zopakujte prosím požadavek."
         ),
-        "automation_install_failed": (
-            "Automatizaci se nepodařilo nainstalovat: {err}. "
-            "Potvrzení bylo použito; požádejte prosím o automatizaci znovu."
+        "action_outcome_unknown": (
+            "Akce možná proběhla, ale skončila neočekávanou chybou: {err}. "
+            "Potvrzení bylo použito. Akci neopakujte; požádejte uživatele, "
+            "aby před dalším požadavkem zkontroloval zařízení."
         ),
+        "automation_outcome_unknown": (
+            "Automatizace možná byla nainstalována, ale instalace skončila "
+            "neočekávanou chybou: {err}. Potvrzení bylo použito. Neopakujte ji; "
+            "požádejte uživatele, aby nejdřív zkontroloval své automatizace."
+        ),
+        "pin_reply_to_prompt_only": (
+            "Nepotvrzeno: PIN se přijímá jen v odpovědi uživatele na výzvu "
+            "k PINu pro tuto akci. Požádejte uživatele o PIN."
+        ),
+        "pin_one_action_at_a_time": (
+            "Nevyžádáno: na PIN uživatele už čeká jiná chráněná akce. Nejdřív "
+            "požádejte o PIN k té čekající akci; o tuto akci může uživatel "
+            "požádat potom."
+        ),
+        "pin_confirm_line": "Váš PIN potvrdí: {action}.",
+        "pin_done_line": "PIN přijat: {action}.",
+        "pin_failed_line": "PIN přijat, ale {action} se nepodařilo.",
+        "pin_unknown_line": (
+            "PIN přijat; {action} možná proběhlo. Zkontrolujte zařízení."
+        ),
+        "pin_ask_line": "Jaký je váš PIN?",
+        "action_lock": "zamknout {target}",
+        "action_unlock": "odemknout {target}",
+        "action_open": "otevřít {target}",
+        "action_close": "zavřít {target}",
+        "action_turn_on": "zapnout {target}",
+        "action_turn_off": "vypnout {target}",
+        "action_service": "{service} {target}",
+        "action_automation": "přidat automatizaci {target}",
+        "action_unnamed_automation": "přidat nepojmenovanou automatizaci",
+        "action_automation_runs": "{action}, která spouští {calls}",
+        "action_calls_more": "{calls} a dalších {count}",
+        "action_unnamed_target": "nepojmenované zařízení",
+        "target_named": "„{name}“",
+        "target_every": "{kind}",
+        "target_every_in_area": "{kind} v oblasti {area}",
+        "target_every_on_floor": "{kind} v patře {floor}",
+        "kind_lock": "všechny zámky",
+        "kind_cover": "všechny rolety a vrata",
+        "kind_valve": "všechny ventily",
+        "kind_domain": "všechna zařízení typu {domain}",
     },
 }
 
@@ -146,3 +290,176 @@ def pin_msg(hass: HomeAssistant | None, key: str, /, **kwargs: Any) -> str:
     table = _MESSAGES.get(language, _MESSAGES[_DEFAULT_LANGUAGE])
     template = table.get(key) or _MESSAGES[_DEFAULT_LANGUAGE].get(key) or key
     return template.format(**kwargs) if kwargs else template
+
+
+# Longest target name the action line repeats. The name comes from the model.
+_ACTION_TARGET_MAX_LEN = 80
+# Longest service name the line repeats, for a call that is not an intent.
+_ACTION_SERVICE_MAX_LEN = 40
+# Critical calls named for an automation, and the length of each. More calls
+# are counted ("and 2 more"), and a longer call ends in an ellipsis, so an
+# omission is always visible in the line.
+_AUTOMATION_CALLS_MAX = 5
+_AUTOMATION_CALL_MAX_LEN = 60
+_ELLIPSIS = "\u2026"
+
+# How Home Assistant's OnOffIntentHandler runs HassTurnOn / HassTurnOff by
+# domain: (on, off). Any other domain is turned on or off.
+_ON_OFF_VERBS: dict[str, tuple[str, str]] = {
+    "lock": ("action_lock", "action_unlock"),
+    "cover": ("action_open", "action_close"),
+    "valve": ("action_open", "action_close"),
+}
+_KIND_KEYS = {"lock": "kind_lock", "cover": "kind_cover", "valve": "kind_valve"}
+
+
+def _one_line(value: Any, limit: int, *, mark_cut: bool = False) -> str:
+    """Return model-chosen text as one bounded, printable line."""
+    if isinstance(value, list):
+        value = ", ".join(str(v) for v in value if v)
+    text = " ".join(str(value or "").split())
+    if not text:
+        return ""
+    if mark_cut and len(text) > limit:
+        return sanitize_tool_text(text[: limit - 1], limit=limit) + _ELLIPSIS
+    return sanitize_tool_text(text, limit=limit)
+
+
+def _first(value: Any) -> str:
+    """Return the first entry of a list value, or the value, as text."""
+    if isinstance(value, list):
+        value = value[0] if value else ""
+    return str(value or "")
+
+
+def _named(hass: HomeAssistant | None, name: str) -> str:
+    return pin_msg(hass, "target_named", name=name)
+
+
+def _intent_domain(tool_name: str, tool_args: Mapping[str, Any]) -> str:
+    """
+    Return the domain an on/off intent acts on, as the gate reads it.
+
+    The lock normalizer (a `lock` domain, or "lock" in the name), else the
+    domain argument, else the domain of an entity id the model gave.
+    """
+    normalized = normalize_intent_for_lock(tool_name, dict(tool_args))
+    domain = _first(normalized.get("domain")).lower()
+    if domain:
+        return domain
+    entity_id = _first(tool_args.get("entity_id") or tool_args.get("entity_ids"))
+    return entity_id.split(".", 1)[0].lower() if "." in entity_id else ""
+
+
+def _intent_target(
+    hass: HomeAssistant | None, tool_args: Mapping[str, Any], domain: str
+) -> str:
+    """
+    Name what Home Assistant will act on for an on/off intent.
+
+    Read from the payload the call is sent as (`minimal_payload_for_domain`,
+    which the normal path and the PIN confirmation both apply), so the line
+    and the call cannot drift: HA's intents read the name, area and floor
+    slots, and the payload sends an entity id the model gave as the name.
+    With no name, the whole domain acts, in the area or on the floor if one
+    is given, and the line says so rather than naming a device it will not
+    single out.
+    """
+    payload = minimal_payload_for_domain(dict(tool_args))
+    name = payload.get("name")
+    if not isinstance(name, str) or name == INTENT_NAME_ALL:
+        name = ""
+    name = _one_line(name, _ACTION_TARGET_MAX_LEN)
+    if name:
+        return _named(hass, name)
+    if not domain:
+        return pin_msg(hass, "action_unnamed_target")
+    kind_key = _KIND_KEYS.get(domain, "kind_domain")
+    kind = pin_msg(hass, kind_key, domain=sanitize_tool_text(domain, limit=40))
+    if area := _one_line(tool_args.get("area"), _ACTION_TARGET_MAX_LEN):
+        return pin_msg(hass, "target_every_in_area", kind=kind, area=area)
+    if floor := _one_line(tool_args.get("floor"), _ACTION_TARGET_MAX_LEN):
+        return pin_msg(hass, "target_every_on_floor", kind=kind, floor=floor)
+    return pin_msg(hass, "target_every", kind=kind)
+
+
+def _describe_automation(hass: HomeAssistant | None, action: Mapping[str, Any]) -> str:
+    """Name an automation by its alias and the critical calls it would run."""
+    config = action.get("automation_config")
+    alias = _one_line(
+        config.get("alias") if isinstance(config, Mapping) else None,
+        _ACTION_TARGET_MAX_LEN,
+    )
+    text = (
+        pin_msg(hass, "action_automation", target=_named(hass, alias))
+        if alias
+        else pin_msg(hass, "action_unnamed_automation")
+    )
+    raw_calls = action.get("critical_calls")
+    calls = [
+        _one_line(call, _AUTOMATION_CALL_MAX_LEN, mark_cut=True)
+        for call in (raw_calls if isinstance(raw_calls, list) else [])
+    ]
+    calls = [call for call in calls if call]
+    if not calls:
+        return text
+    shown = ", ".join(calls[:_AUTOMATION_CALLS_MAX])
+    if len(calls) > _AUTOMATION_CALLS_MAX:
+        shown = pin_msg(
+            hass,
+            "action_calls_more",
+            calls=shown,
+            count=len(calls) - _AUTOMATION_CALLS_MAX,
+        )
+    return pin_msg(hass, "action_automation_runs", action=text, calls=shown)
+
+
+def describe_pending_action(
+    hass: HomeAssistant | None, action: Mapping[str, Any]
+) -> str:
+    """
+    Name the action a PIN confirms, from what will run, not from the model.
+
+    An on/off intent is named the way Home Assistant runs it for the domain:
+    HassTurnOn locks, opens or turns on; HassTurnOff unlocks, closes or turns
+    off, whatever service the model added. Field test 2026-10-15: the model
+    asked for the PIN "to lock the door" while the held call was HassTurnOff,
+    and the PIN unlocked it. The target is the one HA will act on, or the
+    scope of a call that names none.
+    """
+    tool_name = str(action.get("tool_name") or "")
+    if tool_name == "add_automation":
+        return _describe_automation(hass, action)
+
+    raw_args = action.get("tool_args")
+    tool_args: dict[str, Any] = dict(raw_args) if isinstance(raw_args, Mapping) else {}
+    if is_on_off_intent(tool_name):
+        turns_on = base_tool_name(tool_name) == "HassTurnOn"
+        domain = _intent_domain(tool_name, tool_args)
+        on_key, off_key = _ON_OFF_VERBS.get(
+            domain, ("action_turn_on", "action_turn_off")
+        )
+        return pin_msg(
+            hass,
+            on_key if turns_on else off_key,
+            target=_intent_target(hass, tool_args, domain),
+        )
+
+    target = _one_line(
+        tool_args.get("name")
+        or tool_args.get("entity_id")
+        or tool_args.get("entity_ids")
+        or tool_args.get("area"),
+        _ACTION_TARGET_MAX_LEN,
+    )
+    service = str(tool_args.get("service") or base_tool_name(tool_name))
+    return pin_msg(
+        hass,
+        "action_service",
+        service=sanitize_tool_text(
+            service.replace("_", " "), limit=_ACTION_SERVICE_MAX_LEN
+        ),
+        target=_named(hass, target)
+        if target
+        else pin_msg(hass, "action_unnamed_target"),
+    )
