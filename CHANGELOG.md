@@ -7,6 +7,8 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+## [3.44.0] - 2026-10-16
+
 ### Added
 
 - New option **House notification cooldown** (`video_analyzer_house_notification_cooldown_s`, 0 = off, up to 60 seconds, in Global Options) for the video analyzer ([#721](https://github.com/goruck/home-generative-agent/issues/721)). The camera notification cooldown works per camera, so one event seen by several cameras, such as people walking past the house, still made every camera's first notification sound a second or two apart. With the house cooldown set, a camera notification that sounds starts a short window for all cameras: notifications from other cameras inside it still post their own card, with their own description and image, but quietly. A camera made quiet this way then stays quiet for its own camera cooldown (or the house cooldown, if longer), counted from the sound that covered it; with the camera cooldown off, every camera, including the one that sounded, is quiet for the house cooldown. With face recognition on, the first Unknown Person in the window still sounds, once, whichever camera sees it. It works with the per-camera cooldown on or off, needs a single companion-app notify service (`notify.mobile_app_*`), is verified on iOS only (on Android a quiet card may still sound), and is a time window only, so two unrelated events on different cameras within it sound once. Start around 15 seconds: each camera's clip is analyzed separately, so on slower vision hardware one event reaches the cameras' notification decisions 10 to 30 seconds apart, and the reporter's setup grouped nothing at 5 seconds and every walk-past at 15; see [House notification cooldown](docs/camera-entities.md#house-notification-cooldown).
