@@ -124,7 +124,9 @@ from .indirect_pin import (
     SCENE_DOMAIN,
     SCRIPT_DOMAIN,
     runs_critical_action,
+    script_rule_matches,
     script_tool_entity_id,
+    service_runs_critical_action,
 )
 from .pin_messages import describe_pending_action, pin_msg
 from .token_counter import count_tokens_cross_provider
@@ -3399,7 +3401,7 @@ def _is_critical_action(
 
     # A script's own tool names no domain or service; what it runs decides.
     if (script_id := script_tool_entity_id(tool_name)) is not None:
-        return _script_is_critical(script_id, critical_actions, hass)
+        return _script_tool_is_critical(script_id, critical_actions, hass)
 
     # Alarm panels already enforce their own code; never gate them with the generic PIN.
     if domain == "alarm_control_panel":
@@ -3409,32 +3411,33 @@ def _is_critical_action(
     if not domain or not service:
         return False
 
-    return matches_critical_rule(
+    if matches_critical_rule(
         domain=domain,
         service=service,
         entity_ids=entities,
         critical_actions=critical_actions,
+    ):
+        return True
+    # A service tool can run a script or a scene directly; check what it does.
+    data = {
+        key: value
+        for key, value in tool_args.items()
+        if key not in ("domain", "service", "entity_id", "entity_ids")
+    }
+    return service_runs_critical_action(
+        hass, f"{domain}.{service}", entities, data, critical_actions
     )
 
 
-def _script_is_critical(
+def _script_tool_is_critical(
     entity_id: str,
     critical_actions: list[dict[str, str]],
     hass: HomeAssistant | None,
 ) -> bool:
     """Return True if a rule names the script or a step it runs is critical."""
-    object_id = entity_id.split(".", 1)[1]
-    if any(
-        matches_critical_rule(
-            domain=SCRIPT_DOMAIN,
-            service=service,
-            entity_ids=[entity_id],
-            critical_actions=critical_actions,
-        )
-        for service in ("turn_on", object_id)
-    ):
-        return True
-    return runs_critical_action(hass, entity_id, critical_actions)
+    return script_rule_matches(
+        hass, entity_id, critical_actions
+    ) or runs_critical_action(hass, entity_id, critical_actions)
 
 
 def _intent_is_critical(
@@ -3495,6 +3498,10 @@ def _intent_is_critical(
             and call.domain in (SCRIPT_DOMAIN, SCENE_DOMAIN)
             and (
                 call.entity_id is None
+                or (
+                    call.domain == SCRIPT_DOMAIN
+                    and script_rule_matches(hass, call.entity_id, critical_actions)
+                )
                 or runs_critical_action(hass, call.entity_id, critical_actions)
             )
         ):

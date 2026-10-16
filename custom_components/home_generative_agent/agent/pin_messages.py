@@ -45,6 +45,7 @@ from .helpers import (
     normalize_intent_for_lock,
     sanitize_tool_text,
 )
+from .indirect_pin import script_tool_entity_id
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -522,6 +523,17 @@ def describe_pending_action(
     tool_name = str(action.get("tool_name") or "")
     if tool_name == "add_automation":
         return _describe_automation(hass, action)
+
+    if (script_id := script_tool_entity_id(tool_name)) is not None:
+        # A script's arguments are free-form fields the model fills in, so the
+        # line names the script from Home Assistant, never from them.
+        state = hass.states.get(script_id) if hass is not None else None
+        name = state.name if state is not None else script_id
+        return pin_msg(
+            hass,
+            "action_turn_on",
+            target=_named(hass, _one_line(name, _ACTION_TARGET_MAX_LEN)),
+        )
 
     raw_args = action.get("tool_args")
     tool_args: dict[str, Any] = dict(raw_args) if isinstance(raw_args, Mapping) else {}

@@ -359,8 +359,17 @@ def _screen_state_reproduction(
         "scene.apply",
         "the automation reproduces entity states that cannot be read here",
     )
-    data = step.get("data")
-    if not isinstance(data, dict):
+    # Home Assistant renders `data_template` and merges it over `data`, so
+    # entities given there replace the ones in `data`; both are read.
+    data: dict[Any, Any] = {}
+    for key in ("data", "data_template"):
+        block = step.get(key)
+        if block is None:
+            continue
+        if not isinstance(block, dict):
+            return [unreadable]
+        data.update(block)
+    if not data:
         return [unreadable]
 
     candidates: list[Any] = []

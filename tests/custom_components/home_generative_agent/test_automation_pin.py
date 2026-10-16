@@ -605,6 +605,19 @@ def test_scene_apply_on_an_unguarded_domain_is_not_gated() -> None:
     )
 
 
+def test_scene_apply_entities_in_data_template_are_screened() -> None:
+    """HA merges `data_template` over `data`, so its entities are what runs."""
+    assert _scan(
+        [
+            {
+                "action": "scene.apply",
+                "data": {"entities": {"light.kitchen": "on"}},
+                "data_template": {"entities": {"lock.front_door": "unlocked"}},
+            }
+        ]
+    ) == ["scene.apply (lock.front_door)"]
+
+
 @pytest.mark.parametrize(
     ("steps", "expected"),
     [

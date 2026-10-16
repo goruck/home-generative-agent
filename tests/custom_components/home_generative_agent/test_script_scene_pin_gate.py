@@ -24,6 +24,9 @@ from custom_components.home_generative_agent.agent.graph import (
 from custom_components.home_generative_agent.agent.indirect_pin import (
     script_tool_entity_id,
 )
+from custom_components.home_generative_agent.agent.pin_messages import (
+    describe_pending_action,
+)
 from custom_components.home_generative_agent.const import (
     RECOMMENDED_CRITICAL_ACTIONS,
 )
@@ -48,7 +51,21 @@ async def home(hass: HomeAssistant) -> HomeAssistant:
     assert await async_setup_component(
         hass,
         "group",
-        {"group": {"doors": {"name": "Doors", "entities": ["lock.front_door"]}}},
+        {
+            "group": {
+                "doors": {"name": "Doors", "entities": ["lock.front_door"]},
+                "outer": {"name": "Outer", "entities": ["group.doors"]},
+                "loop": {"name": "Loop", "entities": ["group.loop", "light.porch"]},
+                # Six deep, ending at a light: only the depth cap holds it.
+                **{
+                    f"chain{i}": {
+                        "name": f"Chain {i}",
+                        "entities": [f"group.chain{i + 1}" if i < 6 else "light.porch"],
+                    }
+                    for i in range(1, 7)
+                },
+            }
+        },
     )
     assert await async_setup_component(
         hass,
@@ -78,6 +95,19 @@ async def home(hass: HomeAssistant) -> HomeAssistant:
                     "alias": "Evening",
                     "sequence": [_call("script.turn_on", "script.porch_lights")],
                 },
+                "announce": {
+                    "alias": "Announce",
+                    "sequence": [{"event": "arrived"}],
+                },
+                "pick": {
+                    "alias": "Pick",
+                    "sequence": [
+                        {
+                            "action": "{{ 'light' }}.turn_on",
+                            "target": {"entity_id": "light.porch"},
+                        }
+                    ],
+                },
             }
         },
     )
@@ -102,6 +132,30 @@ async def home(hass: HomeAssistant) -> HomeAssistant:
                 {"name": "Daylight", "entities": {"cover.living_room_blinds": "open"}},
                 {"name": "Leave", "entities": {"script.open_garage": "on"}},
                 {"name": "Open Up", "entities": {"group.doors": "unlocked"}},
+                {"name": "Open Up Nested", "entities": {"group.outer": "unlocked"}},
+                {
+                    "name": "Lock Then Open",
+                    "entities": {
+                        "group.doors": "locked",
+                        "group.outer": "unlocked",
+                    },
+                },
+                {"name": "Loop", "entities": {"group.loop": "on"}},
+                {"name": "Too Deep", "entities": {"group.chain1": "on"}},
+                {
+                    "name": "Half Open",
+                    "entities": {
+                        "cover.garage_door": {"state": "closed", "current_position": 60}
+                    },
+                },
+                {
+                    "name": "Shut Tight",
+                    "entities": {
+                        "cover.garage_door": {"state": "closed", "current_position": 0}
+                    },
+                },
+                {"name": "Locking Up", "entities": {"lock.front_door": "locking"}},
+                {"name": "Stop Garage", "entities": {"script.open_garage": "off"}},
             ]
         },
     )
@@ -128,9 +182,27 @@ async def test_a_script_tool_that_does_nothing_critical_runs(
     assert not _is_critical_action({}, RULES, tool_name, home)
 
 
-async def test_a_script_that_runs_another_script_is_held(home: HomeAssistant) -> None:
-    """As in an automation, a script run from a script is not followed."""
-    assert _is_critical_action({}, RULES, "script__evening", home)
+@pytest.mark.parametrize(
+    "tool_name", ["script__evening", "script__announce", "script__pick"]
+)
+async def test_a_script_step_that_cannot_be_followed_is_held(
+    home: HomeAssistant, tool_name: str
+) -> None:
+    """As in an automation: another script, an event, a templated action."""
+    assert _is_critical_action({}, RULES, tool_name, home)
+
+
+async def test_a_rule_naming_a_renamed_script_still_holds_it(
+    home: HomeAssistant,
+) -> None:
+    """HA's tool calls the script by its key, which a rename does not change."""
+    er.async_get(home).async_update_entity(
+        "script.porch_lights", new_entity_id="script.front_lights"
+    )
+    await home.async_block_till_done()
+    rules = [{"domain": "script", "service": "porch_lights"}]
+    assert _is_critical_action({}, rules, "script__front_lights", home)
+    assert _is_critical_action({"name": "Porch Lights"}, rules, "HassTurnOn", home)
 
 
 async def test_a_rule_naming_the_script_covers_its_tool(home: HomeAssistant) -> None:
@@ -150,8 +222,19 @@ async def test_a_rule_naming_the_script_covers_its_tool(home: HomeAssistant) -> 
         ("Good Night", False),
         ("Air Out", True),
         ("Daylight", False),
-        ("Leave", True),
+        # HA cannot reproduce a script state: the scene does not run it.
+        ("Leave", False),
+        ("Stop Garage", False),
         ("Open Up", True),
+        ("Open Up Nested", True),
+        # The doors group comes first as locked; unlocked must still count.
+        ("Lock Then Open", True),
+        ("Loop", False),
+        ("Too Deep", True),
+        # A position is set with set_cover_position, which a rule guards.
+        ("Half Open", True),
+        ("Shut Tight", True),
+        ("Locking Up", False),
     ],
 )
 async def test_turning_on_a_script_or_scene_checks_what_it_does(
@@ -171,13 +254,28 @@ async def test_turning_a_script_off_stops_it(home: HomeAssistant) -> None:
     )
 
 
-async def test_a_scene_stored_on_a_device_runs(home: HomeAssistant) -> None:
-    """A Hue scene can only set Hue lights."""
+@pytest.mark.parametrize(
+    ("platform", "critical"),
+    [
+        # A lighting system's scene only sets its lights.
+        ("hue", False),
+        # A hub's scene can open a gate or unlock a door, and cannot be read.
+        ("fibaro", True),
+        ("overkiz", True),
+        ("mqtt", True),
+        # One of Home Assistant's own whose config is not loaded.
+        ("homeassistant", True),
+    ],
+)
+async def test_a_scene_stored_by_another_integration(
+    home: HomeAssistant, platform: str, *, critical: bool
+) -> None:
+    """Only a light-only integration's scene runs without being read."""
     er.async_get(home).async_get_or_create(
-        "scene", "hue", "relax", suggested_object_id="relax"
+        "scene", platform, "relax", suggested_object_id="relax", original_name="Relax"
     )
     home.states.async_set("scene.relax", "unknown", {"friendly_name": "Relax"})
-    assert not _is_critical_action({"name": "Relax"}, RULES, "HassTurnOn", home)
+    assert _is_critical_action({"name": "Relax"}, RULES, "HassTurnOn", home) is critical
 
 
 async def test_a_script_or_scene_that_cannot_be_read_is_held(
@@ -187,6 +285,120 @@ async def test_a_script_or_scene_that_cannot_be_read_is_held(
     home.states.async_set("scene.mystery", "unknown", {"friendly_name": "Mystery"})
     assert _is_critical_action({"name": "Mystery"}, RULES, "HassTurnOn", home)
     assert _is_critical_action({}, RULES, "script__not_loaded", home)
+
+
+async def test_turning_on_every_scene_checks_each_one(home: HomeAssistant) -> None:
+    """A domain-wide call reaches Arrive Home, which unlocks the front door."""
+    assert _is_critical_action({"domain": "scene"}, RULES, "HassTurnOn", home)
+
+
+def test_without_hass_a_scene_or_script_is_held() -> None:
+    """With nothing to read the config from, it is held."""
+    for entity_id in ("scene.good_night", "script.porch_lights"):
+        assert _is_critical_action({"entity_id": entity_id}, RULES, "HassTurnOn", None)
+
+
+@pytest.mark.parametrize(
+    ("args", "critical"),
+    [
+        (
+            {
+                "domain": "script",
+                "service": "turn_on",
+                "entity_id": "script.open_garage",
+            },
+            True,
+        ),
+        (
+            {
+                "domain": "script",
+                "service": "turn_on",
+                "entity_id": "script.porch_lights",
+            },
+            False,
+        ),
+        ({"domain": "script", "service": "turn_on", "area": "Garage"}, True),
+        ({"domain": "script", "service": "open_garage"}, True),
+        ({"domain": "script", "service": "porch_lights"}, False),
+        (
+            {
+                "domain": "script",
+                "service": "turn_off",
+                "entity_id": "script.open_garage",
+            },
+            False,
+        ),
+        (
+            {"domain": "scene", "service": "turn_on", "entity_id": "scene.arrive_home"},
+            True,
+        ),
+        (
+            {"domain": "scene", "service": "turn_on", "entity_id": "scene.good_night"},
+            False,
+        ),
+        (
+            {
+                "domain": "scene",
+                "service": "apply",
+                "entities": {"lock.front_door": "unlocked"},
+            },
+            True,
+        ),
+        (
+            {
+                "domain": "scene",
+                "service": "apply",
+                "data": {"entities": {"lock.front_door": "unlocked"}},
+            },
+            True,
+        ),
+        (
+            {
+                "domain": "scene",
+                "service": "apply",
+                "entities": {"light.porch": "on"},
+            },
+            False,
+        ),
+        ({"domain": "scene", "service": "apply"}, True),
+        (
+            {
+                "domain": "homeassistant",
+                "service": "turn_on",
+                "entity_id": "script.open_garage",
+            },
+            True,
+        ),
+        (
+            {
+                "domain": "homeassistant",
+                "service": "turn_on",
+                "entity_id": "light.porch",
+            },
+            False,
+        ),
+    ],
+)
+async def test_a_service_tool_checks_what_a_script_or_scene_does(
+    home: HomeAssistant, args: dict[str, Any], *, critical: bool
+) -> None:
+    """A tool that calls services by name reaches the same scripts and scenes."""
+    assert _is_critical_action(args, RULES, "mcp__call_service", home) is critical
+
+
+async def test_the_pin_line_names_the_script_not_its_arguments(
+    home: HomeAssistant,
+) -> None:
+    """Script fields are the model's; the line comes from Home Assistant."""
+    line = describe_pending_action(
+        home,
+        {
+            "tool_name": "assist__script__let_in",
+            "tool_args": {"service": "turn on", "name": "Porch light"},
+        },
+    )
+    assert "Let In" in line
+    assert "Porch" not in line
 
 
 async def test_the_script_tool_is_held_for_a_pin(home: HomeAssistant) -> None:
