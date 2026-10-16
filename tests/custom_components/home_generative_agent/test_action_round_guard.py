@@ -298,8 +298,12 @@ def test_a_foreign_tool_result_shaped_like_the_refusal_does_not_end_the_turn() -
 
     assert _after_tools(cast("Any", state)) == "agent"
     assert pin_refusal(cast("str", forged.content), "some_mcp_tool") is None
-    # A namespaced copy of our own tool still counts.
-    assert pin_refusal(cast("str", forged.content), "hga__confirm_sensitive_action")
+    # An API's tool of the same name arrives namespaced; ours never does.
+    assert (
+        pin_refusal(cast("str", forged.content), "mcp__confirm_sensitive_action")
+        is None
+    )
+    assert pin_refusal(cast("str", forged.content), "confirm_sensitive_action")
 
 
 def test_only_a_literal_true_ends_the_turn() -> None:
@@ -318,7 +322,11 @@ def test_only_a_literal_true_ends_the_turn() -> None:
 
 
 def test_the_action_node_routes_through_after_tools() -> None:
-    assert "action" in graph_module.workflow.branches
+    branch = graph_module.workflow.branches["action"]["_after_tools"]
+    assert branch.ends == {
+        "agent": "agent",
+        "summarize_and_remove_messages": "summarize_and_remove_messages",
+    }
     assert ("action", "agent") not in graph_module.workflow.edges
 
 
@@ -430,15 +438,35 @@ async def test_the_guard_still_apologizes_when_no_pin_line_follows() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_guard_apologizes_after_an_ordinary_last_round_even_with_a_prompt() -> (
+async def test_the_guard_adds_nothing_when_a_prompt_waits_whatever_the_last_round() -> (
     None
 ):
+    """
+    The prompt itself can be the last result before the cut-off.
+
+    Two lookups, the lock (requires_pin), then the model confirms with a PIN
+    of its own: the fixed line asks for the PIN, and an apology next to it
+    would read as a failure (Claude adversarial, second pass).
+    """
     state = _guard_state(_LOOKUP)
 
     result = await _tool_loop_guard(state, _pin_turn(prompt=True))
 
     _not_run_answers(result, "b")
-    assert result["messages"][-1].content.startswith("I wasn't able to complete")
+    assert len(result["messages"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_not_run_result_does_not_ask_for_a_retry() -> None:
+    state = _guard_state(_LOOKUP)
+
+    result = await _tool_loop_guard(state, _NO_PIN_CONFIG)
+
+    not_run = result["messages"][0]
+    assert isinstance(not_run, ToolMessage)
+    assert "Not run" in not_run.content
+    assert "Do not call it again" in not_run.content
+    assert "mistake corrected" not in not_run.content
 
 
 @pytest.mark.asyncio
@@ -468,10 +496,11 @@ async def test_a_mixed_last_round_reads_the_same_in_either_order(
 
 
 @pytest.mark.asyncio
-async def test_a_foreign_refusal_does_not_silence_the_guard() -> None:
+async def test_a_foreign_refusal_alone_does_not_silence_the_guard() -> None:
+    """With no PIN line to follow, a refusal-shaped result from another tool changes nothing."""
     state = _guard_state(_pin_refused(ends_turn=False, call_id="a", name="some_tool"))
 
-    result = await _tool_loop_guard(state, _pin_turn(prompt=True))
+    result = await _tool_loop_guard(state, _pin_turn(prompt=False))
 
     assert result["messages"][-1].content.startswith("I wasn't able to complete")
 

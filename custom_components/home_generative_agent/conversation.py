@@ -1798,6 +1798,10 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             # repeat the wrong one (red team, 2026-10-16). `pin_lines_follow`
             # (helpers.py) mirrors these three cases.
             lines.append(pin_msg(self.hass, "pin_incorrect_line"))
+            if not prompts_awaiting_reply(pending_actions, pin_reply):
+                # The prompt took its last reply, or the request its last
+                # attempt: no question follows, so say what comes next.
+                lines.append(pin_msg(self.hass, "pin_request_again_line"))
         lines.extend(
             pin_msg(
                 self.hass,

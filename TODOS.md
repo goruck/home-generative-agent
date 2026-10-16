@@ -16,6 +16,19 @@
 
 ---
 
+### A cancelled turn leaves the model's tool calls unanswered in the checkpoint
+
+**What:** When a streamed turn is cancelled (the client disconnects, or the pipeline aborts) after the model's tool-call message was checkpointed and before the `action` node committed its results, the thread ends on an `AIMessage` with tool calls and no `ToolMessage`. The next turn sends that history to the provider; OpenAI and Anthropic reject an assistant tool call with no result, so the conversation fails until trimming drops the exchange. `_get_synthetic_rejections` (conversation.py) repairs only HA's chat log, never the checkpoint, and the round-limit guard's new "not run" results (`_unanswered_calls`, graph.py) run only on the guard path.
+
+**Why:** Codex adversarial finding in the review of the loop-guard fix (2026-10-16); inherited, not introduced there. Rare (a cancellation inside a tool round) but hard to diagnose from the field: the symptom is a provider 400 on the next request.
+
+**How to apply:** On cancellation (`_async_run_astream`'s `CancelledError` path), or at the start of the next turn in `_retrieve_tools`, append a "not run" `ToolMessage` for every tool call of a trailing `AIMessage` that has none, recording an unknown outcome when the call may have started (a device call in flight). Reuse `_unanswered_calls` with a cancellation-specific text. Test: a graph state ending on a tool-call message, then `start`→`_call_model` input, asserts every tool call has a result.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
 ### The unreadable-PIN hint is model text
 
 **What:** When the user's reply holds no readable PIN (a form `pin_in_text` does not read, or a reply that is not a PIN at all), `_confirmation_refusal` tells the model to ask the user to say the digits one by one (`pin_say_digits`), and the user hears it only if the model relays it. The fixed lines say what the PIN will confirm and ask for it; they do not say that the last reply could not be read. A model that loops on the refusal instead of replying reaches the round-limit guard, which adds nothing when a PIN line follows, so the user hears the prompt again with no hint; on a provider that does not stream, text the model wrote next to a tool call is never shown either.

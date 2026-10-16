@@ -2261,6 +2261,12 @@ def test_the_pin_lines_are_added_after_the_reply() -> None:
     assert src.rindex("keep_pin_prompts(") < finish
     assert finish < src.index("return conversation.async_get_result_from_chat_log(")
     assert "streamed=not options.get(CONF_SCHEMA_FIRST_YAML, False)" in src[finish:]
+    # The streamed path's callback is the other half of the pin_lines_follow
+    # contract: the same lines decide whether a failure text is needed.
+    astream = src.index("elif await self._async_run_astream(")
+    call = src[astream:finish]
+    assert "pin_lines_pending=lambda: bool(" in call
+    assert "self._pin_lines(runtime_data.pending_actions, pin_reply)" in call
     finish_src = inspect.getsource(HGAConversationEntity._async_finish_reply)
     assert finish_src.index("I'm sorry, I was unable to respond.") < finish_src.index(
         "await self._async_add_pin_lines("
@@ -2663,6 +2669,38 @@ async def test_a_turn_that_ends_on_a_tool_call_without_a_pin_line_still_fails_al
     ]
 
 
+@pytest.mark.parametrize("pin_lines_pending", [lambda: True, lambda: False])
+async def test_a_stream_that_fails_on_a_tool_call_does_not_recover_its_text(
+    pin_lines_pending: Any,
+) -> None:
+    """The failure is told; the text that came with the call is not re-said."""
+    from langchain_core.messages import AIMessage  # noqa: PLC0415
+
+    chat_log = _refusal_turn_chat_log()
+    dangling = AIMessage(
+        content="Please provide your security PIN.",
+        tool_calls=[{"name": "confirm_sensitive_action", "args": {}, "id": "c2"}],
+    )
+
+    async def _boom(**_kwargs: Any) -> Any:
+        msg = "Model invocation failed: 503"
+        raise HomeAssistantError(msg)
+        yield  # pragma: no cover - makes this an async generator
+
+    app = types.SimpleNamespace(
+        astream_events=_boom,
+        aget_state=AsyncMock(
+            return_value=types.SimpleNamespace(values={"messages": [dangling]})
+        ),
+    )
+
+    await _run_astream(chat_log, app, pin_lines_pending)
+
+    assert [d.get("content") for d in chat_log.heard] == [
+        "I'm sorry, I was unable to respond: Model invocation failed: 503"
+    ]
+
+
 async def test_a_turn_without_a_pin_line_after_all_still_fails_aloud() -> None:
     """The callback said no line will follow: the user must hear something."""
     from langchain_core.messages import ToolMessage  # noqa: PLC0415
@@ -2723,10 +2761,11 @@ async def test_a_failed_stream_is_still_told_as_a_failure_next_to_a_pin_line() -
 
 async def test_text_that_came_with_a_tool_call_is_not_recovered_again() -> None:
     """
-    The round-limit guard adds nothing when a PIN line follows.
+    A graph state ending on a tool-call message has nothing to recover.
 
-    The graph then ends on the model's last tool-call message, whose text was
-    streamed with the call; recovering it would speak it twice.
+    Its text was streamed with the call; recovering it would speak it twice.
+    Reachable when a stream fails between the model's call and the action
+    node (the guard itself now answers the calls it cuts off).
     """
     from langchain_core.messages import AIMessage  # noqa: PLC0415
 
@@ -2893,6 +2932,28 @@ async def test_a_wrong_pin_gets_a_fixed_line(
     assert chat_log.content[-1].content == (
         f"That PIN was incorrect. {_LINE}\n\nSorry, that was wrong. Your PIN?"
     )
+
+
+async def test_the_last_wrong_pin_says_what_comes_next(
+    frozen_assistant_content: None,  # noqa: ARG001
+) -> None:
+    """No prompt waits after the last attempt, so no question follows: say so."""
+    from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+        start_pin_turn,
+    )
+
+    pending: dict[str, Any] = {}
+    reply = start_pin_turn(pending, "conv1", "1 2 3 5")
+    reply.spent = True
+    chat_log = _DeltaChatLog([])
+
+    await HGAConversationEntity._async_finish_reply(
+        _pin_entity(), cast("Any", chat_log), pending, reply, streamed=True
+    )
+
+    assert [c.content for c in chat_log.content] == [
+        "That PIN was incorrect. Make the request again."
+    ]
 
 
 @pytest.mark.parametrize(

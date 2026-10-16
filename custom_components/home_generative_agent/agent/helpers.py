@@ -520,9 +520,11 @@ def pin_refusal(content: str, tool_name: str | None = None) -> dict[str, Any] | 
     action). None for any other tool reply, and, when the tool's name is
     given, for any tool but `confirm_sensitive_action`: a third-party tool's
     result shaped like the refusal must not steer the turn (review finding,
-    2026-10-16).
+    2026-10-16). The name is matched exactly: our tool is a LangChain tool
+    dispatched by its bare name, while an API's tool of the same name
+    arrives namespaced.
     """
-    if tool_name is not None and base_tool_name(tool_name) != CONFIRM_TOOL_NAME:
+    if tool_name is not None and tool_name != CONFIRM_TOOL_NAME:
         return None
     try:
         data = json.loads(content)

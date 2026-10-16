@@ -89,6 +89,7 @@ from ..core.prompt_cache import (  # noqa: TID252
 from ..core.utils import extract_final  # noqa: TID252
 from .automation_targets import AUTOMATION_REFUSAL_PREFIX
 from .helpers import (
+    CONFIRM_TOOL_NAME,
     PIN_REFUSAL_ENDS_TURN,
     active_llm_api_ids,
     base_tool_name,
@@ -2278,7 +2279,7 @@ def _has_pending_pin_confirmation(messages: Sequence[AnyMessage]) -> bool:
     pin_idx = _last_requires_pin_idx(recent)
     if pin_idx is not None:
         for msg in recent[pin_idx + 1 :]:
-            if isinstance(msg, ToolMessage) and msg.name == "confirm_sensitive_action":
+            if isinstance(msg, ToolMessage) and msg.name == CONFIRM_TOOL_NAME:
                 content = msg.content if isinstance(msg.content, str) else ""
                 if "Incorrect PIN" in content:
                     # Wrong PIN entered — action is still pending, keep scanning.
@@ -3617,22 +3618,16 @@ def _after_tools(state: State) -> Literal["agent", "summarize_and_remove_message
     return "agent"
 
 
-def _pin_line_is_the_reply(
-    messages: Sequence[AnyMessage], config: RunnableConfig
-) -> bool:
+def _pin_line_is_the_reply(config: RunnableConfig) -> bool:
     """
-    Return True when the last round refused a confirmation and a PIN line follows.
+    Return True when a fixed PIN line will be the turn's reply.
 
     The reply then says, in fixed words (conversation.py), what the PIN will
     confirm, what it ran, or that it was wrong, so the guard has nothing to
-    add. The round judged is the last one that ran: the calls the guard cuts
-    off are not part of it.
+    add. Whatever the last round held: the field case is a model that keeps
+    confirming with PINs of its own after the prompt was created, and the
+    prompt itself may be the last result before the cut-off.
     """
-    completed = (
-        messages[:-1] if messages and isinstance(messages[-1], AIMessage) else messages
-    )
-    if not any(_pin_refusal_of(msg) for msg in _last_round_responses(completed)):
-        return False
     cfg = config.get("configurable", {})
     pin_reply = cfg.get("pin_reply")
     return pin_reply is not None and pin_lines_follow(
@@ -3640,7 +3635,14 @@ def _pin_line_is_the_reply(
     )
 
 
-_ROUND_LIMIT_RESULT = "Not run: this turn's tool-round limit was reached."
+# The result given to a call the round-limit guard cuts off. Not the error
+# template: that one asks the model to call the tool again, which is the one
+# thing this turn must not do, and the next model call sees this text right
+# before the user's next message.
+_ROUND_LIMIT_RESULT = (
+    "Not run: this turn's tool-round limit was reached. Do not call it again "
+    "unless the user asks."
+)
 
 
 def _unanswered_calls(messages: Sequence[AnyMessage]) -> list[ToolMessage]:
@@ -3656,8 +3658,11 @@ def _unanswered_calls(messages: Sequence[AnyMessage]) -> list[ToolMessage]:
     if not isinstance(last, AIMessage) or not last.tool_calls:
         return []
     return [
-        _make_tool_error(
-            _ROUND_LIMIT_RESULT, tool_call.get("name", ""), tool_call.get("id") or ""
+        ToolMessage(
+            content=_ROUND_LIMIT_RESULT,
+            name=tool_call.get("name", ""),
+            tool_call_id=tool_call.get("id") or "",
+            status="error",
         )
         for tool_call in last.tool_calls
     ]
@@ -3671,14 +3676,13 @@ async def _tool_loop_guard(state: State, config: RunnableConfig) -> dict[str, An
     valid for the next model call. When the round before the cut-off was a
     refused automation, the refusal text is the one thing the user can act
     on, so it is repeated rather than lost behind the generic apology. When
-    it was a confirmation refused for want of the user's PIN and a PIN line
-    will be the reply (the prompt is waiting, an action ran, or the PIN was
-    wrong), nothing more is added: an apology next to "What is your PIN?"
-    reads as a failure, and the user is never asked.
+    a PIN line will be the reply (the prompt is waiting, an action ran, or
+    the PIN was wrong), nothing more is added: an apology next to "What is
+    your PIN?" reads as a failure, and the user is never asked.
     """
     messages = state["messages"]
     answers: list[BaseMessage] = list(_unanswered_calls(messages))
-    if _pin_line_is_the_reply(messages, config):
+    if _pin_line_is_the_reply(config):
         return {"messages": answers}
     content = (
         "I wasn't able to complete this request after several tool-use "

@@ -366,6 +366,8 @@ async def test_a_confirmation_without_the_users_message_is_refused() -> None:
 
     assert isinstance(reply, dict)
     assert reply["status"] == PIN_AWAITING_USER_REPLY
+    # No reply, so no fixed line could follow: the turn must not end here.
+    assert PIN_REFUSAL_ENDS_TURN not in reply
     assert api.calls == []
 
 
