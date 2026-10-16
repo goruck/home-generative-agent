@@ -2584,8 +2584,9 @@ async def test_the_line_is_added_in_czech(
         _pin_entity("cs"), cast("Any", chat_log), pending, reply, streamed=True
     )
 
+    # "Zadejte PIN." ends with no question mark, so the fixed question follows.
     assert chat_log.content[-1].content == (
-        "Váš PIN potvrdí: odemknout „Playroom Door Lock“.\n\nZadejte PIN."
+        "Váš PIN potvrdí: odemknout „Playroom Door Lock“.\n\nZadejte PIN. Jaký je váš PIN?"
     )
 
 
@@ -2606,6 +2607,67 @@ async def test_without_a_reply_to_join_the_line_is_its_own_reply(
     # keeps listening for the PIN.
     assert chat_log.content[-1].content == f"{_LINE} What is your PIN?"
     assert all(action["disclosed"] for action in pending.values())
+
+
+async def test_a_prompt_reply_without_a_question_gets_one(
+    frozen_assistant_content: None,  # noqa: ARG001
+) -> None:
+    """
+    A prompt reply that ends without a question mark gets the fixed question.
+
+    Field test 2026-10-15: the model wrote "Please enter the PIN." and the
+    satellite stopped listening. HA keeps the mic open only for a reply that
+    ends with a question mark, so one is added in fixed words, spoken too.
+    """
+    pending: dict[str, Any] = {}
+    reply = _pin_prompt(pending, "unlock the playroom door")
+    model_text = "I need a security PIN to unlock the playroom door. Please enter it."
+    chat_log = _DeltaChatLog([_assistant_reply(model_text)])
+
+    await HGAConversationEntity._async_add_pin_lines(
+        _pin_entity(), cast("Any", chat_log), pending, reply, streamed=True
+    )
+
+    assert [h["content"] for h in chat_log.heard] == [f"{_LINE} What is your PIN?"]
+    assert chat_log.content[-1].content == f"{_LINE}\n\n{model_text} What is your PIN?"
+    assert chat_log.content[-1].content.endswith("?")
+
+
+async def test_a_prompt_reply_that_already_asks_is_left_as_is(
+    frozen_assistant_content: None,  # noqa: ARG001
+) -> None:
+    pending: dict[str, Any] = {}
+    reply = _pin_prompt(pending, "unlock the playroom door")
+    chat_log = _DeltaChatLog([_assistant_reply("What is your PIN?")])
+
+    await HGAConversationEntity._async_add_pin_lines(
+        _pin_entity(), cast("Any", chat_log), pending, reply, streamed=True
+    )
+
+    assert chat_log.content[-1].content == f"{_LINE}\n\nWhat is your PIN?"
+    assert [h["content"] for h in chat_log.heard] == [_LINE]
+
+
+async def test_a_done_line_does_not_add_a_question(
+    frozen_assistant_content: None,  # noqa: ARG001
+) -> None:
+    pending: dict[str, Any] = {}
+    from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+        start_pin_turn,
+    )
+
+    reply = start_pin_turn(pending, "conv1", "1234")
+    reply.confirmed = 'unlock "Playroom Door Lock"'
+    reply.outcome = "done"
+    chat_log = _DeltaChatLog([_assistant_reply("Done.")])
+
+    await HGAConversationEntity._async_add_pin_lines(
+        _pin_entity(), cast("Any", chat_log), pending, reply, streamed=True
+    )
+
+    assert chat_log.content[-1].content == (
+        'PIN accepted: unlock "Playroom Door Lock".\n\nDone.'
+    )
 
 
 async def test_the_line_does_not_replace_a_tool_call(

@@ -103,6 +103,7 @@ from .helpers import (
     normalize_intent_for_alarm,
     normalize_intent_for_lock,
     parse_tool_response,
+    pending_action_expired,
     register_pending_action,
     resolve_critical_action_policy,
     sanitize_tool_args,
@@ -117,7 +118,7 @@ from .pin_messages import describe_pending_action, pin_msg
 from .token_counter import count_tokens_cross_provider
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from homeassistant.core import HomeAssistant
     from langchain_core.runnables import RunnableConfig
@@ -2370,7 +2371,7 @@ async def _get_pending_pin_tools(
         )
         return []
     LOGGER.debug("PIN flow active: force-injecting confirm_sensitive_action")
-    return [
+    tools = [
         RawTool(
             name=val["name"],
             api_id=val["api_id"],
@@ -2379,6 +2380,51 @@ async def _get_pending_pin_tools(
             is_actuation=val.get("is_actuation", False),
         )
     ]
+    if config is not None:
+        tools.extend(await _get_held_action_tools(store, config, cfg))
+    return tools
+
+
+async def _get_held_action_tools(
+    store: BaseStore, config: RunnableConfig, cfg: Mapping[str, Any]
+) -> list[RawTool]:
+    """
+    Return the tools of this conversation's pending actions.
+
+    The design lets the model re-issue the held request in the PIN reply turn
+    (after a wrong PIN, or when it believes the prompt expired), but the reply
+    itself ("1234") ranks no actuation tool, so the re-issue was rejected as
+    not retrieved (field test 2026-10-15). The pending action names its tool.
+    """
+    thread_id = cfg.get("thread_id")
+    if not thread_id:
+        return []
+    now = dt_util.utcnow()
+    names = sorted(
+        {
+            str(action["tool_name"])
+            for action in cfg.get("pending_actions", {}).values()
+            if action.get("thread_id") == thread_id
+            and action.get("tool_name")
+            and action.get("tool_name") != "add_automation"
+            and not pending_action_expired(action, now)
+        }
+    )
+    if not names:
+        return []
+    allowed_api_ids = _get_allowed_api_ids(config)
+    live_tool_ids = _get_live_tool_ids(config)
+    excluded_names = tool_exclusions(config.get("configurable", {}).get("options", {}))
+    tools: list[RawTool] = []
+    for name in names:
+        fetched = await _get_tool_by_name(
+            store, config, name, allowed_api_ids, live_tool_ids
+        )
+        if fetched is not None and not is_tool_excluded(
+            fetched["name"], excluded_names.get(fetched["api_id"], ())
+        ):
+            tools.append(fetched)
+    return tools
 
 
 def _tool_lookup_targets(

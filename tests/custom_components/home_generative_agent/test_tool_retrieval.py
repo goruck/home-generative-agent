@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import psycopg
 import pytest
 from homeassistant.helpers import llm
+from homeassistant.util import dt as dt_util
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
 from custom_components.home_generative_agent.agent.graph import (
@@ -3663,6 +3664,55 @@ async def test_an_excluded_partner_is_not_looked_up() -> None:
         call.kwargs.get("key") or call.args[1] for call in store.aget.await_args_list
     ]
     assert "assist::intent__HassTurnOn" not in looked_up
+
+
+@pytest.mark.asyncio
+async def test_the_held_actions_tool_is_bound_in_the_reply_turn() -> None:
+    """
+    The held action's tool is bound with confirm_sensitive_action.
+
+    The design lets the model re-issue the held call in the PIN reply turn,
+    but the reply ("1234") ranks no actuation tool, so the re-issue was
+    rejected as not retrieved (field test 2026-10-15).
+    """
+    store = _on_off_store("intent__HassTurnOff")
+    store.asearch = AsyncMock(
+        return_value=[_make_search_item("alarm_control", score=0.4, api_id="hga_local")]
+    )
+    rows = {
+        "hga_local::confirm_sensitive_action": _make_search_item(
+            "confirm_sensitive_action", score=0.0, api_id="hga_local"
+        ),
+        "assist::intent__HassTurnOff": _make_search_item(
+            "intent__HassTurnOff", score=0.0, is_actuation=True
+        ),
+        "assist::intent__HassTurnOn": _make_search_item(
+            "intent__HassTurnOn", score=0.0, is_actuation=True
+        ),
+    }
+
+    async def aget(namespace: Any, key: str = "", **_kwargs: Any) -> Any:  # noqa: ARG001
+        return rows.get(key)
+
+    store.aget = AsyncMock(side_effect=aget)
+    config = _on_off_config("intent__HassTurnOn", "intent__HassTurnOff")
+    configurable = cast("dict[str, Any]", config)["configurable"]
+    configurable["thread_id"] = "conv1"
+    configurable["pending_actions"] = {
+        "a1": {
+            "tool_name": "intent__HassTurnOff",
+            "tool_args": {"name": "Garage Door Lock", "domain": ["lock"]},
+            "thread_id": "conv1",
+            "created_at": dt_util.utcnow().isoformat(),
+        }
+    }
+
+    result = await _retrieve_tools(_history_state("1234"), config, store=store)
+
+    assert result["tool_routing_map"].get("confirm_sensitive_action") == "hga_local"
+    assert result["tool_routing_map"].get("intent__HassTurnOff") == "assist"
+    # Its partner comes with it.
+    assert result["tool_routing_map"].get("intent__HassTurnOn") == "assist"
 
 
 @pytest.mark.asyncio

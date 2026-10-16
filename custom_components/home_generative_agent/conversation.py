@@ -159,6 +159,11 @@ _TOOL_INDEX_DELTA_TIMEOUT_S = 30.0
 _TOOL_INDEX_PAGE_SIZE = 100
 
 
+# What HA's ChatLog.continue_conversation reads as "keep listening": the reply
+# ends with a question mark (Latin, Greek or fullwidth).
+_CONTINUE_MARKS = ("?", ";", "\uff1f")
+
+
 def _recommit_final_assistant_content(chat_log: conversation.ChatLog) -> None:
     """
     Re-fire CONTENT_ADDED for the final AssistantContent.
@@ -1819,6 +1824,16 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             disclose_pin_prompts(pending_actions, pin_reply)
             return
         merged = f"{text}\n\n{reply.content}"
+        if prompts_awaiting_reply(pending_actions, pin_reply) and not str(
+            reply.content
+        ).rstrip().endswith(_CONTINUE_MARKS):
+            # The model asked without a question mark ("Please enter the
+            # PIN."), which closes a satellite's microphone: HA keeps
+            # listening only when the reply ends with one (field test
+            # 2026-10-15). Ask in fixed words, spoken and shown.
+            ask = pin_msg(self.hass, "pin_ask_line")
+            text = f"{text} {ask}"
+            merged = f"{merged} {ask}"
         if getattr(chat_log, "delta_listener", None) is not None:
             count = len(chat_log.content)
             await self._async_stream_text(chat_log, text if streamed else merged)
