@@ -16,17 +16,42 @@
 
 ---
 
-### A PIN refusal that hits the action-round limit ends with a generic apology
+### An empty model reply passes the no-reply guard in schema-first mode
 
-**What:** A model that keeps calling `confirm_sensitive_action` without the user's PIN gets `awaiting_user_pin` each time; on the third action round `_tool_loop_guard` (`agent/graph.py`) replies "I wasn't able to complete this request after several tool-use attempts…" and the user is never asked for the PIN. On a voice satellite the mic then closes. Separately, HA keeps a satellite listening only when the reply ends with "?", so a model that writes "Please say your PIN." makes the user say the wake word again. Since the fourth review pass of PR #769, a PIN is accepted only in the reply to the prompt, so a model that tries to confirm in the request turn ("unlock the door, 1234") is always refused first: this path is now the common case for one-breath requests, not a corner case.
+**What:** `_async_finish_reply` (conversation.py) judges a turn by the type of the last chat_log entry, not by whether it says anything. In schema-first (ainvoke) mode a model reply with empty content and no tool calls is backfilled as an `AssistantContent` with no text, so the guard adds no apology, the user gets a blank bubble (and a satellite nothing), and the empty `AIMessage` stays in the checkpoint for the next model call. `_call_model`'s empty-reply fallback covers only a reply that follows a `ToolMessage`.
 
-**Why:** Claude adversarial and red-team findings in the full review of PR #769 (2026-10-14). Left out of that PR by the maintainer's scope choice. **Field test 2026-10-16 (voice, 32f483e):** on "Unlock the garage door lock" the local model called `confirm_sensitive_action` with a made-up PIN three times in the request turn, re-spoke "please provide your security PIN" each round, and the turn ended with the apology; the PIN flow still completed because the fixed lines ("Your PIN will confirm: … What is your PIN?") follow the apology and keep the mic open. The mic half of this entry is done in PR #769 (a fixed question is appended when the reply lacks one); the apology and the repeated sentence remain.
+**Why:** Codex adversarial finding in the review of the loop-guard fix (2026-10-16); inherited, not introduced there. The streamed path is covered by its own recovery (`_normalize_ai_content("")` is None, so the failure text is added).
 
-**How to apply:** In `_tool_loop_guard`, when the last ToolMessage is an `awaiting_user_pin` refusal, end the turn with no apology (the fixed lines already ask for the PIN), or end the turn right after the first refusal so the prompt is spoken once. (The duplicate pending action this entry used to list is gone: a conversation now holds one pending action.)
+**How to apply:** In `_async_finish_reply`, treat an `AssistantContent` with no content and no tool calls as no reply; in `_call_model`, apply the empty-reply fallback to a first response too, so the checkpoint never ends on an empty assistant message. Test both in `test_conversation_units.py` next to the no-reply cases.
 
 **Effort:** S
-**Priority:** P1 (more common since one-breath requests are refused first)
-**Depends on:** None
+**Priority:** P3
+
+---
+
+### A cancelled turn leaves the model's tool calls unanswered in the checkpoint
+
+**What:** When a streamed turn is cancelled (the client disconnects, or the pipeline aborts) after the model's tool-call message was checkpointed and before the `action` node committed its results, the thread ends on an `AIMessage` with tool calls and no `ToolMessage`. The next turn sends that history to the provider; OpenAI and Anthropic reject an assistant tool call with no result, so the conversation fails until trimming drops the exchange. `_get_synthetic_rejections` (conversation.py) repairs only HA's chat log, never the checkpoint, and the round-limit guard's new "not run" results (`_unanswered_calls`, graph.py) run only on the guard path.
+
+**Why:** Codex adversarial finding in the review of the loop-guard fix (2026-10-16); inherited, not introduced there. Rare (a cancellation inside a tool round) but hard to diagnose from the field: the symptom is a provider 400 on the next request.
+
+**How to apply:** On cancellation (`_async_run_astream`'s `CancelledError` path), or at the start of the next turn in `_retrieve_tools`, append a "not run" `ToolMessage` for every tool call of a trailing `AIMessage` that has none, recording an unknown outcome when the call may have started (a device call in flight). Reuse `_unanswered_calls` with a cancellation-specific text. Test: a graph state ending on a tool-call message, then `start`→`_call_model` input, asserts every tool call has a result.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
+### The unreadable-PIN hint is model text
+
+**What:** When the user's reply holds no readable PIN (a form `pin_in_text` does not read, or a reply that is not a PIN at all), `_confirmation_refusal` tells the model to ask the user to say the digits one by one (`pin_say_digits`), and the user hears it only if the model relays it. The fixed lines say what the PIN will confirm and ask for it; they do not say that the last reply could not be read. A model that loops on the refusal instead of replying reaches the round-limit guard, which adds nothing when a PIN line follows, so the user hears the prompt again with no hint; on a provider that does not stream, text the model wrote next to a tool call is never shown either.
+
+**Why:** Codex and Claude adversarial findings in the review of the loop-guard fix (2026-10-16). The wrong-PIN case got its fixed line in that PR; the unreadable case did not, because `PinReply` does not record it.
+
+**How to apply:** Record the refusal on `PinReply` (for example `unread: bool`, set in `_confirmation_refusal` where `not_in_message` is) and add a `pin_unread_line` ("I could not read a PIN in your message. Say the digits one by one.", en + cs) to `_pin_lines` and `pin_lines_follow`, placed before the prompt line. Test in `test_conversation_units.py` next to the wrong-PIN line.
+
+**Effort:** S
+**Priority:** P3
 
 ---
 
@@ -2488,6 +2513,22 @@ This is the same allowlist-omission class as #480 and as the triage options fixe
 ---
 
 ## Completed
+
+### A PIN refusal that hits the action-round limit ends with a generic apology
+
+**What:** A model that keeps calling `confirm_sensitive_action` without the user's PIN gets `awaiting_user_pin` each time; on the third action round `_tool_loop_guard` (`agent/graph.py`) replies "I wasn't able to complete this request after several tool-use attempts…" and the user is never asked for the PIN. On a voice satellite the mic then closes. Separately, HA keeps a satellite listening only when the reply ends with "?", so a model that writes "Please say your PIN." makes the user say the wake word again. Since the fourth review pass of PR #769, a PIN is accepted only in the reply to the prompt, so a model that tries to confirm in the request turn ("unlock the door, 1234") is always refused first: this path is now the common case for one-breath requests, not a corner case.
+
+**Why:** Claude adversarial and red-team findings in the full review of PR #769 (2026-10-14). Left out of that PR by the maintainer's scope choice. **Field test 2026-10-16 (voice, 32f483e):** on "Unlock the garage door lock" the local model called `confirm_sensitive_action` with a made-up PIN three times in the request turn, re-spoke "please provide your security PIN" each round, and the turn ended with the apology; the PIN flow still completed because the fixed lines ("Your PIN will confirm: … What is your PIN?") follow the apology and keep the mic open. The mic half of this entry is done in PR #769 (a fixed question is appended when the reply lacks one); the apology and the repeated sentence remain.
+
+**How to apply:** In `_tool_loop_guard`, when the last ToolMessage is an `awaiting_user_pin` refusal, end the turn with no apology (the fixed lines already ask for the PIN), or end the turn right after the first refusal so the prompt is spoken once. (The duplicate pending action this entry used to list is gone: a conversation now holds one pending action.)
+
+**Effort:** S
+**Priority:** P1 (more common since one-breath requests are refused first)
+**Depends on:** None
+
+**Completed:** PR #771 (2026-10-16). A confirmation refused because the user has not been asked for the PIN yet (`pin_reply_to_prompt_only`, the request turn, when this message's PIN was not used) carries `ends_turn` in its payload (`_confirmation_refusal`, tools.py); the graph's new conditional edge after `action` (`_after_tools`) ends the turn when every call in the round was such a refusal, so the fixed line and "What is your PIN?" are the reply and the prompt is spoken once (`_async_finish_reply`; the streamed path adds no failure text and recovers no text that came with a tool call; the schema-first path backfills the chain instead of logging an error and writing the tool JSON as the reply). `_tool_loop_guard` first answers every call it cuts off with a "not run" result (the pre-existing guard left them dangling, which a strict provider rejects on the next turn), then adds nothing when the last round refused a confirmation and a PIN line follows (`pin_lines_follow`: a prompt waits, an action ran, or a PIN was wrong); the apology stays when nothing would otherwise be said. A wrong PIN now has its own fixed line, "That PIN was incorrect." (review: the guard's silence would otherwise have had the user repeat the wrong PIN). The refusal predicates read only `confirm_sensitive_action`'s results (a third-party tool's result shaped like the refusal cannot steer the turn). Left as is: a model that loops in the reply turn on an unreadable PIN still speaks its own text each round, which carries the digits hint the fixed lines do not; see the entry below.
+
+---
 
 ### The PIN prompt does not say which action it confirms, deterministically
 

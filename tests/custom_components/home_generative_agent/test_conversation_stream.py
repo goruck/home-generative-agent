@@ -1329,6 +1329,32 @@ def test_streamed_tool_result_uses_the_2026_10_result_key() -> None:
 
 
 @pytest.mark.usefixtures("ha_2026_10")
+def test_the_guards_not_run_results_reach_the_chat_log() -> None:
+    """The round-limit guard answers the calls it cuts off; Show Details gets them."""
+    from custom_components.home_generative_agent.conversation import (  # noqa: PLC0415
+        _process_stream_event,
+    )
+
+    not_run = ToolMessage(
+        content=json.dumps({"error": "Not run: the tool-round limit was reached."}),
+        tool_call_id="c9",
+        name="HassTurnOn",
+        status="error",
+    )
+    pending: dict[str, Any] = {"c9": {"name": "HassTurnOn", "args": {}, "id": "c9"}}
+    event = {
+        "event": "on_chain_end",
+        "metadata": {"langgraph_node": "tool_loop_guard"},
+        "data": {"output": {"messages": [not_run]}},
+    }
+
+    deltas = list(_process_stream_event(event, pending, deque()))
+
+    assert [cast("dict[str, Any]", d)["tool_call_id"] for d in deltas] == ["c9"]
+    assert pending == {}
+
+
+@pytest.mark.usefixtures("ha_2026_10")
 def test_synthetic_rejection_is_flagged_as_an_error() -> None:
     pending: dict[str, Any] = {"c1": {"name": "HassTurnOn", "args": {}, "id": "c1"}}
 

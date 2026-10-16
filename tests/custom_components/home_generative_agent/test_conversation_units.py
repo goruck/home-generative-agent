@@ -13,6 +13,7 @@ import contextlib
 import dataclasses
 import importlib
 import inspect
+import logging
 import re
 import sys
 import types
@@ -1849,6 +1850,136 @@ async def test_non_streaming_backfill_only_writes_this_turns_messages() -> None:
     assert written[-1].content == "About 2 TB free."
 
 
+@pytest.mark.asyncio
+async def test_non_streaming_turn_that_ends_on_a_refused_confirmation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    Show Details gets the call and the refusal; the PIN line is the reply.
+
+    Before, a thread ending on a tool message was an error, and the tool's
+    JSON was written as the reply.
+    """
+    request = HumanMessage(content="Unlock the garage door.", id="req-1")
+    thread = [
+        request,
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "HassTurnOff", "args": {}, "id": "c1"}],
+        ),
+        ToolMessage(
+            content='{"status": "requires_pin"}', tool_call_id="c1", name="HassTurnOff"
+        ),
+        AIMessage(
+            content="Please provide your security PIN.",
+            tool_calls=[{"name": "confirm_sensitive_action", "args": {}, "id": "c2"}],
+        ),
+        ToolMessage(
+            content='{"status": "awaiting_user_pin", "ends_turn": true}',
+            tool_call_id="c2",
+            name="confirm_sensitive_action",
+        ),
+    ]
+    app = types.SimpleNamespace(ainvoke=AsyncMock(return_value={"messages": thread}))
+    written: list[Any] = []
+    chat_log = types.SimpleNamespace(
+        content=written,
+        async_add_assistant_content_without_tools=written.append,
+    )
+    entity = _runner_entity()
+
+    with contextlib.ExitStack() as stack:
+        for patcher in _patch_runner_deps():
+            stack.enter_context(patcher)
+        with caplog.at_level(logging.ERROR):
+            await entity._async_run_ainvoke(
+                app,
+                cast("Any", {"messages": [request]}),
+                cast("Any", {}),
+                cast("Any", chat_log),
+                None,
+            )
+
+    assert [type(entry).__name__.removeprefix("_Fake") for entry in written] == [
+        "AssistantContent",
+        "ToolResultContent",
+        "AssistantContent",
+        "ToolResultContent",
+    ]
+    assert all(
+        "awaiting_user_pin" not in str(getattr(e, "content", "")) for e in written
+    )
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_turn_that_ends_on_an_ordinary_tool_result(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The round-limit guard's silent path also ends on tool results; no error."""
+    request = HumanMessage(content="Unlock the garage door.", id="req-1")
+    thread = [
+        request,
+        AIMessage(
+            content="", tool_calls=[{"name": "GetLiveContext", "args": {}, "id": "c1"}]
+        ),
+        ToolMessage(content="{}", tool_call_id="c1", name="GetLiveContext"),
+    ]
+    app = types.SimpleNamespace(ainvoke=AsyncMock(return_value={"messages": thread}))
+    written: list[Any] = []
+    chat_log = types.SimpleNamespace(
+        content=written,
+        async_add_assistant_content_without_tools=written.append,
+    )
+
+    with contextlib.ExitStack() as stack:
+        for patcher in _patch_runner_deps():
+            stack.enter_context(patcher)
+        with caplog.at_level(logging.DEBUG):
+            await _runner_entity()._async_run_ainvoke(
+                app,
+                cast("Any", {"messages": [request]}),
+                cast("Any", {}),
+                cast("Any", chat_log),
+                None,
+            )
+
+    assert [type(entry).__name__.removeprefix("_Fake") for entry in written] == [
+        "AssistantContent",
+        "ToolResultContent",
+    ]
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert [r for r in caplog.records if "ended on a tool round" in r.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_turn_with_nothing_after_the_request_logs_an_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    request = HumanMessage(content="Hello.", id="req-1")
+    app = types.SimpleNamespace(ainvoke=AsyncMock(return_value={"messages": [request]}))
+    written: list[Any] = []
+    chat_log = types.SimpleNamespace(
+        content=written,
+        async_add_assistant_content_without_tools=written.append,
+    )
+
+    with contextlib.ExitStack() as stack:
+        for patcher in _patch_runner_deps():
+            stack.enter_context(patcher)
+        with caplog.at_level(logging.ERROR):
+            await _runner_entity()._async_run_ainvoke(
+                app,
+                cast("Any", {"messages": [request]}),
+                cast("Any", {}),
+                cast("Any", chat_log),
+                None,
+            )
+
+    assert written == []
+    assert [r for r in caplog.records if "did not end with AIMessage" in r.getMessage()]
+
+
 def test_message_history_thread_holds_each_user_message_once() -> None:
     """
     End to end through the real reducer: four turns, no duplicate messages.
@@ -2130,6 +2261,12 @@ def test_the_pin_lines_are_added_after_the_reply() -> None:
     assert src.rindex("keep_pin_prompts(") < finish
     assert finish < src.index("return conversation.async_get_result_from_chat_log(")
     assert "streamed=not options.get(CONF_SCHEMA_FIRST_YAML, False)" in src[finish:]
+    # The streamed path's callback is the other half of the pin_lines_follow
+    # contract: the same lines decide whether a failure text is needed.
+    astream = src.index("elif await self._async_run_astream(")
+    call = src[astream:finish]
+    assert "pin_lines_pending=lambda: bool(" in call
+    assert "self._pin_lines(runtime_data.pending_actions, pin_reply)" in call
     finish_src = inspect.getsource(HGAConversationEntity._async_finish_reply)
     assert finish_src.index("I'm sorry, I was unable to respond.") < finish_src.index(
         "await self._async_add_pin_lines("
@@ -2443,6 +2580,206 @@ async def test_recovered_reply_after_a_tool_call_is_added_and_spoken() -> None:
     assert tool_call in chat_log.content, "the tool call must not be replaced"
 
 
+def _refusal_turn_chat_log() -> Any:
+    """Build a streamed turn that ended on a refused confirmation: call, then result."""
+    return _DeltaChatLog(
+        [
+            _mk_content(ha_conversation.UserContent, content="Unlock the garage door."),
+            _mk_content(
+                ha_conversation.AssistantContent,
+                agent_id=HGA_AGENT_ID,
+                content="Please provide your security PIN.",
+                tool_calls=[object()],
+            ),
+            _mk_content(
+                ha_conversation.ToolResultContent,
+                agent_id=HGA_AGENT_ID,
+                tool_call_id="c1",
+                tool_name="confirm_sensitive_action",
+                tool_result={"status": "awaiting_user_pin"},
+            ),
+        ]
+    )
+
+
+def _ended_app(last_message: Any) -> Any:
+    async def _no_events(**_kwargs: Any) -> Any:
+        return
+        yield  # pragma: no cover - makes this an async generator
+
+    return types.SimpleNamespace(
+        astream_events=_no_events,
+        aget_state=AsyncMock(
+            return_value=types.SimpleNamespace(values={"messages": [last_message]})
+        ),
+    )
+
+
+async def _run_astream(chat_log: Any, app: Any, pin_lines_pending: Any) -> None:
+    entity = _ack_entity()
+    entity.hass = types.SimpleNamespace(async_create_task=asyncio.ensure_future)
+    await HGAConversationEntity._async_run_astream(
+        cast("Any", entity),
+        app,
+        cast("Any", {}),
+        cast("Any", {}),
+        cast("Any", chat_log),
+        None,
+        pin_lines_pending=pin_lines_pending,
+    )
+
+
+async def test_a_turn_that_ends_on_a_refused_confirmation_gets_no_failure_text() -> (
+    None
+):
+    """
+    The PIN line is the reply (field test 2026-10-16).
+
+    The graph ends the turn on a confirmation refused before the user was
+    asked; the streamed turn then has no reply of its own, which used to read
+    as a failure.
+    """
+    from langchain_core.messages import ToolMessage  # noqa: PLC0415
+
+    chat_log = _refusal_turn_chat_log()
+    refusal = ToolMessage(
+        content='{"status": "awaiting_user_pin", "ends_turn": true}',
+        name="confirm_sensitive_action",
+        tool_call_id="c1",
+    )
+
+    await _run_astream(chat_log, _ended_app(refusal), lambda: True)
+
+    assert chat_log.heard == []
+    assert len(chat_log.content) == 3
+
+
+async def test_a_turn_that_ends_on_a_tool_call_without_a_pin_line_still_fails_aloud() -> (
+    None
+):
+    from langchain_core.messages import ToolMessage  # noqa: PLC0415
+
+    chat_log = _refusal_turn_chat_log()
+    result = ToolMessage(content="{}", name="GetLiveContext", tool_call_id="c1")
+
+    await _run_astream(chat_log, _ended_app(result), None)
+
+    assert [d.get("content") for d in chat_log.heard] == [
+        "I'm sorry, I was unable to respond in time. Please try again."
+    ]
+
+
+@pytest.mark.parametrize("pin_lines_pending", [lambda: True, lambda: False])
+async def test_a_stream_that_fails_on_a_tool_call_does_not_recover_its_text(
+    pin_lines_pending: Any,
+) -> None:
+    """The failure is told; the text that came with the call is not re-said."""
+    from langchain_core.messages import AIMessage  # noqa: PLC0415
+
+    chat_log = _refusal_turn_chat_log()
+    dangling = AIMessage(
+        content="Please provide your security PIN.",
+        tool_calls=[{"name": "confirm_sensitive_action", "args": {}, "id": "c2"}],
+    )
+
+    async def _boom(**_kwargs: Any) -> Any:
+        msg = "Model invocation failed: 503"
+        raise HomeAssistantError(msg)
+        yield  # pragma: no cover - makes this an async generator
+
+    app = types.SimpleNamespace(
+        astream_events=_boom,
+        aget_state=AsyncMock(
+            return_value=types.SimpleNamespace(values={"messages": [dangling]})
+        ),
+    )
+
+    await _run_astream(chat_log, app, pin_lines_pending)
+
+    assert [d.get("content") for d in chat_log.heard] == [
+        "I'm sorry, I was unable to respond: Model invocation failed: 503"
+    ]
+
+
+async def test_a_turn_without_a_pin_line_after_all_still_fails_aloud() -> None:
+    """The callback said no line will follow: the user must hear something."""
+    from langchain_core.messages import ToolMessage  # noqa: PLC0415
+
+    chat_log = _refusal_turn_chat_log()
+    refusal = ToolMessage(
+        content='{"status": "awaiting_user_pin", "ends_turn": true}',
+        name="confirm_sensitive_action",
+        tool_call_id="c1",
+    )
+
+    await _run_astream(chat_log, _ended_app(refusal), lambda: False)
+
+    assert [d.get("content") for d in chat_log.heard] == [
+        "I'm sorry, I was unable to respond in time. Please try again."
+    ]
+
+
+async def test_a_failed_stream_is_still_told_as_a_failure_next_to_a_pin_line() -> None:
+    """
+    A provider error after the PIN prompt is not hidden by the prompt.
+
+    The PIN line goes in front of the failure text afterwards; the user and
+    the chat log still learn the turn failed (red team, 2026-10-16).
+    """
+    from langchain_core.messages import ToolMessage  # noqa: PLC0415
+
+    chat_log = _refusal_turn_chat_log()
+
+    async def _boom(**_kwargs: Any) -> Any:
+        msg = "Model invocation failed: 503"
+        raise HomeAssistantError(msg)
+        yield  # pragma: no cover - makes this an async generator
+
+    app = types.SimpleNamespace(
+        astream_events=_boom,
+        aget_state=AsyncMock(
+            return_value=types.SimpleNamespace(
+                values={
+                    "messages": [
+                        ToolMessage(
+                            content='{"status": "requires_pin"}',
+                            name="HassTurnOff",
+                            tool_call_id="c1",
+                        )
+                    ]
+                }
+            )
+        ),
+    )
+
+    await _run_astream(chat_log, app, lambda: True)
+
+    assert [d.get("content") for d in chat_log.heard] == [
+        "I'm sorry, I was unable to respond: Model invocation failed: 503"
+    ]
+
+
+async def test_text_that_came_with_a_tool_call_is_not_recovered_again() -> None:
+    """
+    A graph state ending on a tool-call message has nothing to recover.
+
+    Its text was streamed with the call; recovering it would speak it twice.
+    Reachable when a stream fails between the model's call and the action
+    node (the guard itself now answers the calls it cuts off).
+    """
+    from langchain_core.messages import AIMessage  # noqa: PLC0415
+
+    chat_log = _refusal_turn_chat_log()
+    dangling = AIMessage(
+        content="Please provide your security PIN.",
+        tool_calls=[{"name": "confirm_sensitive_action", "args": {}, "id": "c2"}],
+    )
+
+    await _run_astream(chat_log, _ended_app(dangling), lambda: True)
+
+    assert chat_log.heard == []
+
+
 # ---------------------------------------------------------------------------
 # The line naming the action a PIN confirms (field test 2026-10-15)
 # ---------------------------------------------------------------------------
@@ -2571,6 +2908,87 @@ async def test_a_turn_without_a_prompt_or_confirmation_is_left_alone(
 
     assert chat_log.heard == []
     assert chat_log.content[-1].content == "It's noon."
+
+
+async def test_a_wrong_pin_gets_a_fixed_line(
+    frozen_assistant_content: None,  # noqa: ARG001
+) -> None:
+    """
+    "That PIN was incorrect." does not depend on the model saying so.
+
+    A model that loops on refusals after a wrong PIN leaves no reply of its
+    own (the round-limit guard adds none when a PIN line follows), and the
+    prompt line alone would have the user repeat the wrong PIN (red team).
+    """
+    pending: dict[str, Any] = {}
+    reply = _pin_prompt(pending, "1 2 3 5")
+    reply.spent = True
+    chat_log = _DeltaChatLog([_assistant_reply("Sorry, that was wrong. Your PIN?")])
+
+    await HGAConversationEntity._async_add_pin_lines(
+        _pin_entity(), cast("Any", chat_log), pending, reply, streamed=True
+    )
+
+    assert chat_log.content[-1].content == (
+        f"That PIN was incorrect. {_LINE}\n\nSorry, that was wrong. Your PIN?"
+    )
+
+
+async def test_the_last_wrong_pin_says_what_comes_next(
+    frozen_assistant_content: None,  # noqa: ARG001
+) -> None:
+    """No prompt waits after the last attempt, so no question follows: say so."""
+    from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+        start_pin_turn,
+    )
+
+    pending: dict[str, Any] = {}
+    reply = start_pin_turn(pending, "conv1", "1 2 3 5")
+    reply.spent = True
+    chat_log = _DeltaChatLog([])
+
+    await HGAConversationEntity._async_finish_reply(
+        _pin_entity(), cast("Any", chat_log), pending, reply, streamed=True
+    )
+
+    assert [c.content for c in chat_log.content] == [
+        "That PIN was incorrect. Make the request again."
+    ]
+
+
+@pytest.mark.parametrize(
+    ("confirmed", "spent", "prompt"),
+    [
+        ("", False, False),
+        ("", False, True),
+        ("", True, False),
+        ("", True, True),
+        ('unlock "Playroom Door Lock"', True, False),
+    ],
+)
+def test_pin_lines_follow_mirrors_the_lines_built_here(
+    confirmed: str,
+    spent: bool,  # noqa: FBT001
+    prompt: bool,  # noqa: FBT001
+) -> None:
+    """The graph's guard trusts helpers.pin_lines_follow to predict _pin_lines."""
+    from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+        pin_lines_follow,
+        start_pin_turn,
+    )
+
+    pending: dict[str, Any] = {}
+    reply = (
+        _pin_prompt(pending, "unlock the playroom door")
+        if prompt
+        else start_pin_turn(pending, "conv1", "hello")
+    )
+    reply.confirmed = confirmed
+    reply.spent = spent
+
+    lines = HGAConversationEntity._pin_lines(_pin_entity(), pending, reply)
+
+    assert bool(lines) is pin_lines_follow(pending, reply)
 
 
 async def test_the_line_is_added_in_czech(

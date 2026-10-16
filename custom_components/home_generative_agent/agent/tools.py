@@ -110,6 +110,7 @@ from .helpers import (
     PIN_OUTCOME_DONE,
     PIN_OUTCOME_FAILED,
     PIN_OUTCOME_UNKNOWN,
+    PIN_REFUSAL_ENDS_TURN,
     ConfigurableData,
     base_tool_name,
     keep_pin_prompt,
@@ -1065,8 +1066,10 @@ async def confirm_sensitive_action(  # noqa: D417
             # next message, unless the prompt has taken all its replies.
             kept = keep_pin_prompt(action, cfg.get("pin_reply"))
             hint = "pin_retry_next_message" if kept else "pin_request_again"
-            pin_err = f"{pin_err} {pin_msg(hass, hint)}"
-        return pin_err
+        else:
+            # The request's last attempt: the prompt is gone with it.
+            hint = "pin_request_again"
+        return f"{pin_err} {pin_msg(hass, hint)}"
 
     result, exec_err = await _execute_pending_action(
         resolved_action_id, action, cfg, deadline
@@ -1191,12 +1194,23 @@ def _confirmation_refusal(
     # Refused before the PIN is checked, so no attempt is counted.
     pin_reply = cfg.get("pin_reply")
     not_in_message = False
+    ends_turn = False
     hint = None
     if pin_reply is None or action.get("reply_turn") != pin_reply.turn_id:
         # Only the user's reply to this action's prompt can confirm it: not
         # the message that started it (a request made, or injected, during
         # this turn), and not a later one (the user moved on).
-        reason = "pin_reply_to_prompt_only"
+        # The user has not been asked yet. The reply asks in fixed words, so
+        # the turn ends here (graph.py, `_after_tools`) instead of going back
+        # to a model that may ask again, or try another PIN of its own. Not
+        # when this message's PIN was already used (an action ran, or a PIN
+        # failed) and the model re-issued a request: the model's reply is
+        # where the user learns what happened first. The text the model reads
+        # next turn, right before the user's PIN, says so: "ask the user now"
+        # would be stale there, and a model that obeyed it would re-ask
+        # instead of confirming, which drops the prompt.
+        ends_turn = pin_reply is not None and not pin_reply.spent
+        reason = "pin_reply_next_message" if ends_turn else "pin_reply_to_prompt_only"
     elif not pin_in_text(provided_pin, pin_reply.text):
         # The PIN came from the model (guessed, or reused from earlier in the
         # conversation), not from the user's message for this turn.
@@ -1211,9 +1225,14 @@ def _confirmation_refusal(
     text = pin_msg(hass, reason)
     if hint:
         text = f"{text} {pin_msg(hass, hint)}"
-    return json.dumps(
-        {"status": PIN_AWAITING_USER_REPLY, "action_id": action_id, "reason": text}
-    ), not_in_message
+    payload: dict[str, Any] = {
+        "status": PIN_AWAITING_USER_REPLY,
+        "action_id": action_id,
+        "reason": text,
+    }
+    if ends_turn:
+        payload[PIN_REFUSAL_ENDS_TURN] = True
+    return json.dumps(payload), not_in_message
 
 
 async def _warn_if_correct_pin_refused(

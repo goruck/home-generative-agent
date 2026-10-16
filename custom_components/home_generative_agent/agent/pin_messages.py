@@ -116,6 +116,11 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "an unexpected error: {err}. The confirmation was used up. Do not "
             "repeat it; tell the user to check their automations first."
         ),
+        "pin_reply_next_message": (
+            "Not confirmed: the PIN is accepted only in the user's reply to "
+            "this action's PIN prompt. The user is being asked for the PIN now; "
+            "their next message is the reply. Confirm with the PIN from it."
+        ),
         "pin_reply_to_prompt_only": (
             "Not confirmed: the PIN is accepted only in the user's reply to "
             "this action's PIN prompt. Ask the user for the PIN now."
@@ -126,6 +131,8 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "afterwards."
         ),
         "pin_confirm_line": "Your PIN will confirm: {action}.",
+        "pin_incorrect_line": "That PIN was incorrect.",
+        "pin_request_again_line": "Make the request again.",
         "pin_done_line": "PIN accepted: {action}.",
         "pin_failed_line": "PIN accepted, but {action} failed.",
         "pin_unknown_line": "PIN accepted; {action} may have run. Check the device.",
@@ -225,6 +232,11 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "neočekávanou chybou: {err}. Potvrzení bylo použito. Neopakujte ji; "
             "požádejte uživatele, aby nejdřív zkontroloval své automatizace."
         ),
+        "pin_reply_next_message": (
+            "Nepotvrzeno: PIN se přijímá jen v odpovědi uživatele na výzvu "
+            "k PINu pro tuto akci. Uživatel je o PIN právě žádán; jeho další "
+            "zpráva je odpověď. Potvrďte PINem z ní."
+        ),
         "pin_reply_to_prompt_only": (
             "Nepotvrzeno: PIN se přijímá jen v odpovědi uživatele na výzvu "
             "k PINu pro tuto akci. Požádejte uživatele o PIN."
@@ -235,6 +247,8 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "požádat potom."
         ),
         "pin_confirm_line": "Váš PIN potvrdí: {action}.",
+        "pin_incorrect_line": "Ten PIN byl nesprávný.",
+        "pin_request_again_line": "Zopakujte požadavek.",
         "pin_done_line": "PIN přijat: {action}.",
         "pin_failed_line": "PIN přijat, ale {action} se nepodařilo.",
         "pin_unknown_line": (

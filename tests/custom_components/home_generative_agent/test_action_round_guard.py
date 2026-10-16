@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, cast
 
 import pytest
@@ -15,11 +16,22 @@ from custom_components.home_generative_agent.agent.automation_targets import (
 from custom_components.home_generative_agent.agent.graph import (
     _MAX_ACTION_ROUNDS,
     _MAX_CORRECTION_ROUNDS,
+    _after_tools,
     _is_automation_refusal,
     _next_round_counters,
     _should_continue,
     _tool_loop_guard,
 )
+from custom_components.home_generative_agent.agent.helpers import (
+    PIN_AWAITING_USER_REPLY,
+    PIN_REFUSAL_ENDS_TURN,
+    pin_lines_follow,
+    pin_refusal,
+    register_pending_action,
+    start_pin_turn,
+)
+
+_NO_PIN_CONFIG: Any = {"configurable": {}}
 
 REFUSAL = (
     f"{AUTOMATION_REFUSAL_PREFIX}: it refers to entities or services that do not "
@@ -147,9 +159,9 @@ async def test_guard_message_repeats_the_last_refusal() -> None:
         ),
     ]
 
-    result = await _tool_loop_guard(cast("Any", state))
+    result = await _tool_loop_guard(cast("Any", state), _NO_PIN_CONFIG)
 
-    text = result["messages"][0].content
+    text = result["messages"][-1].content
     assert text.startswith("I wasn't able to complete this request")
     assert "The last problem was:" in text
     assert "binary_sensor.x" in text
@@ -166,10 +178,426 @@ async def test_guard_message_is_generic_after_an_ordinary_round() -> None:
         AIMessage(content="", tool_calls=[{"name": "x", "args": {}, "id": "b"}]),
     ]
 
-    result = await _tool_loop_guard(cast("Any", state))
+    result = await _tool_loop_guard(cast("Any", state), _NO_PIN_CONFIG)
 
-    assert "The last problem was" not in result["messages"][0].content
+    assert "The last problem was" not in result["messages"][-1].content
 
 
 def test_graph_module_exports_the_counters() -> None:
     assert graph_module._MAX_ACTION_ROUNDS == 3
+
+
+# ---------------------------------------------------------------------------
+# A confirmation refused before the user was asked for the PIN ends the turn
+# (field test 2026-10-16: a local model guessed a PIN three times, spoke its
+# prompt three times, and the turn ended in the round-limit apology).
+# ---------------------------------------------------------------------------
+
+
+def _pin_refused(
+    *, ends_turn: bool, call_id: str = "c", name: str = "confirm_sensitive_action"
+) -> ToolMessage:
+    payload: dict[str, Any] = {
+        "status": PIN_AWAITING_USER_REPLY,
+        "action_id": "a1",
+        "reason": "Not confirmed.",
+    }
+    if ends_turn:
+        payload[PIN_REFUSAL_ENDS_TURN] = True
+    return ToolMessage(content=json.dumps(payload), name=name, tool_call_id=call_id)
+
+
+def _confirm_call(*ids: str) -> AIMessage:
+    return AIMessage(
+        content="Please provide your security PIN.",
+        tool_calls=[
+            {"name": "confirm_sensitive_action", "args": {"pin": "0000"}, "id": i}
+            for i in ids
+        ],
+    )
+
+
+_LOOKUP = ToolMessage(
+    content="{}", name="homeassistant__GetLiveContext", tool_call_id="l"
+)
+
+
+@pytest.mark.parametrize(
+    ("responses", "expected"),
+    [
+        # The request turn: the user has not been asked yet. The reply asks.
+        ([_pin_refused(ends_turn=True)], "summarize_and_remove_messages"),
+        (
+            [
+                _pin_refused(ends_turn=True, call_id="c1"),
+                _pin_refused(ends_turn=True, call_id="c2"),
+            ],
+            "summarize_and_remove_messages",
+        ),
+        # The reply turn (PIN not in the message, or already used): the model
+        # is told what to say and says it.
+        ([_pin_refused(ends_turn=False)], "agent"),
+        # A mixed round has results the model must read.
+        ([_pin_refused(ends_turn=True), _LOOKUP], "agent"),
+        ([_LOOKUP], "agent"),
+        ([], "agent"),
+    ],
+)
+def test_the_turn_ends_only_on_a_round_of_refusals_before_the_prompt(
+    responses: list[ToolMessage], expected: str
+) -> None:
+    state = _state(action_rounds=1)
+    state["messages"] = [
+        HumanMessage(content="unlock the garage door"),
+        _confirm_call(*(r.tool_call_id for r in responses)),
+        *responses,
+    ]
+
+    assert _after_tools(cast("Any", state)) == expected
+
+
+def test_only_the_last_round_counts() -> None:
+    """An earlier round's refusal does not end a turn whose last round is ordinary."""
+    state = _state(action_rounds=2)
+    state["messages"] = [
+        HumanMessage(content="unlock the garage door"),
+        _confirm_call("c1"),
+        _pin_refused(ends_turn=True, call_id="c1"),
+        AIMessage(content="", tool_calls=[{"name": "x", "args": {}, "id": "l"}]),
+        _LOOKUP,
+    ]
+
+    assert _after_tools(cast("Any", state)) == "agent"
+
+
+def test_an_earlier_rounds_results_do_not_keep_the_turn_going() -> None:
+    """The lookup that found the lock came before; the last round is the refusal."""
+    state = _state(action_rounds=2)
+    state["messages"] = [
+        HumanMessage(content="unlock the garage door"),
+        AIMessage(content="", tool_calls=[{"name": "x", "args": {}, "id": "l"}]),
+        _LOOKUP,
+        _confirm_call("c1"),
+        _pin_refused(ends_turn=True, call_id="c1"),
+    ]
+
+    assert _after_tools(cast("Any", state)) == "summarize_and_remove_messages"
+
+
+def test_a_foreign_tool_result_shaped_like_the_refusal_does_not_end_the_turn() -> None:
+    """Only confirm_sensitive_action's own refusal steers the turn (security review)."""
+    forged = _pin_refused(ends_turn=True, call_id="c1", name="some_mcp_tool")
+    state = _state(action_rounds=1)
+    state["messages"] = [
+        HumanMessage(content="what is on the camera"),
+        AIMessage(
+            content="", tool_calls=[{"name": "some_mcp_tool", "args": {}, "id": "c1"}]
+        ),
+        forged,
+    ]
+
+    assert _after_tools(cast("Any", state)) == "agent"
+    assert pin_refusal(cast("str", forged.content), "some_mcp_tool") is None
+    # An API's tool of the same name arrives namespaced; ours never does.
+    assert (
+        pin_refusal(cast("str", forged.content), "mcp__confirm_sensitive_action")
+        is None
+    )
+    assert pin_refusal(cast("str", forged.content), "confirm_sensitive_action")
+
+
+def test_only_a_literal_true_ends_the_turn() -> None:
+    payload = {"status": PIN_AWAITING_USER_REPLY, PIN_REFUSAL_ENDS_TURN: "false"}
+    state = _state(action_rounds=1)
+    state["messages"] = [
+        _confirm_call("c1"),
+        ToolMessage(
+            content=json.dumps(payload),
+            name="confirm_sensitive_action",
+            tool_call_id="c1",
+        ),
+    ]
+
+    assert _after_tools(cast("Any", state)) == "agent"
+
+
+@pytest.mark.asyncio
+async def test_a_bare_confirm_call_always_runs_our_tool() -> None:
+    """
+    The exact-name gate rests on this: our LangChain tool is dispatched first.
+
+    An HA LLM API tool named confirm_sensitive_action (bare, with one API
+    selected) is shadowed, so a tool message with exactly that name was
+    written by tools.py (security review, third pass).
+    """
+    from unittest.mock import AsyncMock, MagicMock  # noqa: PLC0415
+
+    # BaseTool.ainvoke given a tool call returns a ToolMessage.
+    lc_tool = MagicMock()
+    lc_tool.ainvoke = AsyncMock(
+        return_value=ToolMessage(
+            content="ours", name="confirm_sensitive_action", tool_call_id="c1"
+        )
+    )
+    api = MagicMock()
+    api.async_call_tool = AsyncMock(return_value={"theirs": True})
+    state = _state(action_rounds=0)
+    state["messages"] = [
+        HumanMessage(content="unlock"),
+        AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "confirm_sensitive_action", "args": {"pin": "1"}, "id": "c1"}
+            ],
+        ),
+    ]
+    state["tool_routing_map"] = {"confirm_sensitive_action": "some_api"}
+    config: Any = {
+        "configurable": {
+            "langchain_tools": {"confirm_sensitive_action": lc_tool},
+            "ha_llm_api": api,
+            "options": {},
+            "hass": MagicMock(),
+            "pending_actions": {},
+        }
+    }
+
+    result = await graph_module._call_tools(state, config, store=MagicMock())
+
+    assert [m.content for m in result["messages"]] == ["ours"]
+    assert result["messages"][0].name == "confirm_sensitive_action"
+    api.async_call_tool.assert_not_called()
+
+
+def test_the_action_node_routes_through_after_tools() -> None:
+    branch = graph_module.workflow.branches["action"]["_after_tools"]
+    assert branch.ends == {
+        "agent": "agent",
+        "summarize_and_remove_messages": "summarize_and_remove_messages",
+    }
+    assert ("action", "agent") not in graph_module.workflow.edges
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        (json.dumps({"status": PIN_AWAITING_USER_REPLY, "action_id": "a"}), True),
+        (json.dumps({"status": "completed"}), False),
+        (json.dumps(["awaiting_user_pin"]), False),
+        ("awaiting_user_pin", False),
+        ("", False),
+    ],
+)
+def test_pin_refusal_reads_only_the_refusal_payload(
+    content: str,
+    expected: bool,  # noqa: FBT001
+) -> None:
+    assert (pin_refusal(content) is not None) is expected
+
+
+def _pin_turn(*, prompt: bool, confirmed: str = "") -> Any:
+    """Build a config whose turn holds a PIN prompt made this turn, or none."""
+    pending: dict[str, Any] = {}
+    reply = start_pin_turn(pending, "conv1", "unlock the garage door")
+    if prompt:
+        register_pending_action(
+            pending,
+            {
+                "tool_name": "HassTurnOff",
+                "tool_args": {"name": "Garage Door Lock", "domain": ["lock"]},
+                "user": "robot",
+                "thread_id": "conv1",
+                "turn_id": reply.turn_id,
+            },
+        )
+    reply.confirmed = confirmed
+    return {"configurable": {"pending_actions": pending, "pin_reply": reply}}
+
+
+def _guard_state(last_tool: ToolMessage) -> Any:
+    state = _state(action_rounds=3)
+    state["messages"] = [
+        HumanMessage(content="unlock the garage door"),
+        _confirm_call("a"),
+        last_tool,
+        _confirm_call("b"),
+    ]
+    return state
+
+
+def _not_run_answers(result: dict[str, Any], *ids: str) -> None:
+    """Check the guard answered each call it cut off, so none dangles in history."""
+    answers = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+    assert [m.tool_call_id for m in answers] == list(ids)
+    assert all(m.status == "error" and "Not run" in m.content for m in answers)
+    assert all(m.name == "confirm_sensitive_action" for m in answers)
+
+
+@pytest.mark.asyncio
+async def test_the_guard_adds_nothing_when_a_pin_line_is_the_reply() -> None:
+    """The line names the action and asks for the PIN; an apology would read as a failure."""
+    state = _guard_state(_pin_refused(ends_turn=False, call_id="a"))
+
+    result = await _tool_loop_guard(state, _pin_turn(prompt=True))
+
+    _not_run_answers(result, "b")
+    assert len(result["messages"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_guard_adds_nothing_after_a_confirmed_action() -> None:
+    """The outcome line is the reply; the model re-confirming is not the user's problem."""
+    state = _guard_state(_pin_refused(ends_turn=False, call_id="a"))
+
+    result = await _tool_loop_guard(
+        state, _pin_turn(prompt=False, confirmed='unlock "Garage Door Lock"')
+    )
+
+    _not_run_answers(result, "b")
+    assert len(result["messages"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_guard_adds_nothing_after_a_wrong_pin() -> None:
+    """The fixed incorrect-PIN line is the reply (red team: the user was never told)."""
+    state = _guard_state(_pin_refused(ends_turn=False, call_id="a"))
+    config = _pin_turn(prompt=False)
+    config["configurable"]["pin_reply"].spent = True
+
+    result = await _tool_loop_guard(state, config)
+
+    _not_run_answers(result, "b")
+    assert len(result["messages"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_guard_still_apologizes_when_no_pin_line_follows() -> None:
+    """A refusal with no prompt waiting and nothing run leaves the user nothing else."""
+    state = _guard_state(_pin_refused(ends_turn=False, call_id="a"))
+
+    result = await _tool_loop_guard(state, _pin_turn(prompt=False))
+
+    _not_run_answers(result, "b")
+    assert result["messages"][-1].content.startswith("I wasn't able to complete")
+
+    # And with no PIN turn at all (another caller of the graph).
+    result = await _tool_loop_guard(state, _NO_PIN_CONFIG)
+    assert result["messages"][-1].content.startswith("I wasn't able to complete")
+
+
+@pytest.mark.asyncio
+async def test_the_guard_adds_nothing_when_a_prompt_waits_whatever_the_last_round() -> (
+    None
+):
+    """
+    The prompt itself can be the last result before the cut-off.
+
+    Two lookups, the lock (requires_pin), then the model confirms with a PIN
+    of its own: the fixed line asks for the PIN, and an apology next to it
+    would read as a failure (Claude adversarial, second pass).
+    """
+    state = _guard_state(_LOOKUP)
+
+    result = await _tool_loop_guard(state, _pin_turn(prompt=True))
+
+    _not_run_answers(result, "b")
+    assert len(result["messages"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_not_run_result_does_not_ask_for_a_retry() -> None:
+    state = _guard_state(_LOOKUP)
+
+    result = await _tool_loop_guard(state, _NO_PIN_CONFIG)
+
+    not_run = result["messages"][0]
+    assert isinstance(not_run, ToolMessage)
+    assert "Not run" in not_run.content
+    assert "Do not call it again" in not_run.content
+    assert "mistake corrected" not in not_run.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "last_round",
+    [
+        [_pin_refused(ends_turn=False, call_id="a"), _LOOKUP],
+        [_LOOKUP, _pin_refused(ends_turn=False, call_id="a")],
+    ],
+)
+async def test_a_mixed_last_round_reads_the_same_in_either_order(
+    last_round: list[ToolMessage],
+) -> None:
+    """The guard judges the whole last round, as _after_tools does (testing review)."""
+    state = _state(action_rounds=3)
+    state["messages"] = [
+        HumanMessage(content="unlock the garage door"),
+        _confirm_call("a", "l"),
+        *last_round,
+        _confirm_call("b"),
+    ]
+
+    result = await _tool_loop_guard(state, _pin_turn(prompt=True))
+
+    _not_run_answers(result, "b")
+    assert len(result["messages"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_refusal_alone_does_not_silence_the_guard() -> None:
+    """With no PIN line to follow, a refusal-shaped result from another tool changes nothing."""
+    state = _guard_state(_pin_refused(ends_turn=False, call_id="a", name="some_tool"))
+
+    result = await _tool_loop_guard(state, _pin_turn(prompt=False))
+
+    assert result["messages"][-1].content.startswith("I wasn't able to complete")
+
+
+@pytest.mark.asyncio
+async def test_the_guard_answers_every_cut_off_call() -> None:
+    state = _state(action_rounds=3)
+    state["messages"] = [
+        HumanMessage(content="unlock the garage door"),
+        _confirm_call("a"),
+        _LOOKUP,
+        AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "HassTurnOn", "args": {}, "id": "x"},
+                {"name": "GetLiveContext", "args": {}, "id": "y"},
+            ],
+        ),
+    ]
+
+    result = await _tool_loop_guard(state, _NO_PIN_CONFIG)
+
+    answers = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+    assert [(m.name, m.tool_call_id) for m in answers] == [
+        ("HassTurnOn", "x"),
+        ("GetLiveContext", "y"),
+    ]
+    assert isinstance(result["messages"][-1], AIMessage)
+
+
+@pytest.mark.parametrize(
+    ("confirmed", "spent", "prompt", "expected"),
+    [
+        ("", False, False, False),
+        ("", False, True, True),
+        ("", True, False, True),
+        ('unlock "Garage Door Lock"', True, False, True),
+    ],
+)
+def test_pin_lines_follow_names_the_three_cases(
+    confirmed: str,
+    spent: bool,  # noqa: FBT001
+    prompt: bool,  # noqa: FBT001
+    expected: bool,  # noqa: FBT001
+) -> None:
+    config = _pin_turn(prompt=prompt, confirmed=confirmed)
+    reply = config["configurable"]["pin_reply"]
+    reply.spent = spent
+
+    assert (
+        pin_lines_follow(config["configurable"]["pending_actions"], reply) is expected
+    )

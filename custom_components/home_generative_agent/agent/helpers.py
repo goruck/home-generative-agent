@@ -505,6 +505,42 @@ MAX_PENDING_ACTIONS = 16
 # not the reply to the action's PIN prompt, the PIN is not in it, or it was
 # already used. The action stays pending for the user's reply.
 PIN_AWAITING_USER_REPLY = "awaiting_user_pin"
+# Key of such a refusal when the user has not been asked for the PIN yet (the
+# message is not the prompt's reply): the turn ends with the fixed prompt, so
+# the model is not called again to ask, or to try a PIN of its own.
+PIN_REFUSAL_ENDS_TURN = "ends_turn"
+
+
+def pin_refusal(content: str, tool_name: str | None = None) -> dict[str, Any] | None:
+    """
+    Return the payload of a confirmation refused before the PIN was checked.
+
+    The message was not the reply to the action's PIN prompt, the PIN was not
+    in it, or it was already used (a PIN from it failed, or it confirmed an
+    action). None for any other tool reply, and, when the tool's name is
+    given, for any tool but `confirm_sensitive_action`: a third-party tool's
+    result shaped like the refusal must not steer the turn (review finding,
+    2026-10-16). The name is matched exactly, and that holds because of how
+    `_call_tools` (graph.py) dispatches: a call named `confirm_sensitive_action`
+    always runs our LangChain tool, before any HA LLM API tool is considered,
+    so a tool message with exactly that name was written by tools.py. An
+    API's tool of the same name is shadowed (one API selected: its names
+    arrive bare) or namespaced (several selected).
+    """
+    if tool_name is not None and tool_name != CONFIRM_TOOL_NAME:
+        return None
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if isinstance(data, dict) and data.get("status") == PIN_AWAITING_USER_REPLY:
+        return data
+    return None
+
+
+# The LangChain tool that checks the PIN and runs the held action (tools.py).
+CONFIRM_TOOL_NAME = "confirm_sensitive_action"
+
 
 # Spoken digits as speech-to-text may write them, in the languages the PIN
 # messages ship in (pin_messages.py); Czech also without diacritics, except
@@ -1062,6 +1098,23 @@ def prompts_awaiting_reply(
             and prompt_renewable(action)
         )
     ]
+
+
+def pin_lines_follow(
+    pending_actions: Mapping[str, dict[str, Any]], reply: PinReply
+) -> bool:
+    """
+    Return True when the turn's reply carries a fixed PIN line.
+
+    The lines themselves are built in conversation.py (`_pin_lines`) from the
+    same three facts: a PIN from this message ran an action (its outcome), a
+    PIN from it failed the check, or a prompt awaits the user's next message.
+    The graph's round-limit guard uses this to add nothing when a line will
+    be the reply.
+    """
+    return bool(
+        reply.confirmed or reply.spent or prompts_awaiting_reply(pending_actions, reply)
+    )
 
 
 def disclose_pin_prompts(
