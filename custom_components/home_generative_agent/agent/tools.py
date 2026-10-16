@@ -1192,12 +1192,20 @@ def _confirmation_refusal(
     # Refused before the PIN is checked, so no attempt is counted.
     pin_reply = cfg.get("pin_reply")
     not_in_message = False
+    ends_turn = False
     hint = None
     if pin_reply is None or action.get("reply_turn") != pin_reply.turn_id:
         # Only the user's reply to this action's prompt can confirm it: not
         # the message that started it (a request made, or injected, during
         # this turn), and not a later one (the user moved on).
         reason = "pin_reply_to_prompt_only"
+        # The user has not been asked yet. The reply asks in fixed words, so
+        # the turn ends here (graph.py, `_after_tools`) instead of going back
+        # to a model that may ask again, or try another PIN of its own. Not
+        # when this message's PIN was already used (an action ran, or a PIN
+        # failed) and the model re-issued a request: the model's reply is
+        # where the user learns what happened first.
+        ends_turn = pin_reply is not None and not pin_reply.spent
     elif not pin_in_text(provided_pin, pin_reply.text):
         # The PIN came from the model (guessed, or reused from earlier in the
         # conversation), not from the user's message for this turn.
@@ -1217,15 +1225,7 @@ def _confirmation_refusal(
         "action_id": action_id,
         "reason": text,
     }
-    if reason == "pin_reply_to_prompt_only" and not (
-        pin_reply is None or pin_reply.spent
-    ):
-        # The user has not been asked yet. The reply asks in fixed words, so
-        # the turn ends here (graph.py, `_after_tools`) instead of going back
-        # to a model that may ask again, or try another PIN of its own. Not
-        # when this message's PIN was already used (an action ran, or a PIN
-        # failed) and the model re-issued a request: the model's reply is
-        # where the user learns what happened first.
+    if ends_turn:
         payload[PIN_REFUSAL_ENDS_TURN] = True
     return json.dumps(payload), not_in_message
 

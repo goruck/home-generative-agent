@@ -511,14 +511,19 @@ PIN_AWAITING_USER_REPLY = "awaiting_user_pin"
 PIN_REFUSAL_ENDS_TURN = "ends_turn"
 
 
-def pin_refusal(content: str) -> dict[str, Any] | None:
+def pin_refusal(content: str, tool_name: str | None = None) -> dict[str, Any] | None:
     """
     Return the payload of a confirmation refused before the PIN was checked.
 
     The message was not the reply to the action's PIN prompt, the PIN was not
     in it, or it was already used (a PIN from it failed, or it confirmed an
-    action). None for any other tool reply.
+    action). None for any other tool reply, and, when the tool's name is
+    given, for any tool but `confirm_sensitive_action`: a third-party tool's
+    result shaped like the refusal must not steer the turn (review finding,
+    2026-10-16).
     """
+    if tool_name is not None and base_tool_name(tool_name) != CONFIRM_TOOL_NAME:
+        return None
     try:
         data = json.loads(content)
     except (json.JSONDecodeError, TypeError, ValueError):
@@ -526,6 +531,10 @@ def pin_refusal(content: str) -> dict[str, Any] | None:
     if isinstance(data, dict) and data.get("status") == PIN_AWAITING_USER_REPLY:
         return data
     return None
+
+
+# The LangChain tool that checks the PIN and runs the held action (tools.py).
+CONFIRM_TOOL_NAME = "confirm_sensitive_action"
 
 
 # Spoken digits as speech-to-text may write them, in the languages the PIN
@@ -1084,6 +1093,23 @@ def prompts_awaiting_reply(
             and prompt_renewable(action)
         )
     ]
+
+
+def pin_lines_follow(
+    pending_actions: Mapping[str, dict[str, Any]], reply: PinReply
+) -> bool:
+    """
+    Return True when the turn's reply carries a fixed PIN line.
+
+    The lines themselves are built in conversation.py (`_pin_lines`) from the
+    same three facts: a PIN from this message ran an action (its outcome), a
+    PIN from it failed the check, or a prompt awaits the user's next message.
+    The graph's round-limit guard uses this to add nothing when a line will
+    be the reply.
+    """
+    return bool(
+        reply.confirmed or reply.spent or prompts_awaiting_reply(pending_actions, reply)
+    )
 
 
 def disclose_pin_prompts(

@@ -16,6 +16,19 @@
 
 ---
 
+### The unreadable-PIN hint is model text
+
+**What:** When the user's reply holds no readable PIN (a form `pin_in_text` does not read, or a reply that is not a PIN at all), `_confirmation_refusal` tells the model to ask the user to say the digits one by one (`pin_say_digits`), and the user hears it only if the model relays it. The fixed lines say what the PIN will confirm and ask for it; they do not say that the last reply could not be read. A model that loops on the refusal instead of replying reaches the round-limit guard, which adds nothing when a PIN line follows, so the user hears the prompt again with no hint; on a provider that does not stream, text the model wrote next to a tool call is never shown either.
+
+**Why:** Codex and Claude adversarial findings in the review of the loop-guard fix (2026-10-16). The wrong-PIN case got its fixed line in that PR; the unreadable case did not, because `PinReply` does not record it.
+
+**How to apply:** Record the refusal on `PinReply` (for example `unread: bool`, set in `_confirmation_refusal` where `not_in_message` is) and add a `pin_unread_line` ("I could not read a PIN in your message. Say the digits one by one.", en + cs) to `_pin_lines` and `pin_lines_follow`, placed before the prompt line. Test in `test_conversation_units.py` next to the wrong-PIN line.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
 ### A confirmed action can run on two LLM APIs when its tool is missing from the routing map
 
 **What:** `MultiLLMAPI.async_call_tool` (`conversation.py`) falls back to trying every API in turn when the tool name is not in this turn's routing map, and moves on after `HomeAssistantError` or `vol.Invalid`. A PIN reply's retrieved tools may not include the original actuation tool, so its confirmed execution can take that path; if two APIs expose a tool of that name, the first can actuate and then raise, and the second actuates again. The pending action is already claimed, so this is the one way a single confirmation can still act twice.
@@ -2487,7 +2500,7 @@ This is the same allowlist-omission class as #480 and as the triage options fixe
 **Priority:** P1 (more common since one-breath requests are refused first)
 **Depends on:** None
 
-**Completed:** PR after #769 (2026-10-16). A confirmation refused because the user has not been asked for the PIN yet (`pin_reply_to_prompt_only`, the request turn, when this message's PIN was not used) carries `ends_turn` in its payload (`_confirmation_refusal`, tools.py); the graph's new conditional edge after `action` (`_after_tools`) ends the turn when every call in the round was such a refusal, so the fixed line and "What is your PIN?" are the reply and the prompt is spoken once (`_async_finish_reply`; the streamed path adds no failure text and recovers no text that came with a tool call; the schema-first path backfills the chain instead of logging an error and writing the tool JSON as the reply). `_tool_loop_guard` adds nothing when the last round was a refused confirmation and a PIN line follows (a prompt waits, or an action ran); the apology stays when nothing would otherwise be said. Left as is: a model that loops in the reply turn (PIN unreadable, or already used) still speaks its own text each round, since that text carries what the fixed lines do not (say the digits one by one; what already happened), and the guard then ends the turn without the apology.
+**Completed:** PR after #769 (2026-10-16). A confirmation refused because the user has not been asked for the PIN yet (`pin_reply_to_prompt_only`, the request turn, when this message's PIN was not used) carries `ends_turn` in its payload (`_confirmation_refusal`, tools.py); the graph's new conditional edge after `action` (`_after_tools`) ends the turn when every call in the round was such a refusal, so the fixed line and "What is your PIN?" are the reply and the prompt is spoken once (`_async_finish_reply`; the streamed path adds no failure text and recovers no text that came with a tool call; the schema-first path backfills the chain instead of logging an error and writing the tool JSON as the reply). `_tool_loop_guard` first answers every call it cuts off with a "not run" result (the pre-existing guard left them dangling, which a strict provider rejects on the next turn), then adds nothing when the last round refused a confirmation and a PIN line follows (`pin_lines_follow`: a prompt waits, an action ran, or a PIN was wrong); the apology stays when nothing would otherwise be said. A wrong PIN now has its own fixed line, "That PIN was incorrect." (review: the guard's silence would otherwise have had the user repeat the wrong PIN). The refusal predicates read only `confirm_sensitive_action`'s results (a third-party tool's result shaped like the refusal cannot steer the turn). Left as is: a model that loops in the reply turn on an unreadable PIN still speaks its own text each round, which carries the digits hint the fixed lines do not; see the entry below.
 
 ---
 

@@ -31,6 +31,7 @@ from custom_components.home_generative_agent.agent.helpers import (
     normalize_pin,
     pin_digits,
     pin_in_text,
+    prompts_awaiting_reply,
     register_pending_action,
     start_pin_turn,
     thread_has_pending_action,
@@ -179,6 +180,11 @@ async def test_only_the_request_turn_refusal_ends_the_turn() -> None:
     before_the_prompt = await turns.confirm(action_id)
     assert isinstance(before_the_prompt, dict)
     assert before_the_prompt[PIN_REFUSAL_ENDS_TURN] is True
+    # The turn ends here, so a fixed line must exist for the reply, or the
+    # user would hear a failure (testing review).
+    assert prompts_awaiting_reply(
+        turns.pending, turns.config["configurable"]["pin_reply"]
+    )
 
     turns.say("yes, go ahead")
     not_in_message = await turns.confirm(action_id)

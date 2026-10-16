@@ -126,6 +126,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "afterwards."
         ),
         "pin_confirm_line": "Your PIN will confirm: {action}.",
+        "pin_incorrect_line": "That PIN was incorrect.",
         "pin_done_line": "PIN accepted: {action}.",
         "pin_failed_line": "PIN accepted, but {action} failed.",
         "pin_unknown_line": "PIN accepted; {action} may have run. Check the device.",
@@ -235,6 +236,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "požádat potom."
         ),
         "pin_confirm_line": "Váš PIN potvrdí: {action}.",
+        "pin_incorrect_line": "Ten PIN byl nesprávný.",
         "pin_done_line": "PIN přijat: {action}.",
         "pin_failed_line": "PIN přijat, ale {action} se nepodařilo.",
         "pin_unknown_line": (

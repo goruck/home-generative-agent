@@ -730,7 +730,7 @@ async def test_openai_compatible_repeated_tool_calls_hit_loop_guard() -> None:
     assert _should_continue(state) == "tool_loop_guard"
 
     guard_result = await _tool_loop_guard(state, cast("Any", {"configurable": {}}))
-    response_text = guard_result["messages"][0].content
+    response_text = guard_result["messages"][-1].content
     assert "wasn't able to complete" in response_text
 
 

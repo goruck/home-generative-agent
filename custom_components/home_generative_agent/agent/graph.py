@@ -104,8 +104,8 @@ from .helpers import (
     normalize_intent_for_lock,
     parse_tool_response,
     pending_action_expired,
+    pin_lines_follow,
     pin_refusal,
-    prompts_awaiting_reply,
     register_pending_action,
     resolve_critical_action_policy,
     sanitize_tool_args,
@@ -2259,11 +2259,6 @@ def _last_routing_rejection_idx(recent: Sequence[AnyMessage]) -> int | None:
     return idx
 
 
-def _is_awaiting_user_pin(content: str) -> bool:
-    """Return True for a confirmation refused before the PIN was checked."""
-    return pin_refusal(content) is not None
-
-
 def _has_pending_pin_confirmation(messages: Sequence[AnyMessage]) -> bool:
     """
     Return True if a PIN confirmation is pending in recent message history.
@@ -2288,7 +2283,7 @@ def _has_pending_pin_confirmation(messages: Sequence[AnyMessage]) -> bool:
                 if "Incorrect PIN" in content:
                     # Wrong PIN entered — action is still pending, keep scanning.
                     continue
-                if _is_awaiting_user_pin(content):
+                if pin_refusal(content) is not None:
                     # Refused before the PIN was checked (not in the user's
                     # message, or the message already used) — still pending.
                     continue
@@ -3590,12 +3585,17 @@ def _last_round_responses(messages: Sequence[AnyMessage]) -> list[ToolMessage]:
     return responses
 
 
+def _pin_refusal_of(msg: BaseMessage) -> dict[str, Any] | None:
+    """Return the refusal payload of a `confirm_sensitive_action` tool message."""
+    if not isinstance(msg, ToolMessage) or not isinstance(msg.content, str):
+        return None
+    return pin_refusal(msg.content, msg.name or "")
+
+
 def _refusal_ends_turn(msg: BaseMessage) -> bool:
     """Return True for a confirmation refused because the user was not asked yet."""
-    if not isinstance(msg, ToolMessage) or not isinstance(msg.content, str):
-        return False
-    refusal = pin_refusal(msg.content)
-    return refusal is not None and bool(refusal.get(PIN_REFUSAL_ENDS_TURN))
+    refusal = _pin_refusal_of(msg)
+    return refusal is not None and refusal.get(PIN_REFUSAL_ENDS_TURN) is True
 
 
 def _after_tools(state: State) -> Literal["agent", "summarize_and_remove_messages"]:
@@ -3617,50 +3617,80 @@ def _after_tools(state: State) -> Literal["agent", "summarize_and_remove_message
     return "agent"
 
 
-def _pin_line_is_the_reply(last_tool: ToolMessage, config: RunnableConfig) -> bool:
+def _pin_line_is_the_reply(
+    messages: Sequence[AnyMessage], config: RunnableConfig
+) -> bool:
     """
-    Return True when the turn ends on a refused confirmation and a PIN line follows.
+    Return True when the last round refused a confirmation and a PIN line follows.
 
-    The reply then names the action the PIN will confirm, or the one it ran,
-    in fixed words (conversation.py), so the guard has nothing to add.
+    The reply then says, in fixed words (conversation.py), what the PIN will
+    confirm, what it ran, or that it was wrong, so the guard has nothing to
+    add. The round judged is the last one that ran: the calls the guard cuts
+    off are not part of it.
     """
-    content = last_tool.content if isinstance(last_tool.content, str) else ""
-    if pin_refusal(content) is None:
+    completed = (
+        messages[:-1] if messages and isinstance(messages[-1], AIMessage) else messages
+    )
+    if not any(_pin_refusal_of(msg) for msg in _last_round_responses(completed)):
         return False
     cfg = config.get("configurable", {})
     pin_reply = cfg.get("pin_reply")
-    if pin_reply is None:
-        return False
-    if pin_reply.confirmed:
-        return True
-    return bool(prompts_awaiting_reply(cfg.get("pending_actions", {}), pin_reply))
+    return pin_reply is not None and pin_lines_follow(
+        cfg.get("pending_actions", {}), pin_reply
+    )
+
+
+_ROUND_LIMIT_RESULT = "Not run: this turn's tool-round limit was reached."
+
+
+def _unanswered_calls(messages: Sequence[AnyMessage]) -> list[ToolMessage]:
+    """
+    Answer the tool calls the guard cuts off, so none is left dangling.
+
+    The model's last message asked for tools that never ran. A provider
+    rejects a history whose assistant tool call has no result, so the next
+    turn (the user's PIN, for one) would fail on it. Each gets a fixed
+    "not run" result.
+    """
+    last = messages[-1] if messages else None
+    if not isinstance(last, AIMessage) or not last.tool_calls:
+        return []
+    return [
+        _make_tool_error(
+            _ROUND_LIMIT_RESULT, tool_call.get("name", ""), tool_call.get("id") or ""
+        )
+        for tool_call in last.tool_calls
+    ]
 
 
 async def _tool_loop_guard(state: State, config: RunnableConfig) -> dict[str, Any]:
     """
     Emit a friendly message when the action-round limit is reached.
 
-    When the round before the cut-off was a refused automation, the refusal
-    text is the one thing the user can act on, so it is repeated rather than
-    lost behind the generic apology. When it was a confirmation refused for
-    want of the user's PIN and a PIN line will be the reply (the prompt is
-    waiting, or an action ran), nothing is added: an apology next to "What is
-    your PIN?" reads as a failure, and the user is never asked.
+    The calls being cut off get a "not run" result first, so the history stays
+    valid for the next model call. When the round before the cut-off was a
+    refused automation, the refusal text is the one thing the user can act
+    on, so it is repeated rather than lost behind the generic apology. When
+    it was a confirmation refused for want of the user's PIN and a PIN line
+    will be the reply (the prompt is waiting, an action ran, or the PIN was
+    wrong), nothing more is added: an apology next to "What is your PIN?"
+    reads as a failure, and the user is never asked.
     """
-    last_tool = next(
-        (m for m in reversed(state["messages"]) if isinstance(m, ToolMessage)),
-        None,
-    )
-    if last_tool is not None and _pin_line_is_the_reply(last_tool, config):
-        return {"messages": []}
+    messages = state["messages"]
+    answers: list[BaseMessage] = list(_unanswered_calls(messages))
+    if _pin_line_is_the_reply(messages, config):
+        return {"messages": answers}
     content = (
         "I wasn't able to complete this request after several tool-use "
         "attempts. Please try rephrasing your query or breaking it into "
         "smaller steps."
     )
+    last_tool = next(
+        (m for m in reversed(messages) if isinstance(m, ToolMessage)), None
+    )
     if last_tool is not None and _is_automation_refusal(last_tool):
         content += f"\n\nThe last problem was:\n{last_tool.content}"
-    return {"messages": [AIMessage(content=content)]}
+    return {"messages": [*answers, AIMessage(content=content)]}
 
 
 # Define a new graph
