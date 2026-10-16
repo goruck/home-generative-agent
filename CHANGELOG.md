@@ -11,6 +11,12 @@ their own. See [RELEASING.md](RELEASING.md).
 
 - The model-provider libraries are no longer pinned to one exact version each: `langchain-openai`, `langchain-anthropic` and `langchain-ollama` accept any 1.x release (`langchain-ollama` from 0.3.10), `langchain-google-genai` any 3.x from 3.1.0, and the `anthropic` SDK anything from 0.125.0 below 2. When a Home Assistant release moved a library these depend on, such as `openai` in 2026.10, an exact pin could not be installed next to it and the integration failed to set up for everyone until a new release shipped (#735). Home Assistant can now pick a compatible release on its own. A fresh install, or the reinstall that follows a Home Assistant update, gets the newest release in each range: today `langchain-openai` 1.7.2, `langchain-anthropic` 1.7.6 with `anthropic` 1.15.0, `langchain-ollama` 1.1.0 and `langchain-google-genai` 3.2.0. The test suite runs against the newest releases every day.
 
+## [3.44.1] - 2026-10-16
+
+### Fixed
+
+- History answers about a device that changed state often no longer leave out one of its states. When a period held more than 50 entries, the history tool kept every second or third one, so a light that toggled about 100 times in a day came back as 53 entries all "off" and the agent said it never turned on ([#715](https://github.com/goruck/home-generative-agent/issues/715)). With an odd step both states survived, but changes in between were still dropped, so times, counts and durations could be wrong. Rows that only repeat the previous state (a thermostat records one each time its temperature reading updates) are now dropped first, so the limit counts real changes. Over 50 changes, the agent gets the latest 50 in full, the state at the start of the period, and for each state over the whole period: how many times it was entered, when first and last, and how many minutes it lasted. A brief drop to unavailable and back no longer counts as turning on again. Numeric sensors, including ones with no state class, are still thinned to 50 readings, and now always include the latest one.
+
 ## [3.44.0] - 2026-10-16
 
 ### Added
