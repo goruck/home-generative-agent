@@ -16,6 +16,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 
 from custom_components.home_generative_agent.agent.graph import (
     State,
+    _append_on_off_partners,
     _conversation_has_automation_context,
     _conversation_has_history_context,
     _fallback_words,
@@ -3599,6 +3600,69 @@ async def test_retrieve_tools_does_not_bind_an_excluded_partner() -> None:
     )
     assert "intent__HassTurnOff" in result["tool_routing_map"]
     assert "intent__HassTurnOn" not in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_a_same_named_tool_from_another_api_does_not_stand_in_for_the_partner() -> (
+    None
+):
+    """Pairing is per API: another server's HassTurnOn is not Assist's."""
+    store = _on_off_store("intent__HassTurnOff")
+    candidates = [
+        _make_search_item("intent__HassTurnOff", score=0.3, is_actuation=True).value,
+        _make_search_item(
+            "remote__HassTurnOn", score=0.3, is_actuation=True, api_id="other"
+        ).value,
+    ]
+    config = _on_off_config()
+    cast("dict[str, Any]", config)["configurable"]["options"]["llm_hass_api"] = [
+        "assist",
+        "other",
+    ]
+
+    result = await _append_on_off_partners(candidates, store, config, None)
+
+    assert [(t["api_id"], t["name"]) for t in result] == [
+        ("assist", "intent__HassTurnOff"),
+        ("other", "remote__HassTurnOn"),
+        ("assist", "intent__HassTurnOn"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_always_included_on_off_tool_gets_its_partner() -> None:
+    """Pairing runs after the inclusions, so a pinned HassTurnOff is paired too."""
+    store = _on_off_store("intent__HassTurnOff")
+    store.asearch = AsyncMock(
+        return_value=[_make_search_item("alarm_control", score=0.4, api_id="hga_local")]
+    )
+    config = _on_off_config("intent__HassTurnOn", "intent__HassTurnOff")
+    cast("dict[str, Any]", config)["configurable"]["options"]["tool_inclusions"] = {
+        "assist": ["intent__HassTurnOff"]
+    }
+    result = await _retrieve_tools(
+        _history_state("Block the playroom, block."), config, store=store
+    )
+    assert result["tool_routing_map"].get("intent__HassTurnOff") == "assist"
+    assert result["tool_routing_map"].get("intent__HassTurnOn") == "assist"
+
+
+@pytest.mark.asyncio
+async def test_an_excluded_partner_is_not_looked_up() -> None:
+    """The exclusion is checked before the store round-trip (performance pass)."""
+    store = _on_off_store("intent__HassTurnOff")
+    result = await _retrieve_tools(
+        _history_state("Block the playroom, block."),
+        _on_off_config(exclusions={"assist": ["intent__HassTurnOn"]}),
+        store=store,
+    )
+    # Pairing ran (the ranked tool is bound) and the partner stayed out.
+    assert "intent__HassTurnOff" in result["tool_routing_map"]
+    assert "intent__HassTurnOn" not in result["tool_routing_map"]
+    looked_up = [
+        call.kwargs.get("key") or call.args[1] for call in store.aget.await_args_list
+    ]
+    assert "assist::intent__HassTurnOn" not in looked_up
 
 
 @pytest.mark.asyncio

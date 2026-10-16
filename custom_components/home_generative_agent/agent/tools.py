@@ -107,12 +107,17 @@ from .camera_activity import get_camera_last_events_from_states
 from .helpers import (
     PENDING_ACTION_TTL,
     PIN_AWAITING_USER_REPLY,
+    PIN_OUTCOME_DONE,
+    PIN_OUTCOME_FAILED,
+    PIN_OUTCOME_UNKNOWN,
     ConfigurableData,
     base_tool_name,
     keep_pin_prompt,
     maybe_fill_lock_entity,
+    minimal_payload_for_domain,
     normalize_intent_for_alarm,
     normalize_intent_for_lock,
+    parse_tool_response,
     pin_digits,
     pin_in_text,
     register_pending_action,
@@ -871,6 +876,9 @@ def _maybe_require_pin_for_automation(
         "tool_name": "add_automation",
         "tool_args": {},
         "automation_config": ha_automation_config,
+        # What made it critical, so the fixed line names the unlock inside
+        # it, not only the alias the model chose.
+        "critical_calls": [call.describe() for call in critical_calls],
         "user": cfg.get("user_id"),
         "thread_id": cfg.get("thread_id"),
         "turn_id": _turn_id(cfg),
@@ -1075,15 +1083,17 @@ def _resolve_action_id(
     if not thread_id:
         return None
     if requested_action_id:
-        # Another conversation's action reads as missing before any other
-        # check, so no reply tells this caller it exists.
         action = pending_actions.get(requested_action_id)
         if action and action.get("thread_id") == thread_id:
             return requested_action_id
-        return None
-    # Without an id, take the conversation's only pending action. The store is
-    # shared by every conversation, and satellites and automations share one
-    # user, so another conversation's action must never be picked up here.
+    # Without an id, or with one this conversation no longer holds (a
+    # re-issued request replaces its action under a new id, and the model may
+    # still hold the old one), take the conversation's only pending action.
+    # The store is shared by every conversation, and satellites and
+    # automations share one user, so another conversation's action must
+    # never be picked up here: its id reads as missing like any other. This
+    # only picks the action; `_confirmation_refusal` still requires the
+    # user's reply to that action's prompt, with the PIN in it, unspent.
     own = [
         key
         for key, action in pending_actions.items()
@@ -1270,11 +1280,14 @@ def _claim_pending_action(cfg: Mapping[str, Any], action_id: str) -> bool:
     return True
 
 
-def _record_confirmed(cfg: Mapping[str, Any], action: Mapping[str, Any]) -> None:
-    """Record on the user's message the action its PIN ran, for the reply."""
+def _record_confirmed(
+    cfg: Mapping[str, Any], action: Mapping[str, Any], outcome: str
+) -> None:
+    """Record on the user's message the action its PIN was accepted for and its end."""
     pin_reply = cfg.get("pin_reply")
     if pin_reply is not None:
         pin_reply.confirmed = describe_pending_action(cfg.get("hass"), action)
+        pin_reply.outcome = outcome
 
 
 def _spend_pin_reply(cfg: Mapping[str, Any]) -> None:
@@ -1311,16 +1324,25 @@ async def _execute_pending_action(
     tool_args = normalize_intent_for_alarm(tool_name, tool_args)
     tool_args = normalize_intent_for_lock(tool_name, tool_args)
     tool_args = maybe_fill_lock_entity(tool_args, cfg.get("hass"))
-    tool_args = sanitize_tool_args(tool_args)
+    # The same payload the normal path sends after its guard: HA's intents
+    # read name/area/floor and ignore an entity id, so a held lock call with
+    # only an entity id would otherwise act on every exposed lock.
+    tool_args = sanitize_tool_args(
+        minimal_payload_for_domain(sanitize_tool_args(tool_args))
+    )
 
     if not _claim_pending_action(cfg, resolved_action_id):
         return None, pin_msg(cfg.get("hass"), "pending_action_not_found_or_expired")
 
-    reply_key = "action_execute_failed"
+    reply_key, outcome = "action_execute_failed", PIN_OUTCOME_FAILED
     try:
         tool_input = llm.ToolInput(tool_name=tool_name, tool_args=tool_args)
         async with asyncio.timeout_at(deadline):
             response = tool_call_data(await ha_llm_api.async_call_tool(tool_input))
+        # A tool that reports failure in its payload (success: false, a
+        # warning) did not act, the same as the normal path reads it. Inside
+        # the try: after the claim, even reading the reply must not raise.
+        content, status = parse_tool_response(response.data, tool_args)
     except (HomeAssistantError, vol.Invalid) as err:
         failure = repr(err)
     except Exception as err:
@@ -1328,20 +1350,26 @@ async def _execute_pending_action(
         # let the error end the turn with the action looking still pending.
         LOGGER.exception("PIN-confirmed %s ended with an unexpected error", tool_name)
         # The type only: the message can hold URLs or tokens.
-        reply_key, failure = "action_outcome_unknown", type(err).__name__
+        reply_key, outcome = "action_outcome_unknown", PIN_OUTCOME_UNKNOWN
+        failure = type(err).__name__
     else:
-        if not response.error:
-            _record_confirmed(cfg, action)
+        if not response.error and status != "error":
+            _record_confirmed(cfg, action, PIN_OUTCOME_DONE)
+            # default=str: a result the JSON encoder cannot take must not
+            # raise after the action ran.
             return json.dumps(
                 {
                     "status": "completed",
                     "action_id": resolved_action_id,
                     "result": response.data,
-                }
+                },
+                default=str,
             ), None
-        # A tool that reports failure through HA 2026.10's error flag gets the
-        # same reply as a raised error.
-        failure = json.dumps(response.data, default=str)
+        # HA 2026.10's error flag gets the same reply as a raised error.
+        failure = (
+            content if status == "error" else json.dumps(response.data, default=str)
+        )
+    _record_confirmed(cfg, action, outcome)
     return None, pin_msg(cfg.get("hass"), reply_key, err=failure)
 
 
@@ -1368,10 +1396,11 @@ async def _execute_pending_automation(
         # (the reload, or a timeout, which is also an OSError): never tell
         # the user to request it again, which could install it twice.
         LOGGER.exception("PIN-confirmed automation ended with an error")
+        _record_confirmed(cfg, action, PIN_OUTCOME_UNKNOWN)
         # The type only: the message can hold paths or tokens.
         return None, pin_msg(hass, "automation_outcome_unknown", err=type(err).__name__)
 
-    _record_confirmed(cfg, action)
+    _record_confirmed(cfg, action, PIN_OUTCOME_DONE)
     return json.dumps(
         {"status": "completed", "action_id": resolved_action_id, "result": result}
     ), None

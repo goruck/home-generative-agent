@@ -20,6 +20,13 @@ on the fly and no reason to pay for or cache a completion.
 Add a new language by adding a key to ``_MESSAGES`` with the same set
 of message ids as ``"en"``. Missing keys in a non-English language
 fall back to the English string automatically.
+
+The module also builds the one deterministic sentence the user is told to
+trust: ``describe_pending_action`` names a held action from the call itself
+(the verb HA's handler runs for the domain, the target or the scope HA will
+act on), and ``conversation.py`` joins it to every reply as the
+``pin_confirm_line`` / ``pin_done_line`` family. It imports from
+``.helpers``, so ``helpers`` must never import this module.
 """
 
 from __future__ import annotations
@@ -28,8 +35,10 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from .helpers import (
+    INTENT_NAME_ALL,
     base_tool_name,
     is_on_off_intent,
+    minimal_payload_for_domain,
     normalize_intent_for_lock,
     sanitize_tool_text,
 )
@@ -118,13 +127,34 @@ _MESSAGES: dict[str, dict[str, str]] = {
         ),
         "pin_confirm_line": "Your PIN will confirm: {action}.",
         "pin_done_line": "PIN accepted: {action}.",
+        "pin_failed_line": "PIN accepted, but {action} failed.",
+        "pin_unknown_line": "PIN accepted; {action} may have run. Check the device.",
+        # Ends a reply that is only the fixed line, so a satellite keeps
+        # listening for the answer.
+        "pin_ask_line": "What is your PIN?",
         "action_lock": "lock {target}",
         "action_unlock": "unlock {target}",
+        "action_open": "open {target}",
+        "action_close": "close {target}",
         "action_turn_on": "turn on {target}",
         "action_turn_off": "turn off {target}",
         "action_service": "{service} {target}",
-        "action_automation": 'add the automation "{target}"',
+        "action_automation": "add the automation {target}",
+        "action_unnamed_automation": "add an unnamed automation",
+        "action_automation_runs": "{action}, which runs {calls}",
+        "action_calls_more": "{calls} and {count} more",
         "action_unnamed_target": "an unnamed device",
+        # The target as HA reads it: one named device, or the scope of a
+        # call that names none (every device of the domain, in an area, on
+        # a floor).
+        "target_named": '"{name}"',
+        "target_every": "{kind}",
+        "target_every_in_area": "{kind} in {area}",
+        "target_every_on_floor": "{kind} on floor {floor}",
+        "kind_lock": "every lock",
+        "kind_cover": "every cover",
+        "kind_valve": "every valve",
+        "kind_domain": "every {domain} device",
     },
     "cs": {
         "automation_pin_unset": (
@@ -206,13 +236,31 @@ _MESSAGES: dict[str, dict[str, str]] = {
         ),
         "pin_confirm_line": "Váš PIN potvrdí: {action}.",
         "pin_done_line": "PIN přijat: {action}.",
+        "pin_failed_line": "PIN přijat, ale {action} se nepodařilo.",
+        "pin_unknown_line": (
+            "PIN přijat; {action} možná proběhlo. Zkontrolujte zařízení."
+        ),
+        "pin_ask_line": "Jaký je váš PIN?",
         "action_lock": "zamknout {target}",
         "action_unlock": "odemknout {target}",
+        "action_open": "otevřít {target}",
+        "action_close": "zavřít {target}",
         "action_turn_on": "zapnout {target}",
         "action_turn_off": "vypnout {target}",
         "action_service": "{service} {target}",
-        "action_automation": "přidat automatizaci „{target}“",
+        "action_automation": "přidat automatizaci {target}",
+        "action_unnamed_automation": "přidat nepojmenovanou automatizaci",
+        "action_automation_runs": "{action}, která spouští {calls}",
+        "action_calls_more": "{calls} a dalších {count}",
         "action_unnamed_target": "nepojmenované zařízení",
+        "target_named": "„{name}“",
+        "target_every": "{kind}",
+        "target_every_in_area": "{kind} v oblasti {area}",
+        "target_every_on_floor": "{kind} v patře {floor}",
+        "kind_lock": "všechny zámky",
+        "kind_cover": "všechny rolety a vrata",
+        "kind_valve": "všechny ventily",
+        "kind_domain": "všechna zařízení typu {domain}",
     },
 }
 
@@ -246,16 +294,124 @@ def pin_msg(hass: HomeAssistant | None, key: str, /, **kwargs: Any) -> str:
 
 # Longest target name the action line repeats. The name comes from the model.
 _ACTION_TARGET_MAX_LEN = 80
+# Longest service name the line repeats, for a call that is not an intent.
+_ACTION_SERVICE_MAX_LEN = 40
+# Critical calls named for an automation, and the length of each. More calls
+# are counted ("and 2 more"), and a longer call ends in an ellipsis, so an
+# omission is always visible in the line.
+_AUTOMATION_CALLS_MAX = 5
+_AUTOMATION_CALL_MAX_LEN = 60
+_ELLIPSIS = "\u2026"
+
+# How Home Assistant's OnOffIntentHandler runs HassTurnOn / HassTurnOff by
+# domain: (on, off). Any other domain is turned on or off.
+_ON_OFF_VERBS: dict[str, tuple[str, str]] = {
+    "lock": ("action_lock", "action_unlock"),
+    "cover": ("action_open", "action_close"),
+    "valve": ("action_open", "action_close"),
+}
+_KIND_KEYS = {"lock": "kind_lock", "cover": "kind_cover", "valve": "kind_valve"}
 
 
-def _action_target(hass: HomeAssistant | None, value: Any) -> str:
-    """Return the target as one bounded line, or the unnamed-device words."""
+def _one_line(value: Any, limit: int, *, mark_cut: bool = False) -> str:
+    """Return model-chosen text as one bounded, printable line."""
     if isinstance(value, list):
         value = ", ".join(str(v) for v in value if v)
     text = " ".join(str(value or "").split())
     if not text:
+        return ""
+    if mark_cut and len(text) > limit:
+        return sanitize_tool_text(text[: limit - 1], limit=limit) + _ELLIPSIS
+    return sanitize_tool_text(text, limit=limit)
+
+
+def _first(value: Any) -> str:
+    """Return the first entry of a list value, or the value, as text."""
+    if isinstance(value, list):
+        value = value[0] if value else ""
+    return str(value or "")
+
+
+def _named(hass: HomeAssistant | None, name: str) -> str:
+    return pin_msg(hass, "target_named", name=name)
+
+
+def _intent_domain(tool_name: str, tool_args: Mapping[str, Any]) -> str:
+    """
+    Return the domain an on/off intent acts on, as the gate reads it.
+
+    The lock normalizer (a `lock` domain, or "lock" in the name), else the
+    domain argument, else the domain of an entity id the model gave.
+    """
+    normalized = normalize_intent_for_lock(tool_name, dict(tool_args))
+    domain = _first(normalized.get("domain")).lower()
+    if domain:
+        return domain
+    entity_id = _first(tool_args.get("entity_id") or tool_args.get("entity_ids"))
+    return entity_id.split(".", 1)[0].lower() if "." in entity_id else ""
+
+
+def _intent_target(
+    hass: HomeAssistant | None, tool_args: Mapping[str, Any], domain: str
+) -> str:
+    """
+    Name what Home Assistant will act on for an on/off intent.
+
+    Read from the payload the call is sent as (`minimal_payload_for_domain`,
+    which the normal path and the PIN confirmation both apply), so the line
+    and the call cannot drift: HA's intents read the name, area and floor
+    slots, and the payload sends an entity id the model gave as the name.
+    With no name, the whole domain acts, in the area or on the floor if one
+    is given, and the line says so rather than naming a device it will not
+    single out.
+    """
+    payload = minimal_payload_for_domain(dict(tool_args))
+    name = payload.get("name")
+    if not isinstance(name, str) or name == INTENT_NAME_ALL:
+        name = ""
+    name = _one_line(name, _ACTION_TARGET_MAX_LEN)
+    if name:
+        return _named(hass, name)
+    if not domain:
         return pin_msg(hass, "action_unnamed_target")
-    return sanitize_tool_text(text, limit=_ACTION_TARGET_MAX_LEN)
+    kind_key = _KIND_KEYS.get(domain, "kind_domain")
+    kind = pin_msg(hass, kind_key, domain=sanitize_tool_text(domain, limit=40))
+    if area := _one_line(tool_args.get("area"), _ACTION_TARGET_MAX_LEN):
+        return pin_msg(hass, "target_every_in_area", kind=kind, area=area)
+    if floor := _one_line(tool_args.get("floor"), _ACTION_TARGET_MAX_LEN):
+        return pin_msg(hass, "target_every_on_floor", kind=kind, floor=floor)
+    return pin_msg(hass, "target_every", kind=kind)
+
+
+def _describe_automation(hass: HomeAssistant | None, action: Mapping[str, Any]) -> str:
+    """Name an automation by its alias and the critical calls it would run."""
+    config = action.get("automation_config")
+    alias = _one_line(
+        config.get("alias") if isinstance(config, Mapping) else None,
+        _ACTION_TARGET_MAX_LEN,
+    )
+    text = (
+        pin_msg(hass, "action_automation", target=_named(hass, alias))
+        if alias
+        else pin_msg(hass, "action_unnamed_automation")
+    )
+    raw_calls = action.get("critical_calls")
+    calls = [
+        _one_line(call, _AUTOMATION_CALL_MAX_LEN, mark_cut=True)
+        for call in (raw_calls if isinstance(raw_calls, list) else [])
+    ]
+    calls = [call for call in calls if call]
+    if not calls:
+        return text
+    shown = ", ".join(calls[:_AUTOMATION_CALLS_MAX])
+    if len(calls) > _AUTOMATION_CALLS_MAX:
+        shown = pin_msg(
+            hass,
+            "action_calls_more",
+            calls=shown,
+            count=len(calls) - _AUTOMATION_CALLS_MAX,
+        )
+    return pin_msg(hass, "action_automation_runs", action=text, calls=shown)
 
 
 def describe_pending_action(
@@ -264,38 +420,46 @@ def describe_pending_action(
     """
     Name the action a PIN confirms, from what will run, not from the model.
 
-    An on/off intent on a lock is named the way Home Assistant runs it:
-    HassTurnOn locks and HassTurnOff unlocks, whatever service the model
-    added. Field test 2026-10-15: the model asked for the PIN "to lock the
-    door" while the held call was HassTurnOff, and the PIN unlocked it.
+    An on/off intent is named the way Home Assistant runs it for the domain:
+    HassTurnOn locks, opens or turns on; HassTurnOff unlocks, closes or turns
+    off, whatever service the model added. Field test 2026-10-15: the model
+    asked for the PIN "to lock the door" while the held call was HassTurnOff,
+    and the PIN unlocked it. The target is the one HA will act on, or the
+    scope of a call that names none.
     """
     tool_name = str(action.get("tool_name") or "")
     if tool_name == "add_automation":
-        config = action.get("automation_config")
-        alias = config.get("alias") if isinstance(config, Mapping) else None
-        return pin_msg(hass, "action_automation", target=_action_target(hass, alias))
+        return _describe_automation(hass, action)
 
     raw_args = action.get("tool_args")
     tool_args: dict[str, Any] = dict(raw_args) if isinstance(raw_args, Mapping) else {}
-    target = _action_target(
-        hass,
+    if is_on_off_intent(tool_name):
+        turns_on = base_tool_name(tool_name) == "HassTurnOn"
+        domain = _intent_domain(tool_name, tool_args)
+        on_key, off_key = _ON_OFF_VERBS.get(
+            domain, ("action_turn_on", "action_turn_off")
+        )
+        return pin_msg(
+            hass,
+            on_key if turns_on else off_key,
+            target=_intent_target(hass, tool_args, domain),
+        )
+
+    target = _one_line(
         tool_args.get("name")
         or tool_args.get("entity_id")
         or tool_args.get("entity_ids")
         or tool_args.get("area"),
+        _ACTION_TARGET_MAX_LEN,
     )
-    if is_on_off_intent(tool_name):
-        turns_on = base_tool_name(tool_name) == "HassTurnOn"
-        if normalize_intent_for_lock(tool_name, tool_args).get("domain") == ["lock"]:
-            key = "action_lock" if turns_on else "action_unlock"
-        else:
-            key = "action_turn_on" if turns_on else "action_turn_off"
-        return pin_msg(hass, key, target=target)
-
     service = str(tool_args.get("service") or base_tool_name(tool_name))
     return pin_msg(
         hass,
         "action_service",
-        service=sanitize_tool_text(service.replace("_", " "), limit=40),
-        target=target,
+        service=sanitize_tool_text(
+            service.replace("_", " "), limit=_ACTION_SERVICE_MAX_LEN
+        ),
+        target=_named(hass, target)
+        if target
+        else pin_msg(hass, "action_unnamed_target"),
     )

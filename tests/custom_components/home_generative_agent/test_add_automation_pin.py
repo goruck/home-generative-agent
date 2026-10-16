@@ -19,7 +19,10 @@ from custom_components.home_generative_agent.agent import tools as tools_module
 from custom_components.home_generative_agent.agent.helpers import (
     MAX_PENDING_ACTIONS,
     PIN_AWAITING_USER_REPLY,
+    PIN_OUTCOME_DONE,
+    PIN_OUTCOME_UNKNOWN,
     PinReply,
+    disclose_pin_prompts,
     start_pin_turn,
 )
 from custom_components.home_generative_agent.agent.tools import (
@@ -46,6 +49,8 @@ async def confirm_tool(
 ) -> str:
     """Confirm as the user's reply to the PIN prompt: a new message with the PIN."""
     configurable = config["configurable"]
+    # The request turn ended by naming the prompt, as conversation.py does.
+    disclose_pin_prompts(configurable["pending_actions"], configurable["pin_reply"])
     configurable["pin_reply"] = start_pin_turn(
         configurable["pending_actions"], configurable["thread_id"], pin
     )
@@ -509,6 +514,7 @@ async def test_pending_automation_without_a_config_is_rejected(tmp_path: Path) -
         "created_at": dt_util.utcnow().isoformat(),
         "user": "user1",
         "thread_id": "conv1",
+        "turn_id": config["configurable"]["pin_reply"].turn_id,
         "attempts": 0,
     }
 
@@ -549,6 +555,11 @@ async def test_write_failure_is_reported_and_consumes_the_confirmation(
     assert "/config" not in result
     assert _written(tmp_path) == []
     assert config["configurable"]["pending_actions"] == {}
+    # Said in fixed words too: "PIN accepted; add the automation … may have run."
+    pin_reply = config["configurable"]["pin_reply"]
+    assert pin_reply.outcome == PIN_OUTCOME_UNKNOWN
+    assert pin_reply.confirmed.startswith('add the automation "Unlock when I get home"')
+    assert "lock.unlock" in pin_reply.confirmed
 
 
 @pytest.mark.asyncio
@@ -574,6 +585,7 @@ async def test_an_unexpected_install_error_says_the_automation_may_exist(
     assert "may have been installed" in result
     assert "integration bug" not in result
     assert config["configurable"]["pending_actions"] == {}
+    assert config["configurable"]["pin_reply"].outcome == PIN_OUTCOME_UNKNOWN
 
 
 @pytest.mark.asyncio
@@ -588,9 +600,11 @@ async def test_a_confirmed_automation_cannot_be_installed_twice(
         await add_automation_tool(automation_yaml=UNLOCK_YAML, config=config)
     )
     first = await confirm_tool(challenge["action_id"], PIN, config=config, store=None)
+    first_reply = config["configurable"]["pin_reply"]
     second = await confirm_tool(challenge["action_id"], PIN, config=config, store=None)
 
     assert json.loads(first)["status"] == "completed"
+    assert first_reply.outcome == PIN_OUTCOME_DONE
     assert second == "Pending action not found or expired."
     assert len(_written(tmp_path)) == 1
 
@@ -801,6 +815,7 @@ async def test_reissuing_the_automation_in_the_pin_reply_still_installs(
     configurable = config["configurable"]
 
     await add_automation_tool(automation_yaml=UNLOCK_YAML, config=config)
+    disclose_pin_prompts(configurable["pending_actions"], configurable["pin_reply"])
     configurable["pin_reply"] = start_pin_turn(
         configurable["pending_actions"], configurable["thread_id"], PIN
     )

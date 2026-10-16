@@ -25,6 +25,7 @@ from custom_components.home_generative_agent.agent.helpers import (
     PENDING_ACTION_TTL,
     PIN_AWAITING_USER_REPLY,
     PinReply,
+    disclose_pin_prompts,
     keep_pin_prompts,
     normalize_pin,
     pin_digits,
@@ -75,9 +76,11 @@ class _FakeAPI:
     def __init__(self, result: Any = None) -> None:
         self.result = {"success": True} if result is None else result
         self.calls: list[str] = []
+        self.sent_names: list[Any] = []
 
     async def async_call_tool(self, tool_input: Any) -> Any:
         self.calls.append(tool_input.tool_name)
+        self.sent_names.append(tool_input.tool_args.get("name"))
         # Yield so a second confirmation in the same batch runs meanwhile.
         await asyncio.sleep(0)
         return self.result
@@ -133,6 +136,9 @@ class _Turns:
         assert message is not None
         payload = json.loads(cast("str", message.content))
         assert payload["status"] == "requires_pin"
+        # The turn ends by naming the prompt, as conversation.py does; a
+        # prompt whose line was never delivered cannot be answered.
+        disclose_pin_prompts(self.pending, self.config["configurable"]["pin_reply"])
         return payload["action_id"]
 
     async def confirm(self, action_id: str, pin: str = PIN) -> dict[str, Any] | str:
@@ -700,7 +706,9 @@ async def test_a_new_protected_request_replaces_the_conversations_older_one() ->
     The user's PIN never runs a request they moved on from.
 
     "Unlock the back door", then "no, the front door": only the newest
-    request is waiting, so the back door cannot be confirmed.
+    request is waiting, so the back door cannot be confirmed. An id the
+    conversation no longer holds means its only pending action (the one the
+    fixed line named), and the PIN runs it once.
     """
     api = _FakeAPI()
     turns = _Turns(api)
@@ -714,10 +722,12 @@ async def test_a_new_protected_request_replaces_the_conversations_older_one() ->
     stale_reply = await turns.confirm(stale)
     newest_reply = await turns.confirm(newest)
 
-    assert stale_reply == "Pending action not found or expired."
-    assert isinstance(newest_reply, dict)
-    assert newest_reply["status"] == "completed"
+    assert isinstance(stale_reply, dict)
+    assert stale_reply["status"] == "completed"
+    assert stale_reply["action_id"] == newest
+    assert newest_reply == "Pending action not found or expired."
     assert api.calls == ["HassTurnOff"]
+    assert api.sent_names == ["Front Door"]
 
 
 async def test_another_conversations_pending_action_is_not_replaced() -> None:
@@ -862,6 +872,7 @@ def test_a_new_turn_only_ages_its_own_conversation() -> None:
         pending, {"tool_name": "a", "thread_id": "conv-a", "turn_id": reply.turn_id}
     )
     assert action_id is not None
+    disclose_pin_prompts(pending, reply)
 
     for _ in range(3):
         start_pin_turn(pending, "conv-b", "hello")

@@ -26,6 +26,12 @@ _DUMMY_KWARGS: dict[str, Any] = {
     "action": "action",
     "target": "target",
     "service": "service",
+    "name": "name",
+    "kind": "kind",
+    "area": "area",
+    "floor": "floor",
+    "domain": "domain",
+    "count": 2,
 }
 
 

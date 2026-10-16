@@ -474,9 +474,18 @@ class PinReply:
     # Identifies this turn: a pending action records the turn that created it
     # and the one turn whose message may answer its PIN prompt.
     turn_id: str = field(default_factory=ulid.ulid_now)
-    # The action this message's PIN ran, as `describe_pending_action` names
-    # it, so the reply can say what ran in words the model did not choose.
+    # The action this message's PIN was accepted for, as
+    # `describe_pending_action` names it, so the reply can say what happened
+    # in words the model did not choose, and how it ended (`outcome`).
     confirmed: str = ""
+    outcome: str = ""
+
+
+# How a PIN-confirmed action ended, for `PinReply.outcome`.
+PIN_OUTCOME_DONE = "done"
+PIN_OUTCOME_FAILED = "failed"
+# An error or timeout after the claim: the device may have acted.
+PIN_OUTCOME_UNKNOWN = "unknown"
 
 
 # How long a pending PIN confirmation stays valid, used by the sweep here and
@@ -917,14 +926,30 @@ def register_pending_action(
             and existing.get("user") == action.get("user")
         ):
             if _same_request(existing, action) and existing.get("turn_id"):
-                carried = {
-                    name: existing[name]
-                    for name in ("turn_id", "reply_turn", "replies", "renew")
-                    if name in existing
-                }
-                reply_turn = existing.get("reply_turn")
-                if reply_turn and reply_turn == action.get("turn_id"):
-                    carried["renew"] = True
+                reissued_in_reply = bool(
+                    existing.get("reply_turn")
+                    and existing.get("reply_turn") == action.get("turn_id")
+                )
+                if reissued_in_reply and not prompt_renewable(existing):
+                    # The prompt has taken all its replies, so the request
+                    # said again starts a fresh one (answered by the next
+                    # message) rather than one that promises a reply it
+                    # cannot take. The attempts still carry over.
+                    carried = {}
+                else:
+                    carried = {
+                        name: existing[name]
+                        for name in (
+                            "turn_id",
+                            "reply_turn",
+                            "replies",
+                            "renew",
+                            "disclosed",
+                        )
+                        if name in existing
+                    }
+                    if reissued_in_reply:
+                        carried["renew"] = True
             elif existing.get("turn_id") == action.get("turn_id"):
                 return None
             carried["attempts"] = int(existing.get("attempts", 0) or 0)
@@ -958,7 +983,10 @@ def start_pin_turn(
     While the user is still answering, the prompt is kept for one more
     message: after a wrong or unreadable PIN, the request repeated, or a
     turn that failed (see `keep_pin_prompts`), up to MAX_PIN_REPLIES replies.
-    Expired actions are dropped here too.
+    Expired actions are dropped here too, and so is a prompt whose fixed line
+    (`disclose_pin_prompts`) was never delivered: the turn that made it was
+    cancelled or failed before its reply, so the user was never told, in
+    words the model did not choose, what their PIN would run.
     """
     reply = PinReply(text)
     turn_id = reply.turn_id
@@ -969,8 +997,11 @@ def start_pin_turn(
             continue
         if action.get("thread_id") != thread_id or action.get("turn_id") == turn_id:
             continue
+        if not action.get("disclosed"):
+            pending_actions.pop(key, None)
+            continue
         replies = int(action.get("replies", 0) or 0)
-        renew = action.pop("renew", False) and replies < MAX_PIN_REPLIES
+        renew = action.pop("renew", False) and prompt_renewable(action)
         if action.get("reply_turn") is None or renew:
             action["reply_turn"] = turn_id
             action["replies"] = replies + 1
@@ -988,10 +1019,15 @@ def keep_pin_prompt(action: dict[str, Any], reply: PinReply | None) -> bool:
     """
     if reply is None or action.get("reply_turn") != reply.turn_id:
         return False
-    if int(action.get("replies", 0) or 0) >= MAX_PIN_REPLIES:
+    if not prompt_renewable(action):
         return False
     action["renew"] = True
     return True
+
+
+def prompt_renewable(action: Mapping[str, Any]) -> bool:
+    """Return True while the prompt has not taken all its MAX_PIN_REPLIES replies."""
+    return int(action.get("replies", 0) or 0) < MAX_PIN_REPLIES
 
 
 def keep_pin_prompts(
@@ -1014,14 +1050,34 @@ def prompts_awaiting_reply(
     Return the actions whose PIN prompt the user's next message may answer.
 
     A prompt made this turn, and one this turn answered that was kept for
-    another message (`keep_pin_prompt`).
+    another message (`keep_pin_prompt`), while it can still take one.
     """
     return [
         action
         for action in pending_actions.values()
         if action.get("turn_id") == reply.turn_id
-        or (action.get("reply_turn") == reply.turn_id and action.get("renew"))
+        or (
+            action.get("reply_turn") == reply.turn_id
+            and action.get("renew")
+            and prompt_renewable(action)
+        )
     ]
+
+
+def disclose_pin_prompts(
+    pending_actions: Mapping[str, dict[str, Any]], reply: PinReply
+) -> list[dict[str, Any]]:
+    """
+    Mark the prompts this turn's reply names as delivered, and return them.
+
+    Called once the fixed line naming each action is in the reply. Only a
+    disclosed prompt can be answered (`start_pin_turn`): the user has been
+    told, in words the model did not choose, what their PIN would run.
+    """
+    actions = prompts_awaiting_reply(pending_actions, reply)
+    for action in actions:
+        action["disclosed"] = True
+    return actions
 
 
 def thread_has_pending_action(
@@ -1077,6 +1133,167 @@ def matches_critical_rule(
             continue
         return True
     return False
+
+
+def _payload_target(tool_args: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    """
+    Return the (name, entity_id) a payload may carry, as HA will read them.
+
+    HA reads a name of "all" as no name, so a single entity id the model gave
+    is the better target; a list of ids is read like one id.
+    """
+    name = tool_args.get("name")
+    if name == INTENT_NAME_ALL or not isinstance(name, str) or not name:
+        name = None
+    entity_id = tool_args.get("entity_id") or tool_args.get("entity_ids")
+    if isinstance(entity_id, list):
+        entity_id = entity_id[0] if entity_id else None
+    if not isinstance(entity_id, str) or not entity_id:
+        entity_id = None
+    return name, entity_id
+
+
+def _lock_payload(
+    tool_args: Mapping[str, Any], name: str | None, entity_id: str | None
+) -> dict[str, Any]:
+    """Return the payload for a lock intent, narrowed to one lock or one place."""
+    if not entity_id and name:
+        slug = str(name).strip().lower().replace(" ", "_")
+        entity_id = f"lock.{slug}"
+    payload: dict[str, Any] = {
+        "domain": ["lock"],
+        "service": tool_args.get("service"),
+    }
+    # The payload must carry a target NAME. HA's turn-on/turn-off intents
+    # resolve targets from name/area/floor and never read an `entity_id`
+    # slot (`helpers/intent.py` contains no such lookup), while `domains`
+    # alone already satisfies `MatchTargetsConstraints.has_constraints` --
+    # so domain+entity_id sails past the "cannot target all devices" guard
+    # and matches EVERY exposed lock. `_filter_by_name` accepts an entity
+    # id as the name value, so one key narrows both shapes to one entity.
+    if target := (name or entity_id):
+        payload["name"] = target
+    if entity_id:
+        payload["entity_id"] = entity_id
+    # The area or floor the user named narrows a call with no name to
+    # the locks there, rather than every lock in the home.
+    for key in ("area", "floor"):
+        if value := tool_args.get(key):
+            payload[key] = value
+    if code := tool_args.get("code"):
+        payload["code"] = code
+    return payload
+
+
+def _alarm_payload(tool_args: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the payload for an alarm panel intent."""
+    payload: dict[str, Any] = {
+        "domain": ["alarm_control_panel"],
+        "service": tool_args.get("service"),
+    }
+    for key in ("entity_id", "code", "state"):
+        if value := tool_args.get(key):
+            payload[key] = value
+    return payload
+
+
+def minimal_payload_for_domain(tool_args: dict[str, Any]) -> dict[str, Any]:
+    """
+    Return a reduced payload for HA services to avoid extra keys.
+
+    The normal tool path applies this after the critical-action guard, and
+    the PIN confirmation applies it to the held call before running it, so
+    the two send the same payload (the fixed line names what this sends).
+    """
+    domains = tool_args.get("domain") or []
+    domains = domains if isinstance(domains, list) else [domains]
+    domain = str(domains[0]).lower() if domains else ""
+    name, entity_id = _payload_target(tool_args)
+
+    if domain == "lock":
+        return _lock_payload(tool_args, name, entity_id)
+    if domain == "alarm_control_panel":
+        return _alarm_payload(tool_args)
+    # Any other domain: HA's intents ignore an entity id, so without a name
+    # the whole domain acts. An entity id the model gave is sent as the name
+    # (`_filter_by_name` accepts one), which narrows the call to that device.
+    if domain and not name and entity_id:
+        return {**tool_args, "name": entity_id}
+    return tool_args
+
+
+# The target name Home Assistant's intents read as "no name".
+INTENT_NAME_ALL = "all"
+
+
+def parse_tool_response(
+    response: Any, tool_args: dict[str, Any]
+) -> tuple[str, str | None]:
+    """
+    Return (content, status) from a tool response.
+
+    Shared by the normal tool path and the PIN confirmation, so a tool that
+    reports failure in its payload (`success: false`, a `warning`, an alarm
+    that did not change state) reads as a failure on both.
+    """
+    parsed: dict[str, Any] | None = None
+    if isinstance(response, dict):
+        parsed = response
+    elif isinstance(response, str):
+        try:
+            decoded = json.loads(response)
+        except json.JSONDecodeError:
+            decoded = None
+        # A JSON list, number or bool carries no status fields.
+        parsed = decoded if isinstance(decoded, dict) else None
+
+    status: str | None = None
+    content_str = json.dumps(response, default=str)
+    if parsed is None:
+        return content_str, status
+
+    warning = parsed.get("warning")
+    success_val = parsed.get("success", True)
+    result_text = (
+        parsed.get("result_text") or parsed.get("response") or parsed.get("result")
+    )
+    inferred_state = parsed.get("inferred_state")
+
+    domains = tool_args.get("domain") or []
+    domains = domains if isinstance(domains, list) else [domains]
+    is_alarm = any(str(d).lower() == "alarm_control_panel" for d in domains)
+    service = str(tool_args.get("service") or "").lower()
+
+    if warning:
+        status = "error"
+        content_str = str(result_text or warning)
+    elif success_val is False:
+        status = "error"
+        content_str = str(result_text or "Action failed.")
+    elif is_alarm:
+        if "arm" in service and inferred_state not in {
+            "armed",
+            "armed_home",
+            "armed_away",
+            "armed_night",
+            "arming",
+        }:
+            status = "error"
+            content_str = str(
+                result_text
+                or f"Alarm did not change state (panel_state={inferred_state})."
+            )
+        if "disarm" in service and inferred_state not in {
+            "disarmed",
+            "disarming",
+        }:
+            status = "error"
+            content_str = str(
+                result_text
+                or f"Alarm did not change state (panel_state={inferred_state})."
+            )
+
+    return content_str, status
 
 
 def sanitize_tool_args(tool_args: dict[str, Any]) -> dict[str, Any]:

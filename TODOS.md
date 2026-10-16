@@ -112,6 +112,48 @@
 
 ---
 
+### `maybe_fill_lock_entity` maps any name with "lock" in it to the nearest real lock
+
+**What:** `maybe_fill_lock_entity` (`agent/helpers.py`) runs when the lock normalizer set `domain: ["lock"]`, which it does for any name containing "lock" ("Kitchen Clock" does). With no exact or compact match it falls back to the best-ranked lock by substring and length, so a HassTurnOff on "Kitchen Clock" can be rewritten to a real lock and held for the PIN as an unlock of that lock. The fixed line now names that lock, so the user sees it before answering, but the rewrite itself is a guess.
+
+**Why:** Fourth review round of PR #769 (2026-10-15), Claude adversarial, out of that commit's scope: the best-match fallback predates the PIN work.
+
+**How to apply:** Drop the ranked fallback (keep the exact and compact matches), or require the compact match to contain the whole target; add a "Kitchen Clock" row to the lock-normalizer tests asserting no entity id is filled.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
+### A PIN-confirmed call that half-succeeded reads as done
+
+**What:** Home Assistant's intents return success when at least one target succeeded and list the rest in `data.failed`. `parse_tool_response` (`agent/helpers.py`) reads `success`, `warning` and the alarm state only, so a confirmed "unlock every lock in Kitchen" with one of three locks failing gets "PIN accepted: unlock every lock in Kitchen." The normal tool path has the same blind spot.
+
+**Why:** Fourth review round of PR #769 (2026-10-15), Claude adversarial cycle 2 (INVESTIGATE); pre-existing, now surfaced in a fixed trust line.
+
+**How to apply:** Read `failed` (a non-empty list) in `parse_tool_response` as a partial outcome, give it a status of its own, and a `pin_partial_line` ("PIN accepted: unlock every lock in Kitchen, but 1 did not respond.") in `pin_messages.py`.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
+### Two overlapping turns in one conversation drop each other's undelivered PIN prompt
+
+**What:** `start_pin_turn` drops a pending action from an earlier turn whose fixed line was never delivered. Two `conversation.process` calls with the same `conversation_id` running at once: the second starts while the first is mid-run and drops the first's not-yet-disclosed action; the first then finishes with the model's own PIN request and no fixed line, and the PIN reads as "not found". Fail-safe, and not reachable from one satellite or chat panel, but confusing for an automation that fires twice.
+
+**Why:** Fourth review round of PR #769 (2026-10-15), Claude adversarial cycle 2 (INVESTIGATE).
+
+**How to apply:** Drop undisclosed actions only when their turn is no longer running (track live turn ids per conversation in `HGAData`), or serialize turns per `conversation_id`.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ### The pending-action store evicts across conversations
 
 **What:** `register_pending_action` caps the shared store at `MAX_PENDING_ACTIONS` (16) by evicting the oldest entry from any conversation. A conversation holds at most one pending action per user and drops it after its reply turn, so only 16+ conversations with a prompt out at once (or requests with no `thread_id`) can push out another satellite's pending unlock, which then reads as "not found or expired".
@@ -2458,7 +2500,7 @@ This is the same allowlist-omission class as #480 and as the triage options fixe
 **Effort:** M
 **Priority:** P2
 
-**Completed:** PR #769 (2026-10-15), after a field test where the model asked for the PIN "to lock" the door while the held call was HassTurnOff, which unlocked it. `describe_pending_action` (pin_messages.py) names the held action, HassTurnOn/HassTurnOff on a lock as lock/unlock the way HA runs them. `_async_add_pin_lines` (conversation.py) joins "Your PIN will confirm: …" for every prompt awaiting the next message and "PIN accepted: …" after a confirmed action to the reply, streamed as a delta so a speaking pipeline says it. The `requires_pin` payload also carries `action`. Same PR: `_append_on_off_partners` (graph.py) binds HassTurnOn and HassTurnOff together, so the model cannot be left with only the opposite command.
+**Completed:** PR #769 (2026-10-15), after a field test where the model asked for the PIN "to lock" the door while the held call was HassTurnOff, which unlocked it. `describe_pending_action` (pin_messages.py) names the held action, HassTurnOn/HassTurnOff on a lock as lock/unlock the way HA runs them. `_async_add_pin_lines` (conversation.py) joins "Your PIN will confirm: …" for every prompt awaiting the next message and "PIN accepted: …" after a confirmed action to the reply, streamed as a delta so a speaking pipeline says it. The `requires_pin` payload also carries `action`. Same PR: `_append_on_off_partners` (graph.py) binds HassTurnOn and HassTurnOff together, so the model cannot be left with only the opposite command. The fourth review round (2026-10-15) made the line say what HA runs: the verb per domain (lock/unlock, open/close, turn on/off), the scope of a call with no name (`every lock in Garage`), the critical calls of an automation, and outcome lines for failed and may-have-run; put it in front of the model's reply so `continue_conversation` keeps a satellite listening; made the confirm path send the same minimal payload as the normal path; and made a prompt answerable only once its line was delivered (`disclose_pin_prompts`).
 
 ---
 

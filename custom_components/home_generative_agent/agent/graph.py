@@ -99,8 +99,10 @@ from .helpers import (
     langchain_tool_parameters_json,
     matches_critical_rule,
     maybe_fill_lock_entity,
+    minimal_payload_for_domain,
     normalize_intent_for_alarm,
     normalize_intent_for_lock,
+    parse_tool_response,
     register_pending_action,
     resolve_critical_action_policy,
     sanitize_tool_args,
@@ -471,7 +473,7 @@ async def _run_ha_tool(
     except (HomeAssistantError, vol.Invalid) as err:
         return _make_tool_error(repr(err), tool_name, tool_call.get("id") or "")
 
-    content_str, status = _parse_tool_response(response.data, prepared_args)
+    content_str, status = parse_tool_response(response.data, prepared_args)
     if response.error:
         status = "error"
     return ToolMessage(
@@ -520,76 +522,11 @@ def _prepare_tool_args(
         return critical_guard, tool_args
 
     # Reduce payload to the minimal arguments HA expects (avoids extra-key errors).
-    tool_args = _minimal_payload_for_domain(tool_args)
+    tool_args = minimal_payload_for_domain(tool_args)
     tool_args = sanitize_tool_args(tool_args)
     return None, tool_args
 
 
-def _parse_tool_response(
-    response: Any, tool_args: dict[str, Any]
-) -> tuple[str, str | None]:
-    """Return (content, status) from a tool response."""
-    parsed: dict[str, Any] | None = None
-    if isinstance(response, dict):
-        parsed = response
-    elif isinstance(response, str):
-        try:
-            parsed = json.loads(response)
-        except json.JSONDecodeError:
-            parsed = None
-
-    status: str | None = None
-    content_str = json.dumps(response)
-    if parsed is None:
-        return content_str, status
-
-    warning = parsed.get("warning")
-    success_val = parsed.get("success", True)
-    result_text = (
-        parsed.get("result_text") or parsed.get("response") or parsed.get("result")
-    )
-    inferred_state = parsed.get("inferred_state")
-
-    domains = tool_args.get("domain") or []
-    domains = domains if isinstance(domains, list) else [domains]
-    is_alarm = any(str(d).lower() == "alarm_control_panel" for d in domains)
-    service = str(tool_args.get("service") or "").lower()
-
-    if warning:
-        status = "error"
-        content_str = str(result_text or warning)
-    elif success_val is False:
-        status = "error"
-        content_str = str(result_text or "Action failed.")
-    elif is_alarm:
-        if "arm" in service and inferred_state not in {
-            "armed",
-            "armed_home",
-            "armed_away",
-            "armed_night",
-            "arming",
-        }:
-            status = "error"
-            content_str = str(
-                result_text
-                or f"Alarm did not change state (panel_state={inferred_state})."
-            )
-        if "disarm" in service and inferred_state not in {
-            "disarmed",
-            "disarming",
-        }:
-            status = "error"
-            content_str = str(
-                result_text
-                or f"Alarm did not change state (panel_state={inferred_state})."
-            )
-
-    return content_str, status
-
-
-# Bare name of HA's live-state tool. HA exposes it namespaced
-# (`homeassistant__GetLiveContext`), so every comparison and every
-# force-injection must go through the base name -- see `base_tool_name`.
 LIVE_CONTEXT_TOOL = "GetLiveContext"
 
 
@@ -1363,26 +1300,27 @@ async def _append_on_off_partners(
     live filter is off; see `_append_included_tools`).
     """
     excluded_names = tool_exclusions(config.get("configurable", {}).get("options", {}))
-    bound = {base_tool_name(t["name"]) for t in candidates}
+    # Per API: another server's same-named tool is not this one's partner.
+    bound = {(t["api_id"], base_tool_name(t["name"])) for t in candidates}
     for tool in candidates:
         base = base_tool_name(tool["name"])
         partner = _ON_OFF_PARTNER.get(base)
-        if partner is None or partner in bound:
+        if partner is None or (tool["api_id"], partner) in bound:
             continue
         # Spelled like the bound one ("intent__HassTurnOff" → "intent__HassTurnOn").
+        partner_name = tool["name"].removesuffix(base) + partner
+        excluded = excluded_names.get(tool["api_id"], ())
+        if is_tool_excluded(partner_name, excluded):
+            # Before the store round-trip: with the live filter on, an excluded
+            # tool misses the index and falls through to the fallback scan.
+            continue
         fetched = await _get_tool_by_name(
-            store,
-            config,
-            tool["name"].removesuffix(base) + partner,
-            {tool["api_id"]},
-            live_tool_ids,
+            store, config, partner_name, {tool["api_id"]}, live_tool_ids
         )
-        if fetched is None or is_tool_excluded(
-            fetched["name"], excluded_names.get(fetched["api_id"], ())
-        ):
+        if fetched is None or is_tool_excluded(fetched["name"], excluded):
             continue
         candidates = [*candidates, fetched]
-        bound.add(partner)
+        bound.add((tool["api_id"], partner))
     return candidates
 
 
@@ -2803,12 +2741,6 @@ async def _retrieve_tools(  # noqa: PLR0915
         all_candidates, store, config, query, state["messages"], live_tool_ids
     )
 
-    # 3h. Bind HassTurnOn and HassTurnOff together. Before 3e so inclusions
-    # dedupe against it.
-    all_candidates = await _append_on_off_partners(
-        all_candidates, store, config, live_tool_ids
-    )
-
     # 3e. Force-bind the user's always-included tools (issue #579). A
     # general-purpose tool — a web-search MCP tool on "who won the World
     # Cup?" — can score below the relevance threshold on exactly the queries
@@ -2818,6 +2750,12 @@ async def _retrieve_tools(  # noqa: PLR0915
     # never evicts a RAG/safety selection. Deliberately after step 3b's
     # actuation strip: "always included" means always.
     all_candidates = await _append_included_tools(
+        all_candidates, store, config, live_tool_ids
+    )
+
+    # 3h. Bind HassTurnOn and HassTurnOff together. After 3e, so an
+    # always-included one gets its partner too; it dedupes by (api, name).
+    all_candidates = await _append_on_off_partners(
         all_candidates, store, config, live_tool_ids
     )
 
@@ -3411,9 +3349,13 @@ def _is_critical_action(
             domain = ""
 
     # Treat HA intent tools on locks as critical even without a service arg.
+    # The domain of an entity id the model gave counts too: with no domain
+    # and no service the call would otherwise run with no PIN at all.
     if is_on_off_intent(tool_name):
         domains = tool_args.get("domain") or []
         domains = domains if isinstance(domains, list) else [domains]
+        if not domains and domain:
+            domains = [domain]
         if any(str(d).lower() == "lock" for d in domains):
             return True
         if any(str(d).lower() == "alarm_control_panel" for d in domains):
@@ -3441,56 +3383,6 @@ _LIVE_CONTEXT_KEYS = ("name", "domain", "area")
 def _live_context_args(tool_args: dict[str, Any]) -> dict[str, Any]:
     """Keep only the filters GetLiveContext accepts; models add entity_id too."""
     return {key: tool_args[key] for key in _LIVE_CONTEXT_KEYS if tool_args.get(key)}
-
-
-def _minimal_payload_for_domain(tool_args: dict[str, Any]) -> dict[str, Any]:
-    """Return a reduced payload for HA services to avoid extra keys."""
-    domains = tool_args.get("domain") or []
-    domains = domains if isinstance(domains, list) else [domains]
-    domain = str(domains[0]).lower() if domains else ""
-
-    def slugify(name: str) -> str:
-        return str(name).strip().lower().replace(" ", "_")
-
-    if domain == "lock":
-        name = tool_args.get("name")
-        entity_id = tool_args.get("entity_id")
-        if not entity_id and name:
-            entity_id = f"lock.{slugify(str(name))}"
-        payload: dict[str, Any] = {
-            "domain": ["lock"],
-            "service": tool_args.get("service"),
-        }
-        # The payload must carry a target NAME. HA's turn-on/turn-off intents
-        # resolve targets from name/area/floor and never read an `entity_id`
-        # slot (`helpers/intent.py` contains no such lookup), while `domains`
-        # alone already satisfies `MatchTargetsConstraints.has_constraints` --
-        # so domain+entity_id sails past the "cannot target all devices" guard
-        # and matches EVERY exposed lock. `_filter_by_name` accepts an entity
-        # id as the name value, so one key narrows both shapes to one entity.
-        if target := (name or entity_id):
-            payload["name"] = target
-        if entity_id:
-            payload["entity_id"] = entity_id
-        if code := tool_args.get("code"):
-            payload["code"] = code
-        return payload
-
-    if domain == "alarm_control_panel":
-        payload = {
-            "domain": ["alarm_control_panel"],
-            "service": tool_args.get("service"),
-        }
-        if entity_id := tool_args.get("entity_id"):
-            payload["entity_id"] = entity_id
-        if code := tool_args.get("code"):
-            payload["code"] = code
-        if state := tool_args.get("state"):
-            payload["state"] = state
-        return payload
-
-    # Default: return sanitized args.
-    return tool_args
 
 
 async def _call_tools(
