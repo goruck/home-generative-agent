@@ -11,6 +11,10 @@ their own. See [RELEASING.md](RELEASING.md).
 
 - The model-provider libraries are no longer pinned to one exact version each: `langchain-openai`, `langchain-anthropic` and `langchain-ollama` accept any 1.x release (`langchain-ollama` from 0.3.10), `langchain-google-genai` any 3.x from 3.1.0, and the `anthropic` SDK anything from 0.125.0 below 2. When a Home Assistant release moved a library these depend on, such as `openai` in 2026.10, an exact pin could not be installed next to it and the integration failed to set up for everyone until a new release shipped (#735). Home Assistant can now pick a compatible release on its own. A fresh install, or the reinstall that follows a Home Assistant update, gets the newest release in each range: today `langchain-openai` 1.7.2, `langchain-anthropic` 1.7.6 with `anthropic` 1.15.0, `langchain-ollama` 1.1.0 and `langchain-google-genai` 3.2.0. The test suite runs against the newest releases every day.
 
+### Fixed
+
+- The Critical Action PIN now checks what a script or scene does, not only the call that starts it ([#775](https://github.com/goruck/home-generative-agent/issues/775)). A script run through its own tool, or a script or scene turned on by the agent, ran with no PIN even when it opened the garage door or unlocked the front door, unless a rule named that script or scene. A script is now held when one of its steps would be held in an automation, and a scene when an entity it sets would be: a scene that unlocks the front door asks for the PIN, a bedtime scene that locks it does not. A step that runs another script or scene, fires an event, or builds its action from a template is held, as in automations. Scenes stored on a device (Hue scenes) are not held. A rule naming a script now also covers running it through its own tool.
+
 ## [3.44.1] - 2026-10-16
 
 ### Fixed

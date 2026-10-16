@@ -120,6 +120,12 @@ from .helpers import (
     tool_inclusions,
     tool_index_key,
 )
+from .indirect_pin import (
+    SCENE_DOMAIN,
+    SCRIPT_DOMAIN,
+    runs_critical_action,
+    script_tool_entity_id,
+)
 from .pin_messages import describe_pending_action, pin_msg
 from .token_counter import count_tokens_cross_provider
 
@@ -3391,6 +3397,10 @@ def _is_critical_action(
     if is_actuating_intent(tool_name):
         return _intent_is_critical(tool_args, critical_actions, tool_name, hass)
 
+    # A script's own tool names no domain or service; what it runs decides.
+    if (script_id := script_tool_entity_id(tool_name)) is not None:
+        return _script_is_critical(script_id, critical_actions, hass)
+
     # Alarm panels already enforce their own code; never gate them with the generic PIN.
     if domain == "alarm_control_panel":
         return False
@@ -3405,6 +3415,26 @@ def _is_critical_action(
         entity_ids=entities,
         critical_actions=critical_actions,
     )
+
+
+def _script_is_critical(
+    entity_id: str,
+    critical_actions: list[dict[str, str]],
+    hass: HomeAssistant | None,
+) -> bool:
+    """Return True if a rule names the script or a step it runs is critical."""
+    object_id = entity_id.split(".", 1)[1]
+    if any(
+        matches_critical_rule(
+            domain=SCRIPT_DOMAIN,
+            service=service,
+            entity_ids=[entity_id],
+            critical_actions=critical_actions,
+        )
+        for service in ("turn_on", object_id)
+    ):
+        return True
+    return runs_critical_action(hass, entity_id, critical_actions)
 
 
 def _intent_is_critical(
@@ -3445,6 +3475,7 @@ def _intent_is_critical(
             for call in declared
             if call.domain == "lock" or (call.entity_id and not resolved)
         ]
+    turns_on = base_tool_name(tool_name) == "HassTurnOn"
     for call in calls:
         if call.domain == "alarm_control_panel":
             continue
@@ -3456,6 +3487,16 @@ def _intent_is_critical(
             entity_ids=[call.entity_id] if call.entity_id else [],
             critical_actions=critical_actions,
             unresolved_target=call.entity_id is None,
+        ):
+            return True
+        # Turning on a script runs it; turning on a scene sets its entities.
+        if (
+            turns_on
+            and call.domain in (SCRIPT_DOMAIN, SCENE_DOMAIN)
+            and (
+                call.entity_id is None
+                or runs_critical_action(hass, call.entity_id, critical_actions)
+            )
         ):
             return True
     return False
