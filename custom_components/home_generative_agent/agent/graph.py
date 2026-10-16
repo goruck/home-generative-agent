@@ -3416,9 +3416,11 @@ def _intent_is_critical(
     """
     Return True if any service call an actuating intent makes is critical.
 
-    The calls HA's matcher resolves, plus any entity id the model named and
-    a declared lock domain. Without `hass`, the domain the model declared,
-    with an unnamed target matching every `entity_match` rule. An on/off
+    The calls HA's matcher resolves on the payload HA is sent (an entity id
+    is in it as the name when HA will read it), plus a declared lock domain,
+    plus the entity ids the model named when nothing matched. Without
+    `hass`, the domain the model declared, with an unnamed target matching
+    every `entity_match` rule. An on/off
     intent on any lock is critical whatever the rules say (the domain of an
     entity id the model gave counts: with no domain and no service the call
     would otherwise run with no PIN at all); alarm panels keep their own
@@ -3433,10 +3435,15 @@ def _intent_is_critical(
         resolved = intent_service_calls(hass, tool_name, tool_args)
         if resolved is None:
             return True  # the matcher could not tell: fail closed
-        # What HA matched decides; a domain the model declared with no entity
-        # would otherwise gate every blind in an area as a possible door.
+        # What HA matched decides: an entity id HA ignores, or a domain with
+        # no entity, would otherwise gate every blind as a possible door. A
+        # declared lock is held whatever matched, and an entity id the model
+        # named is checked when nothing matched (HA refuses such a call, but
+        # the gate does not count on it).
         calls = resolved + [
-            call for call in declared if call.entity_id or call.domain == "lock"
+            call
+            for call in declared
+            if call.domain == "lock" or (call.entity_id and not resolved)
         ]
     for call in calls:
         if call.domain == "alarm_control_panel":

@@ -342,6 +342,8 @@ _ON_OFF_VERBS: dict[str, tuple[str, str]] = {
 # in: the ones a PIN rule is most likely about first.
 _VERB_PRIORITY = ("lock", "cover", "valve", "button", "input_button")
 _DEFAULT_VERBS = ("action_turn_on", "action_turn_off")
+# The kind of an action over several kinds of device, named "every device".
+_SEVERAL_KINDS = "*"
 _KIND_KEYS = {"lock": "kind_lock", "cover": "kind_cover", "valve": "kind_valve"}
 
 
@@ -408,7 +410,8 @@ def _intent_actions(
     for domain in sorted(domains, key=lambda d: (rank.get(d, len(rank)), d)):
         by_verb.setdefault(_ON_OFF_VERBS.get(domain, _DEFAULT_VERBS), []).append(domain)
     return [
-        (group[0], group[0] if len(group) == 1 else "") for group in by_verb.values()
+        (group[0], group[0] if len(group) == 1 else _SEVERAL_KINDS)
+        for group in by_verb.values()
     ]
 
 
@@ -418,7 +421,7 @@ def _single_kind(
     """Return the one kind an intent with a single verb acts on, or ""."""
     actions = _intent_actions(hass, tool_name, tool_args)
     kinds = {kind for _, kind in actions}
-    return kinds.pop() if len(actions) == 1 and len(kinds) == 1 else ""
+    return kinds.pop() if len(actions) == 1 and len(kinds) == 1 else _SEVERAL_KINDS
 
 
 def _slot_line(value: Any) -> str:
@@ -452,7 +455,7 @@ def _intent_target(
     floor = _slot_line(payload.get("floor"))
     if not domain and not area and not floor:
         return pin_msg(hass, "action_unnamed_target")
-    if domain:
+    if domain and domain != _SEVERAL_KINDS:
         kind_key = _KIND_KEYS.get(domain, "kind_domain")
         kind = pin_msg(hass, kind_key, domain=sanitize_tool_text(domain, limit=40))
     else:

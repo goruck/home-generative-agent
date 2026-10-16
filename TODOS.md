@@ -30,6 +30,20 @@
 
 ---
 
+### The PIN line describes the match at hold time; HA matches again when the confirmed call runs
+
+**What:** `describe_pending_action` resolves an intent's targets with `async_match_targets` when the call is held, and the fixed line names that match ("open every cover in Garage"). The confirmed call (`_execute_pending_action`, `agent/tools.py`) sends the held arguments, and HA matches them again at that moment. A device renamed, re-aliased or moved into the area between the prompt and the PIN reply changes what runs without changing the line the user confirmed.
+
+**Why:** Claude adversarial pass, second cycle of the #770 review (2026-10-16). The model cannot cause it on its own (it needs a registry change in the PIN window, at most 3 replies), so it was left out of the hotfix.
+
+**How to apply:** Store the resolved entity ids on the pending action when the line is built, and at confirmation re-resolve and refuse (with the fixed "make the request again" line) when the set differs, or send the stored entity ids as the names. Test: hold a call, move a second door into the area, confirm, assert nothing ran.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ### An empty model reply passes the no-reply guard in schema-first mode
 
 **What:** `_async_finish_reply` (conversation.py) judges a turn by the type of the last chat_log entry, not by whether it says anything. In schema-first (ainvoke) mode a model reply with empty content and no tool calls is backfilled as an `AssistantContent` with no text, so the guard adds no apology, the user gets a blank bubble (and a satellite nothing), and the empty `AIMessage` stays in the checkpoint for the next model call. `_call_model`'s empty-reply fallback covers only a reply that follows a `ToolMessage`.

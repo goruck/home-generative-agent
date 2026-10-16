@@ -152,6 +152,15 @@ async def test_opening_a_door_cover_is_critical(
         ("intent__HassSetPosition", {"name": "all", "position": 50}),
         # Stopping is not opening.
         ("intent__HassStopMoving", {"name": "Garage Door"}),
+        # HA acts on the named blinds and ignores the entity id.
+        (
+            "intent__HassTurnOn",
+            {
+                "domain": ["cover"],
+                "name": "Living Room Blinds",
+                "entity_id": "cover.garage_door",
+            },
+        ),
     ],
 )
 async def test_other_calls_stay_ungated(
@@ -336,6 +345,17 @@ async def test_the_tool_path_holds_the_call_for_a_pin(home: HomeAssistant) -> No
         ),
         ("intent__HassTurnOn", {"name": "Garage Opener"}, 'press "Garage Opener"'),
         ("intent__HassStopMoving", {"name": "Garage Door"}, 'stop "Garage Door"'),
+        # Every cover and valve in the home: "every device", never "a device".
+        (
+            "intent__HassTurnOn",
+            {"domain": ["cover", "valve"], "name": "all"},
+            "open every device",
+        ),
+        (
+            "intent__HassSetPosition",
+            {"domain": ["cover", "valve"], "name": "all", "position": 100},
+            "set every device to 100%",
+        ),
         # Floor 0 is kept: dropping it would unlock every lock in the home.
         (
             "intent__HassTurnOff",
