@@ -235,16 +235,16 @@
 
 ---
 
-### Exact `langchain-*` pins break setup whenever Home Assistant bumps a shared dependency
+### Two requirements can still break setup when Home Assistant bumps a shared dependency
 
-**What:** `manifest.json` pins `langchain-openai`, `langchain-google-genai`, `langchain-anthropic`, `langchain-ollama`, `langchain` and `langgraph*` to exact versions. Each one constrains packages that Home Assistant pins for every integration in `homeassistant/package_constraints.txt`: HA 2026.10 pins `openai`, `httpx`, `pydantic`, `protobuf`, `numpy` and `Pillow`. When HA moves one of those past what HGA's exact pin accepts, the requirements can't be resolved and the integration fails to set up for everyone, until a release with a new pin ships. That happened with #735 (`langchain-openai==1.0.3` needed `openai<3`, HA 2026.10 pinned `openai==3.10.0`), reported three times (#735, #740, #741) within a day of HA's release.
+**What:** The provider packages now take capped ranges (`langchain-openai`, `langchain-anthropic`, `langchain-ollama` `<2`, `langchain-google-genai` `<4`, `anthropic` `<2`), so the resolver can pick a release that fits Home Assistant's pins. Two exposures remain. `langchain-google-genai` 3.x reaches Google's API through `google-ai-generativelanguage`, which needs `protobuf<8` and `grpcio<2`, both of which Home Assistant pins in `package_constraints.txt`; when HA moves `protobuf` to 8 the requirements stop resolving for everyone. And our own `ollama>=0.6.1,<0.7` cap excludes any 0.7 that HA's Ollama integration moves to, so a home running both would reinstall one version over the other at each start.
 
-**Why:** Suggested by the #741 reporter (2026-10-08): use a range such as `langchain-openai>=1.6.7,<2`, so HA's resolver can pick a release compatible with the core's pins on its own. The trade-off is that HACS installs then run `langchain-*` releases we never tested, and langchain minors have changed behavior before: 1.6 moved some model names to the Responses API (#735 had to pin `use_responses_api=False`), and 1.6 opens a probe socket at `ChatOpenAI` construction. An open range also lets the resolver pick a release that needs a newer `langchain-core` than other pins allow.
+**Why:** Left over from the range change for the HA 2026.11 beta. 4.x of `langchain-google-genai` moved to the `google-genai` SDK, which drops the protobuf and grpc dependencies, but 4.2.0 was reverted to 3.1.0 in February 2026 (e267da9) with no recorded reason, so moving needs its own test pass against Gemini. `ollama` 0.x minors have changed response types before, which is why its cap is a minor.
 
-**How to apply:** Decide per package. Ranges capped below the next major (`>=X.Y.Z,<X+1`) suit the provider packages, whose job is to track their SDK; keep exact pins where behavior is load-bearing (`langgraph-checkpoint-postgres`, whose schema we migrate). The CI safety net this needs is in place: the "HA compatibility" workflow (`scripts/check_ha_versions.py`) resolves the manifest against the pinned HA's constraints on every PR and against the newest HA release, betas included, every day, and runs the suite against that HA. So a range that lets the resolver pick an untested `langchain-*` release would still be tested daily; what remains is the per-package decision.
+**How to apply:** The daily "Newest HA" job reports a resolution failure during HA's beta week. When it names `protobuf`, move to `langchain-google-genai>=4,<5` and run Gemini chat, vision and embeddings on the box first. When HA pins `ollama` 0.7, widen the cap after running the suite against it.
 
 **Effort:** M
-**Priority:** P2
+**Priority:** P3
 **Depends on:** None
 
 ---
