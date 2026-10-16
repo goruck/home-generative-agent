@@ -183,6 +183,11 @@ def _is_template(value: Any) -> bool:
     return hasattr(value, "template")
 
 
+def _has_templated_key(mapping: Mapping[Any, Any]) -> bool:
+    """Return True if a key is a template, which HA renders like a value."""
+    return any(not isinstance(key, str) or _is_template(key) for key in mapping)
+
+
 def _walk_steps(
     node: Any, depth: int = 0
 ) -> Iterator[tuple[Mapping[str, Any], str | None]]:
@@ -324,8 +329,9 @@ def step_targets(
     containers.extend(step[key] for key in _TARGET_CONTAINER_KEYS if key in step)
 
     for container in containers:
-        if not isinstance(container, dict):
-            # e.g. a fully templated `target:`.
+        if not isinstance(container, dict) or _has_templated_key(container):
+            # e.g. a fully templated `target:`, or a key HA renders into
+            # `entity_id` when the step runs.
             unresolved = True
             continue
         found, found_unresolved = _collect_entity_ids(container.get("entity_id"), keep)
@@ -382,7 +388,9 @@ def _screen_state_reproduction(
         block = step.get(key)
         if block is None:
             continue
-        if not isinstance(block, dict):
+        if not isinstance(block, dict) or _has_templated_key(block):
+            # HA renders dict keys too, so a templated key can become
+            # `entities` when the step runs.
             return [unreadable]
         data.update(block)
     if not data:

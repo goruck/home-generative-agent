@@ -431,6 +431,25 @@ def test_without_hass_a_scene_or_script_is_held() -> None:
             True,
         ),
         ({"domain": "light", "service": "turn_on", "area_id": "garage"}, False),
+        # `variables` is an automation.trigger field, not a script action.
+        (
+            {
+                "domain": "automation",
+                "service": "trigger",
+                "entity_id": "automation.arrive",
+                "variables": {},
+            },
+            True,
+        ),
+        (
+            {
+                "domain": "light",
+                "service": "turn_on",
+                "entity_id": "light.porch",
+                "delay": 5,
+            },
+            False,
+        ),
     ],
 )
 async def test_a_service_tool_reads_targets_the_way_ha_does(
@@ -626,3 +645,18 @@ async def test_the_script_tool_is_held_for_a_pin(home: HomeAssistant) -> None:
 def test_script_tool_names(tool_name: str, entity_id: str | None) -> None:
     """HA names a script's tool `script__<object id>`, maybe namespaced."""
     assert script_tool_entity_id(tool_name) == entity_id
+
+
+async def test_a_light_scene_with_no_registry_entry_runs(home: HomeAssistant) -> None:
+    """LIFX Cloud scenes have no unique id, so the loaded entity names it."""
+    platform = SimpleNamespace(platform_name="lifx_cloud")
+    component = SimpleNamespace(
+        get_entity=lambda entity_id: (
+            SimpleNamespace(platform=platform) if entity_id == "scene.sunset" else None
+        )
+    )
+    home.data["scene"] = component
+    home.states.async_set("scene.sunset", "unknown", {"friendly_name": "Sunset"})
+    assert not _is_critical_action(
+        {"entity_id": "scene.sunset"}, RULES, "HassTurnOn", home
+    )

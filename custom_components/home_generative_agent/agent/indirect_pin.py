@@ -79,6 +79,20 @@ _RUN_SERVICES = frozenset({"turn_on", "toggle"})
 _SCRIPT_SERVICES_THAT_DO_NOT_RUN = frozenset({"turn_off", "reload"})
 _SCENE_INLINE_SERVICES = frozenset({"apply", "create"})
 _INLINE_STATE_KEYS = ("entities", "snapshot_entities")
+# Keys a service step reads its targets from (`automation_pin`).
+_STEP_TARGET_KEYS = frozenset(
+    {
+        "entity_id",
+        "target",
+        "data",
+        "data_template",
+        "service_data",
+        "device_id",
+        "area_id",
+        "label_id",
+        "floor_id",
+    }
+)
 
 # A group can contain a group.
 _MAX_DEPTH = 5
@@ -205,13 +219,29 @@ def service_runs_critical_action(  # noqa: PLR0911
 
 
 def _service_step(action: str, tool_args: Mapping[str, Any]) -> dict[str, Any]:
-    """Return a service tool's call as an automation step."""
-    step: dict[str, Any] = {
-        key: value
-        for key, value in tool_args.items()
-        if key not in ("domain", "service", "action", "entity_ids")
-    }
-    step["action"] = action
+    """
+    Return a service tool's call as an automation step.
+
+    Only target keys stay at the top: any other argument goes under `data`,
+    where it is a service field. Left at the top, a field named like a script
+    action (`variables`, `delay`) would make the step read as that action.
+    """
+    step: dict[str, Any] = {"action": action}
+    fields: dict[str, Any] = {}
+    for key, value in tool_args.items():
+        if key in ("domain", "service", "action", "entity_ids"):
+            continue
+        if key in _STEP_TARGET_KEYS:
+            step[key] = value
+        else:
+            fields[key] = value
+    if fields:
+        nested = step.get("data")
+        if nested is None:
+            step["data"] = fields
+        elif isinstance(nested, dict):
+            step["data"] = {**fields, **nested}
+        # Any other `data` stays as it is, for the screen to call unreadable.
     if (plural := tool_args.get("entity_ids")) is not None:
         named = step.get("entity_id")
         step["entity_id"] = [
@@ -313,8 +343,7 @@ def _scene_is_critical(
     entity = platform.entities.get(entity_id) if platform is not None else None
     states = getattr(getattr(entity, "scene_config", None), "states", None)
     if not isinstance(states, dict):
-        entry = er.async_get(hass).async_get(entity_id)
-        if entry is not None and entry.platform in _LIGHT_SCENE_PLATFORMS:
+        if _scene_platform(hass, entity_id) in _LIGHT_SCENE_PLATFORMS:
             return False
         LOGGER.debug("Cannot read the states %s sets; holding it", entity_id)
         return True
@@ -323,6 +352,22 @@ def _scene_is_critical(
         _state_is_critical(hass, state, rules, depth=0, seen=seen)
         for state in states.values()
     )
+
+
+def _scene_platform(hass: HomeAssistant, entity_id: str) -> str | None:
+    """
+    Return the integration a scene comes from.
+
+    From the loaded entity, since a scene with no unique id (LIFX Cloud's)
+    has no registry entry; else from the registry.
+    """
+    component = hass.data.get(SCENE_DOMAIN)
+    entity = component.get_entity(entity_id) if component is not None else None
+    platform = getattr(getattr(entity, "platform", None), "platform_name", None)
+    if isinstance(platform, str):
+        return platform
+    entry = er.async_get(hass).async_get(entity_id)
+    return entry.platform if entry is not None else None
 
 
 def _state_is_critical(
