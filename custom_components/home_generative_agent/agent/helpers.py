@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict
 import homeassistant.util.dt as dt_util
 import voluptuous as vol
 from homeassistant.const import CONF_LLM_HASS_API
-from homeassistant.helpers import llm
+from homeassistant.helpers import intent, llm
 from homeassistant.util import ulid
 from pydantic import PydanticInvalidForJsonSchema
 
@@ -1230,8 +1230,12 @@ def _lock_payload(
         payload["entity_id"] = entity_id
     # The area or floor the user named narrows a call with no name to
     # the locks there, rather than every lock in the home.
+    # HA reads a number as text (floor 0 is the floor "0"), so only a
+    # missing or blank value is dropped; dropping 0 would widen the call
+    # to every lock in the home.
     for key in ("area", "floor"):
-        if value := tool_args.get(key):
+        value = tool_args.get(key)
+        if value is not None and not (isinstance(value, str) and not value.strip()):
             payload[key] = value
     if code := tool_args.get("code"):
         payload["code"] = code
@@ -1493,6 +1497,204 @@ def normalize_intent_for_lock(
     else:
         normalized.setdefault("service", "lock")
     return normalized
+
+
+# The services Home Assistant's own intent handlers call for a matched
+# entity, by its domain (`components/intent/__init__.py`): the on/off intents
+# open and close covers and valves, lock and unlock locks, press buttons (and
+# refuse to turn one off), and call `turn_on`/`turn_off` on everything else;
+# HassSetPosition sets a cover's or a valve's position. The `domain` slot only
+# narrows the match, it never picks the service, so the gate must read the
+# service from each matched entity.
+_ON_OFF_INTENT_SERVICES: dict[str, tuple[str | None, str | None]] = {
+    "cover": ("open_cover", "close_cover"),
+    "valve": ("open_valve", "close_valve"),
+    "lock": ("lock", "unlock"),
+    "button": ("press", None),
+    "input_button": ("press", None),
+}
+_SET_POSITION_SERVICES: dict[str, str] = {
+    "cover": "set_cover_position",
+    "valve": "set_valve_position",
+}
+_STOP_MOVING_SERVICES: dict[str, str] = {
+    "cover": "stop_cover",
+    "valve": "stop_valve",
+}
+SET_POSITION_INTENT = "HassSetPosition"
+STOP_MOVING_INTENT = "HassStopMoving"
+# The intents that act on covers and valves only; HA refuses any other match.
+_COVER_VALVE_INTENTS: dict[str, dict[str, str]] = {
+    SET_POSITION_INTENT: _SET_POSITION_SERVICES,
+    STOP_MOVING_INTENT: _STOP_MOVING_SERVICES,
+}
+
+
+class IntentServiceCall(NamedTuple):
+    """One service call an intent makes: its domain, service and entity."""
+
+    domain: str
+    service: str
+    entity_id: str | None
+
+
+class _UnclassifiableSlotError(ValueError):
+    """A slot value whose meaning to Home Assistant the gate cannot read."""
+
+
+def is_actuating_intent(tool_name: str) -> bool:
+    """Return True for the intents whose service depends on the target."""
+    return is_on_off_intent(tool_name) or (
+        base_tool_name(tool_name) in _COVER_VALVE_INTENTS
+    )
+
+
+def _intent_services(tool_name: str, domain: str, entity_id: str | None) -> list[str]:
+    """
+    Return the services an actuating intent calls on an entity of `domain`.
+
+    A script turned on runs, so a rule written for the script's own service
+    (`script.open_garage`) applies to it as well as one for `script.turn_on`.
+    """
+    if (services := _COVER_VALVE_INTENTS.get(base_tool_name(tool_name))) is not None:
+        service = services.get(domain)
+        return [service] if service else []
+    turns_on = base_tool_name(tool_name) == "HassTurnOn"
+    on, off = _ON_OFF_INTENT_SERVICES.get(domain, ("turn_on", "turn_off"))
+    service = on if turns_on else off
+    if service is None:
+        return []
+    services = [service]
+    if domain == "script" and turns_on and entity_id and "." in entity_id:
+        services.append(entity_id.split(".", 1)[1])
+    return services
+
+
+def _intent_calls(
+    tool_name: str, domain: str, entity_id: str | None
+) -> list[IntentServiceCall]:
+    """Return the service calls an actuating intent makes on one entity."""
+    return [
+        IntentServiceCall(domain, service, entity_id)
+        for service in _intent_services(tool_name, domain, entity_id)
+    ]
+
+
+def _slot_text(value: Any) -> str | None:
+    """
+    Return a slot value as Home Assistant's slot schema reads it.
+
+    HA omits a blank slot and coerces anything else with `cv.string`, which
+    turns a number into its text (`floor: 1` is the floor "1") and rejects a
+    list or a dict. Reading a number as absent would drop a target HA uses.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if isinstance(value, (list, dict)):
+        raise _UnclassifiableSlotError(value)
+    return str(value)
+
+
+def _text_list(value: Any) -> list[str]:
+    """Return a list slot (`domain`, `device_class`) as lowercase text."""
+    values = value if isinstance(value, list) else [value]
+    texts = [_slot_text(v) for v in values]
+    return [t.strip().lower() for t in texts if t]
+
+
+def intent_service_calls(
+    hass: HomeAssistant | None, tool_name: str, tool_args: Mapping[str, Any]
+) -> list[IntentServiceCall] | None:
+    """
+    Return the service calls an actuating intent will make, one per entity.
+
+    Matched with Home Assistant's own `async_match_targets` on the payload the
+    call is sent as (`minimal_payload_for_domain`), with the slot values read
+    the way HA's slot schema reads them, so the gate checks what HA will act
+    on rather than what the model wrote: a cover opened by name alone, a
+    garage door named only by its entity id, every device in an area. The
+    match ignores Assist exposure and allows duplicate names, so it finds at
+    least the entities HA will act on. Returns None when it cannot tell: no
+    `hass`, a slot shape it cannot read, or a matcher that raised. The gate
+    then treats the call as critical, or with no `hass` checks the domain and
+    entity ids the model gave.
+    """
+    if hass is None or not is_actuating_intent(tool_name):
+        return None
+    payload = minimal_payload_for_domain(dict(tool_args))
+    try:
+        name = _slot_text(payload.get("name"))
+        area = _slot_text(payload.get("area"))
+        floor = _slot_text(payload.get("floor"))
+        domains = _text_list(payload.get("domain"))
+        device_classes = _text_list(payload.get("device_class"))
+    except _UnclassifiableSlotError:
+        return None
+    if name == INTENT_NAME_ALL:
+        # HA's own comparison: exact, so " all " stays a name it looks up.
+        name = None
+    # No domains are added for the cover/valve intents: HA adds none, so a
+    # call with no target is refused there, and a light it matches has no
+    # service in `_intent_services`.
+    constraints = intent.MatchTargetsConstraints(
+        name=name,
+        area_name=area,
+        floor_name=floor,
+        domains=domains or None,
+        device_classes=device_classes or None,
+        allow_duplicate_names=True,
+    )
+    if not constraints.has_constraints:
+        # HA refuses an intent that would target every device.
+        return []
+    try:
+        result = intent.async_match_targets(hass, constraints)
+    except Exception:
+        LOGGER.warning("Could not match the targets of %s", tool_name, exc_info=True)
+        return None
+    if not result.is_match:
+        return []
+    return [
+        call
+        for state in result.states
+        for call in _intent_calls(tool_name, state.domain, state.entity_id)
+    ]
+
+
+def declared_intent_service_calls(
+    tool_name: str, tool_args: Mapping[str, Any]
+) -> list[IntentServiceCall] | None:
+    """
+    Return the service calls an actuating intent declares, without `hass`.
+
+    From the domain slot, or the domain of the entity ids the model gave.
+    With no entity id the target is unknown, so the call carries none and
+    an `entity_match` rule treats it as matching. None for a slot shape it
+    cannot read, which the gate holds.
+    """
+    if not is_actuating_intent(tool_name):
+        return []
+    try:
+        entity_ids = [
+            e
+            for e in _text_list(tool_args.get("entity_id"))
+            + _text_list(tool_args.get("entity_ids"))
+            if "." in e
+        ]
+        domains = _text_list(tool_args.get("domain"))
+    except _UnclassifiableSlotError:
+        return None
+    calls = [
+        call
+        for entity_id in entity_ids
+        if not domains or entity_id.split(".", 1)[0] in domains
+        for call in _intent_calls(tool_name, entity_id.split(".", 1)[0], entity_id)
+    ]
+    if calls:
+        return calls
+    return [
+        call for domain in domains for call in _intent_calls(tool_name, domain, None)
+    ]
 
 
 # Separator between the API id and the tool name in a composite tool key.

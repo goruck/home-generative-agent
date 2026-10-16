@@ -36,7 +36,10 @@ from typing import TYPE_CHECKING, Any
 
 from .helpers import (
     INTENT_NAME_ALL,
+    SET_POSITION_INTENT,
+    STOP_MOVING_INTENT,
     base_tool_name,
+    intent_service_calls,
     is_on_off_intent,
     minimal_payload_for_domain,
     normalize_intent_for_lock,
@@ -145,6 +148,9 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "action_close": "close {target}",
         "action_turn_on": "turn on {target}",
         "action_turn_off": "turn off {target}",
+        "action_set_position": "set {target} to {position}%",
+        "action_press": "press {target}",
+        "action_stop": "stop {target}",
         "action_service": "{service} {target}",
         "action_automation": "add the automation {target}",
         "action_unnamed_automation": "add an unnamed automation",
@@ -162,6 +168,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "kind_cover": "every cover",
         "kind_valve": "every valve",
         "kind_domain": "every {domain} device",
+        "kind_device": "every device",
     },
     "cs": {
         "automation_pin_unset": (
@@ -261,6 +268,9 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "action_close": "zavřít {target}",
         "action_turn_on": "zapnout {target}",
         "action_turn_off": "vypnout {target}",
+        "action_set_position": "nastavit {target} na {position} %",
+        "action_press": "stisknout {target}",
+        "action_stop": "zastavit {target}",
         "action_service": "{service} {target}",
         "action_automation": "přidat automatizaci {target}",
         "action_unnamed_automation": "přidat nepojmenovanou automatizaci",
@@ -275,6 +285,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "kind_cover": "všechny rolety a vrata",
         "kind_valve": "všechny ventily",
         "kind_domain": "všechna zařízení typu {domain}",
+        "kind_device": "všechna zařízení",
     },
 }
 
@@ -318,12 +329,21 @@ _AUTOMATION_CALL_MAX_LEN = 60
 _ELLIPSIS = "\u2026"
 
 # How Home Assistant's OnOffIntentHandler runs HassTurnOn / HassTurnOff by
-# domain: (on, off). Any other domain is turned on or off.
+# domain: (on, off). Any other domain is turned on or off. HA refuses to turn
+# a button off, so that call never runs and needs no line of its own.
 _ON_OFF_VERBS: dict[str, tuple[str, str]] = {
     "lock": ("action_lock", "action_unlock"),
     "cover": ("action_open", "action_close"),
     "valve": ("action_open", "action_close"),
+    "button": ("action_press", "action_turn_off"),
+    "input_button": ("action_press", "action_turn_off"),
 }
+# The order the actions of a call over several kinds of device are named
+# in: the ones a PIN rule is most likely about first.
+_VERB_PRIORITY = ("lock", "cover", "valve", "button", "input_button")
+_DEFAULT_VERBS = ("action_turn_on", "action_turn_off")
+# The kind of an action over several kinds of device, named "every device".
+_SEVERAL_KINDS = "*"
 _KIND_KEYS = {"lock": "kind_lock", "cover": "kind_cover", "valve": "kind_valve"}
 
 
@@ -350,9 +370,9 @@ def _named(hass: HomeAssistant | None, name: str) -> str:
     return pin_msg(hass, "target_named", name=name)
 
 
-def _intent_domain(tool_name: str, tool_args: Mapping[str, Any]) -> str:
+def _declared_domain(tool_name: str, tool_args: Mapping[str, Any]) -> str:
     """
-    Return the domain an on/off intent acts on, as the gate reads it.
+    Return the domain an intent declares, for a line built without a match.
 
     The lock normalizer (a `lock` domain, or "lock" in the name), else the
     domain argument, else the domain of an entity id the model gave.
@@ -365,36 +385,94 @@ def _intent_domain(tool_name: str, tool_args: Mapping[str, Any]) -> str:
     return entity_id.split(".", 1)[0].lower() if "." in entity_id else ""
 
 
+def _intent_actions(
+    hass: HomeAssistant | None, tool_name: str, tool_args: Mapping[str, Any]
+) -> list[tuple[str, str]]:
+    """
+    Return one (verb, kind) domain pair per distinct action an intent takes.
+
+    From the entities HA's matcher finds, the same resolution the gate uses,
+    so a lock named only "Front Door" reads "unlock" (#770) and an entity id
+    the model added, which HA ignores, cannot change the verb. Kinds that
+    share a verb are one action; one that does something else is its own,
+    so turning on a garage with a lock and the garage door says both "lock"
+    and "open", never one for the other. The kind names the target only
+    when the action covers one kind ("every device" otherwise). With nothing
+    matched, the domain the call declares.
+    """
+    resolved = intent_service_calls(hass, tool_name, tool_args) if hass else None
+    domains = {call.domain for call in resolved or []}
+    if not domains:
+        domain = _declared_domain(tool_name, tool_args)
+        return [(domain, domain)]
+    rank = {domain: index for index, domain in enumerate(_VERB_PRIORITY)}
+    by_verb: dict[tuple[str, str], list[str]] = {}
+    for domain in sorted(domains, key=lambda d: (rank.get(d, len(rank)), d)):
+        by_verb.setdefault(_ON_OFF_VERBS.get(domain, _DEFAULT_VERBS), []).append(domain)
+    return [
+        (group[0], group[0] if len(group) == 1 else _SEVERAL_KINDS)
+        for group in by_verb.values()
+    ]
+
+
+def _single_kind(
+    hass: HomeAssistant | None, tool_name: str, tool_args: Mapping[str, Any]
+) -> str:
+    """Return the one kind an intent with a single verb acts on, or ""."""
+    actions = _intent_actions(hass, tool_name, tool_args)
+    kinds = {kind for _, kind in actions}
+    return kinds.pop() if len(actions) == 1 and len(kinds) == 1 else _SEVERAL_KINDS
+
+
+def _slot_line(value: Any) -> str:
+    """Return a slot value as one line, read the way HA's slot schema reads it."""
+    if value is None or isinstance(value, (list, dict)):
+        return ""
+    return _one_line(str(value), _ACTION_TARGET_MAX_LEN)
+
+
 def _intent_target(
     hass: HomeAssistant | None, tool_args: Mapping[str, Any], domain: str
 ) -> str:
     """
-    Name what Home Assistant will act on for an on/off intent.
+    Name what Home Assistant will act on for an actuating intent.
 
     Read from the payload the call is sent as (`minimal_payload_for_domain`,
     which the normal path and the PIN confirmation both apply), so the line
     and the call cannot drift: HA's intents read the name, area and floor
     slots, and the payload sends an entity id the model gave as the name.
-    With no name, the whole domain acts, in the area or on the floor if one
-    is given, and the line says so rather than naming a device it will not
+    With no name, every device of the kind acts (every device, when the
+    matches are of several kinds), in the area or on the floor if one is
+    given, and the line says so rather than naming a device it will not
     single out.
     """
     payload = minimal_payload_for_domain(dict(tool_args))
     name = payload.get("name")
-    if not isinstance(name, str) or name == INTENT_NAME_ALL:
-        name = ""
-    name = _one_line(name, _ACTION_TARGET_MAX_LEN)
+    name = "" if name == INTENT_NAME_ALL else _slot_line(name)
     if name:
         return _named(hass, name)
-    if not domain:
+    area = _slot_line(payload.get("area"))
+    floor = _slot_line(payload.get("floor"))
+    if not domain and not area and not floor:
         return pin_msg(hass, "action_unnamed_target")
-    kind_key = _KIND_KEYS.get(domain, "kind_domain")
-    kind = pin_msg(hass, kind_key, domain=sanitize_tool_text(domain, limit=40))
-    if area := _one_line(tool_args.get("area"), _ACTION_TARGET_MAX_LEN):
+    if domain and domain != _SEVERAL_KINDS:
+        kind_key = _KIND_KEYS.get(domain, "kind_domain")
+        kind = pin_msg(hass, kind_key, domain=sanitize_tool_text(domain, limit=40))
+    else:
+        kind = pin_msg(hass, "kind_device")
+    if area:
         return pin_msg(hass, "target_every_in_area", kind=kind, area=area)
-    if floor := _one_line(tool_args.get("floor"), _ACTION_TARGET_MAX_LEN):
+    if floor:
         return pin_msg(hass, "target_every_on_floor", kind=kind, floor=floor)
     return pin_msg(hass, "target_every", kind=kind)
+
+
+def _position_text(value: Any) -> str:
+    """Return a held position as HA will run it (`Coerce(int)`), 0 included."""
+    try:
+        return str(int(value))
+    except (TypeError, ValueError, OverflowError):
+        return _one_line(value, _ACTION_SERVICE_MAX_LEN)
 
 
 def _describe_automation(hass: HomeAssistant | None, action: Mapping[str, Any]) -> str:
@@ -447,17 +525,36 @@ def describe_pending_action(
 
     raw_args = action.get("tool_args")
     tool_args: dict[str, Any] = dict(raw_args) if isinstance(raw_args, Mapping) else {}
-    if is_on_off_intent(tool_name):
-        turns_on = base_tool_name(tool_name) == "HassTurnOn"
-        domain = _intent_domain(tool_name, tool_args)
-        on_key, off_key = _ON_OFF_VERBS.get(
-            domain, ("action_turn_on", "action_turn_off")
-        )
+    if base_tool_name(tool_name) == SET_POSITION_INTENT:
         return pin_msg(
             hass,
-            on_key if turns_on else off_key,
-            target=_intent_target(hass, tool_args, domain),
+            "action_set_position",
+            target=_intent_target(
+                hass, tool_args, _single_kind(hass, tool_name, tool_args)
+            ),
+            position=_position_text(tool_args.get("position")),
         )
+    if base_tool_name(tool_name) == STOP_MOVING_INTENT:
+        return pin_msg(
+            hass,
+            "action_stop",
+            target=_intent_target(
+                hass, tool_args, _single_kind(hass, tool_name, tool_args)
+            ),
+        )
+    if is_on_off_intent(tool_name):
+        turns_on = base_tool_name(tool_name) == "HassTurnOn"
+        parts = []
+        for verb, kind in _intent_actions(hass, tool_name, tool_args):
+            on_key, off_key = _ON_OFF_VERBS.get(verb, _DEFAULT_VERBS)
+            parts.append(
+                pin_msg(
+                    hass,
+                    on_key if turns_on else off_key,
+                    target=_intent_target(hass, tool_args, kind),
+                )
+            )
+        return ", ".join(parts)
 
     target = _one_line(
         tool_args.get("name")

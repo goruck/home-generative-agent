@@ -93,7 +93,10 @@ from .helpers import (
     PIN_REFUSAL_ENDS_TURN,
     active_llm_api_ids,
     base_tool_name,
+    declared_intent_service_calls,
     format_tool,
+    intent_service_calls,
+    is_actuating_intent,
     is_actuation_tool,
     is_on_off_intent,
     is_tool_excluded,
@@ -416,7 +419,7 @@ def _critical_action_guard(
     """Enforce critical-action PIN flow when needed."""
     if not ctx.pin_enabled:
         return None
-    if not _is_critical_action(tool_args, ctx.critical_actions, tool_name):
+    if not _is_critical_action(tool_args, ctx.critical_actions, tool_name, ctx.hass):
         return None
     if not ctx.pin_hash or not ctx.pin_salt:
         LOGGER.warning(
@@ -3367,6 +3370,7 @@ def _is_critical_action(
     tool_args: dict[str, Any],
     critical_actions: list[dict[str, str]],
     tool_name: str,
+    hass: HomeAssistant | None = None,
 ) -> bool:
     """Return True if the call matches a critical domain/service/entity rule."""
     domain_val = tool_args.get("domain", "")
@@ -3382,18 +3386,10 @@ def _is_critical_action(
         except IndexError:
             domain = ""
 
-    # Treat HA intent tools on locks as critical even without a service arg.
-    # The domain of an entity id the model gave counts too: with no domain
-    # and no service the call would otherwise run with no PIN at all.
-    if is_on_off_intent(tool_name):
-        domains = tool_args.get("domain") or []
-        domains = domains if isinstance(domains, list) else [domains]
-        if not domains and domain:
-            domains = [domain]
-        if any(str(d).lower() == "lock" for d in domains):
-            return True
-        if any(str(d).lower() == "alarm_control_panel" for d in domains):
-            return False  # alarm panels use their own code, not the critical PIN
+    # An intent carries no service: HA picks it per matched entity (on/off
+    # opens or closes a cover, #770), so check each call HA will make.
+    if is_actuating_intent(tool_name):
+        return _intent_is_critical(tool_args, critical_actions, tool_name, hass)
 
     # Alarm panels already enforce their own code; never gate them with the generic PIN.
     if domain == "alarm_control_panel":
@@ -3409,6 +3405,60 @@ def _is_critical_action(
         entity_ids=entities,
         critical_actions=critical_actions,
     )
+
+
+def _intent_is_critical(
+    tool_args: dict[str, Any],
+    critical_actions: list[dict[str, str]],
+    tool_name: str,
+    hass: HomeAssistant | None,
+) -> bool:
+    """
+    Return True if any service call an actuating intent makes is critical.
+
+    The calls HA's matcher resolves on the payload HA is sent (an entity id
+    is in it as the name when HA will read it), plus a declared lock domain,
+    plus the entity ids the model named when nothing matched. Without
+    `hass`, the domain the model declared, with an unnamed target matching
+    every `entity_match` rule. An on/off
+    intent on any lock is critical whatever the rules say (the domain of an
+    entity id the model gave counts: with no domain and no service the call
+    would otherwise run with no PIN at all); alarm panels keep their own
+    code. When the matcher cannot tell what HA will act on, the call is held.
+    """
+    declared = declared_intent_service_calls(tool_name, tool_args)
+    if declared is None:
+        return True  # a slot the gate cannot read: fail closed
+    if hass is None:
+        calls = declared
+    else:
+        resolved = intent_service_calls(hass, tool_name, tool_args)
+        if resolved is None:
+            return True  # the matcher could not tell: fail closed
+        # What HA matched decides: an entity id HA ignores, or a domain with
+        # no entity, would otherwise gate every blind as a possible door. A
+        # declared lock is held whatever matched, and an entity id the model
+        # named is checked when nothing matched (HA refuses such a call, but
+        # the gate does not count on it).
+        calls = resolved + [
+            call
+            for call in declared
+            if call.domain == "lock" or (call.entity_id and not resolved)
+        ]
+    for call in calls:
+        if call.domain == "alarm_control_panel":
+            continue
+        if call.domain == "lock" and is_on_off_intent(tool_name):
+            return True
+        if matches_critical_rule(
+            domain=call.domain,
+            service=call.service,
+            entity_ids=[call.entity_id] if call.entity_id else [],
+            critical_actions=critical_actions,
+            unresolved_target=call.entity_id is None,
+        ):
+            return True
+    return False
 
 
 _LIVE_CONTEXT_KEYS = ("name", "domain", "area")
