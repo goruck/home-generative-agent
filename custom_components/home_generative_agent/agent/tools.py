@@ -1469,23 +1469,111 @@ async def alarm_control(  # noqa: D417, PLR0913
     return json.dumps(result)
 
 
+def _state_values(data: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Return the entries that have a state and a time, reduced to those two."""
+    keys = ("state", "last_changed")
+    return [{k: d[k] for k in keys} for d in data if all(k in d for k in keys)]
+
+
 def _get_state_and_decimate(
-    data: list[dict[str, str]],
-    keys: list[str] | None = None,
-    limit: int = HISTORY_TOOL_CONTEXT_LIMIT,
+    data: list[dict[str, str]], limit: int = HISTORY_TOOL_CONTEXT_LIMIT
 ) -> list[dict[str, str]]:
-    if keys is None:
-        keys = ["state", "last_changed"]
-    # Filter entity data to only state values with datetimes.
-    state_values = [d for d in data if all(key in d for key in keys)]
-    state_values = [{k: sv[k] for k in keys} for sv in state_values]
-    # Decimate to avoid adding unnecessary fine grained data to context.
+    """
+    Thin a numeric series to at most `limit` entries, keeping the latest.
+
+    Only for numbers: every Nth reading still traces the curve. A series of
+    discrete states must not be sampled this way, see
+    `_summarize_state_changes`.
+    """
+    state_values = _state_values(data)
     length = len(state_values)
     if length > limit:
         LOGGER.debug("Decimating sensor data set.")
-        factor = max(1, length // limit)
-        state_values = state_values[::factor]
+        last = state_values[-1]
+        state_values = state_values[:: math.ceil(length / limit)]
+        state_values[-1] = last
     return state_values
+
+
+def _is_numeric_series(state_values: list[dict[str, str]]) -> bool:
+    """Return True if every known state is a number (and there is one)."""
+    known = [
+        v["state"]
+        for v in state_values
+        if v["state"] not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+    ]
+    try:
+        for state in known:
+            float(state)
+    except ValueError:
+        return False
+    return bool(known)
+
+
+_SUMMARY_MAX_STATES = 10
+
+
+def _summarize_state_changes(
+    data: list[dict[str, str]],
+    period: tuple[datetime, datetime] | None = None,
+    limit: int = HISTORY_TOOL_CONTEXT_LIMIT,
+) -> dict[str, Any]:
+    """
+    Return a discrete history, or its latest changes and a summary of all.
+
+    Sampling every Nth entry of a history that alternates (off, on, off, ...)
+    with an even N kept one state only, so a light that toggled 100 times
+    read as never on (#715). Rows that repeat the previous state (a
+    thermostat records one per attribute update) are dropped first, so the
+    limit counts changes. Over `limit` changes, the latest `limit` are kept
+    whole, and each state gets, over the whole period: how many times it was
+    entered, when first and last, and the minutes spent in it. A blip to
+    unavailable or unknown and back does not count as entering the state
+    again.
+    """
+    changes: list[dict[str, str]] = []
+    for value in _state_values(data):
+        if not changes or value["state"] != changes[-1]["state"]:
+            changes.append(value)
+    if len(changes) <= limit:
+        return {"values": changes}
+
+    times = [dt_util.parse_datetime(c["last_changed"]) for c in changes]
+    start, end = period or (times[0], times[-1])
+    stats: dict[str, dict[str, Any]] = {}
+    previous_known: str | None = None
+    for i, change in enumerate(changes):
+        state = change["state"]
+        entry = stats.setdefault(state, {"times_entered": 0, "minutes_in_state": 0.0})
+        began, ended = times[i], times[i + 1] if i + 1 < len(times) else end
+        if began is not None and ended is not None and start is not None:
+            seconds = (ended - max(began, start)).total_seconds()
+            entry["minutes_in_state"] += max(seconds, 0.0) / 60
+        unavailable = state in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+        if i and (unavailable or state != previous_known):
+            entry["times_entered"] += 1
+            entry.setdefault("first_entered", change["last_changed"])
+            entry["last_entered"] = change["last_changed"]
+        if not unavailable:
+            previous_known = state
+    ranked = sorted(stats.items(), key=lambda kv: -kv[1]["minutes_in_state"])
+    states = {
+        state: {**entry, "minutes_in_state": round(entry["minutes_in_state"], 1)}
+        for state, entry in ranked[:_SUMMARY_MAX_STATES]
+    }
+    note = (
+        f"{len(changes)} state changes in this period; values lists only the "
+        f"latest {limit}. states covers the whole period: times_entered, "
+        "first_entered, last_entered and minutes_in_state per state."
+    )
+    if start is not None and times[0] is not None and times[0] > start:
+        note += f" No history before {changes[0]['last_changed']}."
+    return {
+        "state_at_start": changes[0],
+        "states": states,
+        "values": changes[-limit:],
+        "note": note,
+    }
 
 
 def _gen_dict_extract(key: str, var: dict) -> Generator[str]:
@@ -1502,7 +1590,10 @@ def _gen_dict_extract(key: str, var: dict) -> Generator[str]:
 
 
 def _filter_data(
-    entity_id: str, data: list[dict[str, str]], hass: HomeAssistant
+    entity_id: str,
+    data: list[dict[str, str]],
+    hass: HomeAssistant,
+    period: tuple[datetime, datetime] | None = None,
 ) -> dict[str, Any]:
     state_obj = hass.states.get(entity_id)
     if not state_obj:
@@ -1539,7 +1630,12 @@ def _filter_data(
         state_value_change = max(state_values) - min(state_values)
         return {"value": state_value_change, "units": units}
 
-    return {"values": _get_state_and_decimate(data)}
+    # A number with no state class (a template sensor, say) is thinned too.
+    if _is_numeric_series(_state_values(data)):
+        summary: dict[str, Any] = {"values": _get_state_and_decimate(data)}
+    else:
+        summary = _summarize_state_changes(data, period)
+    return summary
 
 
 async def _fetch_data_from_history(
@@ -1757,6 +1853,11 @@ async def get_entity_history(  # noqa: D417
                     {"state": "on", "last_changed": "2025-07-24T04:47:28-0700"},
                     ...]}
             }.
+        When a device changed state more times than can be listed, its entry
+        lists only the latest changes in "values" and adds "state_at_start",
+        "states" (for each state over the whole period: times_entered,
+        first_entered, last_entered, minutes_in_state) and a "note". Answer
+        counts, first times and durations from "states".
         On error, returns {"error": "<description>"} so the model can report the
         problem to the user (e.g. ambiguous entity name) and request clarification.
 
@@ -1838,7 +1939,8 @@ async def get_entity_history(  # noqa: D417
                 except (ValueError, TypeError):
                     pass
 
-    return {k: _filter_data(k, v, hass) for k, v in data.items()}
+    period = (start_time, min(end_time, now))
+    return {k: _filter_data(k, v, hass, period) for k, v in data.items()}
 
 
 ###
