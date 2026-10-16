@@ -13,12 +13,13 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import MagicMock
 
 import pytest
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import floor_registry as fr
 
+from custom_components.home_generative_agent.agent import helpers
 from custom_components.home_generative_agent.agent.graph import (
     _is_critical_action,
     _prepare_tool_args,
@@ -42,13 +43,27 @@ RULES = RECOMMENDED_CRITICAL_ACTIONS
 
 @pytest.fixture
 async def home(hass: HomeAssistant) -> HomeAssistant:
-    """Set up a garage door, a barn door, blinds, a water valve and a lock."""
+    """
+    Set up a small house.
+
+    Garage (on floor "1"): the garage door, a light and an opener button.
+    Living Room: blinds. Porch: a lock and a lamp. Plus a barn door named
+    without door/gate/garage, a gate named "7", a water valve, a front door
+    lock, a porch light and a script.
+    """
     areas = ar.async_get(hass)
     entities = er.async_get(hass)
+    floor = fr.async_get(hass).async_create("1")
+    garage = areas.async_get_or_create("Garage")
+    areas.async_update(garage.id, floor_id=floor.floor_id)
     # Registered like an integration's entity, so HA matches its computed name.
     for entity_id, name, area_name in (
         ("cover.garage_door", "Garage Door", "Garage"),
+        ("light.garage", "Garage Light", "Garage"),
+        ("button.garage_opener", "Garage Opener", "Garage"),
         ("cover.living_room_blinds", "Living Room Blinds", "Living Room"),
+        ("lock.porch_door", "Porch Door", "Porch"),
+        ("light.porch_lamp", "Porch Lamp", "Porch"),
     ):
         area = areas.async_get_or_create(area_name)
         domain, object_id = entity_id.split(".")
@@ -61,18 +76,18 @@ async def home(hass: HomeAssistant) -> HomeAssistant:
         )
         assert entry.entity_id == entity_id
         entities.async_update_entity(entity_id, area_id=area.id)
+        hass.states.async_set(entity_id, "off", {"friendly_name": name})
 
     hass.states.async_set(
         "cover.garage_door", "closed", {"friendly_name": "Garage Door"}
     )
     # Named without door/gate/garage: only its entity id matches a rule.
     hass.states.async_set("cover.barn_door", "closed", {"friendly_name": "Big Barn"})
-    hass.states.async_set(
-        "cover.living_room_blinds", "closed", {"friendly_name": "Living Room Blinds"}
-    )
+    hass.states.async_set("cover.gate_7", "closed", {"friendly_name": "7"})
     hass.states.async_set("valve.main_water", "closed", {"friendly_name": "Main Water"})
     hass.states.async_set("lock.front_door", "locked", {"friendly_name": "Front Door"})
     hass.states.async_set("light.porch", "off", {"friendly_name": "Porch"})
+    hass.states.async_set("script.open_garage", "off", {"friendly_name": "Open Garage"})
 
     return hass
 
@@ -91,6 +106,20 @@ async def home(hass: HomeAssistant) -> HomeAssistant:
         ("intent__HassTurnOn", {"domain": ["cover"], "area": "Garage"}),
         # Opening a door part way is still opening it.
         ("intent__HassSetPosition", {"name": "Garage Door", "position": 100}),
+        # "all" is HA's word for no name: every cover, the garage door too.
+        ("intent__HassTurnOn", {"name": "all", "domain": ["cover"]}),
+        # Everything in the area, of every kind, the garage door among it.
+        ("intent__HassTurnOn", {"area": "Garage"}),
+        # HA reads a number as text: floor 1, and the gate named "7".
+        ("intent__HassTurnOn", {"floor": 1}),
+        ("intent__HassTurnOn", {"name": 7}),
+        # A lock and a lamp: turning the area off unlocks the lock.
+        ("intent__HassTurnOff", {"area": "Porch"}),
+        # A lock domain is held even when nothing matches it yet.
+        ("intent__HassTurnOff", {"domain": ["lock"], "name": "No Such Lock"}),
+        # A slot HA would refuse or read some other way: held, not guessed.
+        ("intent__HassTurnOn", {"area": ["Garage"]}),
+        ("intent__HassTurnOn", {"name": {"text": "Garage Door"}}),
     ],
 )
 async def test_opening_a_door_cover_is_critical(
@@ -112,6 +141,10 @@ async def test_opening_a_door_cover_is_critical(
         ("intent__HassTurnOn", {"name": "Porch"}),
         # Nothing matches, so HA acts on nothing.
         ("intent__HassTurnOn", {"name": "No Such Thing"}),
+        # The floor resolves; closing, a light off and a button HA refuses.
+        ("intent__HassTurnOff", {"floor": 1}),
+        # Padded, it is a name HA looks up, not its "all".
+        ("intent__HassTurnOn", {"name": " all ", "domain": ["cover"]}),
     ],
 )
 async def test_other_calls_stay_ungated(
@@ -141,6 +174,25 @@ async def test_a_turn_on_rule_for_another_domain_gates_the_intent(
     assert _is_critical_action({"name": "Porch"}, rules, "HassTurnOn", home)
 
 
+async def test_a_button_press_rule_gates_turning_the_button_on(
+    home: HomeAssistant,
+) -> None:
+    """HA presses a button on HassTurnOn and refuses to turn one off."""
+    rules = [{"domain": "button", "service": "press", "entity_match": "garage"}]
+    assert _is_critical_action({"name": "Garage Opener"}, rules, "HassTurnOn", home)
+    assert not _is_critical_action(
+        {"name": "Garage Opener"}, rules, "HassTurnOff", home
+    )
+
+
+async def test_a_rule_for_a_scripts_own_service_gates_turning_it_on(
+    home: HomeAssistant,
+) -> None:
+    """Turning a script on runs it, the same as calling `script.open_garage`."""
+    rules = [{"domain": "script", "service": "open_garage"}]
+    assert _is_critical_action({"name": "Open Garage"}, rules, "HassTurnOn", home)
+
+
 async def test_the_matcher_reads_the_payload_ha_is_sent(home: HomeAssistant) -> None:
     """An entity id with a domain is sent as the name, and resolves to it."""
     calls = intent_service_calls(
@@ -149,12 +201,18 @@ async def test_the_matcher_reads_the_payload_ha_is_sent(home: HomeAssistant) -> 
     assert calls == [IntentServiceCall("cover", "open_cover", "cover.garage_door")]
 
 
-def test_a_matcher_that_raises_fails_closed() -> None:
-    """A matcher HA changed under us must gate every call, not none."""
-    hass = MagicMock()
-    hass.states.async_all.side_effect = RuntimeError("boom")
-    assert _is_critical_action({"name": "Anything"}, RULES, "HassTurnOn", hass)
-    assert not _is_critical_action({"name": "Anything"}, [], "HassTurnOn", hass)
+async def test_a_matcher_that_raises_fails_closed(
+    home: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A matcher HA changed under us must gate every call, rules or none."""
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError
+
+    monkeypatch.setattr(helpers.intent, "async_match_targets", boom)
+    assert intent_service_calls(home, "HassTurnOn", {"name": "Porch"}) is None
+    assert _is_critical_action({"name": "Porch"}, RULES, "HassTurnOn", home)
+    assert _is_critical_action({"name": "Front Door"}, [], "HassTurnOff", home)
 
 
 @pytest.mark.parametrize(
@@ -168,6 +226,11 @@ def test_without_hass_the_declared_domain_is_checked(args: dict[str, Any]) -> No
     """With no `hass`, an unnamed cover target matches every entity_match rule."""
     assert _is_critical_action(args, RULES, "HassTurnOn")
     assert not _is_critical_action(args, RULES, "HassTurnOff")
+
+
+def test_without_hass_a_declared_lock_is_critical() -> None:
+    args = {"domain": ["lock"], "name": "Front Door"}
+    assert _is_critical_action(args, RULES, "HassTurnOff")
 
 
 async def test_the_tool_path_holds_the_call_for_a_pin(home: HomeAssistant) -> None:
@@ -208,6 +271,28 @@ async def test_the_tool_path_holds_the_call_for_a_pin(home: HomeAssistant) -> No
             {"name": "Garage Door", "position": 100},
             'set "Garage Door" to 100%',
         ),
+        # The position HA runs: 0 is shown, and "1_0" runs as 10.
+        (
+            "intent__HassSetPosition",
+            {"name": "Garage Door", "position": 0},
+            'set "Garage Door" to 0%',
+        ),
+        (
+            "intent__HassSetPosition",
+            {"name": "Garage Door", "position": "1_0"},
+            'set "Garage Door" to 10%',
+        ),
+        # HA ignores the entity id and unlocks the lock the name matches.
+        (
+            "intent__HassTurnOff",
+            {"name": "Front Door", "entity_id": "light.porch"},
+            'unlock "Front Door"',
+        ),
+        # Several kinds: the most sensitive verb, and the area kept.
+        ("intent__HassTurnOn", {"area": "Garage"}, "open every device in Garage"),
+        ("intent__HassTurnOff", {"area": "Porch"}, "unlock every device in Porch"),
+        ("intent__HassTurnOn", {"floor": 1}, "open every device on floor 1"),
+        ("intent__HassTurnOn", {"name": "Garage Opener"}, 'press "Garage Opener"'),
     ],
 )
 async def test_the_pin_line_names_what_ha_will_run(
