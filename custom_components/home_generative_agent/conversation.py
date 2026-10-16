@@ -58,6 +58,7 @@ from .agent.helpers import (
     is_actuation_tool,
     keep_pin_prompts,
     langchain_tool_parameters_json,
+    pin_refusal,
     prompts_awaiting_reply,
     resolve_critical_action_policy,
     safe_convert,
@@ -1554,16 +1555,25 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         # AssistantContent, which means the last new message must be an
         # AIMessage.
         if not new_messages or not isinstance(new_messages[-1], AIMessage):
-            _LOGGER.error(
-                "LangGraph response did not end with AIMessage (got %s). "
-                "Falling back to manual ConversationResult.",
-                type(new_messages[-1]) if new_messages else "empty",
-            )
-            chat_log.async_add_assistant_content_without_tools(
-                conversation.AssistantContent(
-                    agent_id=self.entity_id,
-                    content=final_content if isinstance(final_content, str) else "",
+            last = new_messages[-1] if new_messages else None
+            if (
+                isinstance(last, ToolMessage)
+                and isinstance(last.content, str)
+                and pin_refusal(last.content) is not None
+            ):
+                # The turn ended on a confirmation refused because the user
+                # was not asked for the PIN yet (graph.py, `_after_tools`):
+                # the PIN line is the reply.
+                _LOGGER.debug("Turn ended on a refused PIN confirmation.")
+            else:
+                _LOGGER.error(
+                    "LangGraph response did not end with AIMessage (got %s).",
+                    type(last) if last is not None else "empty",
                 )
+            # Show Details still gets the chain; _async_finish_reply adds the
+            # reply, the PIN lines or an apology when there are none.
+            _populate_chat_log_from_response(
+                chat_log, self.entity_id, list(new_messages)
             )
             return
 
@@ -1598,9 +1608,10 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         ``ack_index`` is where a turn-start acknowledgement was committed, so
         recovery does not mistake it for the reply. ``pin_lines_pending`` says
-        whether the turn's PIN lines will replace the reply afterwards, in
-        which case the final recommit is left to them, so a chat_log
-        subscriber sees the reply once.
+        whether the turn's PIN lines will follow: they replace the reply, so
+        the final recommit is left to them and a chat_log subscriber sees the
+        reply once, and they are the reply of a turn that ended on a tool
+        call, so no failure message is added for it.
         """
         hass = self.hass
         ack = acknowledgement or VoiceAck()
@@ -1671,9 +1682,12 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             # Also replace partial streaming content when a model fallback
             # produced a different final response (mid-stream fallback).
             messages = final_state.values.get("messages", [])
+            last_message = messages[-1] if messages else None
+            # Text that arrived with a tool call was streamed with the call,
+            # so a turn that ends on one has nothing to recover.
             recovered_content = (
-                _normalize_ai_content(messages[-1].content)
-                if messages and isinstance(messages[-1], AIMessage)
+                _normalize_ai_content(last_message.content)
+                if isinstance(last_message, AIMessage) and not last_message.tool_calls
                 else None
             )
             last_chat_content = _reply_entry(chat_log.content, ack_index)
@@ -1713,10 +1727,12 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     "Recovered final AssistantContent from graph state after "
                     "streaming failure."
                 )
-            elif not has_reply:
+            elif not has_reply and not (pin_lines_pending and pin_lines_pending()):
                 # Graph state has no usable AI response (e.g. model timed out
                 # before generating a reply). Emit a user-visible error message
-                # so the chat UI shows something instead of a blank bubble.
+                # so the chat UI shows something instead of a blank bubble. A
+                # turn that ended on a refused PIN confirmation has its PIN
+                # line for a reply (_async_finish_reply).
                 await self._async_add_spoken_reply(
                     chat_log, _streaming_failure_content(stream_error)
                 )

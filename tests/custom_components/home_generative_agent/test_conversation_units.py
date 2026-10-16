@@ -13,6 +13,7 @@ import contextlib
 import dataclasses
 import importlib
 import inspect
+import logging
 import re
 import sys
 import types
@@ -1849,6 +1850,68 @@ async def test_non_streaming_backfill_only_writes_this_turns_messages() -> None:
     assert written[-1].content == "About 2 TB free."
 
 
+@pytest.mark.asyncio
+async def test_non_streaming_turn_that_ends_on_a_refused_confirmation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    Show Details gets the call and the refusal; the PIN line is the reply.
+
+    Before, a thread ending on a tool message was an error, and the tool's
+    JSON was written as the reply.
+    """
+    request = HumanMessage(content="Unlock the garage door.", id="req-1")
+    thread = [
+        request,
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "HassTurnOff", "args": {}, "id": "c1"}],
+        ),
+        ToolMessage(
+            content='{"status": "requires_pin"}', tool_call_id="c1", name="HassTurnOff"
+        ),
+        AIMessage(
+            content="Please provide your security PIN.",
+            tool_calls=[{"name": "confirm_sensitive_action", "args": {}, "id": "c2"}],
+        ),
+        ToolMessage(
+            content='{"status": "awaiting_user_pin", "ends_turn": true}',
+            tool_call_id="c2",
+            name="confirm_sensitive_action",
+        ),
+    ]
+    app = types.SimpleNamespace(ainvoke=AsyncMock(return_value={"messages": thread}))
+    written: list[Any] = []
+    chat_log = types.SimpleNamespace(
+        content=written,
+        async_add_assistant_content_without_tools=written.append,
+    )
+    entity = _runner_entity()
+
+    with contextlib.ExitStack() as stack:
+        for patcher in _patch_runner_deps():
+            stack.enter_context(patcher)
+        with caplog.at_level(logging.ERROR):
+            await entity._async_run_ainvoke(
+                app,
+                cast("Any", {"messages": [request]}),
+                cast("Any", {}),
+                cast("Any", chat_log),
+                None,
+            )
+
+    assert [type(entry).__name__.removeprefix("_Fake") for entry in written] == [
+        "AssistantContent",
+        "ToolResultContent",
+        "AssistantContent",
+        "ToolResultContent",
+    ]
+    assert all(
+        "awaiting_user_pin" not in str(getattr(e, "content", "")) for e in written
+    )
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
 def test_message_history_thread_holds_each_user_message_once() -> None:
     """
     End to end through the real reducer: four turns, no duplicate messages.
@@ -2441,6 +2504,115 @@ async def test_recovered_reply_after_a_tool_call_is_added_and_spoken() -> None:
 
     assert [d.get("content") for d in chat_log.heard] == [give_up]
     assert tool_call in chat_log.content, "the tool call must not be replaced"
+
+
+def _refusal_turn_chat_log() -> Any:
+    """Build a streamed turn that ended on a refused confirmation: call, then result."""
+    return _DeltaChatLog(
+        [
+            _mk_content(ha_conversation.UserContent, content="Unlock the garage door."),
+            _mk_content(
+                ha_conversation.AssistantContent,
+                agent_id=HGA_AGENT_ID,
+                content="Please provide your security PIN.",
+                tool_calls=[object()],
+            ),
+            _mk_content(
+                ha_conversation.ToolResultContent,
+                agent_id=HGA_AGENT_ID,
+                tool_call_id="c1",
+                tool_name="confirm_sensitive_action",
+                tool_result={"status": "awaiting_user_pin"},
+            ),
+        ]
+    )
+
+
+def _ended_app(last_message: Any) -> Any:
+    async def _no_events(**_kwargs: Any) -> Any:
+        return
+        yield  # pragma: no cover - makes this an async generator
+
+    return types.SimpleNamespace(
+        astream_events=_no_events,
+        aget_state=AsyncMock(
+            return_value=types.SimpleNamespace(values={"messages": [last_message]})
+        ),
+    )
+
+
+async def _run_astream(chat_log: Any, app: Any, pin_lines_pending: Any) -> None:
+    entity = _ack_entity()
+    entity.hass = types.SimpleNamespace(async_create_task=asyncio.ensure_future)
+    await HGAConversationEntity._async_run_astream(
+        cast("Any", entity),
+        app,
+        cast("Any", {}),
+        cast("Any", {}),
+        cast("Any", chat_log),
+        None,
+        pin_lines_pending=pin_lines_pending,
+    )
+
+
+async def test_a_turn_that_ends_on_a_refused_confirmation_gets_no_failure_text() -> (
+    None
+):
+    """
+    The PIN line is the reply (field test 2026-10-16).
+
+    The graph ends the turn on a confirmation refused before the user was
+    asked; the streamed turn then has no reply of its own, which used to read
+    as a failure.
+    """
+    from langchain_core.messages import ToolMessage  # noqa: PLC0415
+
+    chat_log = _refusal_turn_chat_log()
+    refusal = ToolMessage(
+        content='{"status": "awaiting_user_pin", "ends_turn": true}',
+        name="confirm_sensitive_action",
+        tool_call_id="c1",
+    )
+
+    await _run_astream(chat_log, _ended_app(refusal), lambda: True)
+
+    assert chat_log.heard == []
+    assert len(chat_log.content) == 3
+
+
+async def test_a_turn_that_ends_on_a_tool_call_without_a_pin_line_still_fails_aloud() -> (
+    None
+):
+    from langchain_core.messages import ToolMessage  # noqa: PLC0415
+
+    chat_log = _refusal_turn_chat_log()
+    result = ToolMessage(content="{}", name="GetLiveContext", tool_call_id="c1")
+
+    await _run_astream(chat_log, _ended_app(result), None)
+
+    assert [d.get("content") for d in chat_log.heard] == [
+        "I'm sorry, I was unable to respond in time. Please try again."
+    ]
+
+
+async def test_text_that_came_with_a_tool_call_is_not_recovered_again() -> None:
+    """
+    The round-limit guard adds nothing when a PIN line follows.
+
+    The graph then ends on the model's last tool-call message, whose text was
+    streamed with the call; recovering it would speak it twice.
+    """
+    from langchain_core.messages import AIMessage  # noqa: PLC0415
+
+    chat_log = _refusal_turn_chat_log()
+    dangling = AIMessage(
+        content="Please provide your security PIN.",
+        tool_calls=[{"name": "confirm_sensitive_action", "args": {}, "id": "c2"}],
+    )
+
+    await _run_astream(chat_log, _ended_app(dangling), lambda: True)
+
+    assert chat_log.heard == []
 
 
 # ---------------------------------------------------------------------------

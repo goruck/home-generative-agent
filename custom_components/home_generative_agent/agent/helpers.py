@@ -505,6 +505,28 @@ MAX_PENDING_ACTIONS = 16
 # not the reply to the action's PIN prompt, the PIN is not in it, or it was
 # already used. The action stays pending for the user's reply.
 PIN_AWAITING_USER_REPLY = "awaiting_user_pin"
+# Key of such a refusal when the user has not been asked for the PIN yet (the
+# message is not the prompt's reply): the turn ends with the fixed prompt, so
+# the model is not called again to ask, or to try a PIN of its own.
+PIN_REFUSAL_ENDS_TURN = "ends_turn"
+
+
+def pin_refusal(content: str) -> dict[str, Any] | None:
+    """
+    Return the payload of a confirmation refused before the PIN was checked.
+
+    The message was not the reply to the action's PIN prompt, the PIN was not
+    in it, or it was already used (a PIN from it failed, or it confirmed an
+    action). None for any other tool reply.
+    """
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if isinstance(data, dict) and data.get("status") == PIN_AWAITING_USER_REPLY:
+        return data
+    return None
+
 
 # Spoken digits as speech-to-text may write them, in the languages the PIN
 # messages ship in (pin_messages.py); Czech also without diacritics, except

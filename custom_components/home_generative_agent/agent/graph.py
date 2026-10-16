@@ -89,7 +89,7 @@ from ..core.prompt_cache import (  # noqa: TID252
 from ..core.utils import extract_final  # noqa: TID252
 from .automation_targets import AUTOMATION_REFUSAL_PREFIX
 from .helpers import (
-    PIN_AWAITING_USER_REPLY,
+    PIN_REFUSAL_ENDS_TURN,
     active_llm_api_ids,
     base_tool_name,
     format_tool,
@@ -104,6 +104,8 @@ from .helpers import (
     normalize_intent_for_lock,
     parse_tool_response,
     pending_action_expired,
+    pin_refusal,
+    prompts_awaiting_reply,
     register_pending_action,
     resolve_critical_action_policy,
     sanitize_tool_args,
@@ -2258,18 +2260,8 @@ def _last_routing_rejection_idx(recent: Sequence[AnyMessage]) -> int | None:
 
 
 def _is_awaiting_user_pin(content: str) -> bool:
-    """
-    Return True for a confirmation refused before the PIN was checked.
-
-    The message was not the reply to the action's PIN prompt, the PIN was not
-    in it, or it was already used (a PIN from it failed, or it confirmed an
-    action).
-    """
-    try:
-        data = json.loads(content)
-    except (json.JSONDecodeError, ValueError):
-        return False
-    return isinstance(data, dict) and data.get("status") == PIN_AWAITING_USER_REPLY
+    """Return True for a confirmation refused before the PIN was checked."""
+    return pin_refusal(content) is not None
 
 
 def _has_pending_pin_confirmation(messages: Sequence[AnyMessage]) -> bool:
@@ -3586,22 +3578,85 @@ def _should_continue(
     return "summarize_and_remove_messages"
 
 
-async def _tool_loop_guard(state: State) -> dict[str, Any]:
+def _last_round_responses(messages: Sequence[AnyMessage]) -> list[ToolMessage]:
+    """Return the last tool round's messages: those after the last AIMessage."""
+    responses: list[ToolMessage] = []
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage):
+            break
+        if isinstance(msg, ToolMessage):
+            responses.append(msg)
+    responses.reverse()
+    return responses
+
+
+def _refusal_ends_turn(msg: BaseMessage) -> bool:
+    """Return True for a confirmation refused because the user was not asked yet."""
+    if not isinstance(msg, ToolMessage) or not isinstance(msg.content, str):
+        return False
+    refusal = pin_refusal(msg.content)
+    return refusal is not None and bool(refusal.get(PIN_REFUSAL_ENDS_TURN))
+
+
+def _after_tools(state: State) -> Literal["agent", "summarize_and_remove_messages"]:
+    """
+    Return the next node after a tool round.
+
+    The model gets the results back, except when every call in the round was
+    a confirmation refused because the user has not been asked for the PIN
+    yet (the message is not the prompt's reply). The reply asks for the PIN in
+    fixed words (conversation.py), and the model's next move would be to ask
+    again, or to try another PIN of its own: in a field test (2026-10-16) a
+    local model guessed a PIN three times, spoke its prompt three times, and
+    the turn ended in the round-limit apology. The turn ends here instead, and
+    the user's next message is the prompt's reply.
+    """
+    responses = _last_round_responses(state["messages"])
+    if responses and all(_refusal_ends_turn(msg) for msg in responses):
+        return "summarize_and_remove_messages"
+    return "agent"
+
+
+def _pin_line_is_the_reply(last_tool: ToolMessage, config: RunnableConfig) -> bool:
+    """
+    Return True when the turn ends on a refused confirmation and a PIN line follows.
+
+    The reply then names the action the PIN will confirm, or the one it ran,
+    in fixed words (conversation.py), so the guard has nothing to add.
+    """
+    content = last_tool.content if isinstance(last_tool.content, str) else ""
+    if pin_refusal(content) is None:
+        return False
+    cfg = config.get("configurable", {})
+    pin_reply = cfg.get("pin_reply")
+    if pin_reply is None:
+        return False
+    if pin_reply.confirmed:
+        return True
+    return bool(prompts_awaiting_reply(cfg.get("pending_actions", {}), pin_reply))
+
+
+async def _tool_loop_guard(state: State, config: RunnableConfig) -> dict[str, Any]:
     """
     Emit a friendly message when the action-round limit is reached.
 
     When the round before the cut-off was a refused automation, the refusal
     text is the one thing the user can act on, so it is repeated rather than
-    lost behind the generic apology.
+    lost behind the generic apology. When it was a confirmation refused for
+    want of the user's PIN and a PIN line will be the reply (the prompt is
+    waiting, or an action ran), nothing is added: an apology next to "What is
+    your PIN?" reads as a failure, and the user is never asked.
     """
+    last_tool = next(
+        (m for m in reversed(state["messages"]) if isinstance(m, ToolMessage)),
+        None,
+    )
+    if last_tool is not None and _pin_line_is_the_reply(last_tool, config):
+        return {"messages": []}
     content = (
         "I wasn't able to complete this request after several tool-use "
         "attempts. Please try rephrasing your query or breaking it into "
         "smaller steps."
-    )
-    last_tool = next(
-        (m for m in reversed(state["messages"]) if isinstance(m, ToolMessage)),
-        None,
     )
     if last_tool is not None and _is_automation_refusal(last_tool):
         content += f"\n\nThe last problem was:\n{last_tool.content}"
@@ -3622,6 +3677,6 @@ workflow.add_node("summarize_and_remove_messages", _summarize_and_remove_message
 workflow.add_edge(START, "retrieve_tools")
 workflow.add_edge("retrieve_tools", "agent")
 workflow.add_conditional_edges("agent", _should_continue)
-workflow.add_edge("action", "agent")
+workflow.add_conditional_edges("action", _after_tools)
 workflow.add_edge("tool_loop_guard", "summarize_and_remove_messages")
 workflow.add_edge("summarize_and_remove_messages", END)

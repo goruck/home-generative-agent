@@ -24,6 +24,7 @@ from custom_components.home_generative_agent.agent import tools as tools_module
 from custom_components.home_generative_agent.agent.helpers import (
     PENDING_ACTION_TTL,
     PIN_AWAITING_USER_REPLY,
+    PIN_REFUSAL_ENDS_TURN,
     PinReply,
     disclose_pin_prompts,
     keep_pin_prompts,
@@ -161,6 +162,40 @@ async def test_a_pin_the_user_did_not_write_is_refused_without_an_attempt() -> N
     assert reply["status"] == PIN_AWAITING_USER_REPLY
     assert api.calls == []
     assert turns.pending[action_id]["attempts"] == 0
+
+
+async def test_only_the_request_turn_refusal_ends_the_turn() -> None:
+    """
+    Before the user was asked, the reply asks in fixed words and the turn ends.
+
+    In the reply turn the model is told what to say (say the digits one by
+    one; the PIN was already used), so the turn goes on. So does a turn whose
+    PIN already ran an action and whose model then re-issued the request.
+    """
+    api = _FakeAPI()
+    turns = _Turns(api)
+    action_id = turns.request_unlock()
+
+    before_the_prompt = await turns.confirm(action_id)
+    assert isinstance(before_the_prompt, dict)
+    assert before_the_prompt[PIN_REFUSAL_ENDS_TURN] is True
+
+    turns.say("yes, go ahead")
+    not_in_message = await turns.confirm(action_id)
+    assert isinstance(not_in_message, dict)
+    assert not_in_message["status"] == PIN_AWAITING_USER_REPLY
+    assert PIN_REFUSAL_ENDS_TURN not in not_in_message
+
+    turns.say(PIN)
+    done = await turns.confirm(action_id)
+    assert isinstance(done, dict)
+    assert done["status"] == "completed"
+    reissued = turns.request_unlock()
+    used = await turns.confirm(reissued)
+    assert isinstance(used, dict)
+    assert used["status"] == PIN_AWAITING_USER_REPLY
+    assert PIN_REFUSAL_ENDS_TURN not in used
+    assert api.calls == ["HassTurnOff"]
 
 
 async def test_the_users_pin_reply_confirms() -> None:

@@ -16,20 +16,6 @@
 
 ---
 
-### A PIN refusal that hits the action-round limit ends with a generic apology
-
-**What:** A model that keeps calling `confirm_sensitive_action` without the user's PIN gets `awaiting_user_pin` each time; on the third action round `_tool_loop_guard` (`agent/graph.py`) replies "I wasn't able to complete this request after several tool-use attempts…" and the user is never asked for the PIN. On a voice satellite the mic then closes. Separately, HA keeps a satellite listening only when the reply ends with "?", so a model that writes "Please say your PIN." makes the user say the wake word again. Since the fourth review pass of PR #769, a PIN is accepted only in the reply to the prompt, so a model that tries to confirm in the request turn ("unlock the door, 1234") is always refused first: this path is now the common case for one-breath requests, not a corner case.
-
-**Why:** Claude adversarial and red-team findings in the full review of PR #769 (2026-10-14). Left out of that PR by the maintainer's scope choice. **Field test 2026-10-16 (voice, 32f483e):** on "Unlock the garage door lock" the local model called `confirm_sensitive_action` with a made-up PIN three times in the request turn, re-spoke "please provide your security PIN" each round, and the turn ended with the apology; the PIN flow still completed because the fixed lines ("Your PIN will confirm: … What is your PIN?") follow the apology and keep the mic open. The mic half of this entry is done in PR #769 (a fixed question is appended when the reply lacks one); the apology and the repeated sentence remain.
-
-**How to apply:** In `_tool_loop_guard`, when the last ToolMessage is an `awaiting_user_pin` refusal, end the turn with no apology (the fixed lines already ask for the PIN), or end the turn right after the first refusal so the prompt is spoken once. (The duplicate pending action this entry used to list is gone: a conversation now holds one pending action.)
-
-**Effort:** S
-**Priority:** P1 (more common since one-breath requests are refused first)
-**Depends on:** None
-
----
-
 ### A confirmed action can run on two LLM APIs when its tool is missing from the routing map
 
 **What:** `MultiLLMAPI.async_call_tool` (`conversation.py`) falls back to trying every API in turn when the tool name is not in this turn's routing map, and moves on after `HomeAssistantError` or `vol.Invalid`. A PIN reply's retrieved tools may not include the original actuation tool, so its confirmed execution can take that path; if two APIs expose a tool of that name, the first can actuate and then raise, and the second actuates again. The pending action is already claimed, so this is the one way a single confirmation can still act twice.
@@ -2488,6 +2474,22 @@ This is the same allowlist-omission class as #480 and as the triage options fixe
 ---
 
 ## Completed
+
+### A PIN refusal that hits the action-round limit ends with a generic apology
+
+**What:** A model that keeps calling `confirm_sensitive_action` without the user's PIN gets `awaiting_user_pin` each time; on the third action round `_tool_loop_guard` (`agent/graph.py`) replies "I wasn't able to complete this request after several tool-use attempts…" and the user is never asked for the PIN. On a voice satellite the mic then closes. Separately, HA keeps a satellite listening only when the reply ends with "?", so a model that writes "Please say your PIN." makes the user say the wake word again. Since the fourth review pass of PR #769, a PIN is accepted only in the reply to the prompt, so a model that tries to confirm in the request turn ("unlock the door, 1234") is always refused first: this path is now the common case for one-breath requests, not a corner case.
+
+**Why:** Claude adversarial and red-team findings in the full review of PR #769 (2026-10-14). Left out of that PR by the maintainer's scope choice. **Field test 2026-10-16 (voice, 32f483e):** on "Unlock the garage door lock" the local model called `confirm_sensitive_action` with a made-up PIN three times in the request turn, re-spoke "please provide your security PIN" each round, and the turn ended with the apology; the PIN flow still completed because the fixed lines ("Your PIN will confirm: … What is your PIN?") follow the apology and keep the mic open. The mic half of this entry is done in PR #769 (a fixed question is appended when the reply lacks one); the apology and the repeated sentence remain.
+
+**How to apply:** In `_tool_loop_guard`, when the last ToolMessage is an `awaiting_user_pin` refusal, end the turn with no apology (the fixed lines already ask for the PIN), or end the turn right after the first refusal so the prompt is spoken once. (The duplicate pending action this entry used to list is gone: a conversation now holds one pending action.)
+
+**Effort:** S
+**Priority:** P1 (more common since one-breath requests are refused first)
+**Depends on:** None
+
+**Completed:** PR after #769 (2026-10-16). A confirmation refused because the user has not been asked for the PIN yet (`pin_reply_to_prompt_only`, the request turn, when this message's PIN was not used) carries `ends_turn` in its payload (`_confirmation_refusal`, tools.py); the graph's new conditional edge after `action` (`_after_tools`) ends the turn when every call in the round was such a refusal, so the fixed line and "What is your PIN?" are the reply and the prompt is spoken once (`_async_finish_reply`; the streamed path adds no failure text and recovers no text that came with a tool call; the schema-first path backfills the chain instead of logging an error and writing the tool JSON as the reply). `_tool_loop_guard` adds nothing when the last round was a refused confirmation and a PIN line follows (a prompt waits, or an action ran); the apology stays when nothing would otherwise be said. Left as is: a model that loops in the reply turn (PIN unreadable, or already used) still speaks its own text each round, since that text carries what the fixed lines do not (say the digits one by one; what already happened), and the guard then ends the turn without the apology.
+
+---
 
 ### The PIN prompt does not say which action it confirms, deterministically
 

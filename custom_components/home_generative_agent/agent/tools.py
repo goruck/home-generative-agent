@@ -110,6 +110,7 @@ from .helpers import (
     PIN_OUTCOME_DONE,
     PIN_OUTCOME_FAILED,
     PIN_OUTCOME_UNKNOWN,
+    PIN_REFUSAL_ENDS_TURN,
     ConfigurableData,
     base_tool_name,
     keep_pin_prompt,
@@ -1211,9 +1212,22 @@ def _confirmation_refusal(
     text = pin_msg(hass, reason)
     if hint:
         text = f"{text} {pin_msg(hass, hint)}"
-    return json.dumps(
-        {"status": PIN_AWAITING_USER_REPLY, "action_id": action_id, "reason": text}
-    ), not_in_message
+    payload: dict[str, Any] = {
+        "status": PIN_AWAITING_USER_REPLY,
+        "action_id": action_id,
+        "reason": text,
+    }
+    if reason == "pin_reply_to_prompt_only" and not (
+        pin_reply is None or pin_reply.spent
+    ):
+        # The user has not been asked yet. The reply asks in fixed words, so
+        # the turn ends here (graph.py, `_after_tools`) instead of going back
+        # to a model that may ask again, or try another PIN of its own. Not
+        # when this message's PIN was already used (an action ran, or a PIN
+        # failed) and the model re-issued a request: the model's reply is
+        # where the user learns what happened first.
+        payload[PIN_REFUSAL_ENDS_TURN] = True
+    return json.dumps(payload), not_in_message
 
 
 async def _warn_if_correct_pin_refused(
