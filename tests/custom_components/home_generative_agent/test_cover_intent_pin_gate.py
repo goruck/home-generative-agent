@@ -47,7 +47,8 @@ async def home(hass: HomeAssistant) -> HomeAssistant:
     Set up a small house.
 
     Garage (on floor "1"): the garage door, a light and an opener button.
-    Living Room: blinds. Porch: a lock and a lamp. Plus a barn door named
+    Living Room: blinds. Porch: a lock and a lamp. Shed: a lock and a gate.
+    Plus a barn door named
     without door/gate/garage, a gate named "7", a water valve, a front door
     lock, a porch light and a script.
     """
@@ -64,6 +65,8 @@ async def home(hass: HomeAssistant) -> HomeAssistant:
         ("cover.living_room_blinds", "Living Room Blinds", "Living Room"),
         ("lock.porch_door", "Porch Door", "Porch"),
         ("light.porch_lamp", "Porch Lamp", "Porch"),
+        ("lock.shed_door", "Shed Door", "Shed"),
+        ("cover.shed_gate", "Shed Gate", "Shed"),
     ):
         area = areas.async_get_or_create(area_name)
         domain, object_id = entity_id.split(".")
@@ -145,6 +148,10 @@ async def test_opening_a_door_cover_is_critical(
         ("intent__HassTurnOff", {"floor": 1}),
         # Padded, it is a name HA looks up, not its "all".
         ("intent__HassTurnOn", {"name": " all ", "domain": ["cover"]}),
+        # No target at all: HA refuses it, so there is nothing to hold.
+        ("intent__HassSetPosition", {"name": "all", "position": 50}),
+        # Stopping is not opening.
+        ("intent__HassStopMoving", {"name": "Garage Door"}),
     ],
 )
 async def test_other_calls_stay_ungated(
@@ -191,6 +198,17 @@ async def test_a_rule_for_a_scripts_own_service_gates_turning_it_on(
     """Turning a script on runs it, the same as calling `script.open_garage`."""
     rules = [{"domain": "script", "service": "open_garage"}]
     assert _is_critical_action({"name": "Open Garage"}, rules, "HassTurnOn", home)
+
+
+async def test_a_stop_rule_gates_the_stop_intent(home: HomeAssistant) -> None:
+    """HassStopMoving stops a cover or a valve; a rule on stop_valve applies."""
+    rules = [{"domain": "valve", "service": "stop_valve"}]
+    assert _is_critical_action({"name": "Main Water"}, rules, "HassStopMoving", home)
+
+
+def test_without_hass_an_unreadable_slot_is_held() -> None:
+    args = {"entity_id": {"x": 1}, "domain": "lock"}
+    assert _is_critical_action(args, RULES, "HassTurnOff")
 
 
 async def test_the_matcher_reads_the_payload_ha_is_sent(home: HomeAssistant) -> None:
@@ -288,11 +306,48 @@ async def test_the_tool_path_holds_the_call_for_a_pin(home: HomeAssistant) -> No
             {"name": "Front Door", "entity_id": "light.porch"},
             'unlock "Front Door"',
         ),
-        # Several kinds: the most sensitive verb, and the area kept.
-        ("intent__HassTurnOn", {"area": "Garage"}, "open every device in Garage"),
-        ("intent__HassTurnOff", {"area": "Porch"}, "unlock every device in Porch"),
-        ("intent__HassTurnOn", {"floor": 1}, "open every device on floor 1"),
+        # Several kinds: every action named, most sensitive first, place kept.
+        (
+            "intent__HassTurnOn",
+            {"area": "Garage"},
+            (
+                "open every cover in Garage, press every button device in Garage, "
+                "turn on every light device in Garage"
+            ),
+        ),
+        (
+            "intent__HassTurnOff",
+            {"area": "Porch"},
+            "unlock every lock in Porch, turn off every light device in Porch",
+        ),
+        (
+            "intent__HassTurnOn",
+            {"floor": 1},
+            (
+                "open every cover on floor 1, press every button device on floor 1, "
+                "turn on every light device on floor 1"
+            ),
+        ),
+        # Locking the shed also opens its gate: the line must say both.
+        (
+            "intent__HassTurnOn",
+            {"area": "Shed"},
+            "lock every lock in Shed, open every cover in Shed",
+        ),
         ("intent__HassTurnOn", {"name": "Garage Opener"}, 'press "Garage Opener"'),
+        ("intent__HassStopMoving", {"name": "Garage Door"}, 'stop "Garage Door"'),
+        # Floor 0 is kept: dropping it would unlock every lock in the home.
+        (
+            "intent__HassTurnOff",
+            {"domain": ["lock"], "floor": 0},
+            "unlock every lock on floor 0",
+        ),
+        # A position HA cannot read is shown as written, not a crash.
+        (
+            "intent__HassSetPosition",
+            {"name": "Garage Door", "position": float("inf")},
+            'set "Garage Door" to inf%',
+        ),
     ],
 )
 async def test_the_pin_line_names_what_ha_will_run(
@@ -301,3 +356,9 @@ async def test_the_pin_line_names_what_ha_will_run(
     """The line the user confirms must not say "turn off" for an unlock."""
     action = {"tool_name": tool_name, "tool_args": args}
     assert describe_pending_action(home, action) == line
+
+
+def test_a_lock_call_keeps_floor_zero_in_the_payload() -> None:
+    """HA reads floor 0 as the floor "0"; without it every lock would act."""
+    payload = helpers.minimal_payload_for_domain({"domain": ["lock"], "floor": 0})
+    assert payload["floor"] == 0

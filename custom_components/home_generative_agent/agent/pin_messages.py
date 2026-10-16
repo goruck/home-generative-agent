@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any
 from .helpers import (
     INTENT_NAME_ALL,
     SET_POSITION_INTENT,
+    STOP_MOVING_INTENT,
     base_tool_name,
     intent_service_calls,
     is_on_off_intent,
@@ -149,6 +150,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "action_turn_off": "turn off {target}",
         "action_set_position": "set {target} to {position}%",
         "action_press": "press {target}",
+        "action_stop": "stop {target}",
         "action_service": "{service} {target}",
         "action_automation": "add the automation {target}",
         "action_unnamed_automation": "add an unnamed automation",
@@ -268,6 +270,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "action_turn_off": "vypnout {target}",
         "action_set_position": "nastavit {target} na {position} %",
         "action_press": "stisknout {target}",
+        "action_stop": "zastavit {target}",
         "action_service": "{service} {target}",
         "action_automation": "přidat automatizaci {target}",
         "action_unnamed_automation": "přidat nepojmenovanou automatizaci",
@@ -335,10 +338,10 @@ _ON_OFF_VERBS: dict[str, tuple[str, str]] = {
     "button": ("action_press", "action_turn_off"),
     "input_button": ("action_press", "action_turn_off"),
 }
-# The verb a call over several kinds of device is named by: the one a PIN
-# rule is most likely about, so "unlock every device in Porch" is said for a
-# lock and a light rather than "turn off".
+# The order the actions of a call over several kinds of device are named
+# in: the ones a PIN rule is most likely about first.
 _VERB_PRIORITY = ("lock", "cover", "valve", "button", "input_button")
+_DEFAULT_VERBS = ("action_turn_on", "action_turn_off")
 _KIND_KEYS = {"lock": "kind_lock", "cover": "kind_cover", "valve": "kind_valve"}
 
 
@@ -380,27 +383,42 @@ def _declared_domain(tool_name: str, tool_args: Mapping[str, Any]) -> str:
     return entity_id.split(".", 1)[0].lower() if "." in entity_id else ""
 
 
-def _intent_domains(
+def _intent_actions(
     hass: HomeAssistant | None, tool_name: str, tool_args: Mapping[str, Any]
-) -> tuple[str, str]:
+) -> list[tuple[str, str]]:
     """
-    Return the (verb, kind) domains of an actuating intent, as the gate reads it.
+    Return one (verb, kind) domain pair per distinct action an intent takes.
 
     From the entities HA's matcher finds, the same resolution the gate uses,
     so a lock named only "Front Door" reads "unlock" (#770) and an entity id
-    the model added, which HA ignores, cannot change the verb. The verb comes
-    from the most sensitive kind matched; the kind names the target only when
-    every match is one kind ("every device in Garage" otherwise). With
-    nothing matched, the domain the call declares.
+    the model added, which HA ignores, cannot change the verb. Kinds that
+    share a verb are one action; one that does something else is its own,
+    so turning on a garage with a lock and the garage door says both "lock"
+    and "open", never one for the other. The kind names the target only
+    when the action covers one kind ("every device" otherwise). With nothing
+    matched, the domain the call declares.
     """
     resolved = intent_service_calls(hass, tool_name, tool_args) if hass else None
     domains = {call.domain for call in resolved or []}
     if not domains:
         domain = _declared_domain(tool_name, tool_args)
-        return domain, domain
-    kind = next(iter(domains)) if len(domains) == 1 else ""
-    verb = next((d for d in _VERB_PRIORITY if d in domains), kind)
-    return verb, kind
+        return [(domain, domain)]
+    rank = {domain: index for index, domain in enumerate(_VERB_PRIORITY)}
+    by_verb: dict[tuple[str, str], list[str]] = {}
+    for domain in sorted(domains, key=lambda d: (rank.get(d, len(rank)), d)):
+        by_verb.setdefault(_ON_OFF_VERBS.get(domain, _DEFAULT_VERBS), []).append(domain)
+    return [
+        (group[0], group[0] if len(group) == 1 else "") for group in by_verb.values()
+    ]
+
+
+def _single_kind(
+    hass: HomeAssistant | None, tool_name: str, tool_args: Mapping[str, Any]
+) -> str:
+    """Return the one kind an intent with a single verb acts on, or ""."""
+    actions = _intent_actions(hass, tool_name, tool_args)
+    kinds = {kind for _, kind in actions}
+    return kinds.pop() if len(actions) == 1 and len(kinds) == 1 else ""
 
 
 def _slot_line(value: Any) -> str:
@@ -430,8 +448,8 @@ def _intent_target(
     name = "" if name == INTENT_NAME_ALL else _slot_line(name)
     if name:
         return _named(hass, name)
-    area = _slot_line(tool_args.get("area"))
-    floor = _slot_line(tool_args.get("floor"))
+    area = _slot_line(payload.get("area"))
+    floor = _slot_line(payload.get("floor"))
     if not domain and not area and not floor:
         return pin_msg(hass, "action_unnamed_target")
     if domain:
@@ -450,7 +468,7 @@ def _position_text(value: Any) -> str:
     """Return a held position as HA will run it (`Coerce(int)`), 0 included."""
     try:
         return str(int(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return _one_line(value, _ACTION_SERVICE_MAX_LEN)
 
 
@@ -505,22 +523,35 @@ def describe_pending_action(
     raw_args = action.get("tool_args")
     tool_args: dict[str, Any] = dict(raw_args) if isinstance(raw_args, Mapping) else {}
     if base_tool_name(tool_name) == SET_POSITION_INTENT:
-        _, kind = _intent_domains(hass, tool_name, tool_args)
         return pin_msg(
             hass,
             "action_set_position",
-            target=_intent_target(hass, tool_args, kind),
+            target=_intent_target(
+                hass, tool_args, _single_kind(hass, tool_name, tool_args)
+            ),
             position=_position_text(tool_args.get("position")),
+        )
+    if base_tool_name(tool_name) == STOP_MOVING_INTENT:
+        return pin_msg(
+            hass,
+            "action_stop",
+            target=_intent_target(
+                hass, tool_args, _single_kind(hass, tool_name, tool_args)
+            ),
         )
     if is_on_off_intent(tool_name):
         turns_on = base_tool_name(tool_name) == "HassTurnOn"
-        verb, kind = _intent_domains(hass, tool_name, tool_args)
-        on_key, off_key = _ON_OFF_VERBS.get(verb, ("action_turn_on", "action_turn_off"))
-        return pin_msg(
-            hass,
-            on_key if turns_on else off_key,
-            target=_intent_target(hass, tool_args, kind),
-        )
+        parts = []
+        for verb, kind in _intent_actions(hass, tool_name, tool_args):
+            on_key, off_key = _ON_OFF_VERBS.get(verb, _DEFAULT_VERBS)
+            parts.append(
+                pin_msg(
+                    hass,
+                    on_key if turns_on else off_key,
+                    target=_intent_target(hass, tool_args, kind),
+                )
+            )
+        return ", ".join(parts)
 
     target = _one_line(
         tool_args.get("name")

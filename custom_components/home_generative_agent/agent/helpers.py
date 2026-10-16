@@ -1230,8 +1230,12 @@ def _lock_payload(
         payload["entity_id"] = entity_id
     # The area or floor the user named narrows a call with no name to
     # the locks there, rather than every lock in the home.
+    # HA reads a number as text (floor 0 is the floor "0"), so only a
+    # missing or blank value is dropped; dropping 0 would widen the call
+    # to every lock in the home.
     for key in ("area", "floor"):
-        if value := tool_args.get(key):
+        value = tool_args.get(key)
+        if value is not None and not (isinstance(value, str) and not value.strip()):
             payload[key] = value
     if code := tool_args.get("code"):
         payload["code"] = code
@@ -1513,7 +1517,17 @@ _SET_POSITION_SERVICES: dict[str, str] = {
     "cover": "set_cover_position",
     "valve": "set_valve_position",
 }
+_STOP_MOVING_SERVICES: dict[str, str] = {
+    "cover": "stop_cover",
+    "valve": "stop_valve",
+}
 SET_POSITION_INTENT = "HassSetPosition"
+STOP_MOVING_INTENT = "HassStopMoving"
+# The intents that act on covers and valves only; HA refuses any other match.
+_COVER_VALVE_INTENTS: dict[str, dict[str, str]] = {
+    SET_POSITION_INTENT: _SET_POSITION_SERVICES,
+    STOP_MOVING_INTENT: _STOP_MOVING_SERVICES,
+}
 
 
 class IntentServiceCall(NamedTuple):
@@ -1531,7 +1545,7 @@ class _UnclassifiableSlotError(ValueError):
 def is_actuating_intent(tool_name: str) -> bool:
     """Return True for the intents whose service depends on the target."""
     return is_on_off_intent(tool_name) or (
-        base_tool_name(tool_name) == SET_POSITION_INTENT
+        base_tool_name(tool_name) in _COVER_VALVE_INTENTS
     )
 
 
@@ -1542,8 +1556,8 @@ def _intent_services(tool_name: str, domain: str, entity_id: str | None) -> list
     A script turned on runs, so a rule written for the script's own service
     (`script.open_garage`) applies to it as well as one for `script.turn_on`.
     """
-    if base_tool_name(tool_name) == SET_POSITION_INTENT:
-        service = _SET_POSITION_SERVICES.get(domain)
+    if (services := _COVER_VALVE_INTENTS.get(base_tool_name(tool_name))) is not None:
+        service = services.get(domain)
         return [service] if service else []
     turns_on = base_tool_name(tool_name) == "HassTurnOn"
     on, off = _ON_OFF_INTENT_SERVICES.get(domain, ("turn_on", "turn_off"))
@@ -1619,10 +1633,9 @@ def intent_service_calls(
     if name == INTENT_NAME_ALL:
         # HA's own comparison: exact, so " all " stays a name it looks up.
         name = None
-    if base_tool_name(tool_name) == SET_POSITION_INTENT:
-        domains = [d for d in domains if d in _SET_POSITION_SERVICES] or list(
-            _SET_POSITION_SERVICES
-        )
+    # No domains are added for the cover/valve intents: HA adds none, so a
+    # call with no target is refused there, and a light it matches has no
+    # service in `_intent_services`.
     constraints = intent.MatchTargetsConstraints(
         name=name,
         area_name=area,
@@ -1650,13 +1663,14 @@ def intent_service_calls(
 
 def declared_intent_service_calls(
     tool_name: str, tool_args: Mapping[str, Any]
-) -> list[IntentServiceCall]:
+) -> list[IntentServiceCall] | None:
     """
     Return the service calls an actuating intent declares, without `hass`.
 
     From the domain slot, or the domain of the entity ids the model gave.
     With no entity id the target is unknown, so the call carries none and
-    an `entity_match` rule treats it as matching.
+    an `entity_match` rule treats it as matching. None for a slot shape it
+    cannot read, which the gate holds.
     """
     if not is_actuating_intent(tool_name):
         return []
@@ -1669,7 +1683,7 @@ def declared_intent_service_calls(
         ]
         domains = _text_list(tool_args.get("domain"))
     except _UnclassifiableSlotError:
-        return []
+        return None
     calls = [
         call
         for entity_id in entity_ids

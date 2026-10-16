@@ -3425,6 +3425,8 @@ def _intent_is_critical(
     code. When the matcher cannot tell what HA will act on, the call is held.
     """
     declared = declared_intent_service_calls(tool_name, tool_args)
+    if declared is None:
+        return True  # a slot the gate cannot read: fail closed
     if hass is None:
         calls = declared
     else:
