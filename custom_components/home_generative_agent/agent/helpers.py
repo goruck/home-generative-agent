@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict
 import homeassistant.util.dt as dt_util
 import voluptuous as vol
 from homeassistant.const import CONF_LLM_HASS_API
-from homeassistant.helpers import llm
+from homeassistant.helpers import intent, llm
 from homeassistant.util import ulid
 from pydantic import PydanticInvalidForJsonSchema
 
@@ -1493,6 +1493,153 @@ def normalize_intent_for_lock(
     else:
         normalized.setdefault("service", "lock")
     return normalized
+
+
+# The services Home Assistant's own intent handlers call for a matched
+# entity, by its domain (`components/intent/__init__.py`): the on/off intents
+# open and close covers and valves and lock and unlock locks, and call
+# `turn_on`/`turn_off` on everything else; HassSetPosition sets a cover's or a
+# valve's position. The `domain` slot only narrows the match, it never picks
+# the service, so the gate must read the service from each matched entity.
+_ON_OFF_INTENT_SERVICES: dict[str, tuple[str, str]] = {
+    "cover": ("open_cover", "close_cover"),
+    "valve": ("open_valve", "close_valve"),
+    "lock": ("lock", "unlock"),
+}
+_SET_POSITION_SERVICES: dict[str, str] = {
+    "cover": "set_cover_position",
+    "valve": "set_valve_position",
+}
+SET_POSITION_INTENT = "HassSetPosition"
+
+
+class IntentServiceCall(NamedTuple):
+    """One service call an intent makes: its domain, service and entity."""
+
+    domain: str
+    service: str
+    entity_id: str | None
+
+
+def is_actuating_intent(tool_name: str) -> bool:
+    """Return True for the intents whose service depends on the target."""
+    return is_on_off_intent(tool_name) or (
+        base_tool_name(tool_name) == SET_POSITION_INTENT
+    )
+
+
+def _intent_service(tool_name: str, domain: str) -> str | None:
+    """Return the service an actuating intent calls on an entity of `domain`."""
+    if base_tool_name(tool_name) == SET_POSITION_INTENT:
+        return _SET_POSITION_SERVICES.get(domain)
+    turns_on = base_tool_name(tool_name) == "HassTurnOn"
+    on_off = _ON_OFF_INTENT_SERVICES.get(domain, ("turn_on", "turn_off"))
+    return on_off[0] if turns_on else on_off[1]
+
+
+def _text_list(value: Any) -> list[str]:
+    """Return a slot value as a list of lowercase non-empty strings."""
+    values = value if isinstance(value, list) else [value]
+    return [str(v).strip().lower() for v in values if isinstance(v, str) and v.strip()]
+
+
+def _slot_text(value: Any) -> str | None:
+    """Return a string slot value, or None."""
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def intent_service_calls(
+    hass: HomeAssistant | None, tool_name: str, tool_args: Mapping[str, Any]
+) -> list[IntentServiceCall] | None:
+    """
+    Return the service calls an actuating intent will make, one per entity.
+
+    Matched with Home Assistant's own `async_match_targets` on the payload the
+    call is sent as (`minimal_payload_for_domain`), so the gate checks what
+    HA will act on rather than what the model wrote: a cover opened by name
+    alone, a garage door named only by its entity id, every cover in an
+    area. The match ignores Assist exposure and allows duplicate names, so it
+    finds at least the entities HA will act on. Returns None when it cannot
+    run: not an actuating intent, no `hass` (the caller then checks the
+    domain and entity ids the model gave), or the match raised (the caller
+    then treats the call as critical).
+    """
+    if hass is None or not is_actuating_intent(tool_name):
+        return None
+    payload = minimal_payload_for_domain(dict(tool_args))
+    name = _slot_text(payload.get("name"))
+    if name == INTENT_NAME_ALL:
+        name = None
+    domains = _text_list(payload.get("domain"))
+    if base_tool_name(tool_name) == SET_POSITION_INTENT:
+        domains = [d for d in domains if d in _SET_POSITION_SERVICES] or list(
+            _SET_POSITION_SERVICES
+        )
+    constraints = intent.MatchTargetsConstraints(
+        name=name,
+        area_name=_slot_text(payload.get("area")),
+        floor_name=_slot_text(payload.get("floor")),
+        domains=domains or None,
+        device_classes=_text_list(payload.get("device_class")) or None,
+        allow_duplicate_names=True,
+    )
+    if not constraints.has_constraints:
+        # HA refuses an intent that would target every device.
+        return []
+    try:
+        result = intent.async_match_targets(hass, constraints)
+    except Exception:
+        # The caller fails closed on None with `hass`, so a matcher that HA
+        # changed under us gates every call instead of none.
+        LOGGER.warning(
+            "Could not match the targets of %s; treating it as critical",
+            tool_name,
+            exc_info=True,
+        )
+        return None
+    if not result.is_match:
+        return []
+    calls: list[IntentServiceCall] = []
+    for state in result.states:
+        service = _intent_service(tool_name, state.domain)
+        if service:
+            calls.append(IntentServiceCall(state.domain, service, state.entity_id))
+    return calls
+
+
+def declared_intent_service_calls(
+    tool_name: str, tool_args: Mapping[str, Any]
+) -> list[IntentServiceCall]:
+    """
+    Return the service calls an actuating intent declares, without `hass`.
+
+    From the domain slot, or the domain of the entity ids the model gave.
+    With no entity id the target is unknown, so the call carries none and
+    an `entity_match` rule treats it as matching.
+    """
+    if not is_actuating_intent(tool_name):
+        return []
+    entity_ids = [
+        e
+        for e in _text_list(tool_args.get("entity_id"))
+        + _text_list(tool_args.get("entity_ids"))
+        if "." in e
+    ]
+    domains = _text_list(tool_args.get("domain"))
+    calls: list[IntentServiceCall] = []
+    for entity_id in entity_ids:
+        domain = entity_id.split(".", 1)[0]
+        if domains and domain not in domains:
+            continue
+        if service := _intent_service(tool_name, domain):
+            calls.append(IntentServiceCall(domain, service, entity_id))
+    if calls:
+        return calls
+    return [
+        IntentServiceCall(domain, service, None)
+        for domain in domains
+        if (service := _intent_service(tool_name, domain))
+    ]
 
 
 # Separator between the API id and the tool name in a composite tool key.

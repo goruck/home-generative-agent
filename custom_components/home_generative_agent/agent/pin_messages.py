@@ -36,7 +36,9 @@ from typing import TYPE_CHECKING, Any
 
 from .helpers import (
     INTENT_NAME_ALL,
+    SET_POSITION_INTENT,
     base_tool_name,
+    intent_service_calls,
     is_on_off_intent,
     minimal_payload_for_domain,
     normalize_intent_for_lock,
@@ -145,6 +147,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "action_close": "close {target}",
         "action_turn_on": "turn on {target}",
         "action_turn_off": "turn off {target}",
+        "action_set_position": "set {target} to {position}%",
         "action_service": "{service} {target}",
         "action_automation": "add the automation {target}",
         "action_unnamed_automation": "add an unnamed automation",
@@ -261,6 +264,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "action_close": "zavřít {target}",
         "action_turn_on": "zapnout {target}",
         "action_turn_off": "vypnout {target}",
+        "action_set_position": "nastavit {target} na {position} %",
         "action_service": "{service} {target}",
         "action_automation": "přidat automatizaci {target}",
         "action_unnamed_automation": "přidat nepojmenovanou automatizaci",
@@ -350,19 +354,28 @@ def _named(hass: HomeAssistant | None, name: str) -> str:
     return pin_msg(hass, "target_named", name=name)
 
 
-def _intent_domain(tool_name: str, tool_args: Mapping[str, Any]) -> str:
+def _intent_domain(
+    hass: HomeAssistant | None, tool_name: str, tool_args: Mapping[str, Any]
+) -> str:
     """
-    Return the domain an on/off intent acts on, as the gate reads it.
+    Return the domain an actuating intent acts on, as the gate reads it.
 
     The lock normalizer (a `lock` domain, or "lock" in the name), else the
-    domain argument, else the domain of an entity id the model gave.
+    domain argument, else the domain of an entity id the model gave, else
+    the one domain of every entity HA's matcher finds. A name alone must
+    still say "unlock" for a lock (#770): HA unlocks it on HassTurnOff.
     """
     normalized = normalize_intent_for_lock(tool_name, dict(tool_args))
     domain = _first(normalized.get("domain")).lower()
     if domain:
         return domain
     entity_id = _first(tool_args.get("entity_id") or tool_args.get("entity_ids"))
-    return entity_id.split(".", 1)[0].lower() if "." in entity_id else ""
+    if "." in entity_id:
+        return entity_id.split(".", 1)[0].lower()
+    domains = {
+        call.domain for call in intent_service_calls(hass, tool_name, tool_args) or []
+    }
+    return domains.pop() if len(domains) == 1 else ""
 
 
 def _intent_target(
@@ -447,9 +460,17 @@ def describe_pending_action(
 
     raw_args = action.get("tool_args")
     tool_args: dict[str, Any] = dict(raw_args) if isinstance(raw_args, Mapping) else {}
+    if base_tool_name(tool_name) == SET_POSITION_INTENT:
+        domain = _intent_domain(hass, tool_name, tool_args)
+        return pin_msg(
+            hass,
+            "action_set_position",
+            target=_intent_target(hass, tool_args, domain),
+            position=_one_line(tool_args.get("position"), _ACTION_SERVICE_MAX_LEN),
+        )
     if is_on_off_intent(tool_name):
         turns_on = base_tool_name(tool_name) == "HassTurnOn"
-        domain = _intent_domain(tool_name, tool_args)
+        domain = _intent_domain(hass, tool_name, tool_args)
         on_key, off_key = _ON_OFF_VERBS.get(
             domain, ("action_turn_on", "action_turn_off")
         )

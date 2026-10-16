@@ -32,6 +32,7 @@ _DUMMY_KWARGS: dict[str, Any] = {
     "floor": "floor",
     "domain": "domain",
     "count": 2,
+    "position": 50,
 }
 
 
