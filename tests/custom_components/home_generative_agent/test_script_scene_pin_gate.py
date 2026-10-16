@@ -44,7 +44,10 @@ def _call(action: str, entity_id: str) -> dict[str, Any]:
 @pytest.fixture
 async def home(hass: HomeAssistant) -> HomeAssistant:
     """Set up a garage door, blinds, a front door lock, lights, scripts, scenes."""
-    hass.states.async_set("cover.garage_door", "closed")
+    # Open and close (1 | 2): a scene closing it calls close_cover.
+    hass.states.async_set("cover.garage_door", "closed", {"supported_features": 3})
+    # Position only: HA closes it with set_cover_position(0).
+    hass.states.async_set("cover.side_gate", "closed", {"supported_features": 4})
     hass.states.async_set("cover.living_room_blinds", "closed")
     hass.states.async_set("lock.front_door", "locked")
     hass.states.async_set("light.porch", "off")
@@ -155,6 +158,7 @@ async def home(hass: HomeAssistant) -> HomeAssistant:
                     },
                 },
                 {"name": "Locking Up", "entities": {"lock.front_door": "locking"}},
+                {"name": "Shut Gate", "entities": {"cover.side_gate": "closed"}},
                 {"name": "Stop Garage", "entities": {"script.open_garage": "off"}},
             ]
         },
@@ -235,6 +239,7 @@ async def test_a_rule_naming_the_script_covers_its_tool(home: HomeAssistant) -> 
         ("Half Open", True),
         ("Shut Tight", True),
         ("Locking Up", False),
+        ("Shut Gate", True),
     ],
 )
 async def test_turning_on_a_script_or_scene_checks_what_it_does(
@@ -259,6 +264,8 @@ async def test_turning_a_script_off_stops_it(home: HomeAssistant) -> None:
     [
         # A lighting system's scene only sets its lights.
         ("hue", False),
+        # deCONZ can expose a door lock, so its scenes are not light-only.
+        ("deconz", True),
         # A hub's scene can open a gate or unlock a door, and cannot be read.
         ("fibaro", True),
         ("overkiz", True),
@@ -296,6 +303,188 @@ def test_without_hass_a_scene_or_script_is_held() -> None:
     """With nothing to read the config from, it is held."""
     for entity_id in ("scene.good_night", "script.porch_lights"):
         assert _is_critical_action({"entity_id": entity_id}, RULES, "HassTurnOn", None)
+
+
+@pytest.mark.parametrize(
+    ("args", "critical"),
+    [
+        # HA reads these targets as every script, a list, a registry id, an
+        # area: which scripts run is unknown, so the call is held.
+        ({"domain": "script", "service": "turn_on", "entity_id": "all"}, True),
+        (
+            {
+                "domain": "script",
+                "service": "turn_on",
+                "entity_id": "script.porch_lights, script.open_garage",
+            },
+            True,
+        ),
+        (
+            {
+                "domain": "script",
+                "service": "turn_on",
+                "entity_id": "0123456789abcdef0123456789abcdef",
+            },
+            True,
+        ),
+        (
+            {
+                "domain": "script",
+                "service": "turn_on",
+                "entity_id": "script.porch_lights",
+                "area_id": "garage",
+            },
+            True,
+        ),
+        (
+            {
+                "domain": "script",
+                "service": "turn_on",
+                "target": {"entity_id": "script.open_garage"},
+            },
+            True,
+        ),
+        (
+            {
+                "domain": "script",
+                "service": "turn_on",
+                "target": {"entity_id": "script.porch_lights"},
+            },
+            False,
+        ),
+        (
+            {
+                "domain": "script",
+                "service": "turn_on",
+                "entity_ids": ["script.open_garage"],
+            },
+            True,
+        ),
+        (
+            {
+                "domain": "script",
+                "service": "toggle",
+                "entity_id": "script.open_garage",
+            },
+            True,
+        ),
+        ({"domain": "homeassistant", "service": "turn_on", "area_id": "garage"}, True),
+        (
+            {
+                "domain": "homeassistant",
+                "service": "turn_on",
+                "target": {"entity_id": "script.open_garage"},
+            },
+            True,
+        ),
+        (
+            {
+                "domain": "homeassistant",
+                "service": "turn_on",
+                "entity_id": "group.doors",
+            },
+            True,
+        ),
+        (
+            {
+                "domain": "homeassistant",
+                "service": "turn_on",
+                "entity_id": "scene.arrive_home",
+            },
+            True,
+        ),
+        # HA forwards this to cover.toggle, which opens a closed garage door.
+        (
+            {
+                "domain": "homeassistant",
+                "service": "toggle",
+                "entity_id": "cover.garage_door",
+            },
+            True,
+        ),
+        (
+            {
+                "domain": "scene",
+                "service": "create",
+                "scene_id": "x",
+                "entities": {"lock.front_door": "unlocked"},
+            },
+            True,
+        ),
+        (
+            {
+                "domain": "scene",
+                "service": "create",
+                "scene_id": "x",
+                "snapshot_entities": ["lock.front_door"],
+            },
+            True,
+        ),
+        ({"domain": "scene", "service": "apply", "data": "bogus"}, True),
+        # Runs an automation's actions, which are not opened here.
+        (
+            {
+                "domain": "automation",
+                "service": "trigger",
+                "entity_id": "automation.arrive",
+            },
+            True,
+        ),
+        ({"domain": "light", "service": "turn_on", "area_id": "garage"}, False),
+    ],
+)
+async def test_a_service_tool_reads_targets_the_way_ha_does(
+    home: HomeAssistant, args: dict[str, Any], *, critical: bool
+) -> None:
+    """`all`, lists, ids, areas and nested targets are not taken at face value."""
+    assert _is_critical_action(args, RULES, "mcp__call_service", home) is critical
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"domain": "script", "service": "turn_on", "entity_id": "script.porch_lights"},
+        {"domain": "script", "service": "toggle", "entity_id": "script.porch_lights"},
+        {"domain": "script", "service": "porch_lights"},
+        {
+            "domain": "homeassistant",
+            "service": "turn_on",
+            "entity_id": "script.porch_lights",
+        },
+    ],
+)
+async def test_a_rule_naming_a_script_covers_a_service_tool(
+    home: HomeAssistant, args: dict[str, Any]
+) -> None:
+    """A rule for the script's own service holds every way of running it."""
+    rules = [{"domain": "script", "service": "porch_lights"}]
+    assert _is_critical_action(args, rules, "mcp__call_service", home)
+
+
+async def test_a_service_tool_finds_a_renamed_script_by_its_key(
+    home: HomeAssistant,
+) -> None:
+    """`script.<key>` runs the script with that key, whatever its entity id."""
+    entities = er.async_get(home)
+    entities.async_update_entity(
+        "script.porch_lights", new_entity_id="script.front_lights"
+    )
+    entities.async_update_entity(
+        "script.open_garage", new_entity_id="script.garage_helper"
+    )
+    await home.async_block_till_done()
+    assert not _is_critical_action(
+        {"domain": "script", "service": "porch_lights"},
+        RULES,
+        "mcp__call_service",
+        home,
+    )
+    assert _is_critical_action(
+        {"domain": "script", "service": "open_garage"},
+        RULES,
+        "mcp__call_service",
+        home,
+    )
 
 
 @pytest.mark.parametrize(

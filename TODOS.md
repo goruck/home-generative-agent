@@ -328,6 +328,20 @@
 
 ---
 
+### A service tool that names its call as `action` is not screened
+
+**What:** `_is_critical_action` (`agent/graph.py`) reads a service tool's call from top-level `domain` and `service`. An MCP tool whose arguments spell it `action: "lock.unlock"` (or `service: "lock.unlock"` with no domain) gets an empty domain or service and is let through without any rule check, script/scene screening included.
+
+**Why:** Adversarial review of #775 (2026-10-16). Pre-existing; depends on the argument shape of the MCP servers users actually run, which is unknown.
+
+**How to apply:** Normalize the tool's arguments before the check: split a dotted `action`/`service` into domain and service, and hold a call whose service cannot be read. Check the argument schemas of the common Home Assistant MCP servers first.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** #775
+
+---
+
 ### A remote tool named like a local script is screened against the local script
 
 **What:** `script_tool_entity_id` (`agent/indirect_pin.py`) treats any tool whose last two name parts are `script__<x>` as Home Assistant's tool for `script.<x>` and screens that local script. An MCP server that is itself a Home Assistant instance exposes its own `script__<x>` tools; if a harmless local script shares the object id, the remote one (which may unlock a door there) is screened against the local one and runs with no PIN. With no local twin it is held, which is safe.

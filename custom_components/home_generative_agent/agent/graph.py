@@ -3418,14 +3418,10 @@ def _is_critical_action(
         critical_actions=critical_actions,
     ):
         return True
-    # A service tool can run a script or a scene directly; check what it does.
-    data = {
-        key: value
-        for key, value in tool_args.items()
-        if key not in ("domain", "service", "entity_id", "entity_ids")
-    }
+    # A service tool's call is screened like an automation step, opening any
+    # script or scene it runs.
     return service_runs_critical_action(
-        hass, f"{domain}.{service}", entities, data, critical_actions
+        hass, f"{domain}.{service}", tool_args, critical_actions
     )
 
 

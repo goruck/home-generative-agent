@@ -22,8 +22,8 @@ the script or scene then does can unlock a door. This module looks inside:
   screened like any other entity.
 * **A scene stored by another integration** cannot be read. It is held,
   except for the integrations in ``_LIGHT_SCENE_PLATFORMS``, whose scenes
-  only set lights or shades. A hub's scene (Fibaro, Vera, Overkiz, MQTT, KNX)
-  can open a gate or unlock a door.
+  only set lights or shades. A hub's scene (Fibaro, Vera, Overkiz, MQTT, KNX,
+  deCONZ, which can hold a lock) can open a gate or unlock a door.
 
 Anything that cannot be read (a script or scene the gate cannot find, a
 group nested deeper than ``_MAX_DEPTH``) is held.
@@ -38,7 +38,7 @@ from homeassistant.core import State
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.group import get_entity_ids
 
-from .automation_pin import find_critical_automation_calls
+from .automation_pin import find_critical_automation_calls, step_targets
 from .helpers import TOOL_NAMESPACE_SEP, matches_critical_rule
 
 if TYPE_CHECKING:
@@ -64,7 +64,6 @@ _HA_SCENE_PLATFORM_KEY = "homeassistant_scene"
 # only set its lights or shades. Any other integration's scene is held.
 _LIGHT_SCENE_PLATFORMS = frozenset(
     {
-        "deconz",
         "hue",
         "hunterdouglas_powerview",
         "lifx_cloud",
@@ -98,6 +97,9 @@ _REPRODUCE_SERVICES: dict[tuple[str, str], str] = {
     ("valve", "closed"): "close_valve",
     ("valve", "closing"): "close_valve",
 }
+# `CoverEntityFeature.CLOSE` and `ValveEntityFeature.CLOSE` are both 2.
+_CLOSE_FEATURE = 2
+_CLOSE_FEATURE_DOMAINS = frozenset({"cover", "valve"})
 _POSITION_ATTRIBUTES = (
     "current_position",
     "position",
@@ -166,39 +168,97 @@ def runs_critical_action(
 def service_runs_critical_action(  # noqa: PLR0911
     hass: HomeAssistant | None,
     action: str,
-    entity_ids: Sequence[str],
-    data: Mapping[str, Any],
+    tool_args: Mapping[str, Any],
     rules: Sequence[Mapping[str, str]],
 ) -> bool:
     """
-    Return True if a direct service call runs a script or scene that could.
+    Return True if a direct service call could do a critical action.
 
-    For tools that call services by name (an MCP service tool): `script.*`,
-    `scene.*`, and the generic `homeassistant.*` aimed at a script or scene.
-    A call that runs one with no entity id named is held. `action` is
+    For tools that call services by name (an MCP service tool). The call is
+    screened like one automation step (`automation_pin`), so its targets are
+    read the way Home Assistant reads them: `all`, a registry id, a group, an
+    area, a device or a label is unresolved and held, and a generic
+    `homeassistant.*` call is checked against each target's own domain. A
+    script or scene it runs is opened rather than held wholesale. `action` is
     `<domain>.<service>`.
     """
     domain, _, service = action.partition(".")
+    step = _service_step(action, tool_args)
     if domain == SCRIPT_DOMAIN:
         if service in _SCRIPT_SERVICES_THAT_DO_NOT_RUN:
             return False
         if service not in _RUN_SERVICES:
             # `script.<key>` runs the script with that key.
-            return runs_critical_action(hass, _script_for_key(hass, service), rules)
-        return _any_runs_critical(hass, entity_ids, rules)
+            return _opened_is_critical(hass, _script_for_key(hass, service), rules)
+        return _targets_run_critical(hass, step, frozenset({SCRIPT_DOMAIN}), rules)
     if domain == SCENE_DOMAIN:
         if service in _SCENE_INLINE_SERVICES:
-            return _inline_states_are_critical(data, rules)
+            return _inline_states_are_critical(tool_args, rules)
         if service == "turn_on":
-            return _any_runs_critical(hass, entity_ids, rules)
+            return _targets_run_critical(hass, step, frozenset({SCENE_DOMAIN}), rules)
         return False
     if domain == _GENERIC_DOMAIN and service in _RUN_SERVICES:
-        return any(
-            runs_critical_action(hass, entity_id, rules)
-            for entity_id in entity_ids
-            if entity_id.split(".", 1)[0] in (SCRIPT_DOMAIN, SCENE_DOMAIN)
+        return _targets_run_critical(
+            hass, step, frozenset({SCRIPT_DOMAIN, SCENE_DOMAIN}), rules
         )
-    return False
+    return bool(find_critical_automation_calls({"actions": [step]}, rules))
+
+
+def _service_step(action: str, tool_args: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a service tool's call as an automation step."""
+    step: dict[str, Any] = {
+        key: value
+        for key, value in tool_args.items()
+        if key not in ("domain", "service", "action", "entity_ids")
+    }
+    step["action"] = action
+    if (plural := tool_args.get("entity_ids")) is not None:
+        named = step.get("entity_id")
+        step["entity_id"] = [
+            *(named if isinstance(named, list) else [named] if named else []),
+            *(plural if isinstance(plural, list) else [plural]),
+        ]
+    return step
+
+
+def _targets_run_critical(
+    hass: HomeAssistant | None,
+    step: Mapping[str, Any],
+    opened: frozenset[str],
+    rules: Sequence[Mapping[str, str]],
+) -> bool:
+    """Open each script or scene a call targets; screen any other target."""
+    entities, unresolved = step_targets(step, opened)
+    if unresolved:
+        return True  # `all`, a group, an area or an id: which ones is unknown
+    others = [e for e in entities if e.split(".", 1)[0] not in opened]
+    if others and find_critical_automation_calls(
+        {"actions": [{"action": step["action"], "entity_id": others}]}, rules
+    ):
+        return True
+    return any(
+        _opened_is_critical(hass, entity_id, rules)
+        for entity_id in entities
+        if entity_id.split(".", 1)[0] in opened
+    )
+
+
+def _opened_is_critical(
+    hass: HomeAssistant | None,
+    entity_id: str,
+    rules: Sequence[Mapping[str, str]],
+) -> bool:
+    """Return True if a rule names running it, or what it does is critical."""
+    if entity_id.split(".", 1)[0] == SCRIPT_DOMAIN:
+        named = script_rule_matches(hass, entity_id, rules)
+    else:
+        named = matches_critical_rule(
+            domain=SCENE_DOMAIN,
+            service="turn_on",
+            entity_ids=[entity_id],
+            critical_actions=rules,
+        )
+    return named or runs_critical_action(hass, entity_id, rules)
 
 
 def _inline_states_are_critical(
@@ -209,20 +269,13 @@ def _inline_states_are_critical(
     fields: dict[str, Any] = (
         {**data, **nested} if isinstance(nested, dict) else {**data}
     )
+    fields = {
+        key: value for key, value in fields.items() if key not in ("domain", "service")
+    }
     if not any(key in fields for key in _INLINE_STATE_KEYS):
         return True  # the states it sets are not where they can be read
     step: dict[str, Any] = {"action": f"{SCENE_DOMAIN}.apply", "data": fields}
     return bool(find_critical_automation_calls({"actions": [step]}, rules))
-
-
-def _any_runs_critical(
-    hass: HomeAssistant | None,
-    entity_ids: Sequence[str],
-    rules: Sequence[Mapping[str, str]],
-) -> bool:
-    if not entity_ids:
-        return True  # an area, a device or nothing: which one is unknown
-    return any(runs_critical_action(hass, entity_id, rules) for entity_id in entity_ids)
 
 
 def _script_for_key(hass: HomeAssistant | None, key: str) -> str:
@@ -303,7 +356,7 @@ def _state_is_critical(
             )
             for member in get_entity_ids(hass, entity_id)
         )
-    service = _reproduce_service(domain, state)
+    service = _reproduce_service(hass, domain, state)
     if service is not None:
         return matches_critical_rule(
             domain=domain,
@@ -314,7 +367,7 @@ def _state_is_critical(
     return _entity_is_guarded(domain, entity_id, rules)
 
 
-def _reproduce_service(domain: str, state: State) -> str | None:
+def _reproduce_service(hass: HomeAssistant, domain: str, state: State) -> str | None:
     """Return the one service reproducing this state calls, when there is one."""
     service = _REPRODUCE_SERVICES.get((domain, state.state))
     if service is None:
@@ -322,6 +375,13 @@ def _reproduce_service(domain: str, state: State) -> str | None:
     attributes: Mapping[str, Any] = state.attributes
     if any(attributes.get(key) is not None for key in _POSITION_ATTRIBUTES):
         return None
+    if domain in _CLOSE_FEATURE_DOMAINS:
+        # A cover or valve that cannot close is moved to position 0 instead
+        # (`cover/reproduce_state.py`), so only one that can close is known.
+        current = hass.states.get(state.entity_id)
+        features = current.attributes.get("supported_features") if current else None
+        if not isinstance(features, int) or not features & _CLOSE_FEATURE:
+            return None
     return service
 
 
