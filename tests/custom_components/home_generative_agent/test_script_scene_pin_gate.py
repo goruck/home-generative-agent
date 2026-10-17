@@ -264,6 +264,8 @@ async def test_turning_a_script_off_stops_it(home: HomeAssistant) -> None:
     [
         # A lighting system's scene only sets its lights.
         ("hue", False),
+        # A shade system's scene moves covers, which a rule can guard.
+        ("hunterdouglas_powerview", True),
         # deCONZ can expose a door lock, so its scenes are not light-only.
         ("deconz", True),
         # A hub's scene can open a gate or unlock a door, and cannot be read.
@@ -303,6 +305,12 @@ def test_without_hass_a_scene_or_script_is_held() -> None:
     """With nothing to read the config from, it is held."""
     for entity_id in ("scene.good_night", "script.porch_lights"):
         assert _is_critical_action({"entity_id": entity_id}, RULES, "HassTurnOn", None)
+    for args in (
+        {"domain": "script", "service": "porch_lights"},
+        {"domain": "script", "service": "turn_on", "entity_id": "script.porch_lights"},
+        {"domain": "scene", "service": "turn_on", "entity_id": "scene.good_night"},
+    ):
+        assert _is_critical_action(args, RULES, "mcp__call_service", None)
 
 
 @pytest.mark.parametrize(
@@ -421,6 +429,72 @@ def test_without_hass_a_scene_or_script_is_held() -> None:
             True,
         ),
         ({"domain": "scene", "service": "apply", "data": "bogus"}, True),
+        # A harmless copy at the top cannot vouch for fields the screen
+        # cannot read, or for another copy under `service_data`.
+        (
+            {
+                "domain": "scene",
+                "service": "apply",
+                "entities": {"light.porch": "on"},
+                "data": '{"entities": {"lock.front_door": "unlocked"}}',
+            },
+            True,
+        ),
+        (
+            {
+                "domain": "scene",
+                "service": "apply",
+                "entities": {"light.porch": "on"},
+                "service_data": {"entities": {"lock.front_door": "unlocked"}},
+            },
+            True,
+        ),
+        # The same field twice with two values: either may be sent.
+        (
+            {
+                "domain": "scene",
+                "service": "apply",
+                "entities": {"lock.front_door": "unlocked"},
+                "data": {"entities": {"light.porch": "on"}},
+            },
+            True,
+        ),
+        (
+            {
+                "domain": "homeassistant",
+                "service": "turn_on",
+                "entity_id": "light.porch",
+                "data": {"entity_id": "script.open_garage"},
+            },
+            True,
+        ),
+        (
+            {
+                "domain": "light",
+                "service": "turn_on",
+                "entity_id": "light.porch",
+                "data": {"entity_id": "light.porch"},
+            },
+            False,
+        ),
+        # No domain given: one read from the first target is a guess, and a
+        # tool may send the call as homeassistant.turn_on, which runs the
+        # script.
+        (
+            {"service": "turn_on", "entity_id": ["light.porch", "script.open_garage"]},
+            True,
+        ),
+        (
+            {
+                "service": "turn_on",
+                "entity_id": ["alarm_control_panel.home", "script.open_garage"],
+            },
+            True,
+        ),
+        ({"service": "turn_on", "entity_id": ["light.porch"]}, False),
+        # Not run, so nothing to open.
+        ({"domain": "script", "service": "reload"}, False),
+        ({"domain": "scene", "service": "reload"}, False),
         # Runs an automation's actions, which are not opened here.
         (
             {
@@ -645,6 +719,43 @@ async def test_the_script_tool_is_held_for_a_pin(home: HomeAssistant) -> None:
 def test_script_tool_names(tool_name: str, entity_id: str | None) -> None:
     """HA names a script's tool `script__<object id>`, maybe namespaced."""
     assert script_tool_entity_id(tool_name) == entity_id
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "critical"),
+    [
+        ("open_garage", True),
+        ("assist__open_garage", True),
+        ("porch_lights", False),
+    ],
+)
+async def test_a_script_tool_named_by_the_script_alone_is_screened(
+    home: HomeAssistant, tool_name: str, *, critical: bool
+) -> None:
+    """HA 2026.8 names a script's tool by its object id, with no `script__`."""
+    assert _is_critical_action({}, RULES, tool_name, home) is critical
+
+
+async def test_a_bare_script_tool_name_is_read_from_home_assistant(
+    home: HomeAssistant,
+) -> None:
+    """Only a name an existing script has; `_` comes before a leading digit."""
+    home.states.async_set("script.2nd_door", "off")
+    assert script_tool_entity_id("_2nd_door", home) == "script.2nd_door"
+    assert script_tool_entity_id("open_garage", home) == "script.open_garage"
+    assert script_tool_entity_id("add_automation", home) is None
+    home.states.async_set("script.hassturnon", "off")
+    assert script_tool_entity_id("HassTurnOn", home) is None
+    assert script_tool_entity_id("open_garage") is None
+
+
+async def test_the_pin_line_names_a_bare_named_script(home: HomeAssistant) -> None:
+    """The line for an HA 2026.8 script tool names the script too."""
+    line = describe_pending_action(
+        home, {"tool_name": "let_in", "tool_args": {"name": "Porch light"}}
+    )
+    assert "Let In" in line
+    assert "Porch" not in line
 
 
 async def test_a_light_scene_with_no_registry_entry_runs(home: HomeAssistant) -> None:

@@ -107,6 +107,11 @@ _NON_ENTITY_TARGET_KEYS = ("device_id", "area_id", "label_id", "floor_id")
 # deprecated but still accepted by HA's SERVICE_SCHEMA and still rendered.
 _TARGET_CONTAINER_KEYS = ("target", "data", "data_template", "service_data")
 
+# Every key of a service step that `step_targets` reads a target from.
+STEP_TARGET_KEYS = frozenset(
+    {"entity_id", *_TARGET_CONTAINER_KEYS, *_NON_ENTITY_TARGET_KEYS}
+)
+
 # Service domains that run configuration this module cannot see. `python_script`
 # executes a user Python file whose sandbox permits `hass.services.call`;
 # `shell_command` and `rest_command` run user-defined commands; a template

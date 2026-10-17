@@ -22,7 +22,7 @@ the script or scene then does can unlock a door. This module looks inside:
   screened like any other entity.
 * **A scene stored by another integration** cannot be read. It is held,
   except for the integrations in ``_LIGHT_SCENE_PLATFORMS``, whose scenes
-  only set lights or shades. A hub's scene (Fibaro, Vera, Overkiz, MQTT, KNX,
+  only set lights. A hub's scene (Fibaro, Vera, Overkiz, MQTT, KNX,
   deCONZ, which can hold a lock) can open a gate or unlock a door.
 
 Anything that cannot be read (a script or scene the gate cannot find, a
@@ -32,13 +32,18 @@ group nested deeper than ``_MAX_DEPTH``) is held.
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import State
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.group import get_entity_ids
 
-from .automation_pin import find_critical_automation_calls, step_targets
+from .automation_pin import (
+    STEP_TARGET_KEYS,
+    find_critical_automation_calls,
+    step_targets,
+)
 from .helpers import TOOL_NAMESPACE_SEP, matches_critical_rule
 
 if TYPE_CHECKING:
@@ -60,12 +65,12 @@ _GENERIC_DOMAIN = "homeassistant"
 _SCRIPT_COMPONENT_KEY = SCRIPT_DOMAIN
 _HA_SCENE_PLATFORM_KEY = "homeassistant_scene"
 
-# Integrations whose scenes are stored on a lighting or shade system and can
-# only set its lights or shades. Any other integration's scene is held.
+# Integrations whose scenes are stored on a lighting system and can only set
+# its lights. Any other integration's scene is held: a shade system's scene
+# (Hunter Douglas PowerView) moves covers, which a rule can guard.
 _LIGHT_SCENE_PLATFORMS = frozenset(
     {
         "hue",
-        "hunterdouglas_powerview",
         "lifx_cloud",
         "litejet",
         "sunricher_dali",
@@ -79,26 +84,17 @@ _RUN_SERVICES = frozenset({"turn_on", "toggle"})
 _SCRIPT_SERVICES_THAT_DO_NOT_RUN = frozenset({"turn_off", "reload"})
 _SCENE_INLINE_SERVICES = frozenset({"apply", "create"})
 _INLINE_STATE_KEYS = ("entities", "snapshot_entities")
-# Keys a service step reads its targets from (`automation_pin`).
-_STEP_TARGET_KEYS = frozenset(
-    {
-        "entity_id",
-        "target",
-        "data",
-        "data_template",
-        "service_data",
-        "device_id",
-        "area_id",
-        "label_id",
-        "floor_id",
-    }
-)
+# Where a service tool may nest a call's fields.
+_FIELD_CONTAINER_KEYS = ("data", "service_data", "data_template")
+# Tool arguments that name the call rather than carry its fields.
+_CALL_KEYS = frozenset({"domain", "service", "action", "entity_ids"})
 
 # A group can contain a group.
 _MAX_DEPTH = 5
 
 # The tool HA gives each script is `script__<object id>`: two parts.
 _SCRIPT_TOOL_PARTS = 2
+_OBJECT_ID = re.compile(r"[a-z0-9_]+")
 
 # Target states that name one service when a scene reproduces them. Any other
 # state, or one with a position, leaves the service open: Home Assistant moves
@@ -122,18 +118,34 @@ _POSITION_ATTRIBUTES = (
 )
 
 
-def script_tool_entity_id(tool_name: str) -> str | None:
+def script_tool_entity_id(
+    tool_name: str, hass: HomeAssistant | None = None
+) -> str | None:
     """
     Return the script a tool runs, for Home Assistant's per-script tools.
 
-    HA names each exposed script's tool ``script__<object id>``, and a merged
-    API prefixes another namespace. Entity ids cannot hold ``__``, so the last
-    two parts are the domain and the object id.
+    HA 2026.9 and later name each exposed script's tool ``script__<object
+    id>``, and a merged API prefixes another namespace. Entity ids cannot hold
+    ``__``, so the last two parts are the domain and the object id. Earlier
+    releases name the tool by the object id alone (with ``_`` before one that
+    starts with a digit), so with `hass` a tool named like an existing
+    script is taken for that script: holding another tool that shares a
+    script's name costs a PIN prompt, missing the script would unlock a door.
     """
     parts = tool_name.split(TOOL_NAMESPACE_SEP)
-    if len(parts) < _SCRIPT_TOOL_PARTS or parts[-2] != SCRIPT_DOMAIN or not parts[-1]:
+    if len(parts) >= _SCRIPT_TOOL_PARTS and parts[-2] == SCRIPT_DOMAIN and parts[-1]:
+        return f"{SCRIPT_DOMAIN}.{parts[-1]}"
+    states = getattr(hass, "states", None)
+    if states is None:
         return None
-    return f"{SCRIPT_DOMAIN}.{parts[-1]}"
+    object_id = parts[-1]
+    # An object id is a lowercase slug, unlike an intent's tool (HassTurnOn).
+    if not _OBJECT_ID.fullmatch(object_id):
+        return None
+    if object_id.startswith("_") and object_id[1:2].isdigit():
+        object_id = object_id[1:]
+    entity_id = f"{SCRIPT_DOMAIN}.{object_id}"
+    return entity_id if states.get(entity_id) is not None else None
 
 
 def script_rule_matches(
@@ -196,6 +208,8 @@ def service_runs_critical_action(  # noqa: PLR0911
     script or scene it runs is opened rather than held wholesale. `action` is
     `<domain>.<service>`.
     """
+    if _fields_disagree(tool_args):
+        return True  # which copy HA reads is up to the tool
     domain, _, service = action.partition(".")
     step = _service_step(action, tool_args)
     if domain == SCRIPT_DOMAIN:
@@ -229,9 +243,9 @@ def _service_step(action: str, tool_args: Mapping[str, Any]) -> dict[str, Any]:
     step: dict[str, Any] = {"action": action}
     fields: dict[str, Any] = {}
     for key, value in tool_args.items():
-        if key in ("domain", "service", "action", "entity_ids"):
+        if key in _CALL_KEYS:
             continue
-        if key in _STEP_TARGET_KEYS:
+        if key in STEP_TARGET_KEYS:
             step[key] = value
         else:
             fields[key] = value
@@ -249,6 +263,33 @@ def _service_step(action: str, tool_args: Mapping[str, Any]) -> dict[str, Any]:
             *(plural if isinstance(plural, list) else [plural]),
         ]
     return step
+
+
+def _fields_disagree(tool_args: Mapping[str, Any]) -> bool:
+    """
+    Return True if a field is given twice with two values.
+
+    At the top of the call and inside `data` (or `service_data`,
+    `data_template`), or in two of those: the screen reads one copy, and the
+    tool may send the other.
+    """
+    seen: dict[str, Any] = {}
+    top = {
+        key: value
+        for key, value in tool_args.items()
+        if key not in _CALL_KEYS and key not in _FIELD_CONTAINER_KEYS
+    }
+    nested = [
+        value
+        for key in _FIELD_CONTAINER_KEYS
+        if isinstance(value := tool_args.get(key), dict)
+    ]
+    for fields in (top, *nested):
+        for key, value in fields.items():
+            if key in seen and seen[key] != value:
+                return True
+            seen[key] = value
+    return False
 
 
 def _targets_run_critical(
@@ -295,13 +336,18 @@ def _inline_states_are_critical(
     data: Mapping[str, Any], rules: Sequence[Mapping[str, str]]
 ) -> bool:
     """Screen `scene.apply`/`scene.create` the way an automation step is."""
-    nested = data.get("data")
-    fields: dict[str, Any] = (
-        {**data, **nested} if isinstance(nested, dict) else {**data}
-    )
-    fields = {
-        key: value for key, value in fields.items() if key not in ("domain", "service")
+    fields: dict[str, Any] = {
+        key: value
+        for key, value in data.items()
+        if key not in _CALL_KEYS and key not in _FIELD_CONTAINER_KEYS
     }
+    for key in _FIELD_CONTAINER_KEYS:
+        if key not in data:
+            continue
+        nested = data[key]
+        if not isinstance(nested, dict):
+            return True  # fields the screen cannot read, such as JSON text
+        fields.update(nested)
     if not any(key in fields for key in _INLINE_STATE_KEYS):
         return True  # the states it sets are not where they can be read
     step: dict[str, Any] = {"action": f"{SCENE_DOMAIN}.apply", "data": fields}

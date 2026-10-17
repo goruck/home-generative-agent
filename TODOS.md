@@ -348,7 +348,21 @@
 
 **Why:** Adversarial review of #775 (2026-10-16), low confidence. Needs a remote HA as an MCP server plus a colliding script name.
 
-**How to apply:** Resolve the tool object from the merged LLM API (unwrap `NamespacedTool`) and treat it as a script tool only when it is HA's `ScriptTool`; hold any other `script__*`-shaped tool. Test with a namespaced fake tool.
+**How to apply:** Resolve the tool object from the merged LLM API (unwrap `NamespacedTool`) and treat it as a script tool only when it is HA's `ScriptTool`; hold any other `script__*`-shaped tool. Test with a namespaced fake tool. The same applies to the bare names Home Assistant 2026.8 gives script tools (`<object id>`), which `script_tool_entity_id` also takes for a local script when one has that object id.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** #775
+
+---
+
+### A scene setting a group helper is screened as the group, not its members
+
+**What:** `_state_is_critical` (`agent/indirect_pin.py`) applies a rule's `entity_match` to the entity id a scene names. A new-style group helper (a cover or lock group such as `cover.all_doors`) is screened as itself, so a rule whose `entity_match` names a member (`left_garage`) misses a scene that opens the group. A direct call on the group has the same gap. `automation_pin`'s inline `scene.apply` screen ignores `entity_match` for this reason.
+
+**Why:** Security specialist, review cycle 4 of #775 (2026-10-17), low confidence. The default rules match `door`/`garage`/`gate`, which group names usually carry too.
+
+**How to apply:** For a state whose entity has an `entity_id` attribute in `hass.states` (a group helper), also screen each member, or fall back to domain-only matching as `_domain_is_guarded` does. Cover the direct-call path in the gate the same way.
 
 **Effort:** S
 **Priority:** P3

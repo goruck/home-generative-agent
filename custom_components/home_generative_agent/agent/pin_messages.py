@@ -524,7 +524,7 @@ def describe_pending_action(
     if tool_name == "add_automation":
         return _describe_automation(hass, action)
 
-    if (script_id := script_tool_entity_id(tool_name)) is not None:
+    if (script_id := script_tool_entity_id(tool_name, hass)) is not None:
         # A script's arguments are free-form fields the model fills in, so the
         # line names the script from Home Assistant, never from them.
         state = hass.states.get(script_id) if hass is not None else None
