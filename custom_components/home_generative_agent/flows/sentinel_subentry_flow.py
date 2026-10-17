@@ -488,12 +488,7 @@ def _autonomy_schema(payload: dict[str, Any]) -> dict[Any, Any]:
         ),
         vol.Required(
             CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
-            default=int(
-                payload.get(
-                    CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
-                    RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
-                )
-            ),
+            default=_override_minutes(payload),
         ): NumberSelector(
             NumberSelectorConfig(min=1, max=_MAX_OVERRIDE_TTL_MINUTES, step=1)
         ),
@@ -513,18 +508,21 @@ def _legacy_autonomy(flow: ConfigSubentryFlow) -> dict[str, Any]:
     }
 
 
+def _override_minutes(payload: dict[str, Any]) -> int:
+    """Return the stored override duration, or the default for one unreadable."""
+    value = payload.get(CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES)
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 1:
+        return min(int(value), _MAX_OVERRIDE_TTL_MINUTES)
+    return RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES
+
+
 def _normalize_autonomy(data: dict[str, Any]) -> None:
     """Store the autonomy fields as numbers, as the engine reads them."""
     level = str(data.get(CONF_SENTINEL_AUTONOMY_LEVEL, ""))
     data[CONF_SENTINEL_AUTONOMY_LEVEL] = (
         int(level) if level in _LEVEL_OPTIONS else RECOMMENDED_SENTINEL_AUTONOMY_LEVEL
     )
-    ttl = data.get(CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES)
-    data[CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES] = (
-        int(ttl)
-        if isinstance(ttl, (int, float)) and not isinstance(ttl, bool)
-        else RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES
-    )
+    data[CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES] = _override_minutes(data)
 
 
 def _default_payload() -> dict[str, Any]:
@@ -1130,6 +1128,11 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             )
 
         data = _default_payload()
+        # A level an older install keeps in the entry options is the one in
+        # force; the subentry's own, if any, wins in the carry below.
+        legacy = _legacy_autonomy(self)
+        if CONF_SENTINEL_AUTONOMY_LEVEL in legacy:
+            data[CONF_SENTINEL_AUTONOMY_LEVEL] = legacy[CONF_SENTINEL_AUTONOMY_LEVEL]
         _carry_basic_setup_survivors(data, current)
 
         errors: dict[str, str] = {}
@@ -1221,6 +1224,9 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             }
             # The select's options are text; the stored level is a number.
             suggested[CONF_SENTINEL_AUTONOMY_LEVEL] = _autonomy_level_str(payload)
+            suggested[CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES] = _override_minutes(
+                payload
+            )
             suggested[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = _camera_entry_links_json(
                 payload
             )

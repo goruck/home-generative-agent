@@ -20,6 +20,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS,
 )
+from custom_components.home_generative_agent.sentinel import engine as engine_module
 from custom_components.home_generative_agent.sentinel.engine import (
     SentinelEngine,
     _delivered_reason,
@@ -1382,3 +1383,49 @@ async def test_trigger_source_on_demand_in_audit(
 
     assert audit.calls
     assert audit.calls[0]["trigger_source"] == "on_demand"
+
+
+async def test_a_grouped_alert_is_silent_at_level_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The compound path honours level 0 too: recorded, not notified (#783)."""
+    snapshot = _make_snapshot()
+    engine, notifier, audit = _make_engine(monkeypatch, snapshot, cooldown_minutes=0)
+    engine._entry_id = "passive-entry"
+    monkeypatch.setattr(engine, "get_autonomy_level", lambda _entry_id: 0)
+
+    sent = await _dispatch_group(
+        engine,
+        _standing_finding("g1", "unlocked_lock_at_night"),
+        _standing_finding("g2", "unlocked_lock_when_away"),
+        at=datetime.now(UTC),
+    )
+
+    assert sent is False
+    assert cast("Any", notifier).calls == []
+    assert audit.calls[-1]["suppression_reason_code"] == "autonomy_passive"
+
+
+async def test_a_level_zero_override_silences_a_notifying_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An override of 0 over a configured level 1, end to end, sends nothing."""
+    engine, hass = _make_ae_engine(monkeypatch, autonomy_level=1)
+    del cast("Any", engine).get_autonomy_level  # the real level lookup
+    engine._options["sentinel_autonomy_level"] = 1
+    engine_module._AUTONOMY_OVERRIDES["test_entry"] = (
+        0,
+        _AE_FROZEN_NOW + timedelta(hours=1),
+    )
+    engine_module._OVERRIDE_BASES["test_entry"] = 1
+    try:
+        await engine._run_once()
+    finally:
+        engine_module._AUTONOMY_OVERRIDES.pop("test_entry", None)
+        engine_module._OVERRIDE_BASES.pop("test_entry", None)
+
+    hass.services.async_call.assert_not_called()
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    assert notifier.calls == []
+    status = engine.autonomy_status()
+    assert status["autonomy_level"] == 1  # the override was cleaned up above

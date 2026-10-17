@@ -12,7 +12,8 @@ their own. See [RELEASING.md](RELEASING.md).
 - Sentinel's autonomy level can now be set in Sentinel's Advanced setup ([#783](https://github.com/goruck/home-generative-agent/issues/783)).
   - Before, Sentinel ran at level 1 (notify only) unless `sentinel_set_autonomy_level` raised it, which lasted only an hour. The setting the engine read for its normal level could not be set anywhere.
   - **Autonomy level** (0–3, default 1) is now kept across restarts and Basic setup re-runs.
-  - Level 0 now silences Sentinel as documented. Before, it still sent every notification and only skipped triage. Findings are still recorded in the audit.
+  - Level 0 now silences finding alerts, and so the daily digest, as documented. Before, it still sent every notification and only skipped triage. Findings are still recorded in the audit and come due again when the level is raised. Baseline and one-time setup notices still appear.
+  - The `sentinel_health` sensor shows the level in force and when an override ends (`autonomy_level`, `autonomy_override_expires`). A service call that sets level 0 is logged as a warning.
   - **Autonomy override duration** (default 60 minutes, up to 30 days) sets how long a level from the service lasts. An override now also ends when the configured level changes, so a raised one cannot outlive a lowered setting.
   - Levels 2 and 3 are reserved for automatic actions, which are not available yet ([#789](https://github.com/goruck/home-generative-agent/issues/789)), and now notify exactly like level 1. Before, they could drop a finding whose device was unavailable. The docs described them as acting on their own, which no setup could do, and now say so.
   - A level an older install stored in its main options is kept on upgrade, and shown in the form.

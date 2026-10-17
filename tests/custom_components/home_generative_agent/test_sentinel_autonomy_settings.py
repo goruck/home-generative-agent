@@ -507,3 +507,52 @@ async def test_the_form_after_an_error_accepts_its_own_level(
     }
     assert suggested[CONF_SENTINEL_AUTONOMY_LEVEL] == "2"
     assert schema(suggested)[CONF_SENTINEL_AUTONOMY_LEVEL] == "2"
+
+
+@pytest.mark.asyncio
+async def test_basic_setup_keeps_an_older_installs_level(
+    hass: HomeAssistant,
+) -> None:
+    """A level 0 kept in the entry options stays 0 through a Basic re-run."""
+    existing = DummySubentry(
+        "sent1", SUBENTRY_TYPE_SENTINEL, "Sentinel", {CONF_SENTINEL_ENABLED: True}
+    )
+    entry = DummyEntry(options={CONF_SENTINEL_AUTONOMY_LEVEL: 0})
+    entry.subentries[existing.subentry_id] = existing
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+    updates: list[Any] = []
+    flow.async_update_and_abort = lambda *_a, **kw: (  # type: ignore[assignment]
+        updates.append(kw) or {"type": "abort", "reason": "reconfigure_successful"}
+    )
+    await flow.async_step_setup_mode({"setup_mode": "basic"})
+    await flow.async_step_basic_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_DAILY_DIGEST_ENABLED: False,
+            CONF_SENTINEL_DAILY_DIGEST_TIME: "08:00:00",
+        }
+    )
+    assert updates[0]["data"][CONF_SENTINEL_AUTONOMY_LEVEL] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stored", [None, "x", 0, True])
+async def test_the_form_opens_with_an_unreadable_duration(
+    hass: HomeAssistant, stored: object
+) -> None:
+    """A duration an older install left unreadable shows as the default."""
+    existing = DummySubentry(
+        "sent1", SUBENTRY_TYPE_SENTINEL, "Sentinel", {CONF_SENTINEL_ENABLED: True}
+    )
+    entry = DummyEntry(options={CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES: stored})
+    entry.subentries[existing.subentry_id] = existing
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+    form = await flow.async_step_settings()
+    schema = cast("Any", form).get("data_schema")
+    suggested = {
+        key.schema: key.description["suggested_value"]
+        for key in schema.schema
+        if key.description and "suggested_value" in key.description
+    }
+    assert suggested[CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES] == 60
+    schema(suggested)

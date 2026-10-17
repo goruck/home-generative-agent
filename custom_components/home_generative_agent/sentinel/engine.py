@@ -627,7 +627,9 @@ class SentinelEngine:
             expires_at = min(expires_at, existing[1])
         _AUTONOMY_OVERRIDES[entry_id] = (level, expires_at)
         _OVERRIDE_BASES[entry_id] = base_level
-        LOGGER.info(
+        # Level 0 silences every finding alert until it ends: say so louder.
+        LOGGER.log(
+            logging.WARNING if level == 0 else logging.INFO,
             "Sentinel autonomy level set to %s for entry %s (expires %s).",
             level,
             entry_id,
@@ -693,6 +695,22 @@ class SentinelEngine:
             if level in SENTINEL_AUTONOMY_LEVELS
             else RECOMMENDED_SENTINEL_AUTONOMY_LEVEL
         )
+
+    def autonomy_status(self) -> dict[str, Any]:
+        """
+        Return the level in force and when an override of it ends, if one does.
+
+        Shown on the health sensor, so a level-0 override that silences
+        Sentinel is visible rather than only logged (#783).
+        """
+        if not self._entry_id:
+            return {"autonomy_level": None, "autonomy_override_expires": None}
+        level = self.get_autonomy_level(self._entry_id)
+        override = _AUTONOMY_OVERRIDES.get(self._entry_id)
+        return {
+            "autonomy_level": level,
+            "autonomy_override_expires": override[1].isoformat() if override else None,
+        }
 
     def _is_passive(self) -> bool:
         """

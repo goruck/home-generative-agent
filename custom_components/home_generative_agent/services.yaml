@@ -235,9 +235,12 @@ sentinel_set_autonomy_level:
   name: Set sentinel autonomy level
   description: >
     Set the runtime autonomy level for the sentinel engine (admin-only, TTL-bounded).
-    Level 0 = fully passive; 1 = notify only; 2 and 3 = notify, with automatic
-    actions reserved for a future release. The override reverts to the level set
-    in Sentinel's Advanced setup when the TTL or a restart ends it.
+    Level 0 = passive (finding alerts silenced); 1 = notify only; 2 and 3 = notify,
+    with automatic actions reserved for a future release. The override reverts to
+    the level set in Sentinel's Advanced setup when its duration runs out, on a
+    restart, or when that setting changes; a raised level also ends on a reload.
+    With the level-increase PIN on, only a level above both the current one and
+    the configured one needs the PIN: returning to the configured level does not.
   fields:
     level:
       name: Autonomy level

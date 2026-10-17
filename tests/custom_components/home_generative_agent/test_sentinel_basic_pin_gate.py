@@ -67,8 +67,10 @@ _BASIC_INPUT: dict[str, Any] = {
 @pytest.fixture(autouse=True)
 def _clear_overrides() -> Generator[None]:
     _AUTONOMY_OVERRIDES.clear()
+    engine_module._OVERRIDE_BASES.clear()
     yield
     _AUTONOMY_OVERRIDES.clear()
+    engine_module._OVERRIDE_BASES.clear()
 
 
 def _engine_for(data: dict[str, Any]) -> SentinelEngine:
