@@ -105,7 +105,13 @@ _NON_ENTITY_TARGET_KEYS = ("device_id", "area_id", "label_id", "floor_id")
 
 # Containers within a service step that can carry targets. `data_template` is
 # deprecated but still accepted by HA's SERVICE_SCHEMA and still rendered.
-_TARGET_CONTAINER_KEYS = ("target", "data", "data_template", "service_data")
+DATA_CONTAINER_KEYS = ("data", "data_template", "service_data")
+_TARGET_CONTAINER_KEYS = ("target", *DATA_CONTAINER_KEYS)
+
+# Every key of a service step that `step_targets` reads a target from.
+STEP_TARGET_KEYS = frozenset(
+    {"entity_id", *_TARGET_CONTAINER_KEYS, *_NON_ENTITY_TARGET_KEYS}
+)
 
 # Service domains that run configuration this module cannot see. `python_script`
 # executes a user Python file whose sandbox permits `hass.services.call`;
@@ -183,6 +189,11 @@ def _is_template(value: Any) -> bool:
     return hasattr(value, "template")
 
 
+def _has_templated_key(mapping: Mapping[Any, Any]) -> bool:
+    """Return True if a key is a template, which HA renders like a value."""
+    return any(not isinstance(key, str) or _is_template(key) for key in mapping)
+
+
 def _walk_steps(
     node: Any, depth: int = 0
 ) -> Iterator[tuple[Mapping[str, Any], str | None]]:
@@ -238,8 +249,15 @@ def _nested_sequences(node: Mapping[str, Any]) -> Iterator[Any]:
         yield node["parallel"]
 
 
-def _collect_one_entity_id(value: str) -> tuple[list[str], bool]:
-    """Return ([entity_id], unresolved) for a single ``entity_id`` string."""
+def _collect_one_entity_id(
+    value: str, keep: frozenset[str] = frozenset()
+) -> tuple[list[str], bool]:
+    """
+    Return ([entity_id], unresolved) for a single ``entity_id`` string.
+
+    An entity of an expanding domain is unresolved unless its domain is in
+    ``keep``, for a caller that opens those entities itself.
+    """
     lowered = value.strip().lower()
     if not lowered or lowered == _ENTITY_ID_NONE:
         return [], False
@@ -250,13 +268,15 @@ def _collect_one_entity_id(value: str) -> tuple[list[str], bool]:
         # Entity registry IDs are accepted in targets and resolved later, so
         # the entity this really hits is unknown at write time.
         return [], True
-    if lowered.split(".", 1)[0] in _EXPANDING_DOMAINS:
+    if lowered.split(".", 1)[0] in _EXPANDING_DOMAINS - keep:
         # Groups and helpers fan out to entities named nowhere in this config.
         return [], True
     return [lowered], False
 
 
-def _collect_entity_ids(value: Any) -> tuple[list[str], bool]:
+def _collect_entity_ids(
+    value: Any, keep: frozenset[str] = frozenset()
+) -> tuple[list[str], bool]:
     """Return (entity_ids, unresolved) for an ``entity_id`` field value."""
     if value is None:
         return [], False
@@ -264,14 +284,14 @@ def _collect_entity_ids(value: Any) -> tuple[list[str], bool]:
         entities: list[str] = []
         unresolved = False
         for item in value:
-            item_entities, item_unresolved = _collect_entity_ids(item)
+            item_entities, item_unresolved = _collect_entity_ids(item, keep)
             entities.extend(item_entities)
             unresolved = unresolved or item_unresolved
         return entities, unresolved
     if not isinstance(value, str) or _is_template(value):
         # Template or unexpected type: the real targets are unknown.
         return [], True
-    return _collect_one_entity_id(value)
+    return _collect_one_entity_id(value, keep)
 
 
 def _targets_include_indirection(step: Mapping[str, Any]) -> bool:
@@ -299,8 +319,15 @@ def _targets_include_indirection(step: Mapping[str, Any]) -> bool:
     return False
 
 
-def _step_targets(step: Mapping[str, Any]) -> tuple[list[str], bool]:
-    """Return (entity_ids, unresolved_target) for one step."""
+def step_targets(
+    step: Mapping[str, Any], keep: frozenset[str] = frozenset()
+) -> tuple[list[str], bool]:
+    """
+    Return (entity_ids, unresolved_target) for one step.
+
+    ``keep`` names expanding domains (`script`, `scene`) whose entities the
+    caller opens itself, so they are returned rather than counted unresolved.
+    """
     entities: list[str] = []
     unresolved = False
 
@@ -308,11 +335,12 @@ def _step_targets(step: Mapping[str, Any]) -> tuple[list[str], bool]:
     containers.extend(step[key] for key in _TARGET_CONTAINER_KEYS if key in step)
 
     for container in containers:
-        if not isinstance(container, dict):
-            # e.g. a fully templated `target:`.
+        if not isinstance(container, dict) or _has_templated_key(container):
+            # e.g. a fully templated `target:`, or a key HA renders into
+            # `entity_id` when the step runs.
             unresolved = True
             continue
-        found, found_unresolved = _collect_entity_ids(container.get("entity_id"))
+        found, found_unresolved = _collect_entity_ids(container.get("entity_id"), keep)
         entities.extend(found)
         unresolved = unresolved or found_unresolved
         if any(container.get(key) for key in _NON_ENTITY_TARGET_KEYS):
@@ -359,8 +387,19 @@ def _screen_state_reproduction(
         "scene.apply",
         "the automation reproduces entity states that cannot be read here",
     )
-    data = step.get("data")
-    if not isinstance(data, dict):
+    # Home Assistant renders `data_template` and merges it over `data`, so
+    # entities given there replace the ones in `data`; both are read.
+    data: dict[Any, Any] = {}
+    for key in ("data", "data_template"):
+        block = step.get(key)
+        if block is None:
+            continue
+        if not isinstance(block, dict) or _has_templated_key(block):
+            # HA renders dict keys too, so a templated key can become
+            # `entities` when the step runs.
+            return [unreadable]
+        data.update(block)
+    if not data:
         return [unreadable]
 
     candidates: list[Any] = []
@@ -416,7 +455,7 @@ def _screen_call_service(
     if special is not None:
         return special
 
-    entities, unresolved = _step_targets(step)
+    entities, unresolved = step_targets(step)
     if not matches_critical_rule(
         domain=domain,
         service=service,
@@ -479,7 +518,7 @@ def _screen_special_domain(
                     "actions cannot be checked here",
                 )
             ]
-        entities, unresolved = _step_targets(step)
+        entities, unresolved = step_targets(step)
         return _screen_generic_domain(service, entities, unresolved, rules)
     return None
 
@@ -550,7 +589,7 @@ def _screen_device_action(
             )
         ]
 
-    entities, unresolved = _step_targets(step)
+    entities, unresolved = step_targets(step)
     if matches_critical_rule(
         domain=domain,
         service=action_kind,

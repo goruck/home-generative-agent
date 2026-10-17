@@ -77,8 +77,9 @@ def _action(tool_name: str, tool_args: dict[str, Any], **extra: Any) -> dict[str
         ("HassTurnOff", PLAYROOM, PLAYROOM_LINE),
         ("HassTurnOn", PLAYROOM, 'lock "Playroom Door Lock"'),
         ("intent__HassTurnOff", PLAYROOM, PLAYROOM_LINE),
-        # The lock is recognized by name too, as the gate does.
-        ("HassTurnOff", {"name": "Front Door Lock"}, 'unlock "Front Door Lock"'),
+        # Never a lock by the letters of its name (#782): with nothing
+        # matched, "lock" inside "Kitchen Clock" does not make it one.
+        ("HassTurnOff", {"name": "Kitchen Clock"}, 'turn off "Kitchen Clock"'),
         # A service the model added does not change what HA runs.
         ("HassTurnOff", {**PLAYROOM, "service": "lock"}, PLAYROOM_LINE),
         # The gate reads the domain off the entity id when nothing else says
