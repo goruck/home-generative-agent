@@ -1341,7 +1341,7 @@ async def _execute_pending_action(
 
     tool_args = action.get("tool_args") or {}
     tool_args = normalize_intent_for_alarm(tool_name, tool_args)
-    tool_args = normalize_intent_for_lock(tool_name, tool_args)
+    tool_args = normalize_intent_for_lock(tool_name, tool_args, cfg.get("hass"))
     tool_args = maybe_fill_lock_entity(tool_args, cfg.get("hass"))
     # The same payload the normal path sends after its guard: HA's intents
     # read name/area/floor and ignore an entity id, so a held lock call with

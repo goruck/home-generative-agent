@@ -499,7 +499,7 @@ def _prepare_tool_args(
 ) -> tuple[ToolMessage | None, dict[str, Any]]:
     """Normalize, guard, and sanitize arguments before calling HA."""
     tool_args = normalize_intent_for_alarm(tool_name, tool_args)
-    tool_args = normalize_intent_for_lock(tool_name, tool_args)
+    tool_args = normalize_intent_for_lock(tool_name, tool_args, ctx.hass)
     if _is_live_context_tool(tool_name):
         # Read-only, and HA's schema is name/domain/area only. The lock
         # rewriting below exists for lock/unlock commands; applied to a state

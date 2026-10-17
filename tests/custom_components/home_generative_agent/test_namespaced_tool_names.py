@@ -162,7 +162,9 @@ def test_alarm_intent_keeps_its_carve_out_under_any_spelling(tool_name: str) -> 
 @pytest.mark.parametrize("tool_name", ["HassTurnOff", "intent__HassTurnOff"])
 def test_lock_intent_normalization_survives_the_rename(tool_name: str) -> None:
     """Unlock must resolve to the `unlock` service, namespaced or not."""
-    out = normalize_intent_for_lock(tool_name, {"name": "Front Door Lock"})
+    out = normalize_intent_for_lock(
+        tool_name, {"name": "Front Door Lock", "domain": ["lock"]}
+    )
     assert out["domain"] == ["lock"]
     assert out["service"] == "unlock"
 
@@ -227,7 +229,6 @@ def test_tool_lookup_targets_is_inert_when_live_filtering_is_off() -> None:
     ("args", "expected_target"),
     [
         ({"name": "Garage Door Lock", "domain": ["lock"]}, "Garage Door Lock"),
-        ({"name": "Garage Door Lock"}, "Garage Door Lock"),
         (
             {"entity_id": "lock.garage_door_lock", "domain": ["lock"]},
             "lock.garage_door_lock",

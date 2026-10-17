@@ -1372,7 +1372,14 @@ def sanitize_tool_args(tool_args: dict[str, Any]) -> dict[str, Any]:
 def maybe_fill_lock_entity(
     tool_args: dict[str, Any], hass: HomeAssistant | None
 ) -> dict[str, Any]:
-    """Best-effort map a friendly lock name to an entity_id without heavy fuzzing."""
+    """
+    Map a lock's friendly name to its entity id, on an exact match only.
+
+    The name may leave off a trailing "lock" ("Front Door" for "Front Door
+    Lock"). No near match: guessing the closest lock sent a call meant for
+    another device to a door lock (#782), so a name that matches no lock is
+    left for Home Assistant's own matcher to refuse.
+    """
     domains = tool_args.get("domain") or []
     domains = domains if isinstance(domains, list) else [domains]
     if "lock" not in {str(d).lower() for d in domains}:
@@ -1390,7 +1397,6 @@ def maybe_fill_lock_entity(
     target_slug = _slugify(name_hint)
     target_compact = target_slug.replace("_", "")
     target_with_lock = f"{target_compact}lock"
-    best_match: tuple[int, int, str, str] | None = None
 
     for entity_id in hass.states.async_entity_ids("lock"):
         state_obj = hass.states.get(entity_id)
@@ -1399,26 +1405,13 @@ def maybe_fill_lock_entity(
         ) or entity_id
         cand_slug = _slugify(friendly)
         cand_compact = cand_slug.replace("_", "")
-        if cand_slug == target_slug:
+        if cand_slug == target_slug or cand_compact in (
+            target_compact,
+            target_with_lock,
+        ):
             tool_args["entity_id"] = entity_id
             tool_args["name"] = friendly
             return tool_args
-        if cand_compact in (target_compact, target_with_lock):
-            tool_args["entity_id"] = entity_id
-            tool_args["name"] = friendly
-            return tool_args
-
-        rank = (
-            1 if target_compact in cand_compact or cand_compact in target_compact else 2
-        )
-        diff = abs(len(cand_compact) - len(target_compact))
-        if best_match is None or (rank, diff) < best_match[:2]:
-            best_match = (rank, diff, entity_id, friendly)
-
-    if not tool_args.get("entity_id") and best_match:
-        _, _, entity_id, friendly = best_match
-        tool_args["entity_id"] = entity_id
-        tool_args["name"] = friendly
 
     return tool_args
 
@@ -1478,16 +1471,27 @@ def normalize_intent_for_alarm(
 
 
 def normalize_intent_for_lock(
-    tool_name: str, tool_args: dict[str, Any]
+    tool_name: str, tool_args: dict[str, Any], hass: HomeAssistant | None = None
 ) -> dict[str, Any]:
-    """Normalize lock intents: set domain and service for lock/unlock."""
+    """
+    Normalize lock intents: set domain and service for lock/unlock.
+
+    A call is a lock call when the model declares the `lock` domain, or
+    declares none and the name is one Home Assistant's matcher resolves to
+    locks only. Never from the letters of the name: "lock" inside "Kitchen
+    Clock" or a scene named "Unlock" turned a switch or a scene into a call
+    on a door lock (#782).
+    """
     if not is_on_off_intent(tool_name):
         return tool_args
 
-    name = str(tool_args.get("name", "")).lower()
     domains = tool_args.get("domain") or []
     domains = domains if isinstance(domains, list) else [domains]
-    is_lock = any(str(d).lower() == "lock" for d in domains) or "lock" in name
+    declared = {str(d).strip().lower() for d in domains if str(d).strip()}
+    if declared:
+        is_lock = "lock" in declared
+    else:
+        is_lock = _name_matches_only_locks(hass, tool_args.get("name"))
     if not is_lock:
         return tool_args
 
@@ -1497,6 +1501,22 @@ def normalize_intent_for_lock(
     else:
         normalized.setdefault("service", "lock")
     return normalized
+
+
+def _name_matches_only_locks(hass: HomeAssistant | None, name: Any) -> bool:
+    """Return True when HA's matcher resolves `name` to locks and nothing else."""
+    if hass is None or not isinstance(name, str) or not name.strip():
+        return False
+    if name.strip() == INTENT_NAME_ALL:
+        return False
+    try:
+        result = intent.async_match_targets(
+            hass,
+            intent.MatchTargetsConstraints(name=name, allow_duplicate_names=True),
+        )
+    except Exception:  # noqa: BLE001 - a name HA cannot match is not a lock
+        return False
+    return result.is_match and all(state.domain == "lock" for state in result.states)
 
 
 # The services Home Assistant's own intent handlers call for a matched

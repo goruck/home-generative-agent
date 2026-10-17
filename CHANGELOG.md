@@ -11,6 +11,10 @@ their own. See [RELEASING.md](RELEASING.md).
 
 - The model-provider libraries are no longer pinned to one exact version each: `langchain-openai`, `langchain-anthropic` and `langchain-ollama` accept any 1.x release (`langchain-ollama` from 0.3.10), `langchain-google-genai` any 3.x from 3.1.0, and the `anthropic` SDK anything from 0.125.0 below 2. When a Home Assistant release moved a library these depend on, such as `openai` in 2026.10, an exact pin could not be installed next to it and the integration failed to set up for everyone until a new release shipped (#735). Home Assistant can now pick a compatible release on its own. A fresh install, or the reinstall that follows a Home Assistant update, gets the newest release in each range: today `langchain-openai` 1.7.2, `langchain-anthropic` 1.7.6 with `anthropic` 1.15.0, `langchain-ollama` 1.1.0 and `langchain-google-genai` 3.2.0. The test suite runs against the newest releases every day.
 
+### Fixed
+
+- **Turning a device on or off no longer acts on a door lock because "lock" appears somewhere in the device's name.** Before, any on/off request whose name contained those letters, such as "Kitchen Clock", "Block Heater" or a scene called "Unlock" or "Lock Up", was rewritten into a lock command, even when the agent had said the device was a switch. When no lock had that name, the closest-named lock was filled in. So "turn off the kitchen clock" unlocked the front door: with the Critical Action PIN on it was held, and entering the PIN unlocked the door; with no PIN set, the door unlocked at once. Turning on a scene named "Unlock" locked a door instead of activating the scene. A request is now treated as a lock command only when the agent says the device is a lock, or when the name matches locks and nothing else, found the way Home Assistant finds it. A lock name that leaves off a trailing "lock" ("Front Door" for "Front Door Lock") still finds the lock when the agent says it is one. A name that matches no lock is passed to Home Assistant unchanged, never redirected to another lock ([#782](https://github.com/goruck/home-generative-agent/issues/782)).
+
 ## [3.44.1] - 2026-10-16
 
 ### Fixed
