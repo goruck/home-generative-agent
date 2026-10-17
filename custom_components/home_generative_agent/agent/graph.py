@@ -87,6 +87,7 @@ from ..core.prompt_cache import (  # noqa: TID252
     concrete_chat_model,
 )
 from ..core.utils import extract_final  # noqa: TID252
+from .automation_pin import STEP_TARGET_KEYS
 from .automation_targets import AUTOMATION_REFUSAL_PREFIX
 from .helpers import (
     CONFIRM_TOOL_NAME,
@@ -121,8 +122,10 @@ from .helpers import (
     tool_index_key,
 )
 from .indirect_pin import (
+    RUN_SERVICES,
     SCENE_DOMAIN,
     SCRIPT_DOMAIN,
+    bare_script_tool_entity_id,
     runs_critical_action,
     script_rule_matches,
     script_tool_entity_id,
@@ -3409,47 +3412,47 @@ def _is_critical_action(
         return _intent_is_critical(tool_args, critical_actions, tool_name, hass)
 
     # A script's own tool names no domain or service; what it runs decides.
-    if (script_id := script_tool_entity_id(tool_name, hass)) is not None:
+    if (script_id := script_tool_entity_id(tool_name)) is not None:
         return _script_tool_is_critical(script_id, critical_actions, hass)
-
-    target_domains = {e.split(".", 1)[0] for e in entities}
-    # Alarm panels already enforce their own code; never gate them with the
-    # generic PIN. A call that names no domain is one only when every target
-    # is an alarm panel: the first being one says nothing of the rest.
-    if domain == "alarm_control_panel" and (
-        domain_given or target_domains == {"alarm_control_panel"}
-    ):
-        return False
-
-    # Require both domain and service to be present before treating as critical.
-    if not domain or not service:
-        return False
-
-    if matches_critical_rule(
-        domain=domain,
-        service=service,
-        entity_ids=entities,
-        critical_actions=critical_actions,
-    ):
+    # A tool named like a script (HA before 2026.9 named script tools so) may
+    # be that script's tool or another tool sharing its name: screen both.
+    if (
+        bare_script := bare_script_tool_entity_id(tool_name, hass)
+    ) is not None and _script_tool_is_critical(bare_script, critical_actions, hass):
         return True
+
+    # Alarm panels already enforce their own code; never gate them with the
+    # generic PIN. Only when the call names the domain: with none, the first
+    # target being a panel says nothing of the rest.
+    if not service or (domain == "alarm_control_panel" and domain_given):
+        return False
+    actions: list[str] = []
+    if domain:
+        if matches_critical_rule(
+            domain=domain,
+            service=service,
+            entity_ids=entities,
+            critical_actions=critical_actions,
+        ):
+            return True
+        actions.append(f"{domain}.{service}")
     # A service tool's call is screened like an automation step, opening any
     # script or scene it runs. With no domain given, the one read from the
-    # first entity is a guess: a tool may send a call over several domains
-    # as `homeassistant.<service>`, which runs each target's own service, so
-    # such a call is screened that way too.
-    actions = [f"{domain}.{service}"]
-    if not domain_given and (
-        len(target_domains) > 1 or target_domains & _OPENED_DOMAINS
+    # first entity is a guess, and the targets may sit under `target` or
+    # `data`: a tool may send such a call as `homeassistant.<service>`, which
+    # runs each target's own service, so it is screened that way too when it
+    # could run a script or scene, or reach several domains.
+    target_domains = {e.split(".", 1)[0] for e in entities}
+    if (
+        not domain_given
+        and any(key in tool_args for key in STEP_TARGET_KEYS)
+        and (service in RUN_SERVICES or len(target_domains) > 1 or not domain)
     ):
         actions.append(f"homeassistant.{service}")
     return any(
         service_runs_critical_action(hass, action, tool_args, critical_actions)
         for action in actions
     )
-
-
-# Domains whose entities run other actions when turned on.
-_OPENED_DOMAINS = frozenset({"script", "scene", "group"})
 
 
 def _script_tool_is_critical(

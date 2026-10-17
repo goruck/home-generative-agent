@@ -22,6 +22,7 @@ from custom_components.home_generative_agent.agent.graph import (
     _prepare_tool_args,
 )
 from custom_components.home_generative_agent.agent.indirect_pin import (
+    bare_script_tool_entity_id,
     script_tool_entity_id,
 )
 from custom_components.home_generative_agent.agent.pin_messages import (
@@ -492,6 +493,62 @@ def test_without_hass_a_scene_or_script_is_held() -> None:
             True,
         ),
         ({"service": "turn_on", "entity_id": ["light.porch"]}, False),
+        # No domain, and the target under `target`: still read.
+        ({"service": "turn_on", "target": {"entity_id": "script.open_garage"}}, True),
+        (
+            {
+                "service": "turn_on",
+                "entity_id": "light.porch",
+                "target": {"entity_id": "script.open_garage"},
+            },
+            True,
+        ),
+        ({"service": "turn_on", "entity_id": "scene.arrive_home"}, True),
+        # Stopping a script runs nothing.
+        ({"service": "turn_off", "entity_id": "script.open_garage"}, False),
+        # A `service` argument with nothing to act on is not a service call.
+        ({"service": "weather"}, False),
+        # Alarm panels keep their own code; a panel alone is not held.
+        (
+            {
+                "domain": "alarm_control_panel",
+                "service": "alarm_disarm",
+                "entity_id": "alarm_control_panel.home",
+            },
+            False,
+        ),
+        (
+            {"service": "alarm_disarm", "entity_id": ["alarm_control_panel.home"]},
+            False,
+        ),
+        # One value and a list of it are the same field.
+        (
+            {
+                "domain": "light",
+                "service": "turn_on",
+                "entity_id": "light.porch",
+                "data": {"entity_id": ["light.porch"]},
+            },
+            False,
+        ),
+        (
+            {
+                "domain": "lock",
+                "service": "lock",
+                "data": {"entity_id": "lock.front_door"},
+                "data_template": {"entity_id": "lock.back_door"},
+            },
+            True,
+        ),
+        (
+            {
+                "domain": "scene",
+                "service": "apply",
+                "entities": {"light.porch": "on"},
+                "data_template": '{"entities": {"lock.front_door": "unlocked"}}',
+            },
+            True,
+        ),
         # Not run, so nothing to open.
         ({"domain": "script", "service": "reload"}, False),
         ({"domain": "scene", "service": "reload"}, False),
@@ -741,12 +798,24 @@ async def test_a_bare_script_tool_name_is_read_from_home_assistant(
 ) -> None:
     """Only a name an existing script has; `_` comes before a leading digit."""
     home.states.async_set("script.2nd_door", "off")
-    assert script_tool_entity_id("_2nd_door", home) == "script.2nd_door"
-    assert script_tool_entity_id("open_garage", home) == "script.open_garage"
-    assert script_tool_entity_id("add_automation", home) is None
+    assert bare_script_tool_entity_id("_2nd_door", home) == "script.2nd_door"
+    assert bare_script_tool_entity_id("open_garage", home) == "script.open_garage"
+    assert bare_script_tool_entity_id("add_automation", home) is None
     home.states.async_set("script.hassturnon", "off")
-    assert script_tool_entity_id("HassTurnOn", home) is None
+    assert bare_script_tool_entity_id("HassTurnOn", home) is None
+    assert bare_script_tool_entity_id("open_garage", None) is None
     assert script_tool_entity_id("open_garage") is None
+
+
+@pytest.mark.parametrize("tool_name", ["porch_lights", "mcp__porch_lights"])
+async def test_a_tool_sharing_a_harmless_scripts_name_still_screens_its_call(
+    home: HomeAssistant, tool_name: str
+) -> None:
+    """Named like a script, or that script's tool: its own call is screened too."""
+    args = {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door"}
+    assert _is_critical_action(args, RULES, tool_name, home)
+    line = describe_pending_action(home, {"tool_name": tool_name, "tool_args": args})
+    assert "Porch Lights" not in line
 
 
 async def test_the_pin_line_names_a_bare_named_script(home: HomeAssistant) -> None:

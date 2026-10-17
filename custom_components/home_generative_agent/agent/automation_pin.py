@@ -105,7 +105,8 @@ _NON_ENTITY_TARGET_KEYS = ("device_id", "area_id", "label_id", "floor_id")
 
 # Containers within a service step that can carry targets. `data_template` is
 # deprecated but still accepted by HA's SERVICE_SCHEMA and still rendered.
-_TARGET_CONTAINER_KEYS = ("target", "data", "data_template", "service_data")
+DATA_CONTAINER_KEYS = ("data", "data_template", "service_data")
+_TARGET_CONTAINER_KEYS = ("target", *DATA_CONTAINER_KEYS)
 
 # Every key of a service step that `step_targets` reads a target from.
 STEP_TARGET_KEYS = frozenset(

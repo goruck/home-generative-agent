@@ -45,7 +45,7 @@ from .helpers import (
     normalize_intent_for_lock,
     sanitize_tool_text,
 )
-from .indirect_pin import script_tool_entity_id
+from .indirect_pin import bare_script_tool_entity_id, script_tool_entity_id
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -524,7 +524,18 @@ def describe_pending_action(
     if tool_name == "add_automation":
         return _describe_automation(hass, action)
 
-    if (script_id := script_tool_entity_id(tool_name, hass)) is not None:
+    raw_args = action.get("tool_args")
+    tool_args: dict[str, Any] = dict(raw_args) if isinstance(raw_args, Mapping) else {}
+    script_id = script_tool_entity_id(tool_name)
+    if (
+        script_id is None
+        and not tool_args.get("domain")
+        and not tool_args.get("service")
+    ):
+        # A tool named like a script that makes no service call of its own
+        # (HA before 2026.9 named script tools so).
+        script_id = bare_script_tool_entity_id(tool_name, hass)
+    if script_id is not None:
         # A script's arguments are free-form fields the model fills in, so the
         # line names the script from Home Assistant, never from them.
         state = hass.states.get(script_id) if hass is not None else None
@@ -535,8 +546,6 @@ def describe_pending_action(
             target=_named(hass, _one_line(name, _ACTION_TARGET_MAX_LEN)),
         )
 
-    raw_args = action.get("tool_args")
-    tool_args: dict[str, Any] = dict(raw_args) if isinstance(raw_args, Mapping) else {}
     if base_tool_name(tool_name) == SET_POSITION_INTENT:
         return pin_msg(
             hass,

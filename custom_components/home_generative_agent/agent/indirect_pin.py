@@ -40,6 +40,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.group import get_entity_ids
 
 from .automation_pin import (
+    DATA_CONTAINER_KEYS,
     STEP_TARGET_KEYS,
     find_critical_automation_calls,
     step_targets,
@@ -80,12 +81,10 @@ _LIGHT_SCENE_PLATFORMS = frozenset(
 # Services that run a script or activate a scene, by domain. `script.<key>`
 # runs the script with that key too; `scene.apply`/`scene.create` carry their
 # states inline.
-_RUN_SERVICES = frozenset({"turn_on", "toggle"})
+RUN_SERVICES = frozenset({"turn_on", "toggle"})
 _SCRIPT_SERVICES_THAT_DO_NOT_RUN = frozenset({"turn_off", "reload"})
 _SCENE_INLINE_SERVICES = frozenset({"apply", "create"})
 _INLINE_STATE_KEYS = ("entities", "snapshot_entities")
-# Where a service tool may nest a call's fields.
-_FIELD_CONTAINER_KEYS = ("data", "service_data", "data_template")
 # Tool arguments that name the call rather than carry its fields.
 _CALL_KEYS = frozenset({"domain", "service", "action", "entity_ids"})
 
@@ -118,27 +117,35 @@ _POSITION_ATTRIBUTES = (
 )
 
 
-def script_tool_entity_id(
-    tool_name: str, hass: HomeAssistant | None = None
-) -> str | None:
+def script_tool_entity_id(tool_name: str) -> str | None:
     """
     Return the script a tool runs, for Home Assistant's per-script tools.
 
     HA 2026.9 and later name each exposed script's tool ``script__<object
     id>``, and a merged API prefixes another namespace. Entity ids cannot hold
-    ``__``, so the last two parts are the domain and the object id. Earlier
-    releases name the tool by the object id alone (with ``_`` before one that
-    starts with a digit), so with `hass` a tool named like an existing
-    script is taken for that script: holding another tool that shares a
-    script's name costs a PIN prompt, missing the script would unlock a door.
+    ``__``, so the last two parts are the domain and the object id.
     """
     parts = tool_name.split(TOOL_NAMESPACE_SEP)
-    if len(parts) >= _SCRIPT_TOOL_PARTS and parts[-2] == SCRIPT_DOMAIN and parts[-1]:
-        return f"{SCRIPT_DOMAIN}.{parts[-1]}"
+    if len(parts) < _SCRIPT_TOOL_PARTS or parts[-2] != SCRIPT_DOMAIN or not parts[-1]:
+        return None
+    return f"{SCRIPT_DOMAIN}.{parts[-1]}"
+
+
+def bare_script_tool_entity_id(
+    tool_name: str, hass: HomeAssistant | None
+) -> str | None:
+    """
+    Return the script a tool named by the script alone may run.
+
+    Before 2026.9, HA named a script's tool by its object id (with ``_`` before
+    one that starts with a digit). A tool named like an existing script may be
+    that script's tool, or another tool that only shares its name, so the
+    caller screens it both ways rather than taking it for the script.
+    """
     states = getattr(hass, "states", None)
     if states is None:
         return None
-    object_id = parts[-1]
+    object_id = tool_name.rsplit(TOOL_NAMESPACE_SEP, maxsplit=1)[-1]
     # An object id is a lowercase slug, unlike an intent's tool (HassTurnOn).
     if not _OBJECT_ID.fullmatch(object_id):
         return None
@@ -215,7 +222,7 @@ def service_runs_critical_action(  # noqa: PLR0911
     if domain == SCRIPT_DOMAIN:
         if service in _SCRIPT_SERVICES_THAT_DO_NOT_RUN:
             return False
-        if service not in _RUN_SERVICES:
+        if service not in RUN_SERVICES:
             # `script.<key>` runs the script with that key.
             return _opened_is_critical(hass, _script_for_key(hass, service), rules)
         return _targets_run_critical(hass, step, frozenset({SCRIPT_DOMAIN}), rules)
@@ -225,7 +232,7 @@ def service_runs_critical_action(  # noqa: PLR0911
         if service == "turn_on":
             return _targets_run_critical(hass, step, frozenset({SCENE_DOMAIN}), rules)
         return False
-    if domain == _GENERIC_DOMAIN and service in _RUN_SERVICES:
+    if domain == _GENERIC_DOMAIN and service in RUN_SERVICES:
         return _targets_run_critical(
             hass, step, frozenset({SCRIPT_DOMAIN, SCENE_DOMAIN}), rules
         )
@@ -277,15 +284,17 @@ def _fields_disagree(tool_args: Mapping[str, Any]) -> bool:
     top = {
         key: value
         for key, value in tool_args.items()
-        if key not in _CALL_KEYS and key not in _FIELD_CONTAINER_KEYS
+        if key not in _CALL_KEYS and key not in DATA_CONTAINER_KEYS
     }
     nested = [
         value
-        for key in _FIELD_CONTAINER_KEYS
+        for key in DATA_CONTAINER_KEYS
         if isinstance(value := tool_args.get(key), dict)
     ]
     for fields in (top, *nested):
-        for key, value in fields.items():
+        for key, raw in fields.items():
+            # HA reads one value and a list of that one value alike.
+            value = raw[0] if isinstance(raw, list) and len(raw) == 1 else raw
             if key in seen and seen[key] != value:
                 return True
             seen[key] = value
@@ -339,9 +348,9 @@ def _inline_states_are_critical(
     fields: dict[str, Any] = {
         key: value
         for key, value in data.items()
-        if key not in _CALL_KEYS and key not in _FIELD_CONTAINER_KEYS
+        if key not in _CALL_KEYS and key not in DATA_CONTAINER_KEYS
     }
-    for key in _FIELD_CONTAINER_KEYS:
+    for key in DATA_CONTAINER_KEYS:
         if key not in data:
             continue
         nested = data[key]
