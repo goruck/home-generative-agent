@@ -117,6 +117,8 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "batch_message": "{count} home update{plural}: {type_summary}.",
         "batch_more": "\u2026and {count} more",
         "also_line": "Also: {names}",
+        # Canary mode (#783): what auto-execution would have run, without acting.
+        "canary_would_run": "Dry run: Sentinel would have run {actions} on {targets}.",
         "also_more": "+{count} more",
         "condition_open_while_away": "open while away",
         "condition_open_while_home": "open while home",
@@ -240,6 +242,9 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "batch_message": "{count} novinek z domova: {type_summary}.",
         "batch_more": "\u2026a dal\u0161\u00edch {count}",
         "also_line": "Také: {names}",
+        "canary_would_run": (
+            "Zkušební režim: Sentinel by spustil {actions} pro {targets}."
+        ),
         "also_more": "+{count} další",
         "condition_open_while_away": "otevřeno v nepřítomnosti",
         "condition_open_while_home": "otevřeno v přítomnosti",

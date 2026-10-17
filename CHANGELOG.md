@@ -7,6 +7,16 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+### Added
+
+- Sentinel's autonomy level and auto-execution can now be set in Sentinel's Advanced setup ([#783](https://github.com/goruck/home-generative-agent/issues/783)). Before, the level Sentinel ran at was always 1 (notify only). `sentinel_set_autonomy_level` could raise it only for an hour, and the switch that lets levels 2 and 3 act was never read from any setting. So those levels could not act or report what they would do, though the docs described them as acting. The new settings:
+  - **Autonomy level** (0–3, default 1) is the level Sentinel runs at, kept across restarts.
+  - **Autonomy override duration** (default 60 minutes, up to 30 days) is how long a level set with the service lasts.
+  - **Dry-run mode** adds a line to each notification naming the action Sentinel would have run, such as "Dry run: Sentinel would have run lock.lock on Front Door Lock.", without running it.
+  - **Run allowed actions automatically**, **Minimum confidence**, **Most actions per hour** and **Actions Sentinel may run** (an allowlist of domains or services) control live actions.
+
+  All of these default to off or to the previous behavior. Sentinel never runs an action that a Critical Action PIN rule covers (unlocking, opening a door, gate or garage), any alarm panel action, or one that starts a script, scene or automation, whatever the allowlist says. A suggested action given as plain advice (such as "check the camera") no longer stops a finding's real action from running. To review what Sentinel would do, set the level to 2 and turn on dry-run mode.
+
 ### Changed
 
 - The model-provider libraries are no longer pinned to one exact version each: `langchain-openai`, `langchain-anthropic` and `langchain-ollama` accept any 1.x release (`langchain-ollama` from 0.3.10), `langchain-google-genai` any 3.x from 3.1.0, and the `anthropic` SDK anything from 0.125.0 below 2. When a Home Assistant release moved a library these depend on, such as `openai` in 2026.10, an exact pin could not be installed next to it and the integration failed to set up for everyone until a new release shipped (#735). Home Assistant can now pick a compatible release on its own. A fresh install, or the reinstall that follows a Home Assistant update, gets the newest release in each range: today `langchain-openai` 1.7.2, `langchain-anthropic` 1.7.6 with `anthropic` 1.15.0, `langchain-ollama` 1.1.0 and `langchain-google-genai` 3.2.0. The test suite runs against the newest releases every day.

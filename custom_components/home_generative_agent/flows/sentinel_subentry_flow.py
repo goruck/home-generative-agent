@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import voluptuous as vol
@@ -37,6 +38,12 @@ from ..const import (  # noqa: TID252
     CONF_SENTINEL_APPLIANCE_DURATION_MIN,
     CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     CONF_SENTINEL_AUTH_IP_RETENTION_DAYS,
+    CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
+    CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
+    CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE,
+    CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
+    CONF_SENTINEL_AUTO_EXECUTION_ENABLED,
+    CONF_SENTINEL_AUTONOMY_LEVEL,
     CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     CONF_SENTINEL_BASELINE_ENABLED,
     CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
@@ -69,6 +76,7 @@ from ..const import (  # noqa: TID252
     CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     CONF_SENTINEL_RESPONSE_LANGUAGE,
     CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
+    CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
     CONF_SENTINEL_TRIAGE_ENABLED,
     CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
     CRITICAL_PIN_MAX_LEN,
@@ -77,6 +85,12 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN,
     RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     RECOMMENDED_SENTINEL_AUTH_IP_RETENTION_DAYS,
+    RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
+    RECOMMENDED_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
+    RECOMMENDED_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE,
+    RECOMMENDED_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
+    RECOMMENDED_SENTINEL_AUTO_EXECUTION_ENABLED,
+    RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
     RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     RECOMMENDED_SENTINEL_BASELINE_ENABLED,
     RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
@@ -105,6 +119,7 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     RECOMMENDED_SENTINEL_RESPONSE_LANGUAGE,
     RECOMMENDED_SENTINEL_RULE_ENTITY_EXCLUSIONS,
+    RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
     RECOMMENDED_SENTINEL_TRIAGE_ENABLED,
     RECOMMENDED_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
     SENTINEL_SEVERITIES,
@@ -448,6 +463,127 @@ def _carry_basic_setup_survivors(
                 data[key] = stored[key]
 
 
+# Sentinel autonomy levels (const.py): passive, notify, and two levels at
+# which the auto-execution guardrails apply.
+_AUTONOMY_LEVELS = ("0", "1", "2", "3")
+# An override can last up to 30 days.
+_MAX_OVERRIDE_TTL_MINUTES = 43200
+_MAX_ACTIONS_PER_HOUR = 60
+# `domain` or `domain.service`, as the allowlist matches them.
+_ALLOWED_SERVICE_RE = re.compile(r"[a-z0-9_]+(\.[a-z0-9_]+)?")
+
+
+def _autonomy_schema(payload: dict[str, Any]) -> dict[Any, Any]:
+    """Return the form fields for the default autonomy level and execution (#783)."""
+    return {
+        vol.Required(
+            CONF_SENTINEL_AUTONOMY_LEVEL,
+            default=str(
+                payload.get(
+                    CONF_SENTINEL_AUTONOMY_LEVEL, RECOMMENDED_SENTINEL_AUTONOMY_LEVEL
+                )
+            ),
+        ): SelectSelector(
+            SelectSelectorConfig(
+                options=list(_AUTONOMY_LEVELS),
+                mode=SelectSelectorMode.DROPDOWN,
+                translation_key="sentinel_autonomy_level",
+            )
+        ),
+        vol.Required(
+            CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
+            default=int(
+                payload.get(
+                    CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
+                    RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
+                )
+            ),
+        ): NumberSelector(
+            NumberSelectorConfig(min=1, max=_MAX_OVERRIDE_TTL_MINUTES, step=1)
+        ),
+        vol.Required(
+            CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
+            default=bool(
+                payload.get(
+                    CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
+                    RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
+                )
+            ),
+        ): BooleanSelector(),
+        vol.Required(
+            CONF_SENTINEL_AUTO_EXECUTION_ENABLED,
+            default=bool(
+                payload.get(
+                    CONF_SENTINEL_AUTO_EXECUTION_ENABLED,
+                    RECOMMENDED_SENTINEL_AUTO_EXECUTION_ENABLED,
+                )
+            ),
+        ): BooleanSelector(),
+        vol.Required(
+            CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE,
+            default=float(
+                payload.get(
+                    CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE,
+                    RECOMMENDED_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE,
+                )
+            ),
+        ): NumberSelector(NumberSelectorConfig(min=0, max=1, step=0.05)),
+        vol.Required(
+            CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
+            default=int(
+                payload.get(
+                    CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
+                    RECOMMENDED_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
+                )
+            ),
+        ): NumberSelector(
+            NumberSelectorConfig(min=1, max=_MAX_ACTIONS_PER_HOUR, step=1)
+        ),
+        vol.Optional(
+            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
+            default=list(
+                payload.get(
+                    CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
+                    RECOMMENDED_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
+                )
+                or []
+            ),
+        ): SelectSelector(
+            SelectSelectorConfig(
+                options=[],
+                multiple=True,
+                custom_value=True,
+                mode=SelectSelectorMode.DROPDOWN,
+            )
+        ),
+    }
+
+
+def _normalize_autonomy(data: dict[str, Any], errors: dict[str, str]) -> None:
+    """Store the autonomy fields as the engine reads them; flag a bad allowlist."""
+    level = str(data.get(CONF_SENTINEL_AUTONOMY_LEVEL, ""))
+    data[CONF_SENTINEL_AUTONOMY_LEVEL] = (
+        int(level) if level in _AUTONOMY_LEVELS else RECOMMENDED_SENTINEL_AUTONOMY_LEVEL
+    )
+    for key, default in (
+        (
+            CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
+            RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
+        ),
+        (
+            CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
+            RECOMMENDED_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
+        ),
+    ):
+        value = data.get(key, default)
+        data[key] = int(value) if isinstance(value, (int, float)) else default
+    allowed = data.get(CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES) or []
+    services = [str(s).strip().lower() for s in allowed if str(s).strip()]
+    if any(not _ALLOWED_SERVICE_RE.fullmatch(s) for s in services):
+        errors.setdefault("base", "invalid_allowed_services")
+    data[CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES] = list(dict.fromkeys(services))
+
+
 def _default_payload() -> dict[str, Any]:
     """Return default Sentinel configuration payload."""
     return {
@@ -508,6 +644,23 @@ def _default_payload() -> dict[str, Any]:
         CONF_SENTINEL_RESPONSE_LANGUAGE: RECOMMENDED_SENTINEL_RESPONSE_LANGUAGE,
         CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: (
             RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE
+        ),
+        CONF_SENTINEL_AUTONOMY_LEVEL: RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
+        CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES: (
+            RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES
+        ),
+        CONF_SENTINEL_AUTO_EXEC_CANARY_MODE: RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
+        CONF_SENTINEL_AUTO_EXECUTION_ENABLED: (
+            RECOMMENDED_SENTINEL_AUTO_EXECUTION_ENABLED
+        ),
+        CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE: (
+            RECOMMENDED_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE
+        ),
+        CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR: (
+            RECOMMENDED_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR
+        ),
+        CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: list(
+            RECOMMENDED_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES
         ),
         CONF_SENTINEL_DAILY_DIGEST_ENABLED: RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED,
         CONF_SENTINEL_DAILY_DIGEST_TIME: RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME,
@@ -793,6 +946,7 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     )
                 ),
             ): BooleanSelector(),
+            **_autonomy_schema(payload),
             vol.Required(
                 CONF_SENTINEL_DAILY_DIGEST_ENABLED,
                 default=bool(
@@ -1194,6 +1348,8 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             and data.get(CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT)
         ):
             errors.setdefault("base", "pin_required")
+
+        _normalize_autonomy(data, errors)
 
         raw_quiet_start = _raw_quiet_hour(data, CONF_SENTINEL_QUIET_HOURS_START)
         raw_quiet_end = _raw_quiet_hour(data, CONF_SENTINEL_QUIET_HOURS_END)

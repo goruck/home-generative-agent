@@ -12,9 +12,13 @@ Guardrail evaluation order
 2. Data quality != "fresh"            → ``prompt_user`` (stale) /
                                         ``blocked`` (unavailable)
 3. Sensitivity flag                   → ``handoff``
-4. Auto-execution disabled            → ``prompt_user``
+4. Auto-execution disabled            → ``prompt_user`` (the canary
+                                        evaluator still runs on in canary mode)
 5. Confidence below threshold         → ``prompt_user``
-6. Service allowlist                  → ``prompt_user``
+6. Actions: none callable, one not
+   allowlisted, or one critical (a
+   PIN rule, a script/scene/automation
+   it starts, an alarm panel)         → ``prompt_user``
 7. Rate limit exceeded                → ``prompt_user``
 8. Idempotency duplicate              → ``prompt_user``
 9. All checks passed                  → ``auto_execute``
@@ -37,6 +41,7 @@ from custom_components.home_generative_agent.const import (
     ACTION_POLICY_BLOCKED,
     ACTION_POLICY_HANDOFF,
     ACTION_POLICY_PROMPT_USER,
+    CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
     CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
     CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE,
     CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
@@ -48,6 +53,7 @@ from custom_components.home_generative_agent.const import (
     DATA_QUALITY_FRESH,
     DATA_QUALITY_STALE,
     DATA_QUALITY_UNAVAILABLE,
+    RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
     RECOMMENDED_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
     RECOMMENDED_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE,
     RECOMMENDED_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
@@ -70,6 +76,12 @@ LOGGER = logging.getLogger(__name__)
 
 # Minimum autonomy level required for auto-execution.
 _MIN_AUTO_EXECUTE_LEVEL: int = 2
+_ALARM_DOMAIN = "alarm_control_panel"
+
+
+def executable_actions(finding: AnomalyFinding) -> list[str]:
+    """Return the suggested actions Sentinel can call: ``domain.service`` ones."""
+    return [a for a in finding.suggested_actions if "." in a]
 
 
 def level_increase_pin_required(options: Mapping[str, Any]) -> bool:
@@ -235,14 +247,14 @@ class SentinelExecutionService:
                 block_reason="confidence_below_threshold",
             )
 
-        # 6. Service allowlist gate.
-        if not self._passes_allowlist(finding):
+        # 6. Action gate: something to run, allowlisted, never critical.
+        if (block_reason := self._actions_block_reason(finding)) is not None:
             return ActionPolicyResult(
                 action_policy_path=ACTION_POLICY_PROMPT_USER,
                 data_quality=dq,
                 data_quality_details=dq_details,
                 execution_id=None,
-                block_reason="service_not_allowlisted",
+                block_reason=block_reason,
             )
 
         # 7. Rate limit gate.
@@ -354,7 +366,15 @@ class SentinelExecutionService:
                 RECOMMENDED_SENTINEL_AUTO_EXECUTION_ENABLED,
             )
         )
-        if not auto_enabled:
+        # Canary mode reports what would run whether or not live execution
+        # is on, so a dry-run review needs no switch that could act.
+        canary_mode = bool(
+            self._options.get(
+                CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
+                RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
+            )
+        )
+        if not auto_enabled and not canary_mode:
             return ActionPolicyResult(
                 action_policy_path=ACTION_POLICY_PROMPT_USER,
                 data_quality=dq,
@@ -379,14 +399,14 @@ class SentinelExecutionService:
                 block_reason="confidence_below_threshold",
             )
 
-        # 6. Service allowlist gate.
-        if not self._passes_allowlist(finding):
+        # 6. Action gate: something to run, allowlisted, never critical.
+        if (block_reason := self._actions_block_reason(finding)) is not None:
             return ActionPolicyResult(
                 action_policy_path=ACTION_POLICY_PROMPT_USER,
                 data_quality=dq,
                 data_quality_details=dq_details,
                 execution_id=None,
-                block_reason="service_not_allowlisted",
+                block_reason=block_reason,
             )
 
         # 7. Rate limit gate — use a read-only snapshot of the action-time list.
@@ -507,34 +527,64 @@ class SentinelExecutionService:
     # Allowlist
     # ---------------------------------------------------------------------- #
 
-    def _passes_allowlist(self, finding: AnomalyFinding) -> bool:
+    def _actions_block_reason(self, finding: AnomalyFinding) -> str | None:
         """
-        Return True if all suggested actions are on the allowlist.
+        Return why *finding*'s suggested actions cannot run on their own, or None.
 
-        An empty allowlist means no services are permitted.  An empty
-        ``suggested_actions`` list passes (nothing to execute).
+        Only ``domain.service`` actions are ever called (advisory text such as
+        ``check_camera`` is not), so only those must be on the allowlist; with
+        none, there is nothing to run and the user decides. An empty allowlist
+        permits nothing. A critical action never runs without a person: one a
+        Critical Action PIN rule covers, one the automation screener holds
+        (a script, scene or automation it would start), or an alarm disarm,
+        whatever the allowlist says.
         """
+        actions = executable_actions(finding)
+        if not actions:
+            return "no_executable_action"
         allowed: list[str] = list(
             self._options.get(
                 CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
                 RECOMMENDED_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
             )
+            or []
         )
-        if not allowed:
-            # Empty allowlist — deny all.
-            return not finding.suggested_actions
-
-        for action in finding.suggested_actions:
-            # action is a "domain.service" string (e.g. "light.turn_off")
-            domain = action.split(".")[0] if "." in action else action
-            if action not in allowed and domain not in allowed:
+        for action in actions:
+            if action not in allowed and action.split(".", 1)[0] not in allowed:
                 LOGGER.debug(
                     "Auto-execute blocked: service %s not in allowlist %s.",
                     action,
                     allowed,
                 )
-                return False
-        return True
+                return "service_not_allowlisted"
+        if self._is_critical(finding, actions):
+            return "critical_action"
+        return None
+
+    def _is_critical(self, finding: AnomalyFinding, actions: list[str]) -> bool:
+        """Return True if any action needs a person: a PIN-gated or alarm call."""
+        from custom_components.home_generative_agent.agent.automation_pin import (  # noqa: PLC0415
+            find_critical_automation_calls,
+        )
+        from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+            resolve_critical_action_policy,
+        )
+
+        if any(a.split(".", 1)[0] == _ALARM_DOMAIN for a in actions):
+            # A panel guards itself with its own code; Sentinel never
+            # changes one on its own.
+            LOGGER.debug("Auto-execute blocked: alarm panel action %s.", actions)
+            return True
+        rules = resolve_critical_action_policy(self._options).critical_actions
+        target = {"entity_id": list(finding.triggering_entities)}
+        steps = [{"action": action, "target": target} for action in actions]
+        found = find_critical_automation_calls({"actions": steps}, rules)
+        if found:
+            LOGGER.debug(
+                "Auto-execute blocked: critical action %s.",
+                "; ".join(call.describe() for call in found),
+            )
+        return bool(found)
 
     # ---------------------------------------------------------------------- #
     # Rate limiting

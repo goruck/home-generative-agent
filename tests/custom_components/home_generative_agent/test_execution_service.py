@@ -275,8 +275,8 @@ def test_empty_allowlist_blocks_when_actions_present() -> None:
     assert result.block_reason == "service_not_allowlisted"
 
 
-def test_empty_suggested_actions_passes_allowlist() -> None:
-    """Finding with no suggested_actions passes any allowlist."""
+def test_a_finding_with_nothing_to_run_is_left_to_the_user() -> None:
+    """No suggested `domain.service` action: nothing to run, the user decides."""
     opts = {
         **_FULL_OPTIONS,
         CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: [],
@@ -286,9 +286,9 @@ def test_empty_suggested_actions_passes_allowlist() -> None:
     snapshot = _make_snapshot(last_changed=recent)
     finding = _make_finding(suggested_actions=[])
 
-    # Will be blocked by rate or idempotency, not allowlist.
     result = svc.evaluate(finding, snapshot, 2, _NOW)
-    assert result.block_reason != "service_not_allowlisted"
+    assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
+    assert result.block_reason == "no_executable_action"
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +300,7 @@ def test_rate_limit_blocks_after_max_actions() -> None:
     opts = {
         **_FULL_OPTIONS,
         CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR: 2,
-        CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: [],  # empty = allow no-action findings
+        CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: ["light.turn_off"],
     }
     svc = SentinelExecutionService(opts)
     recent = "2025-01-01T00:59:50+00:00"
@@ -312,7 +312,7 @@ def test_rate_limit_blocks_after_max_actions() -> None:
         _NOW - timedelta(minutes=5),
     ]
 
-    finding = _make_finding(anomaly_id="fresh_a1", suggested_actions=[])
+    finding = _make_finding(anomaly_id="fresh_a1", suggested_actions=["light.turn_off"])
     result = svc.evaluate(finding, snapshot, 2, _NOW)
 
     assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
@@ -351,12 +351,14 @@ def test_idempotency_deduplicates_within_window() -> None:
     """Second evaluate() call with same finding returns idempotency block."""
     opts = {
         **_FULL_OPTIONS,
-        CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: [],
+        CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: ["light.turn_off"],
     }
     svc = SentinelExecutionService(opts)
     recent = "2025-01-01T00:59:50+00:00"
     snapshot = _make_snapshot(last_changed=recent)
-    finding = _make_finding(anomaly_id="idem_test", suggested_actions=[])
+    finding = _make_finding(
+        anomaly_id="idem_test", suggested_actions=["light.turn_off"]
+    )
 
     first = svc.evaluate(finding, snapshot, 2, _NOW)
     assert first.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
@@ -378,14 +380,14 @@ def test_all_guardrails_pass_returns_auto_execute() -> None:
     svc = SentinelExecutionService(
         {
             **_FULL_OPTIONS,
-            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: [],  # empty allowed services, empty actions → pass
+            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: ["light.turn_off"],
         }
     )
     finding = _make_finding(
         anomaly_id="happy_path",
         confidence=0.95,
         is_sensitive=False,
-        suggested_actions=[],
+        suggested_actions=["light.turn_off"],
     )
 
     result = svc.evaluate(finding, snapshot, 2, _NOW)
@@ -448,13 +450,13 @@ def test_canary_no_side_effects_when_would_auto_execute() -> None:
     svc = SentinelExecutionService(
         {
             **_FULL_OPTIONS,
-            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: [],
+            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: ["light.turn_off"],
         }
     )
     finding = _make_finding(
         anomaly_id="canary_happy",
         confidence=0.95,
-        suggested_actions=[],
+        suggested_actions=["light.turn_off"],
     )
 
     # Capture state before canary call.
@@ -477,13 +479,13 @@ def test_canary_distinguishable_from_live() -> None:
     svc = SentinelExecutionService(
         {
             **_FULL_OPTIONS,
-            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: [],
+            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: ["light.turn_off"],
         }
     )
     finding = _make_finding(
         anomaly_id="live_vs_canary",
         confidence=0.95,
-        suggested_actions=[],
+        suggested_actions=["light.turn_off"],
     )
 
     # Canary first — no state change.
@@ -507,19 +509,23 @@ def test_canary_rate_limit_is_read_only() -> None:
     svc = SentinelExecutionService(
         {
             **_FULL_OPTIONS,
-            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: [],
+            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: ["light.turn_off"],
             CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR: max_actions,
         }
     )
     # Fill rate-limit bucket with live calls.
     for i in range(max_actions):
-        f = _make_finding(anomaly_id=f"fill_{i}", confidence=0.95, suggested_actions=[])
+        f = _make_finding(
+            anomaly_id=f"fill_{i}",
+            confidence=0.95,
+            suggested_actions=["light.turn_off"],
+        )
         svc.evaluate(f, snapshot, 2, _NOW)
     assert len(svc._recent_action_times) == max_actions
 
     # Canary on a new finding should report rate_limit_exceeded without mutating.
     new_finding = _make_finding(
-        anomaly_id="new_canary", confidence=0.95, suggested_actions=[]
+        anomaly_id="new_canary", confidence=0.95, suggested_actions=["light.turn_off"]
     )
     result = svc.evaluate_canary(new_finding, snapshot, 2, _NOW)
     assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
@@ -535,13 +541,13 @@ def test_commit_auto_execute_records_state_after_pure_evaluation() -> None:
     svc = SentinelExecutionService(
         {
             **_FULL_OPTIONS,
-            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: [],
+            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: ["light.turn_off"],
         }
     )
     finding = _make_finding(
         anomaly_id="commit_me",
         confidence=0.95,
-        suggested_actions=[],
+        suggested_actions=["light.turn_off"],
     )
 
     result = svc.evaluate_canary(finding, snapshot, 2, _NOW)
@@ -564,13 +570,13 @@ def test_commit_auto_execute_enables_future_duplicate_block() -> None:
     svc = SentinelExecutionService(
         {
             **_FULL_OPTIONS,
-            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: [],
+            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: ["light.turn_off"],
         }
     )
     finding = _make_finding(
         anomaly_id="dup_after_commit",
         confidence=0.95,
-        suggested_actions=[],
+        suggested_actions=["light.turn_off"],
     )
 
     first = svc.evaluate_canary(finding, snapshot, 2, _NOW)

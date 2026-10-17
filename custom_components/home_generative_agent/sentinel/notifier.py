@@ -278,6 +278,7 @@ class SentinelNotifier:
         explanation: str | None,
         *,
         also_line: str | None = None,
+        canary_line: str | None = None,
     ) -> bool:
         """
         Send a proactive notification for *finding*.
@@ -289,6 +290,9 @@ class SentinelNotifier:
           of a grouped push; the buttons still act on *finding* alone. Such a
           push is never held for the burst batch: the batch can cut a line or
           be lost at unload, while the engine holds every finding it names.
+        * Appends *canary_line* (see ``canary_line``), what auto-execution
+          would have run in canary mode. Such a push is not held either: a
+          dry-run review relies on seeing every line.
 
         Returns False when the push was dropped as a repeat of the same
         anomaly within the per-finding cooldown, so the audit does not count
@@ -317,9 +321,10 @@ class SentinelNotifier:
             self._hass,
         )
         persistent_msg = _persistent_message(clean_explanation, finding, self._hass)
-        if also_line:
-            mobile_msg = f"{mobile_msg}\n{also_line}"
-            persistent_msg = f"{persistent_msg}\n\n{escape_markdown(also_line)}"
+        for line in (also_line, canary_line):
+            if line:
+                mobile_msg = f"{mobile_msg}\n{line}"
+                persistent_msg = f"{persistent_msg}\n\n{escape_markdown(line)}"
         actions = _build_actions(finding)
 
         # Per-area routing.
@@ -357,7 +362,11 @@ class SentinelNotifier:
             self._notification_times = [
                 t for t in self._notification_times if t >= cutoff
             ]
-            if len(self._notification_times) >= _BATCH_RATE_LIMIT and not also_line:
+            if (
+                len(self._notification_times) >= _BATCH_RATE_LIMIT
+                and not also_line
+                and not canary_line
+            ):
                 # Rate limit exceeded — buffer this finding.  Hold the redacted
                 # explanation, never the raw one: the flush discards it today,
                 # but storing the unredacted text would silently bypass
@@ -920,6 +929,10 @@ def _record_notified_after(record: dict[str, Any], cutoff: datetime) -> bool:
     if notified_dt is None:
         return False
     return notified_dt >= cutoff
+
+
+# Longest device name the canary line repeats.
+_CANARY_NAME_MAX_LEN = 64
 
 
 def _friendly_entity(entity_id: str) -> str:
@@ -1906,6 +1919,32 @@ def _name_owners(
             if alias:
                 owners.setdefault(alias.casefold(), set()).add(owner)
     return owners
+
+
+def canary_line(
+    finding: AnomalyFinding, actions: list[str], hass: HomeAssistant | None
+) -> str:
+    """
+    Return the line naming what auto-execution would have run (#783).
+
+    Canary mode records the decision without acting; this puts it in the
+    notification, where a user reviewing Sentinel before turning execution
+    on reads it. Devices are named as Home Assistant names them.
+    """
+    states = getattr(hass, "states", None)
+    names = []
+    for entity_id in finding.triggering_entities:
+        state = states.get(entity_id) if states is not None else None
+        name = getattr(state, "name", None)
+        if not isinstance(name, str) or not name.strip():
+            name = _friendly_entity(entity_id)
+        names.append(" ".join(name.split())[:_CANARY_NAME_MAX_LEN])
+    return notif_msg(
+        hass,
+        "canary_would_run",
+        actions=", ".join(actions),
+        targets=", ".join(names) or notif_msg(hass, "fallback_unknown_entity"),
+    )
 
 
 def _also_text(names: list[str], more: int, hass: HomeAssistant | None) -> str:

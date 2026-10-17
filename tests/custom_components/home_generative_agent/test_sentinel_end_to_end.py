@@ -84,10 +84,15 @@ class DummyNotifier:
         self.calls: list[dict[str, object]] = []
 
     async def async_notify(  # type: ignore[no-untyped-def]
-        self, finding, snapshot, explanation, also_line=None
+        self, finding, snapshot, explanation, also_line=None, canary_line=None
     ) -> bool | None:
         self.calls.append(
-            {"finding": finding, "snapshot": snapshot, "also_line": also_line}
+            {
+                "finding": finding,
+                "snapshot": snapshot,
+                "also_line": also_line,
+                "canary_line": canary_line,
+            }
         )
         return None
 
@@ -354,6 +359,11 @@ async def test_sentinel_canary_mode_does_not_consume_live_auto_execute(
     assert audit.calls
     assert audit.calls[0]["canary_would_execute"] is True
     assert audit.calls[0]["action_policy_path"] == "auto_execute"
+    # The dry run is named in the notification (#783).
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    assert notifier.calls[0]["canary_line"] == (
+        "Dry run: Sentinel would have run lock.lock on Front Door."
+    )
 
     engine._options[CONF_SENTINEL_AUTO_EXEC_CANARY_MODE] = False
     await engine._run_once()

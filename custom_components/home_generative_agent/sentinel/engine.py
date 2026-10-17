@@ -100,6 +100,7 @@ from .correlator import SentinelCorrelator
 from .dynamic_rules import evaluate_dynamic_rules
 from .execution import (
     SentinelExecutionService,
+    executable_actions,
     level_increase_pin_required,
 )
 from .lock_enrichment import async_enrich_lock_last_changed
@@ -112,7 +113,7 @@ from .network_inventory import (
     client_key,
     client_observation,
 )
-from .notifier import is_security_copy, related_findings_line
+from .notifier import canary_line, is_security_copy, related_findings_line
 from .power_enrichment import async_enrich_power_last_changed
 from .rules.alarm_disarmed_external_threat import AlarmDisarmedDuringExternalThreatRule
 from .rules.appliance_power_duration import AppliancePowerDurationRule
@@ -200,6 +201,9 @@ if TYPE_CHECKING:
     from .pseudonymizer import Pseudonymizer
     from .rule_registry import RuleRegistry
     from .rules import StaticRule
+
+# Highest Sentinel autonomy level (const.py).
+_MAX_AUTONOMY_LEVEL = 3
 
 LOGGER = logging.getLogger(__name__)
 
@@ -670,10 +674,26 @@ class SentinelEngine:
 
     def _base_autonomy_level(self) -> int:
         """Return the configured autonomy level, without any runtime override."""
-        return _coerce_int(
+        level = _coerce_int(
             self._options.get(CONF_SENTINEL_AUTONOMY_LEVEL),
             default=RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
         )
+        # A hand-edited value outside the levels reads as the default.
+        return (
+            level
+            if 0 <= level <= _MAX_AUTONOMY_LEVEL
+            else (RECOMMENDED_SENTINEL_AUTONOMY_LEVEL)
+        )
+
+    def _canary_kwargs(
+        self, finding: AnomalyFinding, *, canary_would_execute: bool | None
+    ) -> dict[str, str]:
+        """Return the dry-run line for a finding canary mode would have run."""
+        if not canary_would_execute:
+            return {}
+        return {
+            "canary_line": canary_line(finding, executable_actions(finding), self._hass)
+        }
 
     # ---------------------------------------------------------------------- #
     # Lifecycle
@@ -1908,7 +1928,12 @@ class SentinelEngine:
         if (explainer := self._explainer_for(explain_enabled, finding)) is not None:
             explanation = await explainer.async_explain(finding)
 
-        sent = await self._notifier.async_notify(finding, snapshot, explanation)
+        sent = await self._notifier.async_notify(
+            finding,
+            snapshot,
+            explanation,
+            **self._canary_kwargs(finding, canary_would_execute=canary_would_execute),
+        )
         await _append_finding_audit(
             self._audit_store,
             snapshot,
@@ -2080,7 +2105,11 @@ class SentinelEngine:
             self._hass,
         )
         sent = await self._notifier.async_notify(
-            best, snapshot, explanation, also_line=also_line
+            best,
+            snapshot,
+            explanation,
+            also_line=also_line,
+            **self._canary_kwargs(best, canary_would_execute=canary_would_execute),
         )
         # A push the notifier dropped as a repeat named nothing, so its named
         # partners stay due.

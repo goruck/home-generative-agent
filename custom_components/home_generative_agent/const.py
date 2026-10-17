@@ -221,8 +221,9 @@ RECOMMENDED_AUDIT_HOT_MAX_RECORDS = 500
 # ---- Sentinel autonomy level (runtime kill-switch) ----
 # 0 = fully passive (no notifications, no actions)
 # 1 = notify only (default)
-# 2 = suggest actions (notify + recommend)
-# 3 = act autonomously
+# 2, 3 = notify, and a finding's suggested action may run on its own when the
+#        auto-execution guardrails below pass (sentinel/execution.py); the two
+#        levels apply the same gates today
 CONF_SENTINEL_AUTONOMY_LEVEL = "sentinel_autonomy_level"
 CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES = "sentinel_runtime_override_ttl_minutes"
 CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE = "sentinel_require_pin_for_level_increase"
