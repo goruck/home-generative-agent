@@ -31,6 +31,7 @@ _DUMMY_KWARGS: dict[str, Any] = {
     "area": "area",
     "floor": "floor",
     "domain": "domain",
+    "entity_id": "lock.front_door",
     "count": 2,
     "position": 50,
 }

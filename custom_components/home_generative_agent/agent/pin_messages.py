@@ -161,6 +161,8 @@ _MESSAGES: dict[str, dict[str, str]] = {
         # call that names none (every device of the domain, in an area, on
         # a floor).
         "target_named": '"{name}"',
+        # A device named by its entity id: its own name, then the id HA runs.
+        "target_entity": '"{name}" ({entity_id})',
         "target_every": "{kind}",
         "target_every_in_area": "{kind} in {area}",
         "target_every_on_floor": "{kind} on floor {floor}",
@@ -278,6 +280,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "action_calls_more": "{calls} a dalších {count}",
         "action_unnamed_target": "nepojmenované zařízení",
         "target_named": "„{name}“",
+        "target_entity": "„{name}“ ({entity_id})",
         "target_every": "{kind}",
         "target_every_in_area": "{kind} v oblasti {area}",
         "target_every_on_floor": "{kind} v patře {floor}",
@@ -452,6 +455,12 @@ def _intent_target(
     name = payload.get("name")
     name = "" if name == INTENT_NAME_ALL else _slot_line(name)
     if name:
+        states = getattr(hass, "states", None)
+        state = states.get(name) if states is not None else None
+        # HA reads a name as an entity id only when it is the id exactly.
+        friendly = _slot_line(state.name) if state and state.entity_id == name else ""
+        if friendly and friendly != name:
+            return pin_msg(hass, "target_entity", name=friendly, entity_id=name)
         return _named(hass, name)
     area = _slot_line(payload.get("area"))
     floor = _slot_line(payload.get("floor"))

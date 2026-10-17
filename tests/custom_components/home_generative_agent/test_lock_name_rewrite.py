@@ -422,8 +422,12 @@ def test_a_name_not_only_an_exposed_alarm_panel_is_not_an_alarm(
         # HA matches to nothing: the hint stays.
         ({"name": "Downstairs", "code": "1234"}, True),
         ({"code": "1234"}, True),
-        # A code given with a lock's name is the lock's code.
+        # A code given for a lock is the lock's code: by name, a hidden one
+        # too, by area, or by entity id.
         ({"name": "Front Door Lock", "code": "1234"}, False),
+        ({"name": "Hidden Door Lock", "code": "1234"}, False),
+        ({"name": "all", "area": "Kitchen", "code": "1234"}, False),
+        ({"entity_id": "lock.front_door", "code": "1234"}, False),
         # By the domain of an entity id, never by letters inside it.
         ({"entity_id": "alarm_control_panel.home"}, True),
         (
@@ -433,10 +437,10 @@ def test_a_name_not_only_an_exposed_alarm_panel_is_not_an_alarm(
     ],
 )
 def test_the_alarm_redirect_respects_a_declared_domain(
-    home: HomeAssistant, tool_args: dict[str, Any], *, redirected: bool
+    rooms: HomeAssistant, tool_args: dict[str, Any], *, redirected: bool
 ) -> None:
     """Never an alarm by the letters of a name; a code hints only with no domain."""
-    result = _route_alarm_intent_to_tool("intent__HassTurnOff", tool_args, home, {})
+    result = _route_alarm_intent_to_tool("intent__HassTurnOff", tool_args, rooms, {})
     assert (result is not None) is redirected
 
 
@@ -522,7 +526,7 @@ async def _confirm(home: HomeAssistant, ctx: Any) -> dict[str, Any]:
         # Completed when held; the line and the call name the one lock.
         (
             {"name": "Front Door", "domain": ["lock"]},
-            'unlock "lock.front_door"',
+            'unlock "Front Door Lock" (lock.front_door)',
             {"domain": ["lock"], "name": "lock.front_door"},
         ),
         # Held as given, and confirmed as given: never turned into a lock call.

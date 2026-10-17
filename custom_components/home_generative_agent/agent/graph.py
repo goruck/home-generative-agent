@@ -107,7 +107,6 @@ from .helpers import (
     matches_critical_rule,
     maybe_fill_lock_entity,
     minimal_payload_for_domain,
-    name_matches_exposed,
     normalize_intent_for_alarm,
     normalize_intent_for_lock,
     parse_tool_response,
@@ -391,21 +390,24 @@ def _route_alarm_intent_to_tool(
     An alarm call is one that declares the alarm panel domain (the alarm
     normalizer adds it when HA's matcher resolves the name to alarm panels
     only) or gives the entity id of an alarm panel. A numeric code suggests
-    one only when the call declares no domain and names nothing HA matches:
-    a code given with a lock's name is the lock's code. Never from the
+    one only when the call declares no domain and HA matches nothing to its
+    target, hidden devices included: a code given for a lock, by name, area
+    or entity id, is the lock's code. Never from the
     letters of the name: "Security Light" and "Security Door Lock" were
     refused as alarms (#782).
     """
     declared = declared_domains(tool_args)
+    entity_ids = _coerce_entity_ids(tool_args)
     looks_like_alarm = ALARM_DOMAIN in declared or any(
-        entity_domain(e) == ALARM_DOMAIN for e in _coerce_entity_ids(tool_args)
+        entity_domain(e) == ALARM_DOMAIN for e in entity_ids
     )
     if (
         not looks_like_alarm
         and not declared
+        and not entity_ids
         and hass.states.async_entity_ids(ALARM_DOMAIN)
         and str(tool_args.get("code", "")).strip().isdigit()
-        and name_matches_exposed(hass, tool_args.get("name")) is False
+        and intent_service_calls(hass, tool_name, tool_args) == []
     ):
         looks_like_alarm = True
     if not looks_like_alarm:

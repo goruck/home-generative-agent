@@ -1439,20 +1439,6 @@ def _match_names(  # noqa: PLR0913
     return list(result.states) if result.is_match else []
 
 
-def name_matches_exposed(hass: HomeAssistant | None, name: Any) -> bool | None:
-    """
-    Return whether `name` matches any entity exposed to Assist.
-
-    None when it cannot tell: no `hass`, or a matcher that raised.
-    """
-    if hass is None:
-        return None
-    if not isinstance(name, str) or not name.strip():
-        return False
-    matches = _match_names(hass, name)
-    return None if matches is None else bool(matches)
-
-
 def _name_matches_only(hass: HomeAssistant | None, name: Any, domain: str) -> bool:
     """Return True when HA's matcher resolves `name` to `domain` and nothing else."""
     if hass is None or not isinstance(name, str) or not name.strip():
