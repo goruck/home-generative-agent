@@ -381,21 +381,29 @@ def _route_alarm_intent_to_tool(
     hass: HomeAssistant,
     tool_call: dict[str, Any],
 ) -> ToolMessage | None:
-    """Redirect alarm-like HA intents to the dedicated alarm tool."""
+    """
+    Redirect alarm-like HA intents to the dedicated alarm tool.
+
+    An alarm call is one that declares the alarm panel domain (the alarm
+    normalizer adds it when HA's matcher resolves the name to alarm panels
+    only) or names an alarm panel entity. A numeric code suggests one only
+    when the call declares no domain. Never from the letters of the name:
+    "Security Light" and "Security Door Lock" were refused as alarms (#782).
+    """
     domains = tool_args.get("domain") or []
     domains = domains if isinstance(domains, list) else [domains]
-    is_alarm = any(str(d).lower() == "alarm_control_panel" for d in domains)
+    declared = {str(d).strip().lower() for d in domains if str(d).strip()}
     entity_ids = _coerce_entity_ids(tool_args)
-    has_alarm_entities = bool(hass.states.async_entity_ids("alarm_control_panel"))
-    name_hint = str(tool_args.get("name", "")).lower()
-    looks_like_alarm = is_alarm or any(
+    looks_like_alarm = "alarm_control_panel" in declared or any(
         "alarm_control_panel" in str(e).lower() for e in entity_ids
     )
-    if not looks_like_alarm and has_alarm_entities:
-        if any(k in name_hint for k in ("alarm", "security")):
-            looks_like_alarm = True
-        if str(tool_args.get("code", "")).strip().isdigit():
-            looks_like_alarm = True
+    if (
+        not looks_like_alarm
+        and not declared
+        and hass.states.async_entity_ids("alarm_control_panel")
+        and str(tool_args.get("code", "")).strip().isdigit()
+    ):
+        looks_like_alarm = True
     if not looks_like_alarm:
         return None
     return ToolMessage(
@@ -498,7 +506,7 @@ def _prepare_tool_args(
     tool_call: dict[str, Any],
 ) -> tuple[ToolMessage | None, dict[str, Any]]:
     """Normalize, guard, and sanitize arguments before calling HA."""
-    tool_args = normalize_intent_for_alarm(tool_name, tool_args)
+    tool_args = normalize_intent_for_alarm(tool_name, tool_args, ctx.hass)
     tool_args = normalize_intent_for_lock(tool_name, tool_args, ctx.hass)
     if _is_live_context_tool(tool_name):
         # Read-only, and HA's schema is name/domain/area only. The lock

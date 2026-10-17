@@ -374,10 +374,12 @@ def _declared_domain(tool_name: str, tool_args: Mapping[str, Any]) -> str:
     """
     Return the domain an intent declares, for a line built without a match.
 
-    The lock normalizer (a `lock` domain, or "lock" in the name), else the
-    domain argument, else the domain of an entity id the model gave.
+    A declared `lock` domain (the lock normalizer), else the domain argument,
+    else the domain of an entity id the model gave. Never from the name: this
+    line is built only when HA's matcher found nothing, so there is no device
+    the name could be read from (#782).
     """
-    normalized = normalize_intent_for_lock(tool_name, dict(tool_args))
+    normalized = normalize_intent_for_lock(tool_name, dict(tool_args), None)
     domain = _first(normalized.get("domain")).lower()
     if domain:
         return domain

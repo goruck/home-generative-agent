@@ -163,7 +163,7 @@ def test_alarm_intent_keeps_its_carve_out_under_any_spelling(tool_name: str) -> 
 def test_lock_intent_normalization_survives_the_rename(tool_name: str) -> None:
     """Unlock must resolve to the `unlock` service, namespaced or not."""
     out = normalize_intent_for_lock(
-        tool_name, {"name": "Front Door Lock", "domain": ["lock"]}
+        tool_name, {"name": "Front Door Lock", "domain": ["lock"]}, None
     )
     assert out["domain"] == ["lock"]
     assert out["service"] == "unlock"
@@ -172,7 +172,9 @@ def test_lock_intent_normalization_survives_the_rename(tool_name: str) -> None:
 @pytest.mark.parametrize("tool_name", ["HassTurnOn", "intent__HassTurnOn"])
 def test_alarm_intent_normalization_survives_the_rename(tool_name: str) -> None:
     """Arming must map to `alarm_arm_home`, not fall through to disarm."""
-    out = normalize_intent_for_alarm(tool_name, {"name": "Home Alarm"})
+    out = normalize_intent_for_alarm(
+        tool_name, {"name": "Home Alarm", "domain": "alarm_control_panel"}, None
+    )
     assert out["domain"] == ["alarm_control_panel"]
     assert out["service"] == "alarm_arm_home"
 
@@ -181,8 +183,8 @@ def test_non_intent_tools_are_left_alone_by_the_normalizers() -> None:
     """Base-name matching must not start capturing unrelated tools."""
     args = {"name": "Front Door Lock"}
     assert not is_on_off_intent("get_entity_history")
-    assert normalize_intent_for_lock("get_entity_history", args) == args
-    assert normalize_intent_for_alarm("get_entity_history", args) == args
+    assert normalize_intent_for_lock("get_entity_history", args, None) == args
+    assert normalize_intent_for_alarm("get_entity_history", args, None) == args
 
 
 @pytest.mark.parametrize(
@@ -251,7 +253,9 @@ def test_lock_payload_always_names_one_entity(
     """
     out = sanitize_tool_args(
         _minimal_payload_for_domain(
-            sanitize_tool_args(normalize_intent_for_lock("intent__HassTurnOff", args))
+            sanitize_tool_args(
+                normalize_intent_for_lock("intent__HassTurnOff", args, None)
+            )
         )
     )
     assert out["domain"] == ["lock"]
