@@ -129,7 +129,12 @@ def test_a_device_named_with_lock_or_alarm_keeps_its_own_target(
     redirect, out = _prepare_tool_args(
         tool_name, dict(tool_args), _ctx(home, pin=pin), {"id": "c1"}
     )
-    assert redirect is None
+    if redirect is not None:
+        # A scene whose config cannot be read is held as itself (#775),
+        # never as a lock call.
+        assert json.loads(str(redirect.content))["action"] == (
+            f'turn on "{tool_args["name"]}"'
+        )
     assert out["name"] == tool_args["name"]
     assert not {"lock", "alarm_control_panel"} & set(out.get("domain", []))
     assert "entity_id" not in out

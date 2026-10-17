@@ -320,11 +320,53 @@
 
 **Why:** v3.26.0 shipped the conservative half. An earlier draft *deferred* indirection entirely on the theory that it needs a pre-existing critical script; pre-landing review disproved that for `scene.apply` (which carries target states inline and needs no pre-existing artifact) and for device actions, so indirection moved from "deferred" to "gated". Resolving it properly would remove the over-prompting.
 
-**How to apply:** Resolve `script.*` / `scene.*` targets against the live registries at screen time and recurse with a visited set and a depth cap; keep fail-closed for anything unresolvable. Decide first whether a re-screen is needed when the target script is later edited — the PIN would otherwise attest to something that has since changed, the same caveat that already applies to blueprint automations.
+**How to apply:** Resolve `script.*` / `scene.*` targets against the live registries at screen time and recurse with a visited set and a depth cap; keep fail-closed for anything unresolvable. Decide first whether a re-screen is needed when the target script is later edited — the PIN would otherwise attest to something that has since changed, the same caveat that already applies to blueprint automations. Since #775, `agent/indirect_pin.py` (`runs_critical_action`) does this for scripts and scenes the agent runs directly; a script step that runs another script or scene is still held wholesale, and the screener could call it with `hass` for one level of nesting.
 
 **Effort:** M
 **Priority:** P3
 **Depends on:** v3.26.0
+
+---
+
+### A service tool that names its call as `action` is not screened
+
+**What:** `_is_critical_action` (`agent/graph.py`) reads a service tool's call from top-level `domain` and `service`. An MCP tool whose arguments spell it `action: "lock.unlock"` (or `service: "lock.unlock"` with no domain) gets an empty domain or service and is let through without any rule check, script/scene screening included.
+
+**Why:** Adversarial review of #775 (2026-10-16). Pre-existing; depends on the argument shape of the MCP servers users actually run, which is unknown.
+
+**How to apply:** Normalize the tool's arguments before the check: split a dotted `action`/`service` into domain and service, and hold a call whose service cannot be read. Check the argument schemas of the common Home Assistant MCP servers first.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** #775
+
+---
+
+### A remote tool named like a local script is screened against the local script
+
+**What:** `script_tool_entity_id` (`agent/indirect_pin.py`) treats any tool whose last two name parts are `script__<x>` as Home Assistant's tool for `script.<x>` and screens that local script. An MCP server that is itself a Home Assistant instance exposes its own `script__<x>` tools; if a harmless local script shares the object id, the remote one (which may unlock a door there) is screened against the local one and runs with no PIN. With no local twin it is held, which is safe.
+
+**Why:** Adversarial review of #775 (2026-10-16), low confidence. Needs a remote HA as an MCP server plus a colliding script name.
+
+**How to apply:** Resolve the tool object from the merged LLM API (unwrap `NamespacedTool`) and treat it as a script tool only when it is HA's `ScriptTool`; hold any other `script__*`-shaped tool. Test with a namespaced fake tool. The same applies to the bare names Home Assistant 2026.8 gives script tools (`<object id>`), which `script_tool_entity_id` also takes for a local script when one has that object id.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** #775
+
+---
+
+### A scene setting a group helper is screened as the group, not its members
+
+**What:** `_state_is_critical` (`agent/indirect_pin.py`) applies a rule's `entity_match` to the entity id a scene names. A new-style group helper (a cover or lock group such as `cover.all_doors`) is screened as itself, so a rule whose `entity_match` names a member (`left_garage`) misses a scene that opens the group. A direct call on the group has the same gap. `automation_pin`'s inline `scene.apply` screen ignores `entity_match` for this reason.
+
+**Why:** Security specialist, review cycle 4 of #775 (2026-10-17), low confidence. The default rules match `door`/`garage`/`gate`, which group names usually carry too.
+
+**How to apply:** For a state whose entity has an `entity_id` attribute in `hass.states` (a group helper), also screen each member, or fall back to domain-only matching as `_domain_is_guarded` does. Cover the direct-call path in the gate the same way.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** #775
 
 ---
 

@@ -45,6 +45,7 @@ from .helpers import (
     normalize_intent_for_lock,
     sanitize_tool_text,
 )
+from .indirect_pin import bare_script_tool_entity_id, script_tool_entity_id
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -536,7 +537,7 @@ def _describe_automation(hass: HomeAssistant | None, action: Mapping[str, Any]) 
     return pin_msg(hass, "action_automation_runs", action=text, calls=shown)
 
 
-def describe_pending_action(
+def describe_pending_action(  # noqa: PLR0911
     hass: HomeAssistant | None, action: Mapping[str, Any]
 ) -> str:
     """
@@ -555,6 +556,17 @@ def describe_pending_action(
 
     raw_args = action.get("tool_args")
     tool_args: dict[str, Any] = dict(raw_args) if isinstance(raw_args, Mapping) else {}
+    if (script_id := script_tool_entity_id(tool_name)) is not None:
+        return _script_line(hass, script_id)
+    # A tool named like a script (HA before 2026.9 named script tools so) is
+    # held for the script or for the call its arguments make, so the line
+    # names the script, and the call too when it makes one.
+    bare_script = bare_script_tool_entity_id(tool_name, hass)
+    if bare_script is not None and not (
+        tool_args.get("domain") or tool_args.get("service")
+    ):
+        return _script_line(hass, bare_script)
+
     if base_tool_name(tool_name) == SET_POSITION_INTENT:
         return pin_msg(
             hass,
@@ -594,7 +606,7 @@ def describe_pending_action(
         _ACTION_TARGET_MAX_LEN,
     )
     service = str(tool_args.get("service") or base_tool_name(tool_name))
-    return pin_msg(
+    line = pin_msg(
         hass,
         "action_service",
         service=sanitize_tool_text(
@@ -603,4 +615,23 @@ def describe_pending_action(
         target=_named(hass, target)
         if target
         else pin_msg(hass, "action_unnamed_target"),
+    )
+    if bare_script is not None:
+        return ", ".join([_script_line(hass, bare_script), line])
+    return line
+
+
+def _script_line(hass: HomeAssistant | None, script_id: str) -> str:
+    """
+    Name running a script, from Home Assistant.
+
+    A script's arguments are free-form fields the model fills in, so the line
+    names the script from Home Assistant, never from them.
+    """
+    state = hass.states.get(script_id) if hass is not None else None
+    name = state.name if state is not None else script_id
+    return pin_msg(
+        hass,
+        "action_turn_on",
+        target=_named(hass, _one_line(name, _ACTION_TARGET_MAX_LEN)),
     )

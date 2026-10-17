@@ -87,6 +87,7 @@ from ..core.prompt_cache import (  # noqa: TID252
     concrete_chat_model,
 )
 from ..core.utils import extract_final  # noqa: TID252
+from .automation_pin import STEP_TARGET_KEYS
 from .automation_targets import AUTOMATION_REFUSAL_PREFIX
 from .helpers import (
     ALARM_DOMAIN,
@@ -123,6 +124,17 @@ from .helpers import (
     tool_exclusions,
     tool_inclusions,
     tool_index_key,
+)
+from .indirect_pin import (
+    RUN_SERVICES,
+    SCENE_DOMAIN,
+    SCRIPT_DOMAIN,
+    bare_script_tool_entity_id,
+    call_target_domains,
+    runs_critical_action,
+    script_rule_matches,
+    script_tool_entity_id,
+    service_runs_critical_action,
 )
 from .pin_messages import describe_pending_action, pin_msg
 from .token_counter import count_tokens_cross_provider
@@ -3400,7 +3412,15 @@ def _is_critical_action(
     tool_name: str,
     hass: HomeAssistant | None = None,
 ) -> bool:
-    """Return True if the call matches a critical domain/service/entity rule."""
+    """
+    Return True if the call could do a critical action.
+
+    A call matching a domain/service/entity rule is critical. Beyond the
+    rules: an actuating intent is checked per entity HA will act on, and
+    HassTurnOn on a script or scene opens it; a script's own tool is screened
+    by the steps the script runs; and a service tool's call is screened like
+    an automation step, with any script or scene it runs opened.
+    """
     domain_val = tool_args.get("domain", "")
     if isinstance(domain_val, list):
         domain_val = domain_val[0] if domain_val else ""
@@ -3408,6 +3428,7 @@ def _is_critical_action(
 
     service = str(tool_args.get("service", "") or "").lower()
     entities = [e.lower() for e in _coerce_entity_ids(tool_args)]
+    domain_given = bool(domain)
     if not domain and entities:
         try:
             domain = entities[0].split(".", maxsplit=1)[0]
@@ -3419,20 +3440,78 @@ def _is_critical_action(
     if is_actuating_intent(tool_name):
         return _intent_is_critical(tool_args, critical_actions, tool_name, hass)
 
-    # Alarm panels already enforce their own code; never gate them with the generic PIN.
-    if domain == "alarm_control_panel":
-        return False
+    # A script's own tool names no domain or service; what it runs decides.
+    if (script_id := script_tool_entity_id(tool_name)) is not None:
+        return _script_tool_is_critical(script_id, critical_actions, hass)
+    # A tool named like a script (HA before 2026.9 named script tools so) may
+    # be that script's tool or another tool sharing its name: screen both.
+    if (
+        bare_script := bare_script_tool_entity_id(tool_name, hass)
+    ) is not None and _script_tool_is_critical(bare_script, critical_actions, hass):
+        return True
 
-    # Require both domain and service to be present before treating as critical.
-    if not domain or not service:
+    # Alarm panels already enforce their own code; never gate them with the
+    # generic PIN. Only when the call names that domain alone: with none, the
+    # first target being a panel says nothing of the rest.
+    raw_domain = tool_args.get("domain")
+    declared = raw_domain if isinstance(raw_domain, list) else [raw_domain]
+    alarm_only = domain_given and {str(d).lower() for d in declared} == {
+        "alarm_control_panel"
+    }
+    if not service or alarm_only:
         return False
-
-    return matches_critical_rule(
-        domain=domain,
-        service=service,
-        entity_ids=entities,
-        critical_actions=critical_actions,
+    # A list of domains is screened in each one it names.
+    domains = (
+        [d for d in (str(d).strip().lower() for d in declared) if d]
+        if domain_given
+        else [domain]
+        if domain
+        else []
     )
+    if any(
+        matches_critical_rule(
+            domain=d,
+            service=service,
+            entity_ids=entities,
+            critical_actions=critical_actions,
+        )
+        for d in domains
+    ):
+        return True
+    actions = [f"{d}.{service}" for d in domains]
+    # A service tool's call is screened like an automation step, opening any
+    # script or scene it runs. With no domain given, the one read from the
+    # first entity is a guess, and the targets may sit under `target` or
+    # `data`: a tool may send such a call as `homeassistant.<service>`, which
+    # runs each target's own service, so it is screened that way too when it
+    # could run a script or scene, reaches several domains or targets one
+    # the gate cannot name.
+    if not domain_given and (
+        entities or any(key in tool_args for key in STEP_TARGET_KEYS)
+    ):
+        target_domains, unresolved = call_target_domains(tool_args)
+        if (
+            service in RUN_SERVICES
+            or len(target_domains) > 1
+            or not domain
+            or unresolved
+        ):
+            actions.append(f"homeassistant.{service}")
+    return any(
+        service_runs_critical_action(hass, action, tool_args, critical_actions)
+        for action in actions
+    )
+
+
+def _script_tool_is_critical(
+    entity_id: str,
+    critical_actions: list[dict[str, str]],
+    hass: HomeAssistant | None,
+) -> bool:
+    """Return True if a rule names the script or a step it runs is critical."""
+    return script_rule_matches(
+        hass, entity_id, critical_actions
+    ) or runs_critical_action(hass, entity_id, critical_actions)
 
 
 def _intent_is_critical(
@@ -3452,7 +3531,9 @@ def _intent_is_critical(
     intent on any lock is critical whatever the rules say (the domain of an
     entity id the model gave counts: with no domain and no service the call
     would otherwise run with no PIN at all); alarm panels keep their own
-    code. When the matcher cannot tell what HA will act on, the call is held.
+    code. HassTurnOn on a script or a scene runs it, so it is opened and
+    held when what it does is critical (#775). When the matcher cannot tell
+    what HA will act on, the call is held.
     """
     declared = declared_intent_service_calls(tool_name, tool_args)
     if declared is None:
@@ -3473,6 +3554,7 @@ def _intent_is_critical(
             for call in declared
             if call.domain == "lock" or (call.entity_id and not resolved)
         ]
+    turns_on = base_tool_name(tool_name) == "HassTurnOn"
     for call in calls:
         if call.domain == "alarm_control_panel":
             continue
@@ -3484,6 +3566,20 @@ def _intent_is_critical(
             entity_ids=[call.entity_id] if call.entity_id else [],
             critical_actions=critical_actions,
             unresolved_target=call.entity_id is None,
+        ):
+            return True
+        # Turning on a script runs it; turning on a scene sets its entities.
+        if (
+            turns_on
+            and call.domain in (SCRIPT_DOMAIN, SCENE_DOMAIN)
+            and (
+                call.entity_id is None
+                or (
+                    call.domain == SCRIPT_DOMAIN
+                    and script_rule_matches(hass, call.entity_id, critical_actions)
+                )
+                or runs_critical_action(hass, call.entity_id, critical_actions)
+            )
         ):
             return True
     return False

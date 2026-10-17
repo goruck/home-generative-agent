@@ -605,6 +605,19 @@ def test_scene_apply_on_an_unguarded_domain_is_not_gated() -> None:
     )
 
 
+def test_scene_apply_entities_in_data_template_are_screened() -> None:
+    """HA merges `data_template` over `data`, so its entities are what runs."""
+    assert _scan(
+        [
+            {
+                "action": "scene.apply",
+                "data": {"entities": {"light.kitchen": "on"}},
+                "data_template": {"entities": {"lock.front_door": "unlocked"}},
+            }
+        ]
+    ) == ["scene.apply (lock.front_door)"]
+
+
 @pytest.mark.parametrize(
     ("steps", "expected"),
     [
@@ -1034,3 +1047,30 @@ def test_conversation_process_is_gated() -> None:
     assert _scan_validated(
         [{"action": "conversation.process", "data": {"text": "run my unlock intent"}}]
     ) == ["conversation.process"]
+
+
+def test_a_templated_key_in_scene_apply_data_is_unreadable() -> None:
+    """HA renders dict keys too: this key becomes `entities` when it runs."""
+    assert _scan(
+        [
+            {
+                "action": "scene.apply",
+                "data": {"{{ 'entities' }}": {"lock.front_door": "unlocked"}},
+            }
+        ]
+    ) == ["scene.apply"]
+
+
+def test_a_templated_key_in_a_target_is_unresolved() -> None:
+    """A templated key can replace the named blind with the garage door."""
+    assert _scan(
+        [
+            {
+                "action": "cover.open_cover",
+                "target": {
+                    "entity_id": "cover.bedroom_blind",
+                    "{{ 'entity_id' }}": "cover.garage_door",
+                },
+            }
+        ]
+    ) == ["cover.open_cover"]
