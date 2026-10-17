@@ -239,6 +239,21 @@ def service_runs_critical_action(  # noqa: PLR0911
     return bool(find_critical_automation_calls({"actions": [step]}, rules))
 
 
+def call_target_domains(tool_args: Mapping[str, Any]) -> tuple[set[str], bool]:
+    """
+    Return the domains a service tool's call targets, and if any is unknown.
+
+    Read wherever the targets sit (`entity_id`, `entity_ids`, `target`,
+    `data`), the way the step screen reads them. A target of `all`, an area,
+    a device, a label or a registry id is unknown.
+    """
+    entities, unresolved = step_targets(
+        _service_step(f"{_GENERIC_DOMAIN}.turn_on", tool_args),
+        frozenset({SCRIPT_DOMAIN, SCENE_DOMAIN}),
+    )
+    return {entity_id.split(".", 1)[0] for entity_id in entities}, unresolved
+
+
 def _service_step(action: str, tool_args: Mapping[str, Any]) -> dict[str, Any]:
     """
     Return a service tool's call as an automation step.

@@ -504,6 +504,42 @@ def test_without_hass_a_scene_or_script_is_held() -> None:
             True,
         ),
         ({"service": "turn_on", "entity_id": "scene.arrive_home"}, True),
+        # Plural targets over two domains: each is checked in its own.
+        (
+            {"service": "unlock", "entity_ids": ["light.porch", "lock.front_door"]},
+            True,
+        ),
+        (
+            {
+                "service": "toggle",
+                "entity_ids": ["light.porch", "cover.garage_door"],
+            },
+            True,
+        ),
+        (
+            {"service": "turn_on", "entity_ids": ["light.porch", "script.open_garage"]},
+            True,
+        ),
+        (
+            {
+                "service": "unlock",
+                "entity_id": "light.porch",
+                "target": {"entity_id": "lock.front_door"},
+            },
+            True,
+        ),
+        ({"service": "unlock", "target": {"entity_id": "lock.front_door"}}, True),
+        # No domain and an area: which devices act is unknown, so it is held.
+        ({"service": "turn_off", "area_id": "garage"}, True),
+        # A list of domains is the alarm's only when it names nothing else.
+        (
+            {
+                "domain": ["alarm_control_panel", "lock"],
+                "service": "unlock",
+                "entity_id": "lock.front_door",
+            },
+            True,
+        ),
         # Stopping a script runs nothing.
         ({"service": "turn_off", "entity_id": "script.open_garage"}, False),
         # A `service` argument with nothing to act on is not a service call.
@@ -814,8 +850,10 @@ async def test_a_tool_sharing_a_harmless_scripts_name_still_screens_its_call(
     """Named like a script, or that script's tool: its own call is screened too."""
     args = {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door"}
     assert _is_critical_action(args, RULES, tool_name, home)
+    # The line names both: the script it may be, and the call it makes.
     line = describe_pending_action(home, {"tool_name": tool_name, "tool_args": args})
-    assert "Porch Lights" not in line
+    assert "Porch Lights" in line
+    assert "lock.front_door" in line
 
 
 async def test_the_pin_line_names_a_bare_named_script(home: HomeAssistant) -> None:

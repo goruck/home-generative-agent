@@ -126,6 +126,7 @@ from .indirect_pin import (
     SCENE_DOMAIN,
     SCRIPT_DOMAIN,
     bare_script_tool_entity_id,
+    call_target_domains,
     runs_critical_action,
     script_rule_matches,
     script_tool_entity_id,
@@ -3422,33 +3423,52 @@ def _is_critical_action(
         return True
 
     # Alarm panels already enforce their own code; never gate them with the
-    # generic PIN. Only when the call names the domain: with none, the first
-    # target being a panel says nothing of the rest.
-    if not service or (domain == "alarm_control_panel" and domain_given):
+    # generic PIN. Only when the call names that domain alone: with none, the
+    # first target being a panel says nothing of the rest.
+    raw_domain = tool_args.get("domain")
+    declared = raw_domain if isinstance(raw_domain, list) else [raw_domain]
+    alarm_only = domain_given and {str(d).lower() for d in declared} == {
+        "alarm_control_panel"
+    }
+    if not service or alarm_only:
         return False
-    actions: list[str] = []
-    if domain:
-        if matches_critical_rule(
-            domain=domain,
+    # A list of domains is screened in each one it names.
+    domains = (
+        [d for d in (str(d).strip().lower() for d in declared) if d]
+        if domain_given
+        else [domain]
+        if domain
+        else []
+    )
+    if any(
+        matches_critical_rule(
+            domain=d,
             service=service,
             entity_ids=entities,
             critical_actions=critical_actions,
-        ):
-            return True
-        actions.append(f"{domain}.{service}")
+        )
+        for d in domains
+    ):
+        return True
+    actions = [f"{d}.{service}" for d in domains]
     # A service tool's call is screened like an automation step, opening any
     # script or scene it runs. With no domain given, the one read from the
     # first entity is a guess, and the targets may sit under `target` or
     # `data`: a tool may send such a call as `homeassistant.<service>`, which
     # runs each target's own service, so it is screened that way too when it
-    # could run a script or scene, or reach several domains.
-    target_domains = {e.split(".", 1)[0] for e in entities}
-    if (
-        not domain_given
-        and any(key in tool_args for key in STEP_TARGET_KEYS)
-        and (service in RUN_SERVICES or len(target_domains) > 1 or not domain)
+    # could run a script or scene, reaches several domains or targets one
+    # the gate cannot name.
+    if not domain_given and (
+        entities or any(key in tool_args for key in STEP_TARGET_KEYS)
     ):
-        actions.append(f"homeassistant.{service}")
+        target_domains, unresolved = call_target_domains(tool_args)
+        if (
+            service in RUN_SERVICES
+            or len(target_domains) > 1
+            or not domain
+            or unresolved
+        ):
+            actions.append(f"homeassistant.{service}")
     return any(
         service_runs_critical_action(hass, action, tool_args, critical_actions)
         for action in actions
