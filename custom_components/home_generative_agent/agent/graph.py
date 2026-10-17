@@ -91,6 +91,7 @@ from .automation_targets import AUTOMATION_REFUSAL_PREFIX
 from .helpers import (
     ALARM_DOMAIN,
     CONFIRM_TOOL_NAME,
+    INTENT_NAME_ALL,
     PIN_REFUSAL_ENDS_TURN,
     active_llm_api_ids,
     base_tool_name,
@@ -390,9 +391,10 @@ def _route_alarm_intent_to_tool(
     An alarm call is one that declares the alarm panel domain (the alarm
     normalizer adds it when HA's matcher resolves the name to alarm panels
     only) or gives the entity id of an alarm panel. A numeric code suggests
-    one only when the call declares no domain and HA matches nothing to its
-    target, hidden devices included: a code given for a lock, by name, area
-    or entity id, is the lock's code. Never from the
+    one only when the call declares no domain and either names no target at
+    all or everything HA matches to it, hidden devices included, is an alarm
+    panel. A code given for anything else, or for a target HA cannot find
+    (a lock in the wrong area), is not a sign of the alarm. Never from the
     letters of the name: "Security Light" and "Security Door Lock" were
     refused as alarms (#782).
     """
@@ -407,9 +409,8 @@ def _route_alarm_intent_to_tool(
         and not entity_ids
         and hass.states.async_entity_ids(ALARM_DOMAIN)
         and str(tool_args.get("code", "")).strip().isdigit()
-        and intent_service_calls(hass, tool_name, tool_args) == []
     ):
-        looks_like_alarm = True
+        looks_like_alarm = _code_hints_alarm(hass, tool_name, tool_args)
     if not looks_like_alarm:
         return None
     return ToolMessage(
@@ -422,6 +423,19 @@ def _route_alarm_intent_to_tool(
         tool_call_id=tool_call.get("id") or "",
         status="error",
     )
+
+
+def _code_hints_alarm(
+    hass: HomeAssistant, tool_name: str, tool_args: dict[str, Any]
+) -> bool:
+    """Return True when a call with a code names no target or only alarm panels."""
+    name = tool_args.get("name")
+    named = isinstance(name, str) and name.strip() and name != INTENT_NAME_ALL
+    scoped = any(str(tool_args.get(key) or "").strip() for key in ("area", "floor"))
+    if not named and not scoped:
+        return True
+    calls = intent_service_calls(hass, tool_name, tool_args)
+    return bool(calls) and all(call.domain == ALARM_DOMAIN for call in calls)
 
 
 def _critical_action_guard(

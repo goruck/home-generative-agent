@@ -218,6 +218,13 @@ async def rooms(home: HomeAssistant) -> HomeAssistant:
         "door_a": ("Door", None, [er.COMPUTED_NAME, "Front Entrance Lock"]),
         "door_b": ("Door", None, [er.COMPUTED_NAME]),
     }
+    hall = areas.async_create("Hall")
+    panel = entities.async_get_or_create(
+        "alarm_control_panel", "test", "hall", suggested_object_id="hall"
+    )
+    entities.async_update_entity(panel.entity_id, area_id=hall.id)
+    home.states.async_set(panel.entity_id, "armed_home", {"friendly_name": "Hall"})
+    async_expose_entity(home, "conversation", panel.entity_id, should_expose=True)
     for object_id, (name, area_id, aliases) in locks.items():
         entry = entities.async_get_or_create(
             "lock", "test", object_id, suggested_object_id=object_id
@@ -418,10 +425,15 @@ def test_a_name_not_only_an_exposed_alarm_panel_is_not_an_alarm(
         # A declared non-alarm domain is respected, code or not.
         ({"name": "Security Light", "domain": ["light"]}, False),
         ({"name": "Front Door Lock", "domain": ["lock"], "code": "1234"}, False),
-        # No domain and a numeric code, with a panel in the home and a name
-        # HA matches to nothing: the hint stays.
-        ({"name": "Downstairs", "code": "1234"}, True),
+        # No domain and a numeric code, with a panel in the home: the hint
+        # stays for a call that names no target, or only alarm panels.
         ({"code": "1234"}, True),
+        ({"name": "all", "code": "1234"}, True),
+        ({"area": "Hall", "code": "1234"}, True),
+        # A target HA cannot find is no sign of the alarm: here a lock (and
+        # a switch) named "Shed", asked for in a room it is not in.
+        ({"name": "Downstairs", "code": "1234"}, False),
+        ({"name": "Shed", "area": "Kitchen", "code": "1234"}, False),
         # A code given for a lock is the lock's code: by name, a hidden one
         # too, by area, or by entity id.
         ({"name": "Front Door Lock", "code": "1234"}, False),
@@ -442,6 +454,56 @@ def test_the_alarm_redirect_respects_a_declared_domain(
     """Never an alarm by the letters of a name; a code hints only with no domain."""
     result = _route_alarm_intent_to_tool("intent__HassTurnOff", tool_args, rooms, {})
     assert (result is not None) is redirected
+
+
+def test_a_code_for_a_lock_on_another_intent_is_not_an_alarm(
+    rooms: HomeAssistant,
+) -> None:
+    """A lock matched by an intent that makes no call on it is still a lock."""
+    result = _route_alarm_intent_to_tool(
+        "intent__HassStopMoving", {"name": "Front Door Lock", "code": "1234"}, rooms, {}
+    )
+    assert result is None
+
+
+@pytest.mark.parametrize(
+    ("name", "line"),
+    [
+        ("lock.front_door", 'unlock "Front Door Lock" (lock.front_door)'),
+        # Not the id exactly: HA reads it as a name, and so does the line.
+        (" lock.front_door", 'unlock "lock.front_door"'),
+    ],
+)
+def test_a_lock_named_by_entity_id_is_shown_by_its_own_name(
+    home: HomeAssistant, name: str, line: str
+) -> None:
+    """The line names the device HA reads the slot as, by its own name too."""
+    ctx = _ctx(home, pin=True)
+    _prepare_tool_args(
+        "intent__HassTurnOff", {"name": name, "domain": ["lock"]}, ctx, {"id": "c1"}
+    )
+    (action,) = ctx.pending_actions.values()
+    assert describe_pending_action(home, action) == line
+
+
+def test_quotes_in_a_device_name_cannot_extend_the_line(home: HomeAssistant) -> None:
+    """A name that closes the quote reads as one name, not a second action."""
+    home.states.async_set(
+        "lock.front_door",
+        "locked",
+        {"friendly_name": 'Garage" (lock.garage), lock "Front Door'},
+    )
+    ctx = _ctx(home, pin=True)
+    _prepare_tool_args(
+        "intent__HassTurnOff",
+        {"name": "lock.front_door", "domain": ["lock"]},
+        ctx,
+        {"id": "c1"},
+    )
+    (action,) = ctx.pending_actions.values()
+    assert describe_pending_action(home, action) == (
+        "unlock \"Garage' (lock.garage), lock 'Front Door\" (lock.front_door)"
+    )
 
 
 def test_without_hass_only_a_declared_domain_counts() -> None:

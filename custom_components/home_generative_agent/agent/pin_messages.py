@@ -436,6 +436,28 @@ def _slot_line(value: Any) -> str:
     return _one_line(str(value), _ACTION_TARGET_MAX_LEN)
 
 
+# Quote marks a device's own name may carry, read in the line as its end.
+_QUOTE_MARKS = str.maketrans(dict.fromkeys('"“”„', "'"))
+
+
+def _entity_friendly_name(hass: HomeAssistant | None, raw_name: Any) -> str:
+    """
+    Return the name of the device a name slot gives by its entity id, or "".
+
+    HA reads a name as an entity id only when it is the id exactly, so the
+    slot is looked up as sent, before it is shortened for the line. Quote
+    marks in the device's name are shown as apostrophes, so a name cannot
+    close the quote and read as more of the line.
+    """
+    states = getattr(hass, "states", None)
+    if states is None or not isinstance(raw_name, str):
+        return ""
+    state = states.get(raw_name)
+    if state is None or state.entity_id != raw_name:
+        return ""
+    return _slot_line(state.name.translate(_QUOTE_MARKS))
+
+
 def _intent_target(
     hass: HomeAssistant | None, tool_args: Mapping[str, Any], domain: str
 ) -> str:
@@ -452,13 +474,10 @@ def _intent_target(
     single out.
     """
     payload = minimal_payload_for_domain(dict(tool_args))
-    name = payload.get("name")
-    name = "" if name == INTENT_NAME_ALL else _slot_line(name)
+    raw_name = payload.get("name")
+    name = "" if raw_name == INTENT_NAME_ALL else _slot_line(raw_name)
     if name:
-        states = getattr(hass, "states", None)
-        state = states.get(name) if states is not None else None
-        # HA reads a name as an entity id only when it is the id exactly.
-        friendly = _slot_line(state.name) if state and state.entity_id == name else ""
+        friendly = _entity_friendly_name(hass, raw_name)
         if friendly and friendly != name:
             return pin_msg(hass, "target_entity", name=friendly, entity_id=name)
         return _named(hass, name)
