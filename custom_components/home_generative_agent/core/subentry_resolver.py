@@ -68,6 +68,8 @@ from ..const import (  # noqa: TID252
     CONF_SENTINEL_APPLIANCE_DURATION_MIN,
     CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     CONF_SENTINEL_AUTH_IP_RETENTION_DAYS,
+    CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
+    CONF_SENTINEL_AUTO_EXECUTION_ENABLED,
     CONF_SENTINEL_AUTONOMY_LEVEL,
     CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
@@ -454,6 +456,11 @@ def _apply_sentinel_options(
             RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES
         ),
     }
+
+    # Automatic actions are not offered yet (#789): a value an older build or
+    # a hand edit left in the entry options must not turn them on.
+    options[CONF_SENTINEL_AUTO_EXECUTION_ENABLED] = False
+    options[CONF_SENTINEL_AUTO_EXEC_CANARY_MODE] = False
 
     if sentinel_subentry is None:
         for key, value in {**sentinel_defaults, **autonomy_defaults}.items():

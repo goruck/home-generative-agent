@@ -167,6 +167,7 @@ from .rules.zigbee_permit_join_open import ZigbeePermitJoinOpenRule
 from .rules.zwave_inclusion_active import ZwaveInclusionActiveRule
 from .rules.zwave_insecure_security_class import ZwaveInsecureSecurityClassRule
 from .suppression import (
+    SUPPRESSION_REASON_AUTONOMY_PASSIVE,
     SUPPRESSION_REASON_NOT_SUPPRESSED,
     SUPPRESSION_REASON_NOTIFIER_DUPLICATE,
     SUPPRESSION_REASON_POLICY_BLOCKED,
@@ -262,6 +263,11 @@ class GatedEvaluation:
 # Module-level in-memory store for runtime autonomy-level overrides.
 # Maps entry_id -> (level: int, expires_at: datetime)
 _AUTONOMY_OVERRIDES: dict[str, tuple[int, datetime]] = {}
+# The configured level each override was set over (#783). An override is
+# relative to that level: once the configured level changes, it no longer
+# applies, so a level-3 override cannot outlive a lowered configuration and a
+# muted one cannot outlive a raised one.
+_OVERRIDE_BASES: dict[str, int] = {}
 
 # ---------------------------------------------------------------------------
 # Entity → anomaly-type mapping for event-driven triggering
@@ -620,6 +626,7 @@ class SentinelEngine:
         if require_pin and not pin_verified and level > base_level and existing:
             expires_at = min(expires_at, existing[1])
         _AUTONOMY_OVERRIDES[entry_id] = (level, expires_at)
+        _OVERRIDE_BASES[entry_id] = base_level
         LOGGER.info(
             "Sentinel autonomy level set to %s for entry %s (expires %s).",
             level,
@@ -661,14 +668,18 @@ class SentinelEngine:
         config value ``CONF_SENTINEL_AUTONOMY_LEVEL``, then the recommended
         default.
         """
+        base = self._base_autonomy_level()
         override = _AUTONOMY_OVERRIDES.get(entry_id)
         if override is not None:
             level, expires_at = override
-            if dt_util.utcnow() < expires_at:
+            set_over = _OVERRIDE_BASES.get(entry_id, base)
+            if dt_util.utcnow() < expires_at and set_over == base:
                 return level
-            # TTL expired - clean up and fall through to config default
+            # Expired, or set over a configured level that has since changed:
+            # clean up and fall through to the configured level.
             del _AUTONOMY_OVERRIDES[entry_id]
-        return self._base_autonomy_level()
+            _OVERRIDE_BASES.pop(entry_id, None)
+        return base
 
     def _base_autonomy_level(self) -> int:
         """Return the configured autonomy level, without any runtime override."""
@@ -682,6 +693,16 @@ class SentinelEngine:
             if level in SENTINEL_AUTONOMY_LEVELS
             else RECOMMENDED_SENTINEL_AUTONOMY_LEVEL
         )
+
+    def _is_passive(self) -> bool:
+        """
+        Return True at autonomy level 0, set or overridden: no notifications.
+
+        The level the user chose, not the read-only fallback to 0 after a
+        downgrade, which only stops triage and actions: that must never mute
+        security alerts.
+        """
+        return bool(self._entry_id) and self.get_autonomy_level(self._entry_id) == 0
 
     def _canary_kwargs(
         self, finding: AnomalyFinding, *, canary_would_execute: bool | None
@@ -739,6 +760,7 @@ class SentinelEngine:
         override = _AUTONOMY_OVERRIDES.get(self._entry_id) if self._entry_id else None
         if override is not None and override[0] > self._base_autonomy_level():
             del _AUTONOMY_OVERRIDES[cast("str", self._entry_id)]
+            _OVERRIDE_BASES.pop(cast("str", self._entry_id), None)
             if dt_util.utcnow() < override[1]:
                 LOGGER.info(
                     "Sentinel autonomy level %s for entry %s ended by reload; "
@@ -1825,6 +1847,18 @@ class SentinelEngine:
             self._last_dispatch_reason = suppression_decision.reason_code
             return False
 
+        if self._is_passive():
+            await _append_finding_audit(
+                self._audit_store,
+                snapshot,
+                finding,
+                None,
+                SUPPRESSION_REASON_AUTONOMY_PASSIVE,
+                trigger_source=trigger_source,
+            )
+            self._last_dispatch_reason = SUPPRESSION_REASON_AUTONOMY_PASSIVE
+            return False
+
         # Suppression state is read-only → downgrade to Level 0.
         effective_autonomy = (
             0
@@ -2002,13 +2036,13 @@ class SentinelEngine:
             if not decision.suppress:
                 passing.append((constituent, decision.reason_code))
 
-        if not passing:
+        if not passing or self._is_passive():
             await _append_finding_audit(
                 self._audit_store,
                 snapshot,
                 compound,
                 None,
-                "suppressed",
+                "suppressed" if not passing else SUPPRESSION_REASON_AUTONOMY_PASSIVE,
                 trigger_source=trigger_source,
             )
             return False

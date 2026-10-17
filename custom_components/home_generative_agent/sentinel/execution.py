@@ -9,11 +9,11 @@ evaluation path.
 Guardrail evaluation order
 --------------------------
 1. Autonomy level < 2                 → ``prompt_user``
-2. Data quality != "fresh"            → ``prompt_user`` (stale) /
-                                        ``blocked`` (unavailable)
-3. Sensitivity flag                   → ``handoff``
-4. Auto-execution disabled            → ``prompt_user`` (the canary
+2. Auto-execution disabled            → ``prompt_user`` (the canary
                                         evaluator still runs on in canary mode)
+3. Data quality != "fresh"            → ``prompt_user`` (stale) /
+                                        ``blocked`` (unavailable)
+4. Sensitivity flag                   → ``handoff``
 5. Confidence below threshold         → ``prompt_user``
 6. Actions: none callable, one not
    allowlisted, or one critical (a
@@ -86,6 +86,7 @@ _SERVICE_ACTION = re.compile(r"[a-z0-9_]+\.[a-z0-9_]+")
 _NEVER_AUTO_DOMAINS = frozenset({"alarm_control_panel", "cover"})
 # The only lock service Sentinel may call by itself.
 _SAFE_LOCK_SERVICE = "lock.lock"
+_GENERIC_DOMAIN = "homeassistant"
 
 
 def executable_actions(finding: AnomalyFinding) -> list[str]:
@@ -187,6 +188,24 @@ class SentinelExecutionService:
                 block_reason="autonomy_level_below_2",
             )
 
+        # Auto-execution off: nothing to decide, the user is notified as at
+        # level 1. Checked before data quality so that levels 2 and 3 drop no
+        # finding while no action can run (#783).
+        auto_enabled = bool(
+            self._options.get(
+                CONF_SENTINEL_AUTO_EXECUTION_ENABLED,
+                RECOMMENDED_SENTINEL_AUTO_EXECUTION_ENABLED,
+            )
+        )
+        if not auto_enabled:
+            return ActionPolicyResult(
+                action_policy_path=ACTION_POLICY_PROMPT_USER,
+                data_quality=DATA_QUALITY_FRESH,
+                data_quality_details={},
+                execution_id=None,
+                block_reason="auto_execution_disabled",
+            )
+
         # 2. Data quality gate.
         dq, dq_details = self._compute_data_quality(finding, snapshot, now)
         if dq == DATA_QUALITY_UNAVAILABLE:
@@ -216,22 +235,6 @@ class SentinelExecutionService:
                 data_quality_details=dq_details,
                 execution_id=None,
                 block_reason="finding_sensitive",
-            )
-
-        # 4. Auto-execution enabled gate.
-        auto_enabled = bool(
-            self._options.get(
-                CONF_SENTINEL_AUTO_EXECUTION_ENABLED,
-                RECOMMENDED_SENTINEL_AUTO_EXECUTION_ENABLED,
-            )
-        )
-        if not auto_enabled:
-            return ActionPolicyResult(
-                action_policy_path=ACTION_POLICY_PROMPT_USER,
-                data_quality=dq,
-                data_quality_details=dq_details,
-                execution_id=None,
-                block_reason="auto_execution_disabled",
             )
 
         # 5. Confidence gate.
@@ -337,6 +340,30 @@ class SentinelExecutionService:
                 block_reason="autonomy_level_below_2",
             )
 
+        # As in evaluate(), but canary mode reports what would run whether or
+        # not live execution is on, so a dry-run review needs no switch that
+        # could act.
+        auto_enabled = bool(
+            self._options.get(
+                CONF_SENTINEL_AUTO_EXECUTION_ENABLED,
+                RECOMMENDED_SENTINEL_AUTO_EXECUTION_ENABLED,
+            )
+        )
+        canary_mode = bool(
+            self._options.get(
+                CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
+                RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
+            )
+        )
+        if not auto_enabled and not canary_mode:
+            return ActionPolicyResult(
+                action_policy_path=ACTION_POLICY_PROMPT_USER,
+                data_quality=DATA_QUALITY_FRESH,
+                data_quality_details={},
+                execution_id=None,
+                block_reason="auto_execution_disabled",
+            )
+
         # 2. Data quality gate.
         dq, dq_details = self._compute_data_quality(finding, snapshot, now)
         if dq == DATA_QUALITY_UNAVAILABLE:
@@ -366,30 +393,6 @@ class SentinelExecutionService:
                 data_quality_details=dq_details,
                 execution_id=None,
                 block_reason="finding_sensitive",
-            )
-
-        # 4. Auto-execution enabled gate.
-        auto_enabled = bool(
-            self._options.get(
-                CONF_SENTINEL_AUTO_EXECUTION_ENABLED,
-                RECOMMENDED_SENTINEL_AUTO_EXECUTION_ENABLED,
-            )
-        )
-        # Canary mode reports what would run whether or not live execution
-        # is on, so a dry-run review needs no switch that could act.
-        canary_mode = bool(
-            self._options.get(
-                CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
-                RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
-            )
-        )
-        if not auto_enabled and not canary_mode:
-            return ActionPolicyResult(
-                action_policy_path=ACTION_POLICY_PROMPT_USER,
-                data_quality=dq,
-                data_quality_details=dq_details,
-                execution_id=None,
-                block_reason="auto_execution_disabled",
             )
 
         # 5. Confidence gate.
@@ -580,12 +583,21 @@ class SentinelExecutionService:
             resolve_critical_action_policy,
         )
 
+        target_domains = {e.split(".", 1)[0] for e in finding.triggering_entities}
         for action in actions:
             domain = action.split(".", 1)[0]
             if domain in _NEVER_AUTO_DOMAINS or (
                 domain == "lock" and action != _SAFE_LOCK_SERVICE
             ):
                 LOGGER.debug("Auto-execute blocked: %s needs a person.", action)
+                return True
+            # `homeassistant.*` runs each target's own service: the floor
+            # applies to the targets' domains.
+            if domain == _GENERIC_DOMAIN and target_domains & {
+                *_NEVER_AUTO_DOMAINS,
+                "lock",
+            }:
+                LOGGER.debug("Auto-execute blocked: %s on %s.", action, target_domains)
                 return True
         rules = resolve_critical_action_policy(self._options).critical_actions
         target = {"entity_id": list(finding.triggering_entities)}

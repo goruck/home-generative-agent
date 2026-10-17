@@ -1,12 +1,11 @@
 # ruff: noqa: S101
 """
-Sentinel's autonomy level and auto-execution are settings a user can set (#783).
+Sentinel's autonomy level and override duration are settings (#783).
 
-The engine read a configured level, an override duration and the auto-execution
-guardrails, but no form or resolver ever supplied them: the level was always 1,
-an override lasted an hour, and levels 2 and 3 could neither act nor report what
-they would do. A finding's suggested action may now run on its own, never a
-critical one, and dry-run mode names it in the notification instead.
+The engine read a configured level and an override duration that no form or
+resolver supplied: the level was always 1 and an override lasted an hour. The
+auto-execution guardrails and the dry-run line are in place but not offered in
+the options yet (#789), so nothing here can act.
 """
 
 from __future__ import annotations
@@ -27,7 +26,10 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
     CONF_SENTINEL_AUTO_EXECUTION_ENABLED,
     CONF_SENTINEL_AUTONOMY_LEVEL,
+    CONF_SENTINEL_DAILY_DIGEST_ENABLED,
+    CONF_SENTINEL_DAILY_DIGEST_TIME,
     CONF_SENTINEL_ENABLED,
+    CONF_SENTINEL_QUIET_HOURS_START,
     CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
     RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
     SUBENTRY_TYPE_SENTINEL,
@@ -37,6 +39,7 @@ from custom_components.home_generative_agent.core.subentry_resolver import (
 )
 from custom_components.home_generative_agent.flows.sentinel_subentry_flow import (
     _default_payload,
+    _normalize_autonomy,
 )
 from custom_components.home_generative_agent.sentinel.execution import (
     SentinelExecutionService,
@@ -118,6 +121,9 @@ def test_an_allowlisted_safe_action_runs() -> None:
         ),
         # A cover can be a garage whose id names no door; never on its own.
         (["cover.close_cover"], ["cover"], ["cover.ratgdo_main"]),
+        # Through the generic domain, the floor reads the targets' domains.
+        (["homeassistant.toggle"], ["homeassistant"], ["cover.ratgdo_main"]),
+        (["homeassistant.turn_off"], ["homeassistant"], ["lock.front_door"]),
         # Starts configuration whose steps are not read here.
         (["script.turn_on"], ["script"], ["script.anything"]),
         (["automation.trigger"], ["automation"], ["automation.anything"]),
@@ -156,6 +162,17 @@ def test_prose_with_a_dot_is_advice_not_an_action() -> None:
     """Only a `domain.service` slug pair is ever called."""
     result = _evaluate(["Check the router. Then reboot it."], ["lock"])
     assert result.block_reason == "no_executable_action"
+
+
+def test_levels_two_and_three_drop_nothing_while_no_action_can_run() -> None:
+    """With auto-execution off, an unavailable device does not drop a finding."""
+    svc = SentinelExecutionService({CONF_SENTINEL_AUTO_EXECUTION_ENABLED: False})
+    finding = _make_finding(severity="medium", triggering_entities=["sensor.gone"])
+    snapshot = _make_snapshot(entity_id="lock.front_door", last_changed=_RECENT)
+    for evaluate in (svc.evaluate, svc.evaluate_canary):
+        result = evaluate(finding, snapshot, 2, _NOW)
+        assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
+        assert result.block_reason == "auto_execution_disabled"
 
 
 def test_advice_beside_an_action_does_not_stop_it() -> None:
@@ -292,6 +309,19 @@ def test_an_older_installs_level_is_kept() -> None:
     assert options[CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES] == 120
 
 
+def test_an_older_setting_cannot_turn_automatic_actions_on() -> None:
+    """A value left in the entry options does not enable them (#789)."""
+    options = _resolved(
+        {CONF_SENTINEL_ENABLED: True},
+        {
+            CONF_SENTINEL_AUTO_EXECUTION_ENABLED: True,
+            CONF_SENTINEL_AUTO_EXEC_CANARY_MODE: True,
+        },
+    )
+    assert options[CONF_SENTINEL_AUTO_EXECUTION_ENABLED] is False
+    assert options[CONF_SENTINEL_AUTO_EXEC_CANARY_MODE] is False
+
+
 def test_auto_execution_is_not_set_by_the_subentry() -> None:
     """Automatic actions are not offered yet, so nothing turns them on."""
     options = _resolved(
@@ -377,3 +407,103 @@ def test_the_defaults_change_nothing() -> None:
     assert payload[CONF_SENTINEL_AUTONOMY_LEVEL] == 1
     assert CONF_SENTINEL_AUTO_EXECUTION_ENABLED not in payload
     assert CONF_SENTINEL_AUTO_EXEC_CANARY_MODE not in payload
+
+
+@pytest.mark.asyncio
+async def test_the_form_shows_and_keeps_an_older_installs_level(
+    hass: HomeAssistant,
+) -> None:
+    """A level in the entry options is the one in force, so the form keeps it."""
+    existing = DummySubentry(
+        "sent1", SUBENTRY_TYPE_SENTINEL, "Sentinel", {CONF_SENTINEL_ENABLED: True}
+    )
+    entry = DummyEntry(options={CONF_SENTINEL_AUTONOMY_LEVEL: 0})
+    entry.subentries[existing.subentry_id] = existing
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+    form = await flow.async_step_settings()
+    schema = cast("Any", form).get("data_schema")
+    assert schema is not None
+    suggested = {
+        key.schema: key.description["suggested_value"]
+        for key in schema.schema
+        if key.description and "suggested_value" in key.description
+    }
+    assert suggested[CONF_SENTINEL_AUTONOMY_LEVEL] == "0"
+
+
+@pytest.mark.asyncio
+async def test_basic_setup_keeps_the_level(hass: HomeAssistant) -> None:
+    """A Sentinel set to 0 stays silent when Basic setup runs again."""
+    existing = DummySubentry(
+        "sent1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {CONF_SENTINEL_ENABLED: True, CONF_SENTINEL_AUTONOMY_LEVEL: 0},
+    )
+    entry = DummyEntry()
+    entry.subentries[existing.subentry_id] = existing
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+    updates: list[Any] = []
+    flow.async_update_and_abort = lambda *_a, **kw: (  # type: ignore[assignment]
+        updates.append(kw) or {"type": "abort", "reason": "reconfigure_successful"}
+    )
+    await flow.async_step_setup_mode({"setup_mode": "basic"})
+    await flow.async_step_basic_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_DAILY_DIGEST_ENABLED: False,
+            CONF_SENTINEL_DAILY_DIGEST_TIME: "08:00:00",
+        }
+    )
+    assert updates[0]["data"][CONF_SENTINEL_AUTONOMY_LEVEL] == 0
+
+
+@pytest.mark.parametrize(
+    ("given", "level", "ttl"),
+    [
+        ({CONF_SENTINEL_AUTONOMY_LEVEL: "9"}, 1, 60),
+        ({CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES: True}, 1, 60),
+        ({CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES: "x"}, 1, 60),
+        (
+            {
+                CONF_SENTINEL_AUTONOMY_LEVEL: "3",
+                CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES: 90.0,
+            },
+            3,
+            90,
+        ),
+    ],
+)
+def test_unreadable_values_are_stored_as_the_defaults(
+    given: dict[str, Any], level: int, ttl: int
+) -> None:
+    """The engine never sees a level or duration it cannot read."""
+    data = dict(given)
+    _normalize_autonomy(data)
+    assert data[CONF_SENTINEL_AUTONOMY_LEVEL] == level
+    assert data[CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES] == ttl
+
+
+@pytest.mark.asyncio
+async def test_the_form_after_an_error_accepts_its_own_level(
+    hass: HomeAssistant,
+) -> None:
+    """The redisplayed form shows the level as the select's text, as on first show."""
+    flow = _make_sentinel_flow_for_mode(hass, DummyEntry())
+    form = await flow.async_step_settings(
+        _settings(
+            **{
+                CONF_SENTINEL_AUTONOMY_LEVEL: "2",
+                CONF_SENTINEL_QUIET_HOURS_START: "22",
+            }
+        )
+    )
+    assert cast("Any", form).get("errors") == {"base": "quiet_hours_incomplete"}
+    schema = cast("Any", form).get("data_schema")
+    suggested = {
+        key.schema: key.description["suggested_value"]
+        for key in schema.schema
+        if key.description and "suggested_value" in key.description
+    }
+    assert suggested[CONF_SENTINEL_AUTONOMY_LEVEL] == "2"
+    assert schema(suggested)[CONF_SENTINEL_AUTONOMY_LEVEL] == "2"

@@ -53,6 +53,8 @@ SUPPRESSION_REASON_USER_SNOOZE_PERMANENT = "user_snooze_permanent"
 # so the audit store's eviction logic can correctly treat them as evictable.
 SUPPRESSION_REASON_TRIAGE_SUPPRESSED = "triage_suppressed"
 SUPPRESSION_REASON_POLICY_BLOCKED = "policy_blocked"
+# Autonomy level 0 (passive): found and audited, never notified (#783).
+SUPPRESSION_REASON_AUTONOMY_PASSIVE = "autonomy_passive"
 # The notifier dropped the push as a repeat of the same anomaly within its own
 # cooldown, so this finding did not reach the user (the earlier push did).
 SUPPRESSION_REASON_NOTIFIER_DUPLICATE = "notifier_duplicate"

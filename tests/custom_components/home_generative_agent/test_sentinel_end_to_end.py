@@ -378,6 +378,22 @@ async def test_sentinel_canary_mode_does_not_consume_live_auto_execute(
     assert audit.calls[-1]["action_policy_path"] == "auto_execute"
 
 
+async def test_level_zero_records_but_never_notifies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Level 0 (passive) silences Sentinel: audited, not notified (#783)."""
+    engine, hass = _make_ae_engine(monkeypatch, autonomy_level=0)
+
+    await engine._run_once()
+
+    hass.services.async_call.assert_not_called()
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    assert notifier.calls == []
+    audit = cast("DummyAudit", cast("Any", engine)._audit_store)
+    assert audit.calls
+    assert all(c["suppression_reason_code"] == "autonomy_passive" for c in audit.calls)
+
+
 async def test_dry_run_with_execution_off_never_acts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

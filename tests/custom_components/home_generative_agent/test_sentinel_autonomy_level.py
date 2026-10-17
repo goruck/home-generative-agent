@@ -98,8 +98,10 @@ def _make_engine(options: dict[str, object] | None = None) -> SentinelEngine:
 def _clear_overrides() -> Generator[None]:
     """Ensure _AUTONOMY_OVERRIDES is clean before every test."""
     _AUTONOMY_OVERRIDES.clear()
+    engine_module._OVERRIDE_BASES.clear()
     yield
     _AUTONOMY_OVERRIDES.clear()
+    engine_module._OVERRIDE_BASES.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -262,3 +264,17 @@ def test_override_is_scoped_to_entry_id() -> None:
     # entry-b should still report the config default (0).
     assert engine_b.get_autonomy_level("entry-b") == 0
     assert engine_a.get_autonomy_level("entry-a") == 3
+
+
+def test_an_override_ends_when_the_configured_level_changes() -> None:
+    """An override is relative to the level it was set over (#783)."""
+    engine = _make_engine({CONF_SENTINEL_AUTONOMY_LEVEL: 3})
+    engine_module._AUTONOMY_OVERRIDES["test-entry-1"] = (
+        3,
+        dt_util.utcnow() + timedelta(days=30),
+    )
+    engine_module._OVERRIDE_BASES["test-entry-1"] = 3
+    assert engine.get_autonomy_level("test-entry-1") == 3
+    lowered = _make_engine({CONF_SENTINEL_AUTONOMY_LEVEL: 1})
+    assert lowered.get_autonomy_level("test-entry-1") == 1
+    assert "test-entry-1" not in _AUTONOMY_OVERRIDES

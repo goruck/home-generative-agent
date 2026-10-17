@@ -423,6 +423,11 @@ def _carry_basic_setup_survivors(
 
     stored = dict(current.data)
 
+    # The autonomy level is a choice, not a tunable: a Sentinel set to 0 to
+    # silence it must not start notifying again on a Basic re-run (#783).
+    if CONF_SENTINEL_AUTONOMY_LEVEL in stored:
+        data[CONF_SENTINEL_AUTONOMY_LEVEL] = stored[CONF_SENTINEL_AUTONOMY_LEVEL]
+
     # _exclusions_map normalizes and copies: non-dict input, non-list values and
     # non-str members are dropped rather than persisted. Hand-edited storage is
     # explicitly supported here, so a malformed map must not raise inside the flow.
@@ -492,6 +497,19 @@ def _autonomy_schema(payload: dict[str, Any]) -> dict[Any, Any]:
         ): NumberSelector(
             NumberSelectorConfig(min=1, max=_MAX_OVERRIDE_TTL_MINUTES, step=1)
         ),
+    }
+
+
+def _legacy_autonomy(flow: ConfigSubentryFlow) -> dict[str, Any]:
+    """Return the autonomy settings an older install keeps in the entry options."""
+    options = flow._get_entry().options  # noqa: SLF001
+    return {
+        key: options[key]
+        for key in (
+            CONF_SENTINEL_AUTONOMY_LEVEL,
+            CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
+        )
+        if key in options
     }
 
 
@@ -1186,6 +1204,9 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
         """Create or edit Sentinel configuration."""
         current = _current_subentry(self)
         payload = _default_payload()
+        # A level an older install keeps in the entry options is the one in
+        # force (see _apply_sentinel_options), so the form shows and keeps it.
+        payload.update(_legacy_autonomy(self))
         if current is not None:
             payload.update(dict(current.data))
         # A PIN saved before #762 can be stored with the flag off; the engine
