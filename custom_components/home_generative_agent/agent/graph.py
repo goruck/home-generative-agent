@@ -89,11 +89,15 @@ from ..core.prompt_cache import (  # noqa: TID252
 from ..core.utils import extract_final  # noqa: TID252
 from .automation_targets import AUTOMATION_REFUSAL_PREFIX
 from .helpers import (
+    ALARM_DOMAIN,
     CONFIRM_TOOL_NAME,
+    INTENT_NAME_ALL,
     PIN_REFUSAL_ENDS_TURN,
     active_llm_api_ids,
     base_tool_name,
+    declared_domains,
     declared_intent_service_calls,
+    entity_domain,
     format_tool,
     intent_service_calls,
     is_actuating_intent,
@@ -381,21 +385,32 @@ def _route_alarm_intent_to_tool(
     hass: HomeAssistant,
     tool_call: dict[str, Any],
 ) -> ToolMessage | None:
-    """Redirect alarm-like HA intents to the dedicated alarm tool."""
-    domains = tool_args.get("domain") or []
-    domains = domains if isinstance(domains, list) else [domains]
-    is_alarm = any(str(d).lower() == "alarm_control_panel" for d in domains)
+    """
+    Redirect alarm-like HA intents to the dedicated alarm tool.
+
+    An alarm call is one that declares the alarm panel domain (the alarm
+    normalizer adds it when HA's matcher resolves the name to alarm panels
+    only) or gives the entity id of an alarm panel. A numeric code suggests
+    one only when the call declares no domain and either names no target at
+    all or everything HA matches to it, hidden devices included, is an alarm
+    panel. A code given for anything else, or for a target HA cannot find
+    (a lock in the wrong area), is not a sign of the alarm. Never from the
+    letters of the name: "Security Light" and "Security Door Lock" were
+    refused as alarms (#782).
+    """
+    declared = declared_domains(tool_args)
     entity_ids = _coerce_entity_ids(tool_args)
-    has_alarm_entities = bool(hass.states.async_entity_ids("alarm_control_panel"))
-    name_hint = str(tool_args.get("name", "")).lower()
-    looks_like_alarm = is_alarm or any(
-        "alarm_control_panel" in str(e).lower() for e in entity_ids
+    looks_like_alarm = ALARM_DOMAIN in declared or any(
+        entity_domain(e) == ALARM_DOMAIN for e in entity_ids
     )
-    if not looks_like_alarm and has_alarm_entities:
-        if any(k in name_hint for k in ("alarm", "security")):
-            looks_like_alarm = True
-        if str(tool_args.get("code", "")).strip().isdigit():
-            looks_like_alarm = True
+    if (
+        not looks_like_alarm
+        and not declared
+        and not entity_ids
+        and hass.states.async_entity_ids(ALARM_DOMAIN)
+        and str(tool_args.get("code", "")).strip().isdigit()
+    ):
+        looks_like_alarm = _code_hints_alarm(hass, tool_name, tool_args)
     if not looks_like_alarm:
         return None
     return ToolMessage(
@@ -408,6 +423,19 @@ def _route_alarm_intent_to_tool(
         tool_call_id=tool_call.get("id") or "",
         status="error",
     )
+
+
+def _code_hints_alarm(
+    hass: HomeAssistant, tool_name: str, tool_args: dict[str, Any]
+) -> bool:
+    """Return True when a call with a code names no target or only alarm panels."""
+    name = tool_args.get("name")
+    named = isinstance(name, str) and name.strip() and name != INTENT_NAME_ALL
+    scoped = any(str(tool_args.get(key) or "").strip() for key in ("area", "floor"))
+    if not named and not scoped:
+        return True
+    calls = intent_service_calls(hass, tool_name, tool_args)
+    return bool(calls) and all(call.domain == ALARM_DOMAIN for call in calls)
 
 
 def _critical_action_guard(
@@ -498,8 +526,8 @@ def _prepare_tool_args(
     tool_call: dict[str, Any],
 ) -> tuple[ToolMessage | None, dict[str, Any]]:
     """Normalize, guard, and sanitize arguments before calling HA."""
-    tool_args = normalize_intent_for_alarm(tool_name, tool_args)
-    tool_args = normalize_intent_for_lock(tool_name, tool_args)
+    tool_args = normalize_intent_for_alarm(tool_name, tool_args, ctx.hass)
+    tool_args = normalize_intent_for_lock(tool_name, tool_args, ctx.hass)
     if _is_live_context_tool(tool_name):
         # Read-only, and HA's schema is name/domain/area only. The lock
         # rewriting below exists for lock/unlock commands; applied to a state
