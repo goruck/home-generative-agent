@@ -89,11 +89,14 @@ from ..core.prompt_cache import (  # noqa: TID252
 from ..core.utils import extract_final  # noqa: TID252
 from .automation_targets import AUTOMATION_REFUSAL_PREFIX
 from .helpers import (
+    ALARM_DOMAIN,
     CONFIRM_TOOL_NAME,
     PIN_REFUSAL_ENDS_TURN,
     active_llm_api_ids,
     base_tool_name,
+    declared_domains,
     declared_intent_service_calls,
+    entity_domain,
     format_tool,
     intent_service_calls,
     is_actuating_intent,
@@ -104,6 +107,7 @@ from .helpers import (
     matches_critical_rule,
     maybe_fill_lock_entity,
     minimal_payload_for_domain,
+    name_matches_exposed,
     normalize_intent_for_alarm,
     normalize_intent_for_lock,
     parse_tool_response,
@@ -386,22 +390,22 @@ def _route_alarm_intent_to_tool(
 
     An alarm call is one that declares the alarm panel domain (the alarm
     normalizer adds it when HA's matcher resolves the name to alarm panels
-    only) or names an alarm panel entity. A numeric code suggests one only
-    when the call declares no domain. Never from the letters of the name:
-    "Security Light" and "Security Door Lock" were refused as alarms (#782).
+    only) or gives the entity id of an alarm panel. A numeric code suggests
+    one only when the call declares no domain and names nothing HA matches:
+    a code given with a lock's name is the lock's code. Never from the
+    letters of the name: "Security Light" and "Security Door Lock" were
+    refused as alarms (#782).
     """
-    domains = tool_args.get("domain") or []
-    domains = domains if isinstance(domains, list) else [domains]
-    declared = {str(d).strip().lower() for d in domains if str(d).strip()}
-    entity_ids = _coerce_entity_ids(tool_args)
-    looks_like_alarm = "alarm_control_panel" in declared or any(
-        "alarm_control_panel" in str(e).lower() for e in entity_ids
+    declared = declared_domains(tool_args)
+    looks_like_alarm = ALARM_DOMAIN in declared or any(
+        entity_domain(e) == ALARM_DOMAIN for e in _coerce_entity_ids(tool_args)
     )
     if (
         not looks_like_alarm
         and not declared
-        and hass.states.async_entity_ids("alarm_control_panel")
+        and hass.states.async_entity_ids(ALARM_DOMAIN)
         and str(tool_args.get("code", "")).strip().isdigit()
+        and name_matches_exposed(hass, tool_args.get("name")) is False
     ):
         looks_like_alarm = True
     if not looks_like_alarm:

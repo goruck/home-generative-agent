@@ -114,7 +114,6 @@ from .helpers import (
     ConfigurableData,
     base_tool_name,
     keep_pin_prompt,
-    maybe_fill_lock_entity,
     minimal_payload_for_domain,
     normalize_intent_for_alarm,
     normalize_intent_for_lock,
@@ -1340,9 +1339,13 @@ async def _execute_pending_action(
         return None, pin_msg(cfg.get("hass"), "ha_llm_api_unavailable")
 
     tool_args = action.get("tool_args") or {}
-    tool_args = normalize_intent_for_alarm(tool_name, tool_args, cfg.get("hass"))
-    tool_args = normalize_intent_for_lock(tool_name, tool_args, cfg.get("hass"))
-    tool_args = maybe_fill_lock_entity(tool_args, cfg.get("hass"))
+    # The call runs as it was held: it was normalized and its lock filled in
+    # with hass before the PIN was asked for. Looking the names up again
+    # here could bind a different device than the one the PIN line named,
+    # e.g. after the held one was removed, so only the hass-free
+    # normalization runs.
+    tool_args = normalize_intent_for_alarm(tool_name, tool_args, None)
+    tool_args = normalize_intent_for_lock(tool_name, tool_args, None)
     # The same payload the normal path sends after its guard: HA's intents
     # read name/area/floor and ignore an entity id, so a held lock call with
     # only an entity id would otherwise act on every exposed lock.

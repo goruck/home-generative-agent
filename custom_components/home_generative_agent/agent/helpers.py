@@ -1373,87 +1373,63 @@ def sanitize_tool_args(tool_args: dict[str, Any]) -> dict[str, Any]:
     return cleaned
 
 
-def maybe_fill_lock_entity(
-    tool_args: dict[str, Any], hass: HomeAssistant | None
-) -> dict[str, Any]:
-    """
-    Name the one lock a lock call means when HA cannot match it as given.
-
-    Matched with Home Assistant's own matcher, among locks exposed to Assist,
-    so a name in any language or an alias reads as HA reads it. A name HA
-    already matches is left as is. Otherwise the name with a trailing "lock"
-    added or removed ("Front Door" for "Front Door Lock", and the reverse)
-    is tried, and filled in only when exactly one lock answers. Never a near
-    match: comparing names reduced to ASCII sent a call meant for one lock,
-    or another device, to a different door (#782), so a name that matches no
-    lock is left for Home Assistant to refuse.
-    """
-    if not hass or tool_args.get("entity_id"):
-        return tool_args
-    if _LOCK_DOMAIN not in _declared_domains(tool_args):
-        return tool_args
-    name = tool_args.get("name")
-    if not isinstance(name, str) or not name.strip():
-        return tool_args
-    as_given = _match_exposed(hass, name, _LOCK_DOMAIN)
-    if as_given is None or as_given:
-        return tool_args
-
-    stripped = name.strip()
-    variants = [f"{stripped} {_LOCK_WORD}"]
-    if stripped.casefold().endswith(f" {_LOCK_WORD}"):
-        variants.append(stripped[: -len(_LOCK_WORD)].strip())
-    found: dict[str, str] = {}
-    for variant in variants:
-        for state in _match_exposed(hass, variant, _LOCK_DOMAIN) or []:
-            found[state.entity_id] = state.name
-    if len(found) == 1:
-        ((entity_id, friendly),) = found.items()
-        tool_args["entity_id"] = entity_id
-        tool_args["name"] = friendly
-    return tool_args
-
-
-_LOCK_DOMAIN = "lock"
-_ALARM_DOMAIN = "alarm_control_panel"
+LOCK_DOMAIN = "lock"
+ALARM_DOMAIN = "alarm_control_panel"
 # The word a lock name may carry or leave off ("Front Door" / "Front Door Lock").
 _LOCK_WORD = "lock"
 # The assistant this agent answers as; Assist exposure is kept per assistant.
+# The same value as `automation_targets._ASSISTANT`, kept here because
+# importing that module would make a cycle (it imports automation_pin).
 _ASSIST_ASSISTANT = "conversation"
 
 
-def _declared_domains(tool_args: Mapping[str, Any]) -> set[str]:
+def declared_domains(tool_args: Mapping[str, Any]) -> set[str]:
     """Return the domains a call declares, read the way the normalizers read them."""
     domains = tool_args.get("domain") or []
     domains = domains if isinstance(domains, list) else [domains]
     return {str(d).strip().lower() for d in domains if str(d).strip()}
 
 
-def _match_exposed(
-    hass: HomeAssistant, name: str, domain: str | None = None
+def entity_domain(entity_id: Any) -> str:
+    """Return the domain of an entity id ("lock" for "lock.front_door")."""
+    return str(entity_id).strip().lower().partition(".")[0]
+
+
+def _match_names(  # noqa: PLR0913
+    hass: HomeAssistant,
+    name: str,
+    domain: str | None = None,
+    *,
+    area: str | None = None,
+    floor: str | None = None,
+    exposed_only: bool = True,
 ) -> list[State] | None:
     """
-    Return the entities HA's matcher finds for `name`, as Assist sees them.
+    Return the entities HA's matcher finds for `name`.
 
-    Limited to entities exposed to Assist, as HA's own intent handlers are,
-    so a hidden device never becomes a call's target or shows in a PIN line
-    (#716). None when the matcher raised, which is logged.
+    With `exposed_only`, limited to entities exposed to Assist, as HA's own
+    intent handlers are, so a hidden device never becomes a call's target or
+    shows in a PIN line (#716); with no exposure settings to read, nothing
+    matches. None when the matcher raised, which is logged.
     """
     from homeassistant.components.homeassistant.const import (  # noqa: PLC0415
         DATA_EXPOSED_ENTITIES,
     )
 
-    if name.strip() == INTENT_NAME_ALL:
+    # HA's own comparison: exact, so " all " stays a name it looks up.
+    if name == INTENT_NAME_ALL:
+        return []
+    if exposed_only and DATA_EXPOSED_ENTITIES not in hass.data:
         return []
     try:
         result = intent.async_match_targets(
             hass,
             intent.MatchTargetsConstraints(
                 name=name,
+                area_name=area,
+                floor_name=floor,
                 domains=[domain] if domain else None,
-                assistant=_ASSIST_ASSISTANT
-                if DATA_EXPOSED_ENTITIES in hass.data
-                else None,
+                assistant=_ASSIST_ASSISTANT if exposed_only else None,
                 allow_duplicate_names=True,
             ),
         )
@@ -1463,12 +1439,79 @@ def _match_exposed(
     return list(result.states) if result.is_match else []
 
 
+def name_matches_exposed(hass: HomeAssistant | None, name: Any) -> bool | None:
+    """
+    Return whether `name` matches any entity exposed to Assist.
+
+    None when it cannot tell: no `hass`, or a matcher that raised.
+    """
+    if hass is None:
+        return None
+    if not isinstance(name, str) or not name.strip():
+        return False
+    matches = _match_names(hass, name)
+    return None if matches is None else bool(matches)
+
+
 def _name_matches_only(hass: HomeAssistant | None, name: Any, domain: str) -> bool:
     """Return True when HA's matcher resolves `name` to `domain` and nothing else."""
     if hass is None or not isinstance(name, str) or not name.strip():
         return False
-    matches = _match_exposed(hass, name)
+    matches = _match_names(hass, name)
     return bool(matches) and all(state.domain == domain for state in matches)
+
+
+def maybe_fill_lock_entity(  # noqa: PLR0911
+    tool_args: dict[str, Any], hass: HomeAssistant | None
+) -> dict[str, Any]:
+    """
+    Name the one lock a lock call means when HA cannot match it as given.
+
+    Matched with Home Assistant's own matcher, so a name in any language or
+    an alias reads as HA reads it, within the area and floor the call names.
+    A name HA already matches to a lock, exposed or not, is left as is.
+    Otherwise the name with a trailing "lock" added or removed ("Front Door"
+    for "Front Door Lock", and the reverse) is tried among the locks exposed
+    to Assist, and only when exactly one lock answers is it filled in, by its
+    entity id: HA reads an entity id given as the name as that one entity,
+    where a friendly name or an alias can match others too. Never a near
+    match: comparing names reduced to ASCII sent a call meant for one lock,
+    or another device, to a different door (#782), so a name that matches no
+    lock is left for Home Assistant to refuse.
+    """
+    if not hass or tool_args.get("entity_id"):
+        return tool_args
+    if LOCK_DOMAIN not in declared_domains(tool_args):
+        return tool_args
+    name = tool_args.get("name")
+    if not isinstance(name, str) or not name.strip() or name == INTENT_NAME_ALL:
+        return tool_args
+    try:
+        area = _slot_text(tool_args.get("area"))
+        floor = _slot_text(tool_args.get("floor"))
+    except _UnclassifiableSlotError:
+        return tool_args
+    as_given = _match_names(
+        hass, name, LOCK_DOMAIN, area=area, floor=floor, exposed_only=False
+    )
+    if as_given is None or as_given:
+        return tool_args
+
+    stripped = name.strip()
+    variants = [f"{stripped} {_LOCK_WORD}"]
+    if stripped.casefold().endswith(f" {_LOCK_WORD}"):
+        variants.append(stripped[: -len(_LOCK_WORD)].strip())
+    found: set[str] = set()
+    for variant in variants:
+        matches = _match_names(hass, variant, LOCK_DOMAIN, area=area, floor=floor)
+        if matches is None:
+            return tool_args
+        found.update(state.entity_id for state in matches)
+    if len(found) == 1:
+        (entity_id,) = found
+        tool_args["entity_id"] = entity_id
+        tool_args["name"] = entity_id
+    return tool_args
 
 
 # Separator Home Assistant puts between a tool's namespace and its own name.
@@ -1509,25 +1552,21 @@ def normalize_intent_for_alarm(
     if not is_on_off_intent(tool_name):
         return tool_args
 
-    declared = _declared_domains(tool_args)
+    declared = declared_domains(tool_args)
     if declared:
-        is_alarm = _ALARM_DOMAIN in declared
+        is_alarm = ALARM_DOMAIN in declared
     else:
-        is_alarm = _name_matches_only(hass, tool_args.get("name"), _ALARM_DOMAIN)
+        is_alarm = _name_matches_only(hass, tool_args.get("name"), ALARM_DOMAIN)
     if not is_alarm:
         return tool_args
 
     is_arm = base_tool_name(tool_name) == "HassTurnOn"
     desired_service = "alarm_arm_home" if is_arm else "alarm_disarm"
-    tool_args = {
+    return {
         **tool_args,
-        "domain": ["alarm_control_panel"],
+        "domain": [ALARM_DOMAIN],
         "service": desired_service,
     }
-    if "entity_id" not in tool_args and (name := tool_args.get("name")):
-        slug = str(name).strip().lower().replace(" ", "_")
-        tool_args["entity_id"] = f"alarm_control_panel.{slug}"
-    return tool_args
 
 
 def normalize_intent_for_lock(
@@ -1545,15 +1584,15 @@ def normalize_intent_for_lock(
     if not is_on_off_intent(tool_name):
         return tool_args
 
-    declared = _declared_domains(tool_args)
+    declared = declared_domains(tool_args)
     if declared:
-        is_lock = _LOCK_DOMAIN in declared
+        is_lock = LOCK_DOMAIN in declared
     else:
-        is_lock = _name_matches_only(hass, tool_args.get("name"), _LOCK_DOMAIN)
+        is_lock = _name_matches_only(hass, tool_args.get("name"), LOCK_DOMAIN)
     if not is_lock:
         return tool_args
 
-    normalized = {**tool_args, "domain": ["lock"]}
+    normalized = {**tool_args, "domain": [LOCK_DOMAIN]}
     if base_tool_name(tool_name) == "HassTurnOff":
         normalized.setdefault("service", "unlock")
     else:
