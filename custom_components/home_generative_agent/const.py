@@ -223,8 +223,10 @@ RECOMMENDED_AUDIT_HOT_MAX_RECORDS = 500
 # 1 = notify only (default)
 # 2, 3 = notify, and a finding's suggested action may run on its own when the
 #        auto-execution guardrails below pass (sentinel/execution.py); the two
-#        levels apply the same gates today
+#        levels apply the same gates today. The guardrails are not settable
+#        from the options yet, so auto-execution stays off (#783).
 CONF_SENTINEL_AUTONOMY_LEVEL = "sentinel_autonomy_level"
+SENTINEL_AUTONOMY_LEVELS: tuple[int, ...] = (0, 1, 2, 3)
 CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES = "sentinel_runtime_override_ttl_minutes"
 CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE = "sentinel_require_pin_for_level_increase"
 CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH = "sentinel_level_increase_pin_hash"

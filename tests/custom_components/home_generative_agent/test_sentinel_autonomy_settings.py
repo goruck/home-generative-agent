@@ -12,7 +12,7 @@ critical one, and dry-run mode names it in the notification instead.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
@@ -116,6 +116,8 @@ def test_an_allowlisted_safe_action_runs() -> None:
             ["alarm_control_panel.alarm_arm_away"],
             ["alarm_control_panel.home"],
         ),
+        # A cover can be a garage whose id names no door; never on its own.
+        (["cover.close_cover"], ["cover"], ["cover.ratgdo_main"]),
         # Starts configuration whose steps are not read here.
         (["script.turn_on"], ["script"], ["script.anything"]),
         (["automation.trigger"], ["automation"], ["automation.anything"]),
@@ -139,6 +141,21 @@ def test_a_users_own_pin_rule_bars_an_action() -> None:
         **{CONF_CRITICAL_ACTIONS: [{"domain": "light", "service": "turn_off"}]},
     )
     assert result.block_reason == "critical_action"
+
+
+def test_an_unlock_never_runs_without_the_lock_rules() -> None:
+    """A user who removed the lock rules still never gets an unattended unlock."""
+    rules: dict[str, Any] = {
+        CONF_CRITICAL_ACTIONS: [{"domain": "light", "service": "turn_off"}]
+    }
+    result = _evaluate(["lock.unlock"], ["lock"], **rules)
+    assert result.block_reason == "critical_action"
+
+
+def test_prose_with_a_dot_is_advice_not_an_action() -> None:
+    """Only a `domain.service` slug pair is ever called."""
+    result = _evaluate(["Check the router. Then reboot it."], ["lock"])
+    assert result.block_reason == "no_executable_action"
 
 
 def test_advice_beside_an_action_does_not_stop_it() -> None:
@@ -241,24 +258,52 @@ def test_the_engine_runs_at_the_configured_level(
 # ---------------------------------------------------------------------------
 
 
-def test_the_settings_reach_the_engine() -> None:
-    """Every autonomy setting stored in the subentry is in the runtime options."""
-    stored: dict[str, Any] = {
-        CONF_SENTINEL_ENABLED: True,
-        CONF_SENTINEL_AUTONOMY_LEVEL: 2,
-        CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES: 1440,
-        CONF_SENTINEL_AUTO_EXEC_CANARY_MODE: True,
-        CONF_SENTINEL_AUTO_EXECUTION_ENABLED: False,
-        CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE: 0.8,
-        CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR: 3,
-        CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: ["lock.lock"],
-    }
-    entry = DummyEntry(options={})
+def _resolved(stored: dict[str, Any], parent: dict[str, Any]) -> dict[str, Any]:
+    entry = DummyEntry(options=parent)
     sentinel = DummySubentry("sentinel1", SUBENTRY_TYPE_SENTINEL, "Sentinel", stored)
     entry.subentries[sentinel.subentry_id] = sentinel
-    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
-    for key, value in stored.items():
-        assert options[key] == value
+    return resolve_runtime_options(entry)  # type: ignore[arg-type]
+
+
+def test_the_settings_reach_the_engine() -> None:
+    """The level and override duration stored in the subentry are used."""
+    options = _resolved(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_AUTONOMY_LEVEL: 2,
+            CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES: 1440,
+        },
+        {},
+    )
+    assert options[CONF_SENTINEL_AUTONOMY_LEVEL] == 2
+    assert options[CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES] == 1440
+
+
+def test_an_older_installs_level_is_kept() -> None:
+    """A level stored in the entry options survives a subentry without one."""
+    options = _resolved(
+        {CONF_SENTINEL_ENABLED: True},
+        {
+            CONF_SENTINEL_AUTONOMY_LEVEL: 0,
+            CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES: 120,
+        },
+    )
+    assert options[CONF_SENTINEL_AUTONOMY_LEVEL] == 0
+    assert options[CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES] == 120
+
+
+def test_auto_execution_is_not_set_by_the_subentry() -> None:
+    """Automatic actions are not offered yet, so nothing turns them on."""
+    options = _resolved(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_AUTO_EXECUTION_ENABLED: True,
+            CONF_SENTINEL_AUTO_EXEC_CANARY_MODE: True,
+        },
+        {},
+    )
+    assert not options.get(CONF_SENTINEL_AUTO_EXECUTION_ENABLED)
+    assert not options.get(CONF_SENTINEL_AUTO_EXEC_CANARY_MODE)
 
 
 # ---------------------------------------------------------------------------
@@ -277,19 +322,13 @@ def _settings(**changes: Any) -> dict[str, Any]:
 async def test_the_form_stores_the_settings_as_the_engine_reads_them(
     hass: HomeAssistant,
 ) -> None:
-    """The level is stored as a number and the allowlist normalized."""
+    """The level and the duration are stored as numbers."""
     flow = _make_sentinel_flow_for_mode(hass, DummyEntry())
     result = await flow.async_step_settings(
         _settings(
             **{
                 CONF_SENTINEL_AUTONOMY_LEVEL: "2",
                 CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES: 1440.0,
-                CONF_SENTINEL_AUTO_EXEC_CANARY_MODE: True,
-                CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: [
-                    " Lock ",
-                    "lock.lock",
-                    "lock",
-                ],
             }
         )
     )
@@ -297,27 +336,44 @@ async def test_the_form_stores_the_settings_as_the_engine_reads_them(
     data = result.get("data") or {}
     assert data[CONF_SENTINEL_AUTONOMY_LEVEL] == 2
     assert data[CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES] == 1440
-    assert data[CONF_SENTINEL_AUTO_EXEC_CANARY_MODE] is True
-    assert data[CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES] == ["lock", "lock.lock"]
 
 
 @pytest.mark.asyncio
-async def test_the_form_refuses_an_allowlist_entry_it_cannot_match(
-    hass: HomeAssistant,
+@pytest.mark.parametrize("stored", [1, 2, 0])
+async def test_the_form_accepts_its_own_suggested_values(
+    hass: HomeAssistant, stored: int
 ) -> None:
-    """Only a domain or a domain.service can match a suggested action."""
-    flow = _make_sentinel_flow_for_mode(hass, DummyEntry())
-    result = await flow.async_step_settings(
-        _settings(**{CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: ["lock unlock"]})
+    """
+    Saving the form untouched passes its own schema.
+
+    The level is stored as a number and the select takes text: pre-filled
+    with the number, every untouched save was refused.
+    """
+    existing = DummySubentry(
+        "sent1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {**_default_payload(), CONF_SENTINEL_AUTONOMY_LEVEL: stored},
     )
-    assert result.get("type") == "form"
-    assert result.get("errors") == {"base": "invalid_allowed_services"}
+    entry = DummyEntry()
+    entry.subentries[existing.subentry_id] = existing
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+    form = await flow.async_step_settings()
+    schema = cast("Any", form).get("data_schema")
+    assert schema is not None
+    suggested = {
+        key.schema: key.description["suggested_value"]
+        for key in schema.schema
+        if key.description and "suggested_value" in key.description
+    }
+    assert suggested[CONF_SENTINEL_AUTONOMY_LEVEL] == str(stored)
+    validated = schema(suggested)
+    assert validated[CONF_SENTINEL_AUTONOMY_LEVEL] == str(stored)
 
 
 def test_the_defaults_change_nothing() -> None:
-    """A fresh setup runs at level 1 with execution and dry-run off."""
+    """A fresh setup runs at level 1 with no automatic actions."""
     payload = _default_payload()
     assert payload[CONF_SENTINEL_AUTONOMY_LEVEL] == 1
-    assert payload[CONF_SENTINEL_AUTO_EXECUTION_ENABLED] is False
-    assert payload[CONF_SENTINEL_AUTO_EXEC_CANARY_MODE] is False
-    assert payload[CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES] == []
+    assert CONF_SENTINEL_AUTO_EXECUTION_ENABLED not in payload
+    assert CONF_SENTINEL_AUTO_EXEC_CANARY_MODE not in payload

@@ -218,6 +218,7 @@ from .const import (
     RECOMMENDED_VLM_PROVIDER,
     RECOMMENDED_VLM_RESPONSE_LANGUAGE,
     RECOMMENDED_VLM_TEMPERATURE,
+    SENTINEL_AUTONOMY_LEVELS,
     SIGNAL_HGA_NEW_LATEST,
     SIGNAL_HGA_RECOGNIZED,
     SIGNAL_TOOL_INDEX_UPDATED,
@@ -475,7 +476,9 @@ PATCH_DYNAMIC_RULE_SCHEMA = vol.Schema(
 
 SET_AUTONOMY_LEVEL_SCHEMA = vol.Schema(
     {
-        vol.Required("level"): vol.All(vol.Coerce(int), vol.In([0, 1, 2, 3])),
+        vol.Required("level"): vol.All(
+            vol.Coerce(int), vol.In(SENTINEL_AUTONOMY_LEVELS)
+        ),
         vol.Optional("pin"): cv.string,
     }
 )

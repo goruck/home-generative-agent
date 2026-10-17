@@ -9,13 +9,13 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ### Added
 
-- Sentinel's autonomy level and auto-execution can now be set in Sentinel's Advanced setup ([#783](https://github.com/goruck/home-generative-agent/issues/783)). Before, the level Sentinel ran at was always 1 (notify only). `sentinel_set_autonomy_level` could raise it only for an hour, and the switch that lets levels 2 and 3 act was never read from any setting. So those levels could not act or report what they would do, though the docs described them as acting. The new settings:
-  - **Autonomy level** (0–3, default 1) is the level Sentinel runs at, kept across restarts.
-  - **Autonomy override duration** (default 60 minutes, up to 30 days) is how long a level set with the service lasts.
-  - **Dry-run mode** adds a line to each notification naming the action Sentinel would have run, such as "Dry run: Sentinel would have run lock.lock on Front Door Lock.", without running it.
-  - **Run allowed actions automatically**, **Minimum confidence**, **Most actions per hour** and **Actions Sentinel may run** (an allowlist of domains or services) control live actions.
-
-  All of these default to off or to the previous behavior. Sentinel never runs an action that a Critical Action PIN rule covers (unlocking, opening a door, gate or garage), any alarm panel action, or one that starts a script, scene or automation, whatever the allowlist says. A suggested action given as plain advice (such as "check the camera") no longer stops a finding's real action from running. To review what Sentinel would do, set the level to 2 and turn on dry-run mode.
+- Sentinel's autonomy level can now be set in Sentinel's Advanced setup ([#783](https://github.com/goruck/home-generative-agent/issues/783)).
+  - Before, Sentinel ran at level 1 (notify only) unless `sentinel_set_autonomy_level` raised it, which lasted only an hour. The setting the engine read for its normal level could not be set anywhere.
+  - **Autonomy level** (0–3, default 1) is now kept across restarts; set it to 0 to silence Sentinel for good.
+  - **Autonomy override duration** (default 60 minutes, up to 30 days) sets how long a level from the service lasts.
+  - Levels 2 and 3 are reserved for automatic actions, which are not available yet. They notify like level 1. The docs described them as acting on their own, which no setup could do, and now say so.
+  - A level an older install stored in its main options is kept on upgrade.
+  - When automatic actions arrive, Sentinel will never run a critical action on its own, whatever is allowed: an unlock, an alarm panel or cover action, anything a Critical Action PIN rule covers, or anything that starts a script, scene or automation. That guard is already in place.
 
 ### Changed
 

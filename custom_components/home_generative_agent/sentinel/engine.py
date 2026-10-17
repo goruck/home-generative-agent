@@ -69,6 +69,7 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_PRESENCE_GRACE_MINUTES,
     RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
     RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
+    SENTINEL_AUTONOMY_LEVELS,
     SENTINEL_SEVERITIES,
     SIGNAL_SENTINEL_RUN_COMPLETE,
 )
@@ -201,9 +202,6 @@ if TYPE_CHECKING:
     from .pseudonymizer import Pseudonymizer
     from .rule_registry import RuleRegistry
     from .rules import StaticRule
-
-# Highest Sentinel autonomy level (const.py).
-_MAX_AUTONOMY_LEVEL = 3
 
 LOGGER = logging.getLogger(__name__)
 
@@ -681,8 +679,8 @@ class SentinelEngine:
         # A hand-edited value outside the levels reads as the default.
         return (
             level
-            if 0 <= level <= _MAX_AUTONOMY_LEVEL
-            else (RECOMMENDED_SENTINEL_AUTONOMY_LEVEL)
+            if level in SENTINEL_AUTONOMY_LEVELS
+            else RECOMMENDED_SENTINEL_AUTONOMY_LEVEL
         )
 
     def _canary_kwargs(
@@ -2161,7 +2159,8 @@ async def _auto_execute_finding(
     - ``actions``: list of per-action result dicts
     - ``execution_id``: echoed from the caller
     """
-    service_actions = [a for a in finding.suggested_actions if "." in a]
+    # The same actions the execution gate screened (executable_actions).
+    service_actions = executable_actions(finding)
 
     if not service_actions:
         return {

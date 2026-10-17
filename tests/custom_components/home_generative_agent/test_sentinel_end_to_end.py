@@ -378,6 +378,23 @@ async def test_sentinel_canary_mode_does_not_consume_live_auto_execute(
     assert audit.calls[-1]["action_policy_path"] == "auto_execute"
 
 
+async def test_dry_run_with_execution_off_never_acts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dry-run mode reports with live execution off, and never calls HA (#783)."""
+    engine, hass = _make_ae_engine(monkeypatch)
+    engine._options[CONF_SENTINEL_AUTO_EXEC_CANARY_MODE] = True
+    engine._options[CONF_SENTINEL_AUTO_EXECUTION_ENABLED] = False
+
+    await engine._run_once()
+
+    hass.services.async_call.assert_not_called()
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    assert notifier.calls[0]["canary_line"] == (
+        "Dry run: Sentinel would have run lock.lock on Front Door."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Issue #264 — Level 2 live auto-execute integration tests
 # ---------------------------------------------------------------------------

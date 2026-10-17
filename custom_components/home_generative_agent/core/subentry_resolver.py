@@ -68,11 +68,6 @@ from ..const import (  # noqa: TID252
     CONF_SENTINEL_APPLIANCE_DURATION_MIN,
     CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     CONF_SENTINEL_AUTH_IP_RETENTION_DAYS,
-    CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
-    CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
-    CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE,
-    CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
-    CONF_SENTINEL_AUTO_EXECUTION_ENABLED,
     CONF_SENTINEL_AUTONOMY_LEVEL,
     CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
@@ -143,11 +138,6 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN,
     RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     RECOMMENDED_SENTINEL_AUTH_IP_RETENTION_DAYS,
-    RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
-    RECOMMENDED_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
-    RECOMMENDED_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE,
-    RECOMMENDED_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
-    RECOMMENDED_SENTINEL_AUTO_EXECUTION_ENABLED,
     RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
     RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
@@ -453,29 +443,20 @@ def _apply_sentinel_options(
         # finding explainer only (explain/llm_explain.LLMExplainer).
         # Discovery and triage text is machine-parsed and never translated.
         CONF_SENTINEL_RESPONSE_LANGUAGE: RECOMMENDED_SENTINEL_RESPONSE_LANGUAGE,
-        # Autonomy (#783): the level Sentinel runs at when no runtime override
-        # is set, how long an override lasts, and the auto-execution guardrails.
+    }
+
+    # The autonomy level and override duration (#783) keep a value an older
+    # install stored in the entry options when the subentry has none, rather
+    # than reset it: a level of 0 there silences Sentinel.
+    autonomy_defaults: dict[str, Any] = {
         CONF_SENTINEL_AUTONOMY_LEVEL: RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
         CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES: (
             RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES
         ),
-        CONF_SENTINEL_AUTO_EXECUTION_ENABLED: (
-            RECOMMENDED_SENTINEL_AUTO_EXECUTION_ENABLED
-        ),
-        CONF_SENTINEL_AUTO_EXEC_CANARY_MODE: RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
-        CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE: (
-            RECOMMENDED_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE
-        ),
-        CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR: (
-            RECOMMENDED_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR
-        ),
-        CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: list(
-            RECOMMENDED_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES
-        ),
     }
 
     if sentinel_subentry is None:
-        for key, value in sentinel_defaults.items():
+        for key, value in {**sentinel_defaults, **autonomy_defaults}.items():
             options.setdefault(key, value)
         # No subentry → Sentinel is not configured; force disabled so that tasks
         # are not restarted after the subentry is deleted and the entry reloads.
@@ -485,6 +466,8 @@ def _apply_sentinel_options(
     data = dict(sentinel_subentry.data)
     for key, value in sentinel_defaults.items():
         options[key] = data.get(key, value)
+    for key, value in autonomy_defaults.items():
+        options[key] = data.get(key, options.get(key, value))
 
     for key in (
         CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,

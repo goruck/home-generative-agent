@@ -18,7 +18,8 @@ Guardrail evaluation order
 6. Actions: none callable, one not
    allowlisted, or one critical (a
    PIN rule, a script/scene/automation
-   it starts, an alarm panel)         → ``prompt_user``
+   it starts, an alarm panel or cover,
+   a lock action but lock.lock)       → ``prompt_user``
 7. Rate limit exceeded                → ``prompt_user``
 8. Idempotency duplicate              → ``prompt_user``
 9. All checks passed                  → ``auto_execute``
@@ -29,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import timedelta
@@ -76,12 +78,19 @@ LOGGER = logging.getLogger(__name__)
 
 # Minimum autonomy level required for auto-execution.
 _MIN_AUTO_EXECUTE_LEVEL: int = 2
-_ALARM_DOMAIN = "alarm_control_panel"
+# A suggested action Sentinel can call; anything else is advice to the user.
+_SERVICE_ACTION = re.compile(r"[a-z0-9_]+\.[a-z0-9_]+")
+# Domains Sentinel never acts on by itself, whatever the rules or allowlist:
+# an alarm panel guards itself with its own code, and a cover can be a door,
+# gate or garage whose entity id names none of them.
+_NEVER_AUTO_DOMAINS = frozenset({"alarm_control_panel", "cover"})
+# The only lock service Sentinel may call by itself.
+_SAFE_LOCK_SERVICE = "lock.lock"
 
 
 def executable_actions(finding: AnomalyFinding) -> list[str]:
     """Return the suggested actions Sentinel can call: ``domain.service`` ones."""
-    return [a for a in finding.suggested_actions if "." in a]
+    return [a for a in finding.suggested_actions if _SERVICE_ACTION.fullmatch(a)]
 
 
 def level_increase_pin_required(options: Mapping[str, Any]) -> bool:
@@ -534,10 +543,11 @@ class SentinelExecutionService:
         Only ``domain.service`` actions are ever called (advisory text such as
         ``check_camera`` is not), so only those must be on the allowlist; with
         none, there is nothing to run and the user decides. An empty allowlist
-        permits nothing. A critical action never runs without a person: one a
-        Critical Action PIN rule covers, one the automation screener holds
-        (a script, scene or automation it would start), or an alarm disarm,
-        whatever the allowlist says.
+        permits nothing. A critical action never runs without a person,
+        whatever the allowlist says: one a Critical Action PIN rule covers,
+        one the automation screener holds (a script, scene or automation it
+        would start), any alarm panel or cover action, and any lock action
+        but ``lock.lock``.
         """
         actions = executable_actions(finding)
         if not actions:
@@ -570,11 +580,13 @@ class SentinelExecutionService:
             resolve_critical_action_policy,
         )
 
-        if any(a.split(".", 1)[0] == _ALARM_DOMAIN for a in actions):
-            # A panel guards itself with its own code; Sentinel never
-            # changes one on its own.
-            LOGGER.debug("Auto-execute blocked: alarm panel action %s.", actions)
-            return True
+        for action in actions:
+            domain = action.split(".", 1)[0]
+            if domain in _NEVER_AUTO_DOMAINS or (
+                domain == "lock" and action != _SAFE_LOCK_SERVICE
+            ):
+                LOGGER.debug("Auto-execute blocked: %s needs a person.", action)
+                return True
         rules = resolve_critical_action_policy(self._options).critical_actions
         target = {"entity_id": list(finding.triggering_entities)}
         steps = [{"action": action, "target": target} for action in actions]

@@ -240,11 +240,6 @@
             "sentinel_require_pin_for_level_increase": "Require PIN for autonomy level increases",
             "sentinel_autonomy_level": "Autonomy level",
             "sentinel_runtime_override_ttl_minutes": "Autonomy override duration (minutes)",
-            "sentinel_auto_exec_canary_mode": "Dry-run mode (canary)",
-            "sentinel_auto_execution_enabled": "Run allowed actions automatically",
-            "sentinel_auto_execute_default_min_confidence": "Minimum confidence to run an action (0–1)",
-            "sentinel_auto_execute_max_actions_per_hour": "Most actions per hour",
-            "sentinel_auto_execute_allowed_services": "Actions Sentinel may run",
             "sentinel_daily_digest_enabled": "Enable daily digest notification",
             "sentinel_daily_digest_time": "Daily digest time (HH:MM:SS)",
             "sentinel_quiet_hours_start": "Quiet hours start (suppresses selected severities)",
@@ -280,8 +275,7 @@
         "pin_required": "Enter a PIN, or uncheck \"Require PIN for autonomy level increases\". No PIN is stored, so every level increase would be refused.",
         "quiet_hours_incomplete": "Set both quiet hours start and end (or set both to Disabled).",
         "invalid_quiet_hours": "Quiet hours must be local hours between 0 and 23.",
-        "invalid_rule_entity_exclusions": "Must be a JSON object mapping an anomaly type (or \"*\" for all types) to lists of entity IDs or glob patterns (* and ? wildcards only, lowercase entity-ID characters), each containing a dot and at least one literal character, e.g. an \"appliance_power_duration\" key with the value [\"sensor.ac_power\"], or a \"camera_entry_unsecured\" key with the value [\"camera.map_*\"]. Match-all entries such as \"*\" or \"*.*\" are not allowed — use the \"*\" type key instead.",
-        "invalid_allowed_services": "Allowed actions must be a domain (lock) or a service (lock.lock), in lowercase letters, digits and underscores."
+        "invalid_rule_entity_exclusions": "Must be a JSON object mapping an anomaly type (or \"*\" for all types) to lists of entity IDs or glob patterns (* and ? wildcards only, lowercase entity-ID characters), each containing a dot and at least one literal character, e.g. an \"appliance_power_duration\" key with the value [\"sensor.ac_power\"], or a \"camera_entry_unsecured\" key with the value [\"camera.map_*\"]. Match-all entries such as \"*\" or \"*.*\" are not allowed — use the \"*\" type key instead."
       }
     },
     "feature": {
@@ -396,8 +390,8 @@
       "options": {
         "0": "0 – Passive (no notifications)",
         "1": "1 – Notify (default)",
-        "2": "2 – Notify and act (guardrails below)",
-        "3": "3 – Notify and act (same as 2 today)"
+        "2": "2 – Notify (automatic actions: future)",
+        "3": "3 – Notify (automatic actions: future)"
       }
     }
   },

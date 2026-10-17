@@ -226,8 +226,7 @@
         "pin_required": "Enter a PIN, or uncheck \"Require PIN for autonomy level increases\". No PIN is stored, so every level increase would be refused.",
         "quiet_hours_incomplete": "Set both quiet hours start and end (or set both to Disabled).",
         "invalid_quiet_hours": "Quiet hours must be local hours between 0 and 23.",
-        "invalid_rule_entity_exclusions": "Must be a JSON object mapping an anomaly type (or \"*\" for all types) to lists of entity IDs or glob patterns (* and ? wildcards only, lowercase entity-ID characters), each containing a dot and at least one literal character, e.g. an \"appliance_power_duration\" key with the value [\"sensor.ac_power\"], or a \"camera_entry_unsecured\" key with the value [\"camera.map_*\"]. Match-all entries such as \"*\" or \"*.*\" are not allowed — use the \"*\" type key instead.",
-        "invalid_allowed_services": "Allowed actions must be a domain (lock) or a service (lock.lock), in lowercase letters, digits and underscores."
+        "invalid_rule_entity_exclusions": "Must be a JSON object mapping an anomaly type (or \"*\" for all types) to lists of entity IDs or glob patterns (* and ? wildcards only, lowercase entity-ID characters), each containing a dot and at least one literal character, e.g. an \"appliance_power_duration\" key with the value [\"sensor.ac_power\"], or a \"camera_entry_unsecured\" key with the value [\"camera.map_*\"]. Match-all entries such as \"*\" or \"*.*\" are not allowed — use the \"*\" type key instead."
       },
       "initiate_flow": {
         "reconfigure": "Reconfigure Sentinel",
@@ -287,11 +286,6 @@
             "sentinel_require_pin_for_level_increase": "Require PIN for autonomy level increases",
             "sentinel_autonomy_level": "Autonomy level",
             "sentinel_runtime_override_ttl_minutes": "Autonomy override duration (minutes)",
-            "sentinel_auto_exec_canary_mode": "Dry-run mode (canary)",
-            "sentinel_auto_execution_enabled": "Run allowed actions automatically",
-            "sentinel_auto_execute_default_min_confidence": "Minimum confidence to run an action (0–1)",
-            "sentinel_auto_execute_max_actions_per_hour": "Most actions per hour",
-            "sentinel_auto_execute_allowed_services": "Actions Sentinel may run",
             "sentinel_daily_digest_enabled": "Enable daily digest notification",
             "sentinel_daily_digest_time": "Daily digest time (HH:MM:SS)",
             "sentinel_quiet_hours_start": "Quiet hours start (suppresses selected severities)",
@@ -317,13 +311,8 @@
             "sentinel_network_audit_share_details": "On, the chat agent's security audit gives the chat model the findings' details (device names, ports, token names) so it can explain them. Off, the model gets only counts, severities, and fixed titles, and the full report goes to a Home Assistant persistent notification when an administrator asked (a voice satellite or a non-admin account gets the digest only). Network addresses are redacted either way. On by default.",
             "sentinel_ha_token_stale_days": "Age in days past which a long-lived access token is reported. Home Assistant does not record when a long-lived token is used, so age is the only fact available and the alert suggests rotating old tokens. Default 90.",
             "sentinel_auth_ip_retention_days": "How long an address seen using an access token stays in the security audit's inventory. Addresses are stored as one-way hashes, never in the clear, and at most 20 are kept per token. Default 90 days.",
-            "sentinel_autonomy_level": "The level Sentinel runs at when no override is set. 0 is silent; 1 notifies. At 2 and 3, Sentinel may also run a finding's suggested action itself, but only with dry-run mode or automatic actions turned on below, and never one a Critical Action PIN rule covers (unlocking, opening a door, gate or garage), an alarm panel action, or one that starts a script, scene or automation.",
-            "sentinel_runtime_override_ttl_minutes": "How long a level set with the sentinel_set_autonomy_level service lasts before Sentinel returns to the level above.",
-            "sentinel_auto_exec_canary_mode": "At level 2 or 3, add a line to each notification naming the action Sentinel would have run, without running it. Use it to review what automatic actions would do before turning them on.",
-            "sentinel_auto_execution_enabled": "At level 2 or 3, run a finding's suggested action when it passes every check below. Dry-run mode, if on, still only reports it. Off by default.",
-            "sentinel_auto_execute_default_min_confidence": "A finding below this confidence is never acted on; you are notified instead.",
-            "sentinel_auto_execute_max_actions_per_hour": "After this many automatic actions in an hour, further findings are only notified.",
-            "sentinel_auto_execute_allowed_services": "Type a domain (lock) or a service (lock.lock) and press Enter. Empty means nothing runs. Critical actions are never run, even if listed here."
+            "sentinel_autonomy_level": "The level Sentinel runs at when no override is set, kept across restarts. 0 silences notifications; 1 notifies. Levels 2 and 3 are reserved for automatic actions, which are not available yet: today they notify like level 1, except that some low-severity findings whose data is unavailable are dropped and sensitive ones are handed to the conversation agent. To silence Sentinel for good, set 0 here; a level set with the sentinel_set_autonomy_level service ends after the override duration or a restart.",
+            "sentinel_runtime_override_ttl_minutes": "How long a level set with the sentinel_set_autonomy_level service lasts before Sentinel returns to the level above. A restart also ends it."
           }
         }
       }
@@ -452,8 +441,8 @@
       "options": {
         "0": "0 – Passive (no notifications)",
         "1": "1 – Notify (default)",
-        "2": "2 – Notify and act (guardrails below)",
-        "3": "3 – Notify and act (same as 2 today)"
+        "2": "2 – Notify (automatic actions: future)",
+        "3": "3 – Notify (automatic actions: future)"
       }
     }
   },

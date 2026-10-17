@@ -234,11 +234,6 @@
             "sentinel_require_pin_for_level_increase": "Özerklik düzeyi artışları için PIN iste",
             "sentinel_autonomy_level": "Özerklik düzeyi",
             "sentinel_runtime_override_ttl_minutes": "Özerklik geçersiz kılma süresi (dakika)",
-            "sentinel_auto_exec_canary_mode": "Deneme modu (canary)",
-            "sentinel_auto_execution_enabled": "İzin verilen eylemleri otomatik çalıştır",
-            "sentinel_auto_execute_default_min_confidence": "Eylem çalıştırmak için en düşük güven (0–1)",
-            "sentinel_auto_execute_max_actions_per_hour": "Saatte en fazla eylem",
-            "sentinel_auto_execute_allowed_services": "Sentinel'in çalıştırabileceği eylemler",
             "sentinel_daily_digest_enabled": "Günlük özet bildirimini etkinleştir",
             "sentinel_daily_digest_time": "Günlük özet saati (SS:DD:SN)",
             "sentinel_quiet_hours_start": "Sessiz saatler başlangıcı (seçili önem düzeylerini bastırır)",
@@ -280,8 +275,7 @@
         "pin_required": "Bir PIN girin veya \"Özerklik düzeyi artışları için PIN iste\" seçeneğinin işaretini kaldırın. Kayıtlı PIN olmadığından her düzey artışı reddedilir.",
         "quiet_hours_incomplete": "Sessiz saatler için başlangıç ve bitişin ikisini de ayarlayın (veya ikisini de devre dışı bırakın).",
         "invalid_quiet_hours": "Sessiz saatler 0 ile 23 arasında yerel saat olmalıdır.",
-        "invalid_rule_entity_exclusions": "Bir anomali türünü (veya tüm türler için \"*\") her biri nokta ve en az bir sabit karakter içeren varlık kimliği veya glob deseni (yalnızca * ve ? joker karakterleri, küçük harfli varlık kimliği karakterleri) listeleriyle eşleştiren bir JSON nesnesi olmalıdır, ör. değeri [\"sensor.ac_power\"] olan bir \"appliance_power_duration\" anahtarı veya değeri [\"camera.map_*\"] olan bir \"camera_entry_unsecured\" anahtarı. \"*\" veya \"*.*\" gibi tümüyle eşleşen girdilere izin verilmez — bunun yerine \"*\" tür anahtarını kullanın.",
-        "invalid_allowed_services": "İzin verilen eylemler bir alan (lock) veya bir hizmet (lock.lock) olmalı; küçük harf, rakam ve alt çizgi."
+        "invalid_rule_entity_exclusions": "Bir anomali türünü (veya tüm türler için \"*\") her biri nokta ve en az bir sabit karakter içeren varlık kimliği veya glob deseni (yalnızca * ve ? joker karakterleri, küçük harfli varlık kimliği karakterleri) listeleriyle eşleştiren bir JSON nesnesi olmalıdır, ör. değeri [\"sensor.ac_power\"] olan bir \"appliance_power_duration\" anahtarı veya değeri [\"camera.map_*\"] olan bir \"camera_entry_unsecured\" anahtarı. \"*\" veya \"*.*\" gibi tümüyle eşleşen girdilere izin verilmez — bunun yerine \"*\" tür anahtarını kullanın."
       }
     },
     "feature": {
@@ -396,8 +390,8 @@
       "options": {
         "0": "0 – Pasif (bildirim yok)",
         "1": "1 – Bildir (varsayılan)",
-        "2": "2 – Bildir ve uygula (aşağıdaki korumalar)",
-        "3": "3 – Bildir ve uygula (bugün 2 ile aynı)"
+        "2": "2 – Bildir (otomatik eylemler: ileride)",
+        "3": "3 – Bildir (otomatik eylemler: ileride)"
       }
     }
   },
