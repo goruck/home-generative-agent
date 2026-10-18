@@ -989,6 +989,48 @@ validation.
 
 ---
 
+### Owed admin and token alerts compare display labels, not stable ids
+
+**What:** `sentinel/owed.py` decides whether a live `ha_new_admin_or_token` finding reports an owed one by comparing `new_admin_users` and `new_long_lived_tokens`, which hold display labels. `auth_inventory.py` adds an id suffix to a token name only while another current token shares it, and an account can be renamed. So a held token "Backup" that later reads "Backup (id1)", or a renamed admin, is not covered by the live alert naming it, and is replayed once more as seen at level 0.
+
+**Why:** Codex outside review, cycles 2 and 3 of the PR #800 review (2026-10-18). Rare (a rename or a duplicate token name while Sentinel is at level 0), and the cost is one extra replay, not a lost alert.
+
+**How to apply:** Carry the stable user and token ids in the finding's identity evidence (display labels in `display`), and key owed coverage on the ids.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
+### A failed suppression save is not retried for owed change alerts
+
+**What:** `SuppressionManager.async_save` swallows storage errors and keeps no dirty flag. `_hold_passive` saves only when `owed.record` changed what is owed, so if that save fails, later identical sightings change nothing and nothing retries the write. If the change is then undone and Home Assistant restarts, the owed alert is gone. A failed save after a replay is sent likewise brings the replay back after a restart.
+
+**Why:** Codex outside review, all three cycles of the PR #800 review (2026-10-18). The swallow-and-continue save is the suppression store's existing pattern; only the owed list makes a lost write lose an alert.
+
+**How to apply:** Have `async_save` return whether it wrote, keep a dirty flag on `SuppressionManager`, and retry a dirty save at the start of the next run.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
+### A replay that told a triage-stopped admin change does not commit the auth inventory
+
+**What:** When triage stops a live `ha_new_admin_or_token` alert, `auth_change_delivered` is False and `_commit_auth_inventory` holds the change back, so the rule fires again next run. If an owed replay told the same accounts or tokens that run, the replay's outcome never reaches that flag, so once triage lets the live alert through it is sent again.
+
+**Why:** Codex outside review, cycle 3 of the PR #800 review (2026-10-18). Needs triage on, a level-0 hold and the change still present; the cost is one repeated alert.
+
+**How to apply:** Return the auth items a delivered replay told from `_send_owed_changes` and treat the live finding as delivered for the commit when those cover it.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ## Sentinel Network Audit
 
 ### Network security plan steps 7–11 (router adapters, redaction, audit tool)
