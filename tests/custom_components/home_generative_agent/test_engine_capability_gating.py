@@ -998,8 +998,61 @@ def _public_ip_snapshot() -> tuple[FullStateSnapshot, dict[str, Any]]:
     return snapshot, posture
 
 
-def _owed(engine: SentinelEngine) -> dict[str, dict[str, Any]]:
+def _upnp_snapshot() -> tuple[FullStateSnapshot, dict[str, Any]]:
+    """Return a snapshot reporting one new UPnP port mapping, and its posture."""
+    from custom_components.home_generative_agent.snapshot.network import (  # noqa: PLC0415
+        posture_cap,
+    )
+
+    snapshot = _snapshot()
+    network = cast("dict[str, Any]", snapshot.get("network"))
+    network["capabilities"] = [posture_cap("upnp_port_mappings_added")]
+    posture = cast("dict[str, Any]", network["posture"])
+    posture.update(
+        {
+            "upnp_port_mappings_added": 1,
+            "upnp_port_mapping_count": 3,
+            "upnp_port_mapping_previous_count": 2,
+            "upnp_port_mapping_entity_id": "sensor.gw_upnp",
+        }
+    )
+    return snapshot, posture
+
+
+def _owed(engine: SentinelEngine) -> dict[str, list[dict[str, Any]]]:
     return cast("Any", engine)._suppression.state.owed_change_alerts
+
+
+def _silenced(
+    monkeypatch: pytest.MonkeyPatch, snapshot: FullStateSnapshot, **kwargs: Any
+) -> tuple[SentinelEngine, DummyNotifier]:
+    engine, _ = _engine(
+        monkeypatch, snapshot, options={"sentinel_autonomy_level": 0}, **kwargs
+    )
+    engine._entry_id = "passive-entry"
+    return engine, cast("DummyNotifier", cast("Any", engine)._notifier)
+
+
+def _radio_snapshot() -> tuple[FullStateSnapshot, dict[str, Any]]:
+    radio: dict[str, Any] = {
+        "devices": [_radio_device("a"), _radio_device("b", "New Plug")],
+        "new_devices": ["zigbee:b"],
+    }
+    snapshot = _snapshot(radio=radio)
+    return snapshot, cast("dict[str, Any]", cast("Any", snapshot)["network"]["radio"])
+
+
+async def _radio_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[SentinelEngine, DummyNotifier, dict[str, Any]]:
+    inventory = _memory_inventory()
+    await inventory.async_commit([_radio_device("a")], NOW)
+    snapshot, section = _radio_snapshot()
+    hass, _calls = _service_recorder()
+    engine, notifier = _silenced(
+        monkeypatch, snapshot, hass=hass, network_inventory=inventory
+    )
+    return engine, notifier, section
 
 
 @pytest.mark.asyncio
@@ -1008,12 +1061,10 @@ async def test_a_change_undone_at_level_zero_still_alerts(
 ) -> None:
     """A public IP that changes and changes back while silenced is told (#799)."""
     snapshot, posture = _public_ip_snapshot()
-    engine, _ = _engine(monkeypatch, snapshot, options={"sentinel_autonomy_level": 0})
-    engine._entry_id = "passive-entry"
-    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    engine, notifier = _silenced(monkeypatch, snapshot)
     await engine._timed_run()
     assert notifier.calls == []
-    assert len(_owed(engine)) == 1
+    assert list(_owed(engine)) == ["network_public_ip_changed"]
 
     # Changed back before the level rises: the rule no longer fires.
     posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
@@ -1023,10 +1074,11 @@ async def test_a_change_undone_at_level_zero_still_alerts(
     engine._options["sentinel_autonomy_level"] = 1
     await engine._timed_run()
     assert [f.type for f in notifier.calls] == ["network_public_ip_changed"]
-    sent = notifier.calls[0]
-    assert sent.evidence["seen_while_silenced"] is True
-    assert "while Sentinel was at autonomy level 0" in sent.evidence["summary"]
-    assert sent.evidence["summary"].startswith("Your home's public IP address")
+    summary = notifier.calls[0].evidence["summary"]
+    # The note leads: a push keeps only the start of a long summary.
+    assert summary.startswith("Seen while Sentinel was at autonomy level 0 (")
+    assert "it may have been undone since. Your home's public IP" in summary
+    assert notifier.calls[0].evidence["seen_while_silenced"] is True
     assert _owed(engine) == {}
 
     # Settled: it is not sent again.
@@ -1035,16 +1087,63 @@ async def test_a_change_undone_at_level_zero_still_alerts(
 
 
 @pytest.mark.asyncio
+async def test_a_port_mapping_opened_and_closed_at_level_zero_alerts_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Several UPnP changes while silenced are told in one alert (#799)."""
+    snapshot, posture = _upnp_snapshot()
+    engine, notifier = _silenced(monkeypatch, snapshot)
+    await engine._timed_run()
+    posture.update({"upnp_port_mappings_added": 2, "upnp_port_mapping_count": 4})
+    await engine._timed_run()
+    assert len(_owed(engine)["network_upnp_port_mapping_added"]) == 2
+    posture.update({"upnp_port_mappings_added": 0, "upnp_port_mapping_count": 2})
+    await engine._timed_run()
+
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    await engine._timed_run()
+    assert [f.type for f in notifier.calls] == ["network_upnp_port_mapping_added"]
+    summary = notifier.calls[0].evidence["summary"]
+    assert "1 new port mapping was opened" in summary
+    assert "2 new port mappings were opened" in summary
+    assert "(4 mappings open in total)" in summary
+    assert _owed(engine) == {}
+
+
+@pytest.mark.asyncio
 async def test_a_change_still_there_when_the_level_rises_alerts_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The live finding carries an owed change that is still current; no repeat."""
     snapshot, _posture = _public_ip_snapshot()
-    engine, _ = _engine(monkeypatch, snapshot, options={"sentinel_autonomy_level": 0})
-    engine._entry_id = "passive-entry"
-    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    engine, notifier = _silenced(monkeypatch, snapshot)
     await engine._timed_run()
     engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert [f.type for f in notifier.calls] == ["network_public_ip_changed"]
+    assert "seen_while_silenced" not in notifier.calls[0].evidence
+    assert _owed(engine) == {}
+
+
+@pytest.mark.asyncio
+async def test_an_owed_change_stays_while_its_live_alert_waits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live alert held by a cooldown settles nothing; the owed one waits too."""
+    snapshot, _posture = _public_ip_snapshot()
+    engine, notifier = _silenced(monkeypatch, snapshot)
+    await engine._timed_run()
+    state = cast("Any", engine)._suppression.state
+    # The engine runs on the real clock.
+    state.last_by_type["network_public_ip_changed"] = datetime.now(UTC).isoformat()
+    engine._options["sentinel_autonomy_level"] = 1
+    engine._options["sentinel_cooldown_minutes"] = 60
+    await engine._timed_run()
+    assert notifier.calls == []
+    assert list(_owed(engine)) == ["network_public_ip_changed"]
+
+    state.last_by_type.clear()
     await engine._timed_run()
     assert [f.type for f in notifier.calls] == ["network_public_ip_changed"]
     assert "seen_while_silenced" not in notifier.calls[0].evidence
@@ -1055,25 +1154,59 @@ async def test_a_change_still_there_when_the_level_rises_alerts_once(
 async def test_an_owed_change_stays_owed_until_it_can_be_sent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A cooldown delays an owed change; it does not settle it."""
+    """A cooldown delays an owed replay without auditing every wait."""
     snapshot, posture = _public_ip_snapshot()
-    engine, _ = _engine(monkeypatch, snapshot, options={"sentinel_autonomy_level": 0})
-    engine._entry_id = "passive-entry"
-    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    engine, notifier = _silenced(monkeypatch, snapshot)
     await engine._timed_run()
     posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
     state = cast("Any", engine)._suppression.state
-    # The engine runs on the real clock.
     state.last_by_type["network_public_ip_changed"] = datetime.now(UTC).isoformat()
     engine._options["sentinel_autonomy_level"] = 1
     engine._options["sentinel_cooldown_minutes"] = 60
+    audit = cast("DummyAudit", cast("Any", engine)._audit_store)
+    before = len(audit.calls)
+    await engine._timed_run()
     await engine._timed_run()
     assert notifier.calls == []
-    assert len(_owed(engine)) == 1
+    assert len(audit.calls) == before
+    assert list(_owed(engine)) == ["network_public_ip_changed"]
 
     state.last_by_type.clear()
     await engine._timed_run()
     assert [f.type for f in notifier.calls] == ["network_public_ip_changed"]
+    assert _owed(engine) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_change_a_cooldown_stopped_at_level_zero_is_still_owed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cooldown left from level 1 does not keep a level-0 change from being owed."""
+    snapshot, posture = _public_ip_snapshot()
+    engine, notifier = _silenced(monkeypatch, snapshot)
+    state = cast("Any", engine)._suppression.state
+    state.last_by_type["network_public_ip_changed"] = datetime.now(UTC).isoformat()
+    engine._options["sentinel_cooldown_minutes"] = 60
+    await engine._timed_run()
+    assert list(_owed(engine)) == ["network_public_ip_changed"]
+
+    posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
+    state.last_by_type.clear()
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert [f.type for f in notifier.calls] == ["network_public_ip_changed"]
+    assert notifier.calls[0].evidence["seen_while_silenced"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_snoozed_change_at_level_zero_is_not_owed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot, _posture = _public_ip_snapshot()
+    engine, _notifier = _silenced(monkeypatch, snapshot)
+    state = cast("Any", engine)._suppression.state
+    state.snoozed_until["network_public_ip_changed"] = {"until": "permanent"}
+    await engine._timed_run()
     assert _owed(engine) == {}
 
 
@@ -1083,15 +1216,11 @@ async def test_an_owed_change_the_user_snoozed_is_settled(
 ) -> None:
     """A snooze is the user's answer: the owed change is not kept."""
     snapshot, posture = _public_ip_snapshot()
-    engine, _ = _engine(monkeypatch, snapshot, options={"sentinel_autonomy_level": 0})
-    engine._entry_id = "passive-entry"
-    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    engine, notifier = _silenced(monkeypatch, snapshot)
     await engine._timed_run()
     posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
     state = cast("Any", engine)._suppression.state
-    state.snoozed_until["network_public_ip_changed"] = {
-        "until": (NOW + timedelta(days=365)).isoformat()
-    }
+    state.snoozed_until["network_public_ip_changed"] = {"until": "permanent"}
     engine._options["sentinel_autonomy_level"] = 1
     await engine._timed_run()
     assert notifier.calls == []
@@ -1099,29 +1228,76 @@ async def test_an_owed_change_the_user_snoozed_is_settled(
 
 
 @pytest.mark.asyncio
+async def test_a_replay_skips_triage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What was owed from level 0 is not the model's to drop."""
+    snapshot, posture = _public_ip_snapshot()
+    engine, notifier = _silenced(monkeypatch, snapshot)
+    await engine._timed_run()
+    posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
+    triage = MagicMock()
+
+    async def _suppress(*_a: Any, **_k: Any) -> Any:
+        return MagicMock(
+            decision="suppress", reason_code="llm_suppress", triage_confidence=0.9
+        )
+
+    triage.triage = _suppress
+    cast("Any", engine)._triage_service = triage
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert [f.type for f in notifier.calls] == ["network_public_ip_changed"]
+    assert _owed(engine) == {}
+
+
+@pytest.mark.asyncio
+async def test_an_owed_change_waits_while_its_rule_cannot_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rule that did not run may still be reporting the change: no replay yet."""
+    snapshot, posture = _public_ip_snapshot()
+    engine, notifier = _silenced(monkeypatch, snapshot)
+    await engine._timed_run()
+    network = cast("dict[str, Any]", snapshot.get("network"))
+    caps = list(network["capabilities"])
+    network["capabilities"] = []
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert notifier.calls == []
+    assert list(_owed(engine)) == ["network_public_ip_changed"]
+
+    # Readable again and still changed: the live alert tells it, once.
+    network["capabilities"] = caps
+    await engine._timed_run()
+    assert [f.type for f in notifier.calls] == ["network_public_ip_changed"]
+    assert "seen_while_silenced" not in notifier.calls[0].evidence
+    del posture
+
+
+@pytest.mark.asyncio
+async def test_no_replay_while_the_suppression_state_is_read_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing could be marked sent, so every restart would repeat the replay."""
+    snapshot, posture = _public_ip_snapshot()
+    engine, notifier = _silenced(monkeypatch, snapshot)
+    await engine._timed_run()
+    posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
+    monkeypatch.setattr(DummySuppression, "is_read_only", property(lambda _s: True))
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert notifier.calls == []
+    assert list(_owed(engine)) == ["network_public_ip_changed"]
+
+
+@pytest.mark.asyncio
 async def test_a_device_that_joins_and_leaves_at_level_zero_still_alerts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A radio device paired and removed while silenced is told (#799)."""
-    inventory = _memory_inventory()
-    await inventory.async_commit([_radio_device("a")], NOW)
-    radio: dict[str, Any] = {
-        "devices": [_radio_device("a"), _radio_device("b", "New Plug")],
-        "new_devices": ["zigbee:b"],
-    }
-    snapshot = _snapshot(radio=radio)
-    hass, _calls = _service_recorder()
-    engine, _ = _engine(
-        monkeypatch,
-        snapshot,
-        hass=hass,
-        network_inventory=inventory,
-        options={"sentinel_autonomy_level": 0},
-    )
-    engine._entry_id = "passive-entry"
-    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    engine, notifier, section = await _radio_engine(monkeypatch)
     await engine._timed_run()
-    section = cast("dict[str, Any]", cast("Any", snapshot)["network"]["radio"])
     section["devices"] = [_radio_device("a")]
     section["new_devices"] = []
     await engine._timed_run()
@@ -1130,8 +1306,34 @@ async def test_a_device_that_joins_and_leaves_at_level_zero_still_alerts(
     engine._options["sentinel_autonomy_level"] = 1
     await engine._timed_run()
     assert [f.type for f in notifier.calls] == ["radio_new_device_joined"]
-    assert "New Plug" in notifier.calls[0].evidence["summary"]
+    sent = notifier.calls[0]
+    assert "New Plug" in sent.evidence["summary"]
+    # A replay describes the past: no Trust device button.
+    assert "device_ids" not in sent.evidence
     assert _owed(engine) == {}
+
+
+@pytest.mark.asyncio
+async def test_devices_seen_at_level_zero_are_told_in_one_alert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two devices paired and removed while silenced: one alert naming both."""
+    engine, notifier, section = await _radio_engine(monkeypatch)
+    await engine._timed_run()
+    section["devices"] = [_radio_device("a"), _radio_device("c", "Other Plug")]
+    section["new_devices"] = ["zigbee:c"]
+    await engine._timed_run()
+    assert len(_owed(engine)["radio_new_device_joined"]) == 2
+    section["devices"] = [_radio_device("a")]
+    section["new_devices"] = []
+
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert len(notifier.calls) == 1
+    sent = notifier.calls[0]
+    assert sent.evidence["device_keys"] == ["zigbee:b", "zigbee:c"]
+    assert "New Plug" in sent.evidence["summary"]
+    assert "Other Plug" in sent.evidence["summary"]
 
 
 @pytest.mark.asyncio
@@ -1139,25 +1341,8 @@ async def test_an_owed_device_named_again_by_a_live_alert_is_not_repeated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A live alert naming the owed device and another settles the owed one."""
-    inventory = _memory_inventory()
-    await inventory.async_commit([_radio_device("a")], NOW)
-    radio: dict[str, Any] = {
-        "devices": [_radio_device("a"), _radio_device("b", "New Plug")],
-        "new_devices": ["zigbee:b"],
-    }
-    snapshot = _snapshot(radio=radio)
-    hass, _calls = _service_recorder()
-    engine, _ = _engine(
-        monkeypatch,
-        snapshot,
-        hass=hass,
-        network_inventory=inventory,
-        options={"sentinel_autonomy_level": 0},
-    )
-    engine._entry_id = "passive-entry"
-    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    engine, notifier, section = await _radio_engine(monkeypatch)
     await engine._timed_run()
-    section = cast("dict[str, Any]", cast("Any", snapshot)["network"]["radio"])
     section["devices"] = [*section["devices"], _radio_device("c", "Other Plug")]
     section["new_devices"] = ["zigbee:b", "zigbee:c"]
     engine._options["sentinel_autonomy_level"] = 1
@@ -1168,14 +1353,31 @@ async def test_an_owed_device_named_again_by_a_live_alert_is_not_repeated(
 
 
 @pytest.mark.asyncio
+async def test_an_owed_device_the_live_alert_does_not_name_still_alerts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live alert for another device does not settle the owed one."""
+    engine, notifier, section = await _radio_engine(monkeypatch)
+    await engine._timed_run()
+    section["devices"] = [_radio_device("a"), _radio_device("c", "Other Plug")]
+    section["new_devices"] = ["zigbee:c"]
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert len(notifier.calls) == 2
+    replays = [f for f in notifier.calls if f.evidence.get("seen_while_silenced")]
+    assert len(replays) == 1
+    assert "New Plug" in replays[0].evidence["summary"]
+    assert "Other Plug" not in replays[0].evidence["summary"]
+    assert _owed(engine) == {}
+
+
+@pytest.mark.asyncio
 async def test_an_owed_change_now_excluded_is_dropped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An exclusion added while silenced applies to the owed change too."""
     snapshot, posture = _public_ip_snapshot()
-    engine, _ = _engine(monkeypatch, snapshot, options={"sentinel_autonomy_level": 0})
-    engine._entry_id = "passive-entry"
-    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    engine, notifier = _silenced(monkeypatch, snapshot)
     await engine._timed_run()
     posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
     monkeypatch.setattr(
@@ -1191,52 +1393,61 @@ async def test_an_owed_change_now_excluded_is_dropped(
 
 
 @pytest.mark.asyncio
-async def test_an_unreadable_owed_change_is_dropped(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+async def test_a_replay_overtaken_by_level_zero_stays_owed(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    snapshot = _snapshot()
-    engine, _ = _engine(monkeypatch, snapshot)
-    engine._entry_id = "entry"
-    _owed(engine)["x"] = {"type": "network_public_ip_changed"}
+    """Level 0 set while a replay is prepared: not sent, and owed as before."""
+    snapshot, posture = _public_ip_snapshot()
+    engine, notifier = _silenced(monkeypatch, snapshot)
     await engine._timed_run()
-    assert _owed(engine) == {}
-    assert "unreadable owed Sentinel change alert" in caplog.text
+    stored = [dict(f) for f in _owed(engine)["network_public_ip_changed"]]
+    posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
+    engine._options["sentinel_autonomy_level"] = 1
+    real = engine._is_passive
+    checks = iter([False, False, True])
+    monkeypatch.setattr(engine, "_is_passive", lambda: next(checks, real()))
+    monkeypatch.setattr(engine, "_explainer_for", lambda *_a, **_k: None, raising=False)
+    abandoned: list[str] = []
+    abandon = engine._abandon_for_silence
+
+    async def _spy(held: Any, *args: Any) -> bool:
+        abandoned.extend(f.type for f, _stamps in held)
+        return await abandon(held, *args)
+
+    monkeypatch.setattr(engine, "_abandon_for_silence", _spy)
+    await engine._timed_run()
+    assert abandoned == ["network_public_ip_changed"]
+    assert notifier.calls == []
+    assert _owed(engine)["network_public_ip_changed"] == stored
 
 
 @pytest.mark.asyncio
-async def test_the_owed_changes_are_bounded(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+async def test_the_owed_list_is_saved_only_when_it_changes(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Past the bound the oldest owed changes are dropped, with a warning."""
-    from custom_components.home_generative_agent.sentinel import (  # noqa: PLC0415
-        engine as engine_module,
-    )
+    snapshot, _posture = _public_ip_snapshot()
+    engine, _notifier = _silenced(monkeypatch, snapshot)
+    saves: list[int] = []
+    suppression = cast("Any", engine)._suppression
 
-    monkeypatch.setattr(engine_module, "_MAX_OWED_CHANGE_ALERTS", 2)
-    snapshot = _snapshot()
-    engine, _ = _engine(monkeypatch, snapshot, options={"sentinel_autonomy_level": 0})
-    engine._entry_id = "passive-entry"
-    findings = [
-        AnomalyFinding(
-            anomaly_id=f"id{n}",
-            type="network_public_ip_changed",
-            severity="low",
-            confidence=0.9,
-            triggering_entities=[],
-            evidence={"summary": "s"},
-            suggested_actions=[],
-            is_sensitive=True,
-            detected_at=NOW + timedelta(minutes=n),
-        )
-        for n in range(3)
-    ]
-    await cast("Any", engine)._hold_passive(findings, NOW, timedelta(hours=1))
-    assert sorted(_owed(engine)) == ["id1", "id2"]
-    assert "dropped the 1 oldest" in caplog.text
+    async def _save() -> None:
+        saves.append(1)
+
+    suppression.async_save = _save
+    await engine._timed_run()
+    first = len(saves)
+    assert first >= 1
+    await engine._timed_run()
+    await engine._timed_run()
+    assert len(saves) == first
 
 
 def test_owed_change_alerts_survive_a_save_and_load() -> None:
     """The owed list persists, and older saved state without it loads empty."""
+    from custom_components.home_generative_agent.sentinel.models import (  # noqa: PLC0415
+        anomaly_finding_from_dict,
+    )
+
     finding = AnomalyFinding(
         anomaly_id="id1",
         type="network_public_ip_changed",
@@ -1248,13 +1459,263 @@ def test_owed_change_alerts_survive_a_save_and_load() -> None:
         is_sensitive=True,
         detected_at=NOW,
     )
-    state = SuppressionState(owed_change_alerts={"id1": finding.as_dict()})
-    loaded = SuppressionState.from_dict(state.as_dict())
-    from custom_components.home_generative_agent.sentinel.models import (  # noqa: PLC0415
-        anomaly_finding_from_dict,
+    state = SuppressionState(
+        owed_change_alerts={"network_public_ip_changed": [finding.as_dict()]}
     )
-
-    assert anomaly_finding_from_dict(loaded.owed_change_alerts["id1"]) == finding
+    loaded = SuppressionState.from_dict(state.as_dict())
+    stored = loaded.owed_change_alerts["network_public_ip_changed"]
+    assert anomaly_finding_from_dict(stored[0]) == finding
     legacy = state.as_dict()
     del legacy["owed_change_alerts"]
     assert SuppressionState.from_dict(legacy).owed_change_alerts == {}
+
+
+@pytest.mark.asyncio
+async def test_an_admin_added_and_removed_at_level_zero_still_alerts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new admin removed before the level rises is told, naming the account."""
+    ha = {"new_admin_users": ["eve"], "new_long_lived_tokens": []}
+    snapshot = _snapshot(ha)
+    engine, notifier = _silenced(monkeypatch, snapshot)
+    await engine._timed_run()
+    ha_section = cast("dict[str, Any]", cast("Any", snapshot)["network"]["ha_security"])
+    ha_section["new_admin_users"] = []
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert [f.type for f in notifier.calls] == ["ha_new_admin_or_token"]
+    sent = notifier.calls[0]
+    assert sent.evidence["new_admin_users"] == ["eve"]
+    assert ": 1 account or token;" in sent.evidence["summary"]
+    assert _owed(engine) == {}
+
+
+@pytest.mark.asyncio
+async def test_an_admin_still_there_when_the_level_rises_alerts_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _snapshot({"new_admin_users": ["eve"], "new_long_lived_tokens": []})
+    engine, notifier = _silenced(monkeypatch, snapshot)
+    await engine._timed_run()
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert len(notifier.calls) == 1
+    assert "seen_while_silenced" not in notifier.calls[0].evidence
+    assert _owed(engine) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_port_mapping_still_open_when_the_level_rises_alerts_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot, _posture = _upnp_snapshot()
+    engine, notifier = _silenced(monkeypatch, snapshot)
+    await engine._timed_run()
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert [f.type for f in notifier.calls] == ["network_upnp_port_mapping_added"]
+    assert "seen_while_silenced" not in notifier.calls[0].evidence
+    assert _owed(engine) == {}
+
+
+@pytest.mark.asyncio
+async def test_triage_dropping_the_live_alert_sends_the_owed_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Triage may drop a live alert, not what was owed from level 0."""
+    snapshot, _posture = _public_ip_snapshot()
+    engine, notifier = _silenced(monkeypatch, snapshot)
+    await engine._timed_run()
+    triage = MagicMock()
+
+    async def _suppress(*_a: Any, **_k: Any) -> Any:
+        return MagicMock(
+            decision="suppress", reason_code="llm_suppress", triage_confidence=0.9
+        )
+
+    triage.triage = _suppress
+    cast("Any", engine)._triage_service = triage
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert [f.evidence.get("seen_while_silenced") for f in notifier.calls] == [True]
+    assert _owed(engine) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_device_still_there_is_not_named_again_by_the_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Owed b and c paired together; c removed: b's live alert, c's replay."""
+    engine, notifier, section = await _radio_engine(monkeypatch)
+    section["devices"] = [*section["devices"], _radio_device("c", "Other Plug")]
+    section["new_devices"] = ["zigbee:b", "zigbee:c"]
+    await engine._timed_run()
+    assert len(_owed(engine)["radio_new_device_joined"]) == 1
+    section["devices"] = [_radio_device("a"), _radio_device("b", "New Plug")]
+    section["new_devices"] = ["zigbee:b"]
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    keys = [f.evidence["device_keys"] for f in notifier.calls]
+    assert keys == [["zigbee:b"], ["zigbee:c"]]
+    assert notifier.calls[1].evidence["seen_while_silenced"] is True
+    assert _owed(engine) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_partly_told_device_alert_keeps_what_its_live_alert_waits_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Owed b and c apart; b's live alert waits on a cooldown, c is replayed."""
+    engine, notifier, section = await _radio_engine(monkeypatch)
+    await engine._timed_run()
+    section["devices"] = [_radio_device("a"), _radio_device("c", "Other Plug")]
+    section["new_devices"] = ["zigbee:c"]
+    await engine._timed_run()
+    section["devices"] = [_radio_device("a"), _radio_device("b", "New Plug")]
+    section["new_devices"] = ["zigbee:b"]
+    state = cast("Any", engine)._suppression.state
+    engine._options["sentinel_autonomy_level"] = 1
+    engine._options["sentinel_cooldown_minutes"] = 60
+    state.last_by_type["radio_new_device_joined"] = datetime.now(UTC).isoformat()
+    await engine._timed_run()
+    assert notifier.calls == []
+    assert len(_owed(engine)["radio_new_device_joined"]) == 2
+
+    state.last_by_type.clear()
+    await engine._timed_run()
+    assert [f.evidence["device_keys"] for f in notifier.calls] == [["zigbee:b"]]
+    owed_now = _owed(engine)["radio_new_device_joined"]
+    assert [m["evidence"]["device_keys"] for m in owed_now] == [["zigbee:c"]]
+
+    state.last_by_type.clear()
+    await engine._timed_run()
+    assert [f.evidence["device_keys"] for f in notifier.calls][-1] == ["zigbee:c"]
+    assert _owed(engine) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_device_trusted_at_level_zero_is_not_replayed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, notifier, section = await _radio_engine(monkeypatch)
+    await engine._timed_run()
+    inventory = cast("Any", engine)._network_inventory
+    await inventory.async_set_trusted(["zigbee:b"], trusted=True)
+    section["devices"] = [_radio_device("a"), _radio_device("b", "New Plug")]
+    section["new_devices"] = []
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert notifier.calls == []
+    assert _owed(engine) == {}
+
+
+@pytest.mark.asyncio
+async def test_two_ip_changes_undone_at_level_zero_are_both_owed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A to B and back, then to C and back: one alert telling both."""
+    snapshot, posture = _public_ip_snapshot()
+    engine, notifier = _silenced(monkeypatch, snapshot)
+    await engine._timed_run()
+    posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
+    await engine._timed_run()
+    posture.update({"public_ip_changed": True, "public_ip_key": "cccc0000"})
+    await engine._timed_run()
+    posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
+    await engine._timed_run()
+    assert len(_owed(engine)["network_public_ip_changed"]) == 2
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert [f.type for f in notifier.calls] == ["network_public_ip_changed"]
+    assert _owed(engine) == {}
+
+
+@pytest.mark.asyncio
+async def test_only_kinds_whose_rule_ran_are_replayed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An IP change and a device owed; IP data unreadable: only the device."""
+    from custom_components.home_generative_agent.snapshot.network import (  # noqa: PLC0415
+        posture_cap,
+    )
+
+    inventory = _memory_inventory()
+    await inventory.async_commit([_radio_device("a")], NOW)
+    snapshot, section = _radio_snapshot()
+    network = cast("dict[str, Any]", cast("Any", snapshot)["network"])
+    ip_cap = posture_cap("public_ip_changed")
+    network["capabilities"] = [*network["capabilities"], ip_cap]
+    network["posture"].update(
+        {
+            "public_ip_changed": True,
+            "public_ip_key": "bbbb0000",
+            "public_ip_entity_id": "sensor.gw_ip",
+        }
+    )
+    hass, _calls = _service_recorder()
+    engine, notifier = _silenced(
+        monkeypatch, snapshot, hass=hass, network_inventory=inventory
+    )
+    await engine._timed_run()
+    assert set(_owed(engine)) == {
+        "radio_new_device_joined",
+        "network_public_ip_changed",
+    }
+    section["devices"] = [_radio_device("a")]
+    section["new_devices"] = []
+    network["capabilities"].remove(ip_cap)
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert [f.type for f in notifier.calls] == ["radio_new_device_joined"]
+    assert list(_owed(engine)) == ["network_public_ip_changed"]
+
+
+@pytest.mark.asyncio
+async def test_a_change_quiet_hours_stopped_at_level_zero_is_still_owed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from custom_components.home_generative_agent.sentinel import (  # noqa: PLC0415
+        engine as engine_mod,
+    )
+    from custom_components.home_generative_agent.sentinel.suppression import (  # noqa: PLC0415
+        SuppressionDecision,
+    )
+
+    snapshot, posture = _public_ip_snapshot()
+    engine, notifier = _silenced(monkeypatch, snapshot)
+    real = engine_mod.should_suppress
+    monkeypatch.setattr(
+        engine_mod,
+        "should_suppress",
+        lambda *_a, **_k: SuppressionDecision(True, "quiet_hours"),  # noqa: FBT003
+    )
+    await engine._timed_run()
+    assert list(_owed(engine)) == ["network_public_ip_changed"]
+    monkeypatch.setattr(engine_mod, "should_suppress", real)
+    posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert [f.evidence.get("seen_while_silenced") for f in notifier.calls] == [True]
+
+
+@pytest.mark.asyncio
+async def test_triage_dropping_a_live_device_alert_sends_the_owed_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, notifier, _section = await _radio_engine(monkeypatch)
+    await engine._timed_run()
+    triage = MagicMock()
+
+    async def _suppress(*_a: Any, **_k: Any) -> Any:
+        return MagicMock(
+            decision="suppress", reason_code="llm_suppress", triage_confidence=0.9
+        )
+
+    triage.triage = _suppress
+    cast("Any", engine)._triage_service = triage
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert len(notifier.calls) == 1
+    assert notifier.calls[0].evidence["device_keys"] == ["zigbee:b"]
+    assert notifier.calls[0].evidence["seen_while_silenced"] is True
+    assert _owed(engine) == {}

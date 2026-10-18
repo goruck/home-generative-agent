@@ -7,7 +7,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from homeassistant.util import dt as dt_util
 
@@ -228,6 +228,9 @@ class AnomalyFinding:
         }
 
 
+# The evidence key naming the inventory ids a Trust device tap trusts.
+TRUST_DEVICE_IDS_KEY = "device_ids"
+
 # Severity order, lowest first.
 SEVERITY_RANK: dict[Severity, int] = {"low": 0, "medium": 1, "high": 2}
 
@@ -242,6 +245,18 @@ def anomaly_finding_from_dict(data: Mapping[str, Any]) -> AnomalyFinding:
     if severity not in SEVERITY_RANK:
         msg = f"unknown severity {severity!r}"
         raise ValueError(msg)
+    entities, evidence, actions = (
+        data["triggering_entities"],
+        data["evidence"],
+        data["suggested_actions"],
+    )
+    if not (
+        isinstance(entities, list)
+        and isinstance(evidence, dict)
+        and isinstance(actions, list)
+    ):
+        msg = "triggering_entities, evidence and suggested_actions are malformed"
+        raise TypeError(msg)
     detected_at = dt_util.parse_datetime(str(data["detected_at"]))
     if detected_at is None:
         msg = f"unreadable detected_at {data['detected_at']!r}"
@@ -251,9 +266,9 @@ def anomaly_finding_from_dict(data: Mapping[str, Any]) -> AnomalyFinding:
         type=str(data["type"]),
         severity=severity,
         confidence=float(data["confidence"]),
-        triggering_entities=[str(e) for e in data["triggering_entities"]],
-        evidence=dict(data["evidence"]),
-        suggested_actions=[str(a) for a in data["suggested_actions"]],
+        triggering_entities=[str(e) for e in cast("list[object]", entities)],
+        evidence=dict(cast("dict[str, Any]", evidence)),
+        suggested_actions=[str(a) for a in cast("list[object]", actions)],
         is_sensitive=bool(data["is_sensitive"]),
         detected_at=dt_util.as_utc(detected_at),
     )
@@ -338,5 +353,7 @@ def trust_device_ids(finding: AnomalyFinding) -> list[str]:
     handler trusts only then.
     """
     return [
-        str(d) for d in finding.evidence.get("device_ids") or [] if isinstance(d, str)
+        str(d)
+        for d in finding.evidence.get(TRUST_DEVICE_IDS_KEY) or []
+        if isinstance(d, str)
     ]

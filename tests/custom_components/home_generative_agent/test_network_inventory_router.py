@@ -469,3 +469,173 @@ async def test_engine_leaves_router_rows_alone_when_clients_were_not_read(
     engine, _, _ = _engine(monkeypatch, snapshot, inventory)
     await engine._timed_run()
     assert {r["key"] for r in inventory.list_devices()} == {"router:k1", "zigbee:z1"}
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_client_alert_settles_its_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A client seen while silenced and gone before the level rises is told (#799).
+
+    The replay settles its row, so it is not new again if it comes back, and
+    offers no Trust device button for a client that may be gone.
+    """
+    inventory, _ = _memory_inventory()
+    await inventory.async_commit(
+        [client_observation(_client("k1"))], NOW, present_sources=[ROUTER_SOURCE]
+    )
+    snapshot = _snapshot([_client("k1"), _client("k2")], ["k2"])
+    engine, notifier, _ = _engine(
+        monkeypatch, snapshot, inventory, options={"sentinel_autonomy_level": 0}
+    )
+    engine._entry_id = "passive-entry"
+    await engine._timed_run()
+    row = inventory.row("router:k2")
+    assert row is not None
+    assert row["alerted"] is False
+
+    network = cast("dict[str, Any]", cast("Any", snapshot)["network"])
+    network["clients"] = [_client("k1")]
+    network["new_clients"] = []
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert [f.type for f in notifier.calls] == ["network_unknown_device_joined"]
+    assert notifier.calls[0].evidence["client_keys"] == ["k2"]
+    assert "device_ids" not in notifier.calls[0].evidence
+    row = inventory.row("router:k2")
+    assert row is not None
+    assert row["alerted"] is True
+
+
+async def _two_owed_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[SentinelEngine, _Notifier, NetworkInventory, dict[str, Any]]:
+    """Clients k2 and k3 join apart at level 0, then both leave."""
+    inventory, _ = _memory_inventory()
+    await inventory.async_commit(
+        [client_observation(_client("k1"))], NOW, present_sources=[ROUTER_SOURCE]
+    )
+    snapshot = _snapshot([_client("k1"), _client("k2")], ["k2"])
+    engine, notifier, _ = _engine(
+        monkeypatch, snapshot, inventory, options={"sentinel_autonomy_level": 0}
+    )
+    engine._entry_id = "passive-entry"
+    await engine._timed_run()
+    network = cast("dict[str, Any]", cast("Any", snapshot)["network"])
+    network["clients"] = [_client("k1"), _client("k3")]
+    network["new_clients"] = ["k3"]
+    await engine._timed_run()
+    network["clients"] = [_client("k1")]
+    network["new_clients"] = []
+    return engine, notifier, inventory, network
+
+
+@pytest.mark.asyncio
+async def test_an_excluded_client_does_not_drop_the_other_owed_ones(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, notifier, inventory, _ = await _two_owed_clients(monkeypatch)
+    monkeypatch.setattr(
+        engine,
+        "_entity_excluded_for_type",
+        lambda entity_id, _type: entity_id == "device_tracker.k2",
+    )
+    cast("Any", engine)._rule_entity_exclusions = {"*": object()}
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert [f.evidence["client_keys"] for f in notifier.calls] == [["k3"]]
+    assert cast("Any", engine)._suppression.state.owed_change_alerts == {}
+    k3 = inventory.row("router:k3")
+    assert k3 is not None
+    assert k3["alerted"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_waiting_client_replay_leaves_its_rows_owed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, notifier, inventory, _ = await _two_owed_clients(monkeypatch)
+    state = cast("Any", engine)._suppression.state
+    state.last_by_type["network_unknown_device_joined"] = datetime.now(UTC).isoformat()
+    engine._options["sentinel_autonomy_level"] = 1
+    engine._options["sentinel_cooldown_minutes"] = 60
+    await engine._timed_run()
+    assert notifier.calls == []
+    k2 = inventory.row("router:k2")
+    assert k2 is not None
+    assert k2["alerted"] is False
+    assert len(state.owed_change_alerts["network_unknown_device_joined"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_snoozed_client_replay_settles_its_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A snooze is the user's answer, as for a live alert: the rows are settled."""
+    engine, notifier, inventory, _ = await _two_owed_clients(monkeypatch)
+    state = cast("Any", engine)._suppression.state
+    state.snoozed_until["network_unknown_device_joined"] = {"until": "permanent"}
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert notifier.calls == []
+    for key in ("router:k2", "router:k3"):
+        row = inventory.row(key)
+        assert row is not None
+        assert row["alerted"] is True
+    assert state.owed_change_alerts == {}
+
+
+@pytest.mark.asyncio
+async def test_settling_an_absent_row_writes_only_when_it_changes() -> None:
+    inventory, saved = _memory_inventory()
+    await inventory.async_commit(
+        [client_observation(_client("k1")), client_observation(_client("k2"))],
+        NOW,
+        present_sources=[ROUTER_SOURCE],
+    )
+    saves = len(saved)
+    later = NOW + timedelta(minutes=1)
+    observed = [client_observation(_client("k1"))]
+    await inventory.async_commit(
+        observed, later, present_sources=[ROUTER_SOURCE], alerted=["router:gone"]
+    )
+    await inventory.async_commit(
+        observed, later, present_sources=[ROUTER_SOURCE], alerted=["router:k2"]
+    )
+    # Bootstrap rows are already alerted: nothing to settle, nothing written.
+    assert len(saved) == saves
+
+
+@pytest.mark.asyncio
+async def test_a_client_trusted_at_level_zero_is_not_replayed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, notifier, inventory, _ = await _two_owed_clients(monkeypatch)
+    await inventory.async_set_trusted(["router:k2", "router:k3"], trusted=True)
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert notifier.calls == []
+    assert cast("Any", engine)._suppression.state.owed_change_alerts == {}
+
+
+@pytest.mark.asyncio
+async def test_a_live_client_alert_settles_its_owed_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client seen at level 0 and still there: one live alert, nothing owed."""
+    inventory, _ = _memory_inventory()
+    await inventory.async_commit(
+        [client_observation(_client("k1"))], NOW, present_sources=[ROUTER_SOURCE]
+    )
+    snapshot = _snapshot([_client("k1"), _client("k2")], ["k2"])
+    engine, notifier, _ = _engine(
+        monkeypatch, snapshot, inventory, options={"sentinel_autonomy_level": 0}
+    )
+    engine._entry_id = "passive-entry"
+    await engine._timed_run()
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert len(notifier.calls) == 1
+    assert "seen_while_silenced" not in notifier.calls[0].evidence
+    assert cast("Any", engine)._suppression.state.owed_change_alerts == {}
