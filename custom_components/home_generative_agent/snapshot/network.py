@@ -39,6 +39,9 @@ from custom_components.home_generative_agent.agent.automation_pin import (
 from custom_components.home_generative_agent.agent.helpers import (
     resolve_critical_action_policy,
 )
+from custom_components.home_generative_agent.agent.rule_entities import (
+    expand_critical_rules,
+)
 from custom_components.home_generative_agent.const import DOMAIN
 from custom_components.home_generative_agent.sentinel.auth_inventory import (
     TOKEN_TYPE_LONG_LIVED,
@@ -678,6 +681,9 @@ class HaNativeInputs:
     trusted_networks_bypass_login: bool | None = None
     addons: list[AddonInput] | None = None
     automations: list[AutomationInput] | None = None
+    # The Critical Action rules extended to device classes, names and groups
+    # (#773), read with `hass`; None falls back to the configured rules.
+    critical_actions: list[dict[str, str]] | None = None
     # Conversation engines used by Assist pipelines that this integration's
     # Critical Action PIN does not cover (built-in agent, other LLM agents).
     assist_agents_outside_pin: list[str] | None = None
@@ -1052,6 +1058,18 @@ def _collect_discovery(
     return unconfigured, ignored
 
 
+def _collect_critical_actions(
+    hass: HomeAssistant, context: NetworkBuildContext
+) -> list[dict[str, str]] | None:
+    """Return the rules the add_automation gate applies, as it extends them."""
+    try:
+        policy = resolve_critical_action_policy(context.options or {})
+        return expand_critical_rules(hass, policy.critical_actions)
+    except Exception as err:  # noqa: BLE001 - one input must not fail the snapshot
+        _log_input_failure("critical action rules", err)
+        return None
+
+
 async def async_collect_ha_native_inputs(  # noqa: PLR0913
     hass: HomeAssistant,
     context: NetworkBuildContext,
@@ -1077,6 +1095,7 @@ async def async_collect_ha_native_inputs(  # noqa: PLR0913
         trusted_networks_bypass_login=_collect_auth_providers(hass),
         addons=_collect_addons(hass),
         automations=_collect_automations(hass),
+        critical_actions=_collect_critical_actions(hass, context),
         assist_agents_outside_pin=_collect_assist_agents(hass),
         discovered_unconfigured=unconfigured,
         discovered_ignored=ignored,
@@ -1336,9 +1355,9 @@ def ha_native_adapter(  # noqa: PLR0912 - one branch per input, kept flat on pur
 
     if inputs.automations is not None:
         critical_actions = (
-            resolve_critical_action_policy(context.options).critical_actions
-            if context.options is not None
-            else resolve_critical_action_policy({}).critical_actions
+            inputs.critical_actions
+            if inputs.critical_actions is not None
+            else resolve_critical_action_policy(context.options or {}).critical_actions
         )
         public = sorted(
             a.entity_id
