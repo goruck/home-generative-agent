@@ -45,7 +45,7 @@ from .automation_pin import (
     find_critical_automation_calls,
     step_targets,
 )
-from .helpers import TOOL_NAMESPACE_SEP, matches_critical_rule
+from .helpers import TOOL_NAMESPACE_SEP, matches_critical_rule, rule_entity_matches
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -506,10 +506,9 @@ def _entity_is_guarded(
     """Return True if any rule applies to this entity, whatever the service."""
     for rule in rules:
         rule_domain = (rule.get("domain") or "").lower()
-        entity_match = (rule.get("entity_match") or "").lower()
         if rule_domain and rule_domain != domain:
             continue
-        if entity_match and entity_match not in entity_id:
+        if not rule_entity_matches(rule, [entity_id]):
             continue
         return True
     return False

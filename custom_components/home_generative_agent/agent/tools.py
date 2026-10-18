@@ -127,6 +127,7 @@ from .helpers import (
     tool_call_data,
 )
 from .pin_messages import describe_pending_action, pin_msg
+from .rule_entities import expand_critical_rules
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Mapping
@@ -851,7 +852,8 @@ def _maybe_require_pin_for_automation(
         return None
 
     critical_calls = find_critical_automation_calls(
-        validated_config, policy.critical_actions
+        validated_config,
+        expand_critical_rules(cfg.get("hass"), policy.critical_actions),
     )
     if not critical_calls:
         return None

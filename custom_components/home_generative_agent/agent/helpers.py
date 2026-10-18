@@ -877,9 +877,12 @@ def resolve_critical_action_policy(options: Mapping[str, Any]) -> CriticalAction
         pin_salt=pin_salt,
         # Copy: the default is a module-level list handed to every config
         # entry, so an in-place edit anywhere would corrupt it process-wide.
-        critical_actions=list(
-            options.get(CONF_CRITICAL_ACTIONS) or RECOMMENDED_CRITICAL_ACTIONS
-        ),
+        # The internal exact-entity marker is never taken from stored rules.
+        critical_actions=[
+            {k: v for k, v in rule.items() if k != CRITICAL_RULE_EXACT_ENTITY}
+            for rule in options.get(CONF_CRITICAL_ACTIONS)
+            or RECOMMENDED_CRITICAL_ACTIONS
+        ],
     )
 
 
@@ -1150,6 +1153,29 @@ def thread_has_pending_action(
     )
 
 
+# Marks a rule copy `rule_entities.expand_critical_rules` makes for one entity:
+# it matches that entity id exactly, not as a substring. Internal: removed from
+# stored rules, so a user rule can never be narrowed by carrying it. The copy
+# keeps the user rule's `entity_match`, so a reader that does not know this
+# key still reads it as the rule it was copied from.
+CRITICAL_RULE_EXACT_ENTITY = "_exact_entity"
+
+
+def rule_entity_matches(rule: Mapping[str, str], entity_ids: Sequence[str]) -> bool:
+    """
+    Return True when a rule's entity filter admits one of these entity ids.
+
+    The ids are lowercased. A rule with no filter admits any. A comma-joined
+    id ("cover.a, cover.b") is read as the ids it lists for an exact match.
+    """
+    if exact := (rule.get(CRITICAL_RULE_EXACT_ENTITY) or "").lower():
+        return any(
+            exact == part.strip() for entity in entity_ids for part in entity.split(",")
+        )
+    entity_match = (rule.get("entity_match") or "").lower()
+    return not entity_match or any(entity_match in e for e in entity_ids)
+
+
 def matches_critical_rule(
     *,
     domain: str,
@@ -1176,17 +1202,12 @@ def matches_critical_rule(
     for rule in critical_actions:
         rule_domain = (rule.get("domain") or "").lower()
         rule_service = (rule.get("service") or "").lower()
-        entity_match = (rule.get("entity_match") or "").lower()
 
         if rule_domain and rule_domain != domain:
             continue
         if rule_service and rule_service != service:
             continue
-        if (
-            entity_match
-            and not any(entity_match in e for e in entities)
-            and not unresolved_target
-        ):
+        if not unresolved_target and not rule_entity_matches(rule, entities):
             continue
         return True
     return False
