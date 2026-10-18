@@ -232,6 +232,33 @@ class AnomalyFinding:
 SEVERITY_RANK: dict[Severity, int] = {"low": 0, "medium": 1, "high": 2}
 
 
+def anomaly_finding_from_dict(data: Mapping[str, Any]) -> AnomalyFinding:
+    """
+    Rebuild a finding saved with ``AnomalyFinding.as_dict``.
+
+    Raises KeyError, TypeError or ValueError when ``data`` is not one.
+    """
+    severity = data["severity"]
+    if severity not in SEVERITY_RANK:
+        msg = f"unknown severity {severity!r}"
+        raise ValueError(msg)
+    detected_at = dt_util.parse_datetime(str(data["detected_at"]))
+    if detected_at is None:
+        msg = f"unreadable detected_at {data['detected_at']!r}"
+        raise ValueError(msg)
+    return AnomalyFinding(
+        anomaly_id=str(data["anomaly_id"]),
+        type=str(data["type"]),
+        severity=severity,
+        confidence=float(data["confidence"]),
+        triggering_entities=[str(e) for e in data["triggering_entities"]],
+        evidence=dict(data["evidence"]),
+        suggested_actions=[str(a) for a in data["suggested_actions"]],
+        is_sensitive=bool(data["is_sensitive"]),
+        detected_at=dt_util.as_utc(detected_at),
+    )
+
+
 def _max_severity(findings: list[AnomalyFinding]) -> Severity:
     """Return the highest severity across a list of findings."""
     return max((f.severity for f in findings), key=lambda s: SEVERITY_RANK[s])

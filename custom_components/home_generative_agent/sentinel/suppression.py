@@ -109,6 +109,13 @@ class SuppressionState:
     # Incremented by record_cooldown_feedback() on each dismiss/snooze.
     learned_cooldown_multipliers: dict[str, int] = field(default_factory=dict)
 
+    # Change alerts held at autonomy level 0, owed until one reaches the user
+    # even if the change is undone meanwhile (#799): anomaly_id -> the finding
+    # as ``AnomalyFinding.as_dict`` saved it. Optional and additive, so the
+    # schema version is unchanged: an older build ignores the key, and a
+    # version bump would load this file read-only there (forcing level 0).
+    owed_change_alerts: dict[str, dict[str, Any]] = field(default_factory=dict)
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SuppressionState:
         """Create suppression state from persisted data."""
@@ -128,6 +135,11 @@ class SuppressionState:
                 k: int(v)
                 for k, v in data.get("learned_cooldown_multipliers", {}).items()
             },
+            owed_change_alerts={
+                str(k): dict(v)
+                for k, v in (data.get("owed_change_alerts") or {}).items()
+                if isinstance(v, dict)
+            },
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -142,6 +154,9 @@ class SuppressionState:
             "snoozed_until": {k: dict(v) for k, v in self.snoozed_until.items()},
             "presence_grace_until": dict(self.presence_grace_until),
             "learned_cooldown_multipliers": dict(self.learned_cooldown_multipliers),
+            "owed_change_alerts": {
+                k: dict(v) for k, v in self.owed_change_alerts.items()
+            },
         }
 
 

@@ -7,7 +7,7 @@ import contextlib
 import fnmatch
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
@@ -104,7 +104,12 @@ from .execution import (
 )
 from .lock_enrichment import async_enrich_lock_last_changed
 from .logging_utils import RepeatingLogLimiter
-from .models import SEVERITY_RANK, AnomalyFinding, CompoundFinding
+from .models import (
+    SEVERITY_RANK,
+    AnomalyFinding,
+    CompoundFinding,
+    anomaly_finding_from_dict,
+)
 from .network_audit import NetworkAuditReport, build_report, empty_report
 from .network_inventory import (
     ROUTER_SOURCE,
@@ -253,6 +258,51 @@ _POSTURE_MEMORY_RULES: dict[str, tuple[str, ...]] = {
 # level 0 they start no cooldown, so they alert as soon as the level rises
 # (#783); they are audited once per cooldown meanwhile, not every cycle.
 _CHANGE_ALERT_RULES: frozenset[str] = CHANGE_ALERT_RULE_TYPES
+
+# Change alerts held at level 0 are also kept as found, so one whose change is
+# undone before the level rises still alerts (#799). Bounded: past this, the
+# oldest are dropped.
+_MAX_OWED_CHANGE_ALERTS = 100
+
+# The list evidence a device or account change alert names its items by. An
+# owed alert is still current while a live one of its type names all of them.
+_OWED_ITEM_KEYS: dict[str, tuple[str, ...]] = {
+    HaNewAdminOrTokenRule.rule_id: ("new_admin_users", "new_long_lived_tokens"),
+    RadioNewDeviceJoinedRule.rule_id: ("device_keys",),
+    NetworkUnknownDeviceJoinedRule.rule_id: ("client_keys",),
+}
+
+
+def _covers(live: AnomalyFinding, owed: AnomalyFinding) -> bool:
+    """Return True when ``live`` reports everything ``owed`` reported."""
+    if live.type != owed.type:
+        return False
+    if live.anomaly_id == owed.anomaly_id:
+        return True
+    keys = _OWED_ITEM_KEYS.get(owed.type)
+    if not keys:
+        return False
+    return all(
+        set(map(str, owed.evidence.get(key) or ()))
+        <= set(map(str, live.evidence.get(key) or ()))
+        for key in keys
+    )
+
+
+def _trim_owed(owed: dict[str, dict[str, Any]]) -> None:
+    """Drop the oldest owed change alerts past the bound, saying so."""
+    excess = len(owed) - _MAX_OWED_CHANGE_ALERTS
+    if excess <= 0:
+        return
+    oldest = sorted(owed, key=lambda key: str(owed[key].get("detected_at", "")))
+    for key in oldest[:excess]:
+        del owed[key]
+    LOGGER.warning(
+        "Sentinel holds more than %d change alerts at autonomy level 0; "
+        "dropped the %d oldest.",
+        _MAX_OWED_CHANGE_ALERTS,
+        excess,
+    )
 
 
 @dataclass
@@ -761,7 +811,8 @@ class SentinelEngine:
             key: seen for key, seen in self._passive_recorded.items() if seen > cutoff
         }
         record = False
-        cooled = False
+        changed = False
+        state = self._suppression.state
         for finding in findings:
             # Audited once per window: a device cooldown can be far shorter
             # than a posture rule's day-long one.
@@ -770,11 +821,108 @@ class SentinelEngine:
                 self._passive_recorded[finding.anomaly_id] = now
                 record = True
             if finding.type not in _CHANGE_ALERT_RULES:
-                register_device_cooldown(self._suppression.state, finding, now)
-                cooled = True
-        if cooled:
+                register_device_cooldown(state, finding, now)
+                changed = True
+            elif finding.anomaly_id not in state.owed_change_alerts:
+                # Kept as first seen, so it alerts even if the change is
+                # undone before the level rises (#799).
+                state.owed_change_alerts[finding.anomaly_id] = finding.as_dict()
+                _trim_owed(state.owed_change_alerts)
+                changed = True
+        if changed:
             await self._suppression.async_save()
         return record
+
+    def _owed_replays(
+        self, live: list[AnomalyFinding]
+    ) -> tuple[list[AnomalyFinding], dict[str, str]]:
+        """
+        Return the owed change alerts to send now, and those a live one covers.
+
+        Called above level 0. An owed alert whose change is still there (a
+        live finding of its type naming everything it named) is not sent
+        twice: it is settled with that finding, returned as owed id -> live
+        id. Any other is rebuilt, marked as seen while silenced, and returned
+        to be sent; one that cannot be read is dropped.
+        """
+        owed = self._suppression.state.owed_change_alerts
+        replays: list[AnomalyFinding] = []
+        covered: dict[str, str] = {}
+        for anomaly_id, data in list(owed.items()):
+            try:
+                finding = anomaly_finding_from_dict(data)
+            except (KeyError, TypeError, ValueError):
+                LOGGER.warning("Dropping an unreadable owed Sentinel change alert.")
+                del owed[anomaly_id]
+                continue
+            match = next((f for f in live if _covers(f, finding)), None)
+            if match is not None:
+                covered[anomaly_id] = match.anomaly_id
+                continue
+            seen = dt_util.as_local(finding.detected_at).strftime("%Y-%m-%d %H:%M")
+            summary = str(finding.evidence.get("summary") or "").strip()
+            note = (
+                f"Seen at {seen} while Sentinel was at autonomy level 0; "
+                "it may have been undone since."
+            )
+            replays.append(
+                replace(
+                    finding,
+                    evidence={
+                        **finding.evidence,
+                        "summary": f"{summary} {note}" if summary else note,
+                        "seen_while_silenced": True,
+                    },
+                )
+            )
+        return replays, covered
+
+    async def _send_owed_changes(  # noqa: PLR0913
+        self,
+        live: list[AnomalyFinding],
+        settled: dict[str, bool],
+        snapshot: FullStateSnapshot,
+        now: datetime,
+        cooldown_type: timedelta,
+        cooldown_entity: timedelta,
+        *,
+        explain_enabled: bool,
+        trigger_source: str,
+    ) -> None:
+        """
+        Send the change alerts owed from level 0, once the level has risen.
+
+        Each stays owed until one reaches the user or is stopped for good (a
+        snooze, triage, policy, or an exclusion added since): sent here, or
+        settled with the live finding that still reports it (#799).
+        """
+        owed = self._suppression.state.owed_change_alerts
+        if not owed or self._is_passive():
+            return
+        replays, covered = self._owed_replays(live)
+        done = [aid for aid, live_id in covered.items() if settled.get(live_id)]
+        kept = (
+            self._filter_excluded_findings(replays)
+            if self._rule_entity_exclusions
+            else replays
+        )
+        kept_ids = {f.anomaly_id for f in kept}
+        done.extend(f.anomaly_id for f in replays if f.anomaly_id not in kept_ids)
+        for finding in kept:
+            delivered = await self._dispatch_item(
+                finding,
+                snapshot,
+                now,
+                cooldown_type,
+                cooldown_entity,
+                explain_enabled,
+                trigger_source=trigger_source,
+            )
+            if delivered or self._last_dispatch_reason in _FINAL_SUPPRESSION_REASONS:
+                done.append(finding.anomaly_id)
+        for anomaly_id in done:
+            owed.pop(anomaly_id, None)
+        await self._suppression.async_save()
 
     async def _passive_dispatch(  # noqa: PLR0913
         self,
@@ -1631,6 +1779,9 @@ class SentinelEngine:
         settled_client_keys: list[str] = []
         # Change rules over the remembered posture whose alert did not go out.
         posture_alerts_held: set[str] = set()
+        # anomaly_id -> whether this run settled it (delivered, or stopped for
+        # good), for the change alerts owed from level 0.
+        settled: dict[str, bool] = {}
         if all_findings:
             # Correlation pass: group related findings from this single cycle.
             # Each call to correlate() is stateless; no cross-run merging occurs.
@@ -1646,6 +1797,11 @@ class SentinelEngine:
                     explain_enabled,
                     trigger_source=trigger_source,
                 )
+                if isinstance(item, AnomalyFinding):
+                    settled[item.anomaly_id] = (
+                        delivered
+                        or self._last_dispatch_reason in _FINAL_SUPPRESSION_REASONS
+                    )
                 if (
                     isinstance(item, AnomalyFinding)
                     and item.type == HaNewAdminOrTokenRule.rule_id
@@ -1680,6 +1836,17 @@ class SentinelEngine:
                     and self._last_dispatch_reason not in _FINAL_SUPPRESSION_REASONS
                 ):
                     posture_alerts_held.add(item.type)
+
+        await self._send_owed_changes(
+            all_findings,
+            settled,
+            snapshot,
+            now,
+            cooldown_type,
+            cooldown_entity,
+            explain_enabled=explain_enabled,
+            trigger_source=trigger_source,
+        )
 
         # Commit after dispatch: the auth change rule compared this run's
         # observation against the inventory as it stood before the run, and a
