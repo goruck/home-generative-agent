@@ -7,6 +7,10 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Opening or closing a cover by voice no longer fails when other device tools rank higher** ([#795](https://github.com/goruck/home-generative-agent/issues/795)). "Open the study shade" could fail with "I couldn't find a suitable tool": the agent offers the model only the few tools that best match the request, and device tools such as a vacuum's start or a media player's unpause could outscore the general "turn on" tool, which is the only one Home Assistant gives an assistant for opening a cover. The model then guessed a tool that does not exist and the call was refused. A request with an English action word ("turn", "open", "close", ...), or a "yes" to the agent offering one ("Want me to open the Study Shade?"), now always offers the turn on and turn off tools, alongside what the ranking chose. Requests in other languages, and replies such as "the left one", still rely on the ranking. A tool you excluded is still never offered.
+
 ### Changed
 
 - The model-provider libraries are no longer pinned to one exact version each: `langchain-openai`, `langchain-anthropic` and `langchain-ollama` accept any 1.x release (`langchain-ollama` from 0.3.10), `langchain-google-genai` any 3.x from 3.1.0, and the `anthropic` SDK anything from 0.125.0 below 2. When a Home Assistant release moved a library these depend on, such as `openai` in 2026.10, an exact pin could not be installed next to it and the integration failed to set up for everyone until a new release shipped (#735). Home Assistant can now pick a compatible release on its own. A fresh install, or the reinstall that follows a Home Assistant update, gets the newest release in each range: today `langchain-openai` 1.7.2, `langchain-anthropic` 1.7.6 with `anthropic` 1.15.0, `langchain-ollama` 1.1.0 and `langchain-google-genai` 3.2.0. The test suite runs against the newest releases every day.
