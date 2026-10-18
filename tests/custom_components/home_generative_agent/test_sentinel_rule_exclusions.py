@@ -60,6 +60,10 @@ class DummySuppression(SuppressionManager):
 class DummyNotifier:
     """Notification dispatcher stub."""
 
+    def set_silence_check(self, check: object) -> None:
+        """Accept the engine's level-0 check; unused by this stub."""
+        del check
+
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 

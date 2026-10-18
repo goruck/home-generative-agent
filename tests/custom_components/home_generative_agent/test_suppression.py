@@ -498,3 +498,24 @@ def test_presence_grace_matches_motion_while_away_template() -> None:
     )
     assert decision.suppress
     assert decision.reason_code == SUPPRESSION_REASON_PRESENCE_GRACE
+
+
+def test_a_device_cooldown_with_no_device_cools_the_type() -> None:
+    from custom_components.home_generative_agent.sentinel.suppression import (  # noqa: PLC0415
+        register_device_cooldown,
+    )
+
+    state = SuppressionState()
+    finding = AnomalyFinding(
+        anomaly_id="x",
+        type="network_router_update_pending",
+        severity="low",
+        confidence=0.9,
+        triggering_entities=[],
+        evidence={},
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+    register_device_cooldown(state, finding, dt_util.utcnow())
+    assert "network_router_update_pending" in state.last_by_type
+    assert state.last_by_entity == {}

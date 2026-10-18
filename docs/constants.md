@@ -319,7 +319,7 @@ This document covers the named constants that affect integration behaviour, orga
 
 | Constant | Config key | Default | Purpose |
 |---|---|---|---|
-| `RECOMMENDED_SENTINEL_AUTONOMY_LEVEL` | `sentinel_autonomy_level` | `1` | `0` = passive (no notifications); `1` = notify only; `2`/`3` = reserved for automatic actions, which the settings below would enable but which are not in the options yet. Set in Sentinel Advanced setup |
+| `RECOMMENDED_SENTINEL_AUTONOMY_LEVEL` | `sentinel_autonomy_level` | `1` | `0` = passive (no finding alerts or daily digest; baseline and setup notices still sent); `1` = notify only; `2`/`3` = reserved for automatic actions, which the settings below would enable but which are not in the options yet. Set in Sentinel Advanced setup |
 | `RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES` | `sentinel_runtime_override_ttl_minutes` | `60` | How long a runtime autonomy-level override lasts before reverting to the configured value |
 | `RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE` | `sentinel_require_pin_for_level_increase` | `False` | Require the Sentinel PIN to increase autonomy level via the `sentinel_set_autonomy_level` service |
 

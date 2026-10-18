@@ -53,6 +53,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS,
     DATA_QUALITY_FRESH,
+    DATA_QUALITY_NOT_EVALUATED,
     DATA_QUALITY_STALE,
     DATA_QUALITY_UNAVAILABLE,
     RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
@@ -189,15 +190,15 @@ class SentinelExecutionService:
         if autonomy_level < _MIN_AUTO_EXECUTE_LEVEL:
             return ActionPolicyResult(
                 action_policy_path=ACTION_POLICY_PROMPT_USER,
-                data_quality=DATA_QUALITY_FRESH,
+                data_quality=DATA_QUALITY_NOT_EVALUATED,
                 data_quality_details={},
                 execution_id=None,
                 block_reason="autonomy_level_below_2",
             )
 
-        # Auto-execution off: nothing to decide, the user is notified as at
-        # level 1. Checked before data quality so that levels 2 and 3 drop no
-        # finding while no action can run (#783).
+        # 2. Auto-execution gate. Off: nothing to decide, the user is notified
+        # as at level 1. Checked before data quality so that levels 2 and 3
+        # drop no finding while no action can run (#783).
         auto_enabled = bool(
             self._options.get(
                 CONF_SENTINEL_AUTO_EXECUTION_ENABLED,
@@ -207,13 +208,13 @@ class SentinelExecutionService:
         if not auto_enabled:
             return ActionPolicyResult(
                 action_policy_path=ACTION_POLICY_PROMPT_USER,
-                data_quality=DATA_QUALITY_FRESH,
+                data_quality=DATA_QUALITY_NOT_EVALUATED,
                 data_quality_details={},
                 execution_id=None,
                 block_reason="auto_execution_disabled",
             )
 
-        # 2. Data quality gate.
+        # 3. Data quality gate.
         dq, dq_details = self._compute_data_quality(finding, snapshot, now)
         if dq == DATA_QUALITY_UNAVAILABLE:
             high_sev = finding.severity == "high"
@@ -234,7 +235,7 @@ class SentinelExecutionService:
                 block_reason="data_quality_stale",
             )
 
-        # 3. Sensitivity gate.
+        # 4. Sensitivity gate.
         if finding.is_sensitive:
             return ActionPolicyResult(
                 action_policy_path=ACTION_POLICY_HANDOFF,
@@ -341,15 +342,15 @@ class SentinelExecutionService:
         if autonomy_level < _MIN_AUTO_EXECUTE_LEVEL:
             return ActionPolicyResult(
                 action_policy_path=ACTION_POLICY_PROMPT_USER,
-                data_quality=DATA_QUALITY_FRESH,
+                data_quality=DATA_QUALITY_NOT_EVALUATED,
                 data_quality_details={},
                 execution_id=None,
                 block_reason="autonomy_level_below_2",
             )
 
-        # As in evaluate(), but canary mode reports what would run whether or
-        # not live execution is on, so a dry-run review needs no switch that
-        # could act.
+        # 2. Auto-execution gate. As in evaluate(), but canary mode reports
+        # what would run whether or not live execution is on, so a dry-run
+        # review needs no switch that could act.
         auto_enabled = bool(
             self._options.get(
                 CONF_SENTINEL_AUTO_EXECUTION_ENABLED,
@@ -365,13 +366,13 @@ class SentinelExecutionService:
         if not auto_enabled and not canary_mode:
             return ActionPolicyResult(
                 action_policy_path=ACTION_POLICY_PROMPT_USER,
-                data_quality=DATA_QUALITY_FRESH,
+                data_quality=DATA_QUALITY_NOT_EVALUATED,
                 data_quality_details={},
                 execution_id=None,
                 block_reason="auto_execution_disabled",
             )
 
-        # 2. Data quality gate.
+        # 3. Data quality gate.
         dq, dq_details = self._compute_data_quality(finding, snapshot, now)
         if dq == DATA_QUALITY_UNAVAILABLE:
             high_sev = finding.severity == "high"
@@ -392,7 +393,7 @@ class SentinelExecutionService:
                 block_reason="data_quality_stale",
             )
 
-        # 3. Sensitivity gate.
+        # 4. Sensitivity gate.
         if finding.is_sensitive:
             return ActionPolicyResult(
                 action_policy_path=ACTION_POLICY_HANDOFF,
@@ -543,7 +544,7 @@ class SentinelExecutionService:
         return DATA_QUALITY_FRESH, details
 
     # ---------------------------------------------------------------------- #
-    # Allowlist
+    # Action gate
     # ---------------------------------------------------------------------- #
 
     def _actions_block_reason(self, finding: AnomalyFinding) -> str | None:

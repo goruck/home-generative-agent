@@ -221,6 +221,7 @@ from .const import (
     SENTINEL_AUTONOMY_LEVELS,
     SIGNAL_HGA_NEW_LATEST,
     SIGNAL_HGA_RECOGNIZED,
+    SIGNAL_SENTINEL_RUN_COMPLETE,
     SIGNAL_TOOL_INDEX_UPDATED,
     SUBENTRY_TYPE_DATABASE,
     SUBENTRY_TYPE_FEATURE,
@@ -4070,6 +4071,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             return {"status": "unavailable", "entry_id": entry.entry_id}
 
         sentinel.set_autonomy_level(entry.entry_id, level, pin=pin)
+        # Show the new level on the health sensor now, not after the next run:
+        # a level 0 that silences Sentinel must be visible at once (#783).
+        async_dispatcher_send(hass, SIGNAL_SENTINEL_RUN_COMPLETE)
         return {"status": "ok", "entry_id": entry.entry_id, "level": level}
 
     _register_entry_service(

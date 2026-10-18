@@ -67,12 +67,14 @@ from custom_components.home_generative_agent.sentinel.proposal_templates import 
     NETWORK_TEMPLATES,
 )
 from custom_components.home_generative_agent.sentinel.rules.network_common import (
+    CHANGE_ALERT_RULE_TYPES,
     NETWORK_RULE_TYPES,
 )
 from custom_components.home_generative_agent.sentinel.suppression import (
     SUPPRESSION_REASON_NOT_SUPPRESSED,
     record_cooldown_feedback,
     register_snooze,
+    resolve_prompt,
 )
 from custom_components.home_generative_agent.snapshot.network import sanitize_label
 
@@ -207,6 +209,8 @@ class SentinelNotifier:
         self._digest_unsub: Callable[[], None] | None = None
         # Task spawned by the daily digest callback; kept so stop() can cancel it.
         self._digest_task: asyncio.Task[None] | None = None
+        # True while Sentinel is at autonomy level 0 (set by the engine).
+        self._silenced: Callable[[], bool] = lambda: False
 
     # ---------------------------------------------------------------------- #
     # Lifecycle
@@ -366,6 +370,7 @@ class SentinelNotifier:
                 len(self._notification_times) >= _BATCH_RATE_LIMIT
                 and not also_line
                 and not canary_line
+                and finding.type not in CHANGE_ALERT_RULE_TYPES
             ):
                 # Rate limit exceeded — buffer this finding.  Hold the redacted
                 # explanation, never the raw one: the flush discards it today,
@@ -489,6 +494,16 @@ class SentinelNotifier:
             self._pending_always_snooze.pop(anomaly_id, None)
             LOGGER.debug("Permanent snooze cancelled for %s.", anomaly_id)
 
+    def set_silence_check(self, check: Callable[[], bool]) -> None:
+        """
+        Set what says Sentinel is at autonomy level 0 (#783).
+
+        The engine stops new alerts at level 0 itself; this covers what the
+        notifier sends on its own clock: a batch held before level 0 was set,
+        and the daily digest of alerts sent earlier that day.
+        """
+        self._silenced = check
+
     @callback
     def _async_flush_batch(self, _now: Any = None) -> None:
         """Flush held batch of non-high-severity notifications as a single summary."""
@@ -496,6 +511,18 @@ class SentinelNotifier:
         held = self._held_batch[:]
         self._held_batch.clear()
         if not held:
+            return
+        if self._silenced():
+            # Counted as sent when they were held, so say what was dropped,
+            # and clear their prompts: nothing was pushed to answer (#783).
+            LOGGER.warning(
+                "Sentinel autonomy level 0: dropped %d held alerts (%s).",
+                len(held),
+                ", ".join(sorted({finding.type for finding, _msg, _svc in held})),
+            )
+            for finding, _msg, _svc in held:
+                resolve_prompt(self._suppression.state, finding.anomaly_id)
+            self._hass.async_create_task(self._suppression.async_save())
             return
 
         count = len(held)
@@ -559,6 +586,9 @@ class SentinelNotifier:
     async def _async_run_daily_digest(self) -> None:
         """Fetch the last 24 hours of notified findings and push a summary."""
         if self._audit_store is None:
+            return
+        if self._silenced():
+            LOGGER.debug("Sentinel is at autonomy level 0; no daily digest.")
             return
 
         cutoff = dt_util.utcnow() - timedelta(hours=24)

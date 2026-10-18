@@ -552,6 +552,55 @@ def register_finding(
         per_entity[finding.type] = iso
 
 
+def register_device_cooldown(
+    state: SuppressionState, finding: AnomalyFinding, now: datetime
+) -> None:
+    """
+    Start a finding's cooldown for its own devices only.
+
+    For a finding held at autonomy level 0 (#783): a different device with a
+    finding of the same type still alerts once the level rises. A finding
+    with no device falls back to its type.
+    """
+    iso = dt_util.as_utc(now).isoformat()
+    if not finding.triggering_entities:
+        state.last_by_type[finding.type] = iso
+        return
+    for entity_id in finding.triggering_entities:
+        state.last_by_entity.setdefault(entity_id, {})[finding.type] = iso
+
+
+def cooldown_stamps(
+    state: SuppressionState, finding: AnomalyFinding
+) -> tuple[str | None, dict[str, str | None]]:
+    """Return a finding's type and per-device cooldown stamps, to restore."""
+    return state.last_by_type.get(finding.type), {
+        entity_id: state.last_by_entity.get(entity_id, {}).get(finding.type)
+        for entity_id in finding.triggering_entities
+    }
+
+
+def restore_cooldown_stamps(
+    state: SuppressionState,
+    finding: AnomalyFinding,
+    stamps: tuple[str | None, dict[str, str | None]],
+) -> None:
+    """Put back the stamps ``cooldown_stamps`` read, undoing a registration."""
+    by_type, by_entity = stamps
+    if by_type is None:
+        state.last_by_type.pop(finding.type, None)
+    else:
+        state.last_by_type[finding.type] = by_type
+    for entity_id, stamp in by_entity.items():
+        per_entity = state.last_by_entity.setdefault(entity_id, {})
+        if stamp is None:
+            per_entity.pop(finding.type, None)
+            if not per_entity:
+                state.last_by_entity.pop(entity_id, None)
+        else:
+            per_entity[finding.type] = stamp
+
+
 def register_prompt(
     state: SuppressionState, finding: AnomalyFinding, now: datetime
 ) -> None:

@@ -143,6 +143,10 @@ class NoopAsyncEngine:
 class NoopNotifier(NoopAsyncStore):
     """Notifier stand-in."""
 
+    def set_silence_check(self, check: object) -> None:
+        """Accept the engine's level-0 check; unused by this stub."""
+        del check
+
 
 class NoopRuleRegistry(NoopAsyncStore):
     """Rule registry stand-in."""

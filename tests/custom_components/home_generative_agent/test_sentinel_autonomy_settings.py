@@ -129,6 +129,15 @@ def test_an_allowlisted_safe_action_runs() -> None:
         # Starts configuration whose steps are not read here.
         (["script.turn_on"], ["script"], ["script.anything"]),
         (["automation.trigger"], ["automation"], ["automation.anything"]),
+        # The generic domain on an alarm panel, or on a script.
+        (
+            ["homeassistant.toggle"],
+            ["homeassistant"],
+            ["alarm_control_panel.home"],
+        ),
+        (["homeassistant.turn_on"], ["homeassistant"], ["script.open_garage"]),
+        # One critical action in a list holds the whole finding.
+        (["light.turn_off", "lock.unlock"], ["light", "lock"], ["lock.front_door"]),
     ],
 )
 def test_a_critical_action_never_runs_whatever_the_allowlist(
@@ -584,3 +593,95 @@ async def test_the_form_opens_with_an_unreadable_duration(
     }
     assert suggested[CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES] == 60
     schema(suggested)
+
+
+def test_data_quality_is_not_claimed_when_it_was_not_checked() -> None:
+    """With no action to decide, the audit says data quality was not read."""
+    svc = SentinelExecutionService({CONF_SENTINEL_AUTO_EXECUTION_ENABLED: False})
+    finding = _make_finding(severity="medium", triggering_entities=["sensor.gone"])
+    snapshot = _make_snapshot(entity_id="lock.front_door", last_changed=_RECENT)
+    for level in (1, 2):
+        for evaluate in (svc.evaluate, svc.evaluate_canary):
+            result = evaluate(finding, snapshot, level, _NOW)
+            assert result.data_quality == "not_evaluated", level
+
+
+@pytest.mark.asyncio
+async def test_basic_setup_keeps_the_override_duration(hass: HomeAssistant) -> None:
+    """The duration is the user's choice too: a Basic re-run keeps it."""
+    existing = DummySubentry(
+        "sent1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {CONF_SENTINEL_ENABLED: True, CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES: 600},
+    )
+    entry = DummyEntry()
+    entry.subentries[existing.subentry_id] = existing
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+    updates: list[Any] = []
+    flow.async_update_and_abort = lambda *_a, **kw: (  # type: ignore[assignment]
+        updates.append(kw) or {"type": "abort", "reason": "reconfigure_successful"}
+    )
+    await flow.async_step_setup_mode({"setup_mode": "basic"})
+    await flow.async_step_basic_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_DAILY_DIGEST_ENABLED: False,
+            CONF_SENTINEL_DAILY_DIGEST_TIME: "08:00:00",
+        }
+    )
+    assert updates[0]["data"][CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES] == 600
+
+
+@pytest.mark.asyncio
+async def test_basic_setup_keeps_an_older_installs_duration(
+    hass: HomeAssistant,
+) -> None:
+    existing = DummySubentry(
+        "sent1", SUBENTRY_TYPE_SENTINEL, "Sentinel", {CONF_SENTINEL_ENABLED: True}
+    )
+    entry = DummyEntry(options={CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES: 240})
+    entry.subentries[existing.subentry_id] = existing
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+    updates: list[Any] = []
+    flow.async_update_and_abort = lambda *_a, **kw: (  # type: ignore[assignment]
+        updates.append(kw) or {"type": "abort", "reason": "reconfigure_successful"}
+    )
+    await flow.async_step_setup_mode({"setup_mode": "basic"})
+    await flow.async_step_basic_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_DAILY_DIGEST_ENABLED: False,
+            CONF_SENTINEL_DAILY_DIGEST_TIME: "08:00:00",
+        }
+    )
+    assert updates[0]["data"][CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES] == 240
+
+
+@pytest.mark.asyncio
+async def test_the_form_shows_legacy_values_as_they_run(hass: HomeAssistant) -> None:
+    """
+    A legacy level 0.0 runs as 0 and a duration "5" as five minutes.
+
+    The form shows them so, so saving it unchanged changes nothing.
+    """
+    existing = DummySubentry(
+        "sent1", SUBENTRY_TYPE_SENTINEL, "Sentinel", {CONF_SENTINEL_ENABLED: True}
+    )
+    entry = DummyEntry(
+        options={
+            CONF_SENTINEL_AUTONOMY_LEVEL: 0.0,
+            CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES: "5",
+        }
+    )
+    entry.subentries[existing.subentry_id] = existing
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+    form = await flow.async_step_settings()
+    schema = cast("Any", form).get("data_schema")
+    suggested = {
+        key.schema: key.description["suggested_value"]
+        for key in schema.schema
+        if key.description and "suggested_value" in key.description
+    }
+    assert suggested[CONF_SENTINEL_AUTONOMY_LEVEL] == "0"
+    assert suggested[CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES] == 5

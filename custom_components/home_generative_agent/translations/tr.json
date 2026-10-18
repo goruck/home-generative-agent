@@ -388,7 +388,7 @@
     },
     "sentinel_autonomy_level": {
       "options": {
-        "0": "0 – Pasif (bildirim yok)",
+        "0": "0 – Pasif (bulgu uyarısı yok)",
         "1": "1 – Bildir (varsayılan)",
         "2": "2 – Bildir (otomatik eylemler: ileride)",
         "3": "3 – Bildir (otomatik eylemler: ileride)"

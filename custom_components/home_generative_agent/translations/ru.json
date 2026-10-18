@@ -388,7 +388,7 @@
     },
     "sentinel_autonomy_level": {
       "options": {
-        "0": "0 – Passive (no notifications)",
+        "0": "0 – Passive (no finding alerts)",
         "1": "1 – Notify (default)",
         "2": "2 – Notify (automatic actions: future)",
         "3": "3 – Notify (automatic actions: future)"

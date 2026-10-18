@@ -76,6 +76,10 @@ class DummySuppression(SuppressionManager):
 class DummyNotifier:
     """Notifier stub recording findings."""
 
+    def set_silence_check(self, check: object) -> None:
+        """Accept the engine's level-0 check; unused by this stub."""
+        del check
+
     def __init__(self) -> None:
         self.calls: list[Any] = []
 
@@ -907,3 +911,67 @@ async def test_on_demand_audit_reports_inventory_counts(
     }
     # The audit never commits the inventory.
     assert inventory.diff([_radio_device("c")], []).new_device_keys == ["zigbee:c"]
+
+
+@pytest.mark.asyncio
+async def test_a_new_device_seen_at_level_zero_alerts_when_the_level_rises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Level 0 holds a change alert; it is not lost (#783).
+
+    The device is owed until an alert reaches the user, as a new admin or
+    token already is, so it alerts once the level is raised.
+    """
+    inventory = _memory_inventory()
+    await inventory.async_commit([_radio_device("a")], NOW)
+    devices = [_radio_device("a"), _radio_device("b", "New Plug")]
+    snapshot = _snapshot(radio={"devices": devices, "new_devices": ["zigbee:b"]})
+    hass, _calls = _service_recorder()
+    engine, _ = _engine(
+        monkeypatch,
+        snapshot,
+        hass=hass,
+        network_inventory=inventory,
+        options={"sentinel_autonomy_level": 0},
+    )
+    engine._entry_id = "passive-entry"
+    await engine._timed_run()
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    assert notifier.calls == []
+    assert inventory.diff(devices, []).new_device_keys == ["zigbee:b"]
+
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert [f.type for f in notifier.calls] == ["radio_new_device_joined"]
+    assert inventory.diff(devices, []).new_device_keys == []
+
+
+@pytest.mark.asyncio
+async def test_a_held_change_is_recorded_once_not_every_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """While it is owed at level 0, a change is audited once per cooldown."""
+    inventory = _memory_inventory()
+    await inventory.async_commit([_radio_device("a")], NOW)
+    devices = [_radio_device("a"), _radio_device("b", "New Plug")]
+    snapshot = _snapshot(radio={"devices": devices, "new_devices": ["zigbee:b"]})
+    hass, _calls = _service_recorder()
+    engine, _ = _engine(
+        monkeypatch,
+        snapshot,
+        hass=hass,
+        network_inventory=inventory,
+        options={"sentinel_autonomy_level": 0, "sentinel_cooldown_minutes": 30},
+    )
+    engine._entry_id = "passive-entry"
+    audit = cast("DummyAudit", cast("Any", engine)._audit_store)
+    await engine._timed_run()
+    await engine._timed_run()
+    held = [
+        c
+        for c in audit.calls
+        if c.get("suppression_reason_code") == "autonomy_passive"
+        and c["finding"].type == "radio_new_device_joined"
+    ]
+    assert len(held) == 1
