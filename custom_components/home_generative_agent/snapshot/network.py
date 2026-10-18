@@ -682,7 +682,9 @@ class HaNativeInputs:
     addons: list[AddonInput] | None = None
     automations: list[AutomationInput] | None = None
     # The Critical Action rules extended to device classes, names and groups
-    # (#773), read with `hass`; None falls back to the configured rules.
+    # (#773), read with `hass`. None when no automation has a public webhook
+    # (nothing to screen) or extending failed; the configured rules are then
+    # used.
     critical_actions: list[dict[str, str]] | None = None
     # Conversation engines used by Assist pipelines that this integration's
     # Critical Action PIN does not cover (built-in agent, other LLM agents).
@@ -1059,9 +1061,22 @@ def _collect_discovery(
 
 
 def _collect_critical_actions(
-    hass: HomeAssistant, context: NetworkBuildContext
+    hass: HomeAssistant,
+    context: NetworkBuildContext,
+    automations: Sequence[AutomationInput] | None,
 ) -> list[dict[str, str]] | None:
-    """Return the rules the add_automation gate applies, as it extends them."""
+    """
+    Return the rules the add_automation gate applies, as it extends them.
+
+    Read only for the public webhook automations the adapter screens with
+    them (`ha_native_adapter`, same `automation_has_public_webhook` test;
+    keep the two in step); with none, extending would read every entity for
+    nothing.
+    """
+    if not automations or not any(
+        automation_has_public_webhook(a.config) for a in automations
+    ):
+        return None
     try:
         policy = resolve_critical_action_policy(context.options or {})
         return expand_critical_rules(hass, policy.critical_actions)
@@ -1085,6 +1100,7 @@ async def async_collect_ha_native_inputs(  # noqa: PLR0913
         auth = await async_collect_auth_observation(hass, context.pseudonymizer)
     unconfigured, ignored = _collect_discovery(hass)
     sensitive_ids = [e["entity_id"] for e in entities if is_sensitive_entity(e)]
+    automations = _collect_automations(hass)
     return HaNativeInputs(
         now=now,
         auth=auth,
@@ -1094,8 +1110,8 @@ async def async_collect_ha_native_inputs(  # noqa: PLR0913
         http=_collect_http(hass),
         trusted_networks_bypass_login=_collect_auth_providers(hass),
         addons=_collect_addons(hass),
-        automations=_collect_automations(hass),
-        critical_actions=_collect_critical_actions(hass, context),
+        automations=automations,
+        critical_actions=_collect_critical_actions(hass, context, automations),
         assist_agents_outside_pin=_collect_assist_agents(hass),
         discovered_unconfigured=unconfigured,
         discovered_ignored=ignored,

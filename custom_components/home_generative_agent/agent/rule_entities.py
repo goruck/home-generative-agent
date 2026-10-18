@@ -8,24 +8,30 @@ their own id:
 * **An entity whose device class is the word.** A cover whose device class is
   ``garage`` but whose id is ``cover.msg100_abc`` opens a garage door. The
   device class must equal the word, so a rule for ``door`` does not reach
-  device class ``garage``.
+  device class ``garage``. The class the user set ("Show as") and the
+  integration's own both count: a garage opener shown as a blind is held.
 * **An entity named with the word.** A cover with no device class, id
   ``cover.shelly1_abc`` and name "Garage Door", which "open the garage door"
   finds by its name. The word, or its plural, must have no letter next to it
   in the friendly name, the registry or integration name, an alias, or the
   device's name: "Driveway Gates" and "Gate1" match ``gate``, "Indoor Blinds"
-  does not match ``door``. A cover whose device class is a window covering is
-  not matched by name ("French Door Blinds"). A word written like an id
+  does not match ``door``. A cover its integration classes as a window
+  covering is not matched by name ("French Door Blinds"); a user's "Show as"
+  does not turn the name match off. A word written like an id
   (``garage_door``) matches "Garage Door". Compound words ("GarageDoor")
   and names in other languages are not read; device class or a rule naming
   the id covers those.
 * **A group holding a matching entity.** Opening ``cover.all_covers``, or a
   call on an old-style ``group.*``, acts on every member, the garage door
   included. Groups of groups are followed to any depth. A member matches by
-  the ways above, or by the word starting its id or following ``_`` or
-  ``.`` in it (``cover.garage_door``, not ``cover.outdoor_awning``). A member
+  the ways above, or by the word anywhere in its id, as a direct call on it
+  is matched (``cover.backdoor``, and so ``cover.outdoor_awning`` too). A member
   Home Assistant has not set up or registered yet could be anything, so its
-  groups are held.
+  groups are held. A copy made for an old-style ``group.*`` keeps the rule's
+  domain, so it holds ``cover.open_cover`` aimed at the group. A call in the
+  ``group`` or ``homeassistant`` domain on it is not matched here: in an
+  automation it is held as an unresolved target (``automation_pin``), and
+  Home Assistant refuses HassTurnOn on it (the group domain has no turn_on).
 
 ``expand_critical_rules`` adds, for each such entity, a copy of the rule that
 matches that entity id exactly (``CRITICAL_RULE_EXACT_ENTITY``). Every screen
@@ -37,19 +43,23 @@ door does not hold ``cover.awning``.
 Every check counts entities that are not loaded or not available, because an
 automation the agent writes runs later. An entity only in the entity registry
 is read from it. One not set up yet (no state, or the placeholder Home
-Assistant restores at startup) in the rule's domain with no device class is
-held, since it could be a group whose members cannot be seen yet; a disabled
-one is not, since it cannot run. A group's members
-are read from its state (``entity_id``, or ``group_entities`` for MQTT and
-ZHA groups, which Home Assistant writes even while the group is unavailable),
-else from the group helper's config entry. A group helper whose members
-cannot be read is held. Membership and device class are read when the check
-runs: a member added to a group after an automation is written is not
-checked again.
+Assistant restores at startup) in the rule's domain is held unless its
+integration classes it as a window covering, since it could be a group whose
+members cannot be seen yet; a disabled one is not, since it cannot run. An
+entity that cannot be read is held the same way and logged, so one bad entity
+does not fail every call.
+
+A group's members are read from its state (``entity_id``, or
+``group_entities`` for MQTT and ZHA groups, which Home Assistant writes even
+while the group is unavailable), else from the group helper's config entry. A
+group helper whose members cannot be read is held. Membership and device
+class are read when the check runs: a member added to a group after an
+automation is written is not checked again.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import TYPE_CHECKING, Any, cast
 
@@ -64,6 +74,8 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
 from .helpers import CRITICAL_RULE_EXACT_ENTITY
+
+LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -100,23 +112,27 @@ def _plain(text: str) -> str:
 
 
 class _EntityIndex:
-    """Every entity's names, device class and group membership, read once."""
+    """Every entity's names, device classes and group membership, read once."""
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
         registry = er.async_get(hass)
         self._devices = dr.async_get(hass)
-        self.device_class: dict[str, str] = {}
+        # Every class an entity has been given: the one HA reports, the one
+        # the user set ("Show as") and the integration's own. A garage opener
+        # shown as a blind is still a garage opener. Keyed by every entity the
+        # index knows, so its keys are also the "known" set.
+        self.classes: dict[str, set[str]] = {}
         self.names: dict[str, list[str]] = {}
         self.members: dict[str, list[str]] = {}
         self.unreadable_groups: set[str] = set()
         self.unknown: set[str] = set()
         for state in hass.states.async_all():
             entity_id = state.entity_id.lower()
-            self._add(entity_id, registry.async_get(entity_id), state)
+            self._read(entity_id, registry.async_get(entity_id), state)
         for entry in registry.entities.values():
-            if entry.entity_id not in self.device_class:
-                self._add(entry.entity_id, entry, None)
+            if entry.entity_id not in self.classes:
+                self._read(entry.entity_id, entry, None)
         # Member -> the groups holding it, so a match climbs to every group
         # holding it in one pass, however deep the nesting.
         self.holders: dict[str, set[str]] = {}
@@ -124,16 +140,42 @@ class _EntityIndex:
             for member in group_members:
                 self.holders.setdefault(member, set()).add(group_id)
 
+    def _read(
+        self, entity_id: str, entry: er.RegistryEntry | None, state: State | None
+    ) -> None:
+        """Add one entity; one that cannot be read is held, not the whole call."""
+        try:
+            self._add(entity_id, entry, state)
+        except Exception:
+            # Without this, one bad entity fails every guarded call in the
+            # house. It is held instead: it could be anything.
+            LOGGER.exception(
+                "Critical Action PIN: could not read %s; it is held", entity_id
+            )
+            self.classes.setdefault(entity_id, set())
+            self.names.setdefault(entity_id, [])
+            self.unknown.add(entity_id)
+
     def _add(
         self, entity_id: str, entry: er.RegistryEntry | None, state: State | None
     ) -> None:
         attributes: Mapping[str, Any] = state.attributes if state is not None else {}
-        device_class = attributes.get(ATTR_DEVICE_CLASS)
-        if not isinstance(device_class, str) and entry is not None:
-            device_class = entry.device_class or entry.original_device_class
-        self.device_class[entity_id] = (
-            device_class.lower() if isinstance(device_class, str) else ""
+        reported = attributes.get(ATTR_DEVICE_CLASS)
+        given: list[object] = [reported]
+        if entry is not None:
+            given += [entry.device_class, entry.original_device_class]
+        self.classes[entity_id] = {c.lower() for c in given if isinstance(c, str)}
+        # The integration's own class, not the user's "Show as" or YAML
+        # `customize`: only it can say the entity is a window covering, so a
+        # garage door relay shown as a blind keeps its name match. With no
+        # registry entry it is read from the loaded entity; unknown, the name
+        # is read.
+        own = (
+            entry.original_device_class
+            if entry is not None
+            else getattr(self._loaded_entity(entity_id), "device_class", None)
         )
+        window_covering = isinstance(own, str) and own.lower() in _WINDOW_COVERINGS
         names: list[object] = [attributes.get(ATTR_FRIENDLY_NAME)]
         if entry is not None:
             names += [entry.name, entry.original_name, *entry.aliases]
@@ -143,18 +185,20 @@ class _EntityIndex:
                 names += [device.name_by_user, device.name]
         self.names[entity_id] = (
             []
-            if self.device_class[entity_id] in _WINDOW_COVERINGS
+            if window_covering
             else [_plain(name) for name in names if isinstance(name, str)]
         )
         not_loaded = state is None or bool(attributes.get(ATTR_RESTORED))
         if (
             not_loaded
-            and not self.device_class[entity_id]
+            and not window_covering
             and not (entry is not None and entry.disabled)
         ):
             # Not loaded (no state, or the placeholder Home Assistant restores
-            # at startup) and nothing says what it is: it could be a group. A
-            # disabled entity cannot run, so it is not held.
+            # at startup), so its members cannot be seen: unless its
+            # integration says it is a window covering, it could be a group
+            # (an MQTT group classed shutter, say). A disabled entity cannot
+            # run, so it is not held.
             self.unknown.add(entity_id)
         if entity_id.startswith(_NOT_GROUP_DOMAINS):
             return
@@ -173,14 +217,18 @@ class _EntityIndex:
         """Return the integration of an entity, registered or only loaded."""
         if entry is not None:
             return entry.platform
-        # A YAML entity with no unique id has no registry entry. Its domain's
-        # EntityComponent is stored in `hass.data` under the domain (the
-        # component's DATA_COMPONENT key equals it) and knows its platform.
-        component = self._hass.data.get(entity_id.split(".", 1)[0])
-        get_entity = getattr(component, "get_entity", None)
-        entity = get_entity(entity_id) if callable(get_entity) else None
+        entity = self._loaded_entity(entity_id)
         platform = getattr(getattr(entity, "platform", None), "platform_name", None)
         return platform if isinstance(platform, str) else None
+
+    def _loaded_entity(self, entity_id: str) -> object | None:
+        """Return the entity object of a loaded entity with no registry entry."""
+        # A YAML entity with no unique id has no registry entry. Its domain's
+        # EntityComponent is stored in `hass.data` under the domain (the
+        # component's DATA_COMPONENT key equals it) and holds the entity.
+        component = self._hass.data.get(entity_id.split(".", 1)[0])
+        get_entity = getattr(component, "get_entity", None)
+        return get_entity(entity_id) if callable(get_entity) else None
 
     def _helper_members(self, entry: er.RegistryEntry | None) -> list[str]:
         """Return the members a group helper's config entry lists."""
@@ -196,19 +244,20 @@ class _EntityIndex:
         # A word with no letter next to it: "Gate1" and "Barn Doors" match,
         # "Gatekeeper" and "Indoor" do not.
         word = re.compile(rf"(?<![a-z]){re.escape(_plain(match))}(?:e?s)?(?![a-z])")
-        # The word starting an id or a part of it, not inside a longer word.
-        in_id = re.compile(rf"(?<![a-z0-9]){re.escape(match)}")
+        # An id is read as the rule reads a direct call's target: the word
+        # anywhere in it. `cover.backdoor` is held when opened directly, so a
+        # group holding it is held too.
 
         def in_domain(entity_id: str) -> bool:
             return not domain or entity_id.split(".", 1)[0] == domain
 
         matched = {
             entity_id
-            for entity_id, device_class in self.device_class.items()
+            for entity_id in self.classes
             if in_domain(entity_id)
             and (
-                in_id.search(entity_id)
-                or match == device_class
+                match in entity_id
+                or match in self.classes[entity_id]
                 or any(word.search(name) for name in self.names[entity_id])
             )
         }
@@ -217,10 +266,12 @@ class _EntityIndex:
         matched |= {
             member
             for member in self.holders
-            if member not in self.device_class and in_domain(member)
+            if member not in self.classes and in_domain(member)
         }
-        # A group helper whose members cannot be read could hold anything, and
-        # an entity not loaded with no device class could be such a group.
+        # A group helper whose members cannot be read could hold anything; an
+        # entity not loaded (not disabled, and not a window covering by its
+        # integration's class) could be such a group; and one that could not
+        # be read could be anything.
         matched |= {
             entity_id
             for entity_id in self.unreadable_groups | self.unknown
@@ -241,6 +292,11 @@ def expand_critical_rules(
     """Return the rules plus one per entity an ``entity_match`` misses."""
     expanded = [dict(rule) for rule in rules]
     if hass is None or getattr(hass, "states", None) is None:
+        if any(rule.get("entity_match") for rule in expanded):
+            LOGGER.warning(
+                "Critical Action PIN: no Home Assistant instance; covers are "
+                "matched by entity id only"
+            )
         return expanded
     if not any(rule.get("entity_match") for rule in expanded):
         return expanded
