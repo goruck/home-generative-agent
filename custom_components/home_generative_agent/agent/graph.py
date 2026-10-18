@@ -1327,7 +1327,8 @@ async def _append_history_tool(  # noqa: PLR0913
     return candidates if fetched is None else [*candidates, fetched]
 
 
-_ON_OFF_PARTNER = {"HassTurnOn": "HassTurnOff", "HassTurnOff": "HassTurnOn"}
+_TURN_ON_TOOL = "HassTurnOn"
+_ON_OFF_PARTNER = {_TURN_ON_TOOL: "HassTurnOff", "HassTurnOff": _TURN_ON_TOOL}
 
 
 async def _append_on_off_partners(
@@ -1369,6 +1370,39 @@ async def _append_on_off_partners(
         candidates = [*candidates, fetched]
         bound.add((tool["api_id"], partner))
     return candidates
+
+
+async def _append_turn_on_tool(  # noqa: PLR0913
+    candidates: list[RawTool],
+    store: BaseStore,
+    config: RunnableConfig,
+    query: str,
+    allowed_api_ids: set[str],
+    live_tool_ids: set[tuple[str, str]] | None,
+) -> list[RawTool]:
+    """
+    Bind HassTurnOn on an actuation request when ranking left it out (#795).
+
+    HassTurnOn is what opens and closes a cover, turns on a switch and presses
+    a button: Home Assistant offers no cover-specific open tool. The actuation
+    safety leg ranks by similarity and keeps three, so for "open the study
+    shade" device tools (vacuum, media) that scored higher crowded it out, and
+    the model guessed a tool that does not exist. Appended outside the limit
+    like GetLiveContext; `_append_on_off_partners` then binds HassTurnOff.
+    """
+    if not _query_needs_actuation_safety(query) or any(
+        base_tool_name(t["name"]) in _ON_OFF_PARTNER for t in candidates
+    ):
+        return candidates
+    fetched = await _get_tool_by_name(
+        store, config, _TURN_ON_TOOL, allowed_api_ids, live_tool_ids
+    )
+    if fetched is None:
+        return candidates
+    excluded_names = tool_exclusions(config.get("configurable", {}).get("options", {}))
+    if is_tool_excluded(fetched["name"], excluded_names.get(fetched["api_id"], ())):
+        return candidates
+    return [*candidates, fetched]
 
 
 # How many trailing HUMAN turns establish automation-creation context for
@@ -2828,6 +2862,12 @@ async def _retrieve_tools(  # noqa: PLR0915
     # actuation strip: "always included" means always.
     all_candidates = await _append_included_tools(
         all_candidates, store, config, live_tool_ids
+    )
+
+    # 3i. Bind HassTurnOn on an actuation request ranking left it out (#795).
+    # Before 3h, which then binds HassTurnOff with it.
+    all_candidates = await _append_turn_on_tool(
+        all_candidates, store, config, query, allowed_api_ids, live_tool_ids
     )
 
     # 3h. Bind HassTurnOn and HassTurnOff together. After 3e, so an
