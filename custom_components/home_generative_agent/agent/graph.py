@@ -1331,7 +1331,8 @@ async def _append_history_tool(  # noqa: PLR0913
     return candidates if fetched is None else [*candidates, fetched]
 
 
-_ON_OFF_PARTNER = {"HassTurnOn": "HassTurnOff", "HassTurnOff": "HassTurnOn"}
+_TURN_ON_TOOL = "HassTurnOn"
+_ON_OFF_PARTNER = {_TURN_ON_TOOL: "HassTurnOff", "HassTurnOff": _TURN_ON_TOOL}
 
 
 async def _append_on_off_partners(
@@ -1373,6 +1374,61 @@ async def _append_on_off_partners(
         candidates = [*candidates, fetched]
         bound.add((tool["api_id"], partner))
     return candidates
+
+
+async def _append_turn_on_tool(  # noqa: PLR0913
+    candidates: list[RawTool],
+    store: BaseStore,
+    config: RunnableConfig,
+    messages: Sequence[BaseMessage],
+    allowed_api_ids: set[str],
+    live_tool_ids: set[tuple[str, str]] | None,
+) -> list[RawTool]:
+    """
+    Bind HassTurnOn on an actuation request when ranking left it out (#795).
+
+    HassTurnOn is what opens and closes a cover, turns on a switch and presses
+    a button: Home Assistant offers no cover-specific open tool. The actuation
+    safety leg ranks by similarity and keeps three, so for "open the study
+    shade" device tools (vacuum, media) that scored higher crowded it out, and
+    the model guessed a tool that does not exist. Appended outside the limit
+    like GetLiveContext; `_append_on_off_partners` then binds HassTurnOff.
+
+    A "Yes" to "Want me to open the Study Shade?" has no action word, so the
+    agent's offer is checked too. That widens the tool list only and gates
+    nothing, which is why the raw-query rule for intent detectors does not
+    apply here. The offer alone, not the ranking query: that one also carries
+    the user's earlier "is it open?", which reads as a read-only question.
+    """
+    query = _message_text(messages[-1]) if messages else ""
+    wants_action = (
+        _query_needs_actuation_safety(query)
+        or (
+            _is_affirmative_follow_up(query)
+            # Action word only: an offer often opens with the state ("It is
+            # closed."), which the read-only check would take as a question.
+            and bool(re.search(ACTUATION_KEYWORDS_REGEX, _offer_text(messages[:-1])))
+        )
+    )
+    if not wants_action or any(
+        base_tool_name(t["name"]) in _ON_OFF_PARTNER for t in candidates
+    ):
+        return candidates
+    excluded_names = tool_exclusions(config.get("configurable", {}).get("options", {}))
+    # Before the fetch, and by base name: with the live filter off the bare
+    # lookup can return the pre-2026.9 "HassTurnOn" row, which a namespaced
+    # exclusion ("intent__HassTurnOn") would not match by name.
+    excluded_apis = {
+        api_id
+        for api_id, names in excluded_names.items()
+        if any(base_tool_name(n) == _TURN_ON_TOOL for n in names)
+    }
+    fetched = await _get_tool_by_name(
+        store, config, _TURN_ON_TOOL, allowed_api_ids - excluded_apis, live_tool_ids
+    )
+    if fetched is None:
+        return candidates
+    return [*candidates, fetched]
 
 
 # How many trailing HUMAN turns establish automation-creation context for
@@ -2834,7 +2890,19 @@ async def _retrieve_tools(  # noqa: PLR0915
         all_candidates, store, config, live_tool_ids
     )
 
-    # 3h. Bind HassTurnOn and HassTurnOff together. After 3e, so an
+    # 3h. Bind HassTurnOn on an actuation request ranking left it out (#795),
+    # including a "Yes" to the agent's offer. Before 3i, which then binds
+    # HassTurnOff with it.
+    all_candidates = await _append_turn_on_tool(
+        all_candidates,
+        store,
+        config,
+        state["messages"],
+        allowed_api_ids,
+        live_tool_ids,
+    )
+
+    # 3i. Bind HassTurnOn and HassTurnOff together. After 3e, so an
     # always-included one gets its partner too; it dedupes by (api, name).
     all_candidates = await _append_on_off_partners(
         all_candidates, store, config, live_tool_ids

@@ -40,6 +40,7 @@ from custom_components.home_generative_agent.agent.graph import (
     _retrieve_tools,
     _split_query_intents,
 )
+from custom_components.home_generative_agent.agent.helpers import tool_index_key
 from custom_components.home_generative_agent.const import ACTUATION_KEYWORDS_REGEX
 
 if TYPE_CHECKING:
@@ -3728,3 +3729,139 @@ async def test_retrieve_tools_binds_no_on_off_tool_when_neither_ranked() -> None
     )
     assert "intent__HassTurnOn" not in result["tool_routing_map"]
     assert "intent__HassTurnOff" not in result["tool_routing_map"]
+
+
+_COVER_FIELD_TOOLS = (
+    "vacuum__HassVacuumStart",
+    "media_player__HassMediaUnpause",
+    "media_player__HassMediaPlayerUnmute",
+    "intent__HassTurnOn",
+    "intent__HassTurnOff",
+    "homeassistant__GetLiveContext",
+)
+
+
+def _cover_field_store() -> MagicMock:
+    """
+    Rank as the box did for "Turn on Everything" (#795): device tools first.
+
+    HassTurnOn is indexed but never among the hits, so only force-binding can
+    offer it.
+    """
+    hits = []
+    for name, score in (
+        ("vacuum__HassVacuumStart", 0.591),
+        ("media_player__HassMediaUnpause", 0.567),
+        ("media_player__HassMediaPlayerUnmute", 0.545),
+    ):
+        item = _indexed_item(name)
+        item.value["is_actuation"] = True
+        item.score = score
+        hits.append(item)
+    indexed = {
+        tool_index_key("assist", name): _indexed_item(name)
+        for name in _COVER_FIELD_TOOLS
+    }
+    store = MagicMock()
+    store.asearch = AsyncMock(return_value=hits)
+    store.aget = AsyncMock(side_effect=lambda _ns, key: indexed.get(key))
+    return store
+
+
+def _cover_field_config(
+    *, excluded: list[str] | None = None, live: bool = True
+) -> RunnableConfig:
+    options: dict[str, Any] = {
+        "llm_hass_api": ["assist"],
+        "tool_relevance_threshold": 0.15,
+        "tool_retrieval_limit": 5,
+    }
+    if excluded:
+        options["tool_exclusions"] = {"assist": excluded}
+    configurable: dict[str, Any] = {
+        "options": options,
+        "tool_index_ready": True,
+        "langchain_tools": {},
+    }
+    if live:
+        configurable["ha_llm_api"] = _live_llm_api(*_COVER_FIELD_TOOLS)
+    return cast("RunnableConfig", {"configurable": configurable})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "query", ["Open the study shade", "Turn on Everything", "close the garage door"]
+)
+async def test_an_actuation_request_always_offers_turn_on_and_off(
+    query: str,
+) -> None:
+    """Device tools that outrank HassTurnOn no longer crowd it out (#795)."""
+    result = await _retrieve_tools(
+        _query_state(query), _cover_field_config(), store=_cover_field_store()
+    )
+    routed = result["tool_routing_map"]
+    assert "intent__HassTurnOn" in routed
+    assert "intent__HassTurnOff" in routed
+    # Appended past the limit: nothing the ranking chose was evicted.
+    assert "vacuum__HassVacuumStart" in routed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "query", ["What's the weather tomorrow?", "is the garage door open?"]
+)
+async def test_turn_on_is_not_bound_without_an_actuation_request(query: str) -> None:
+    result = await _retrieve_tools(
+        _query_state(query), _cover_field_config(), store=_cover_field_store()
+    )
+    assert "intent__HassTurnOn" not in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_an_excluded_turn_on_is_not_bound() -> None:
+    """The user's per-tool exclusion still wins."""
+    result = await _retrieve_tools(
+        _query_state("Open the study shade"),
+        _cover_field_config(excluded=["intent__HassTurnOn"]),
+        store=_cover_field_store(),
+    )
+    assert "intent__HassTurnOn" not in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_yes_to_an_open_offer_offers_turn_on() -> None:
+    """A "Yes" to the agent's offer carries no action word of its own (#795)."""
+    state = _query_state("Yes")
+    state["messages"] = [
+        HumanMessage(content="Is the study shade open?"),
+        AIMessage(content="It is closed. Want me to open the Study Shade?"),
+        HumanMessage(content="Yes"),
+    ]
+    result = await _retrieve_tools(
+        state, _cover_field_config(), store=_cover_field_store()
+    )
+    assert "intent__HassTurnOn" in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_a_namespaced_exclusion_blocks_the_bare_row_with_live_filter_off() -> (
+    None
+):
+    """
+    With the live filter off, the bare lookup finds the pre-2026.9 row.
+
+    "intent__HassTurnOn" never matches the name "HassTurnOn", so the exclusion
+    is checked by base name before the fetch.
+    """
+    config = _cover_field_config(excluded=["intent__HassTurnOn"], live=False)
+    store = _cover_field_store()
+    stale = _indexed_item("HassTurnOn")
+    store.aget = AsyncMock(
+        side_effect=lambda _ns, key: (
+            stale if key == tool_index_key("assist", "HassTurnOn") else None
+        )
+    )
+    result = await _retrieve_tools(
+        _query_state("Open the study shade"), config, store=store
+    )
+    assert not any(name.endswith("HassTurnOn") for name in result["tool_routing_map"])
