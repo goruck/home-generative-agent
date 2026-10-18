@@ -436,6 +436,14 @@ class NetworkInventory:
                 row["last_seen"] = now_iso
                 changed = True
 
+        # A row kept while its device is away can be settled too: an alert
+        # owed from autonomy level 0 is told after the device left (#799).
+        for key in settled - seen:
+            row = stored_devices.get(key)
+            if row is not None and row.get("alerted", True) is False:
+                row["alerted"] = True
+                changed = True
+
         changed = _prune_unseen(stored_devices, seen, present, now) or changed
 
         announcements = [

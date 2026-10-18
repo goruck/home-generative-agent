@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
@@ -89,6 +89,11 @@ class SuppressionDecision:
     context: dict[str, Any] = field(default_factory=dict)
 
 
+def _mapping(value: object) -> dict[str, Any]:
+    """Return ``value`` if it is a dict, else an empty one (a malformed save)."""
+    return cast("dict[str, Any]", value) if isinstance(value, dict) else {}
+
+
 @dataclass
 class SuppressionState:
     """Persistent suppression state (v5 schema)."""
@@ -109,6 +114,14 @@ class SuppressionState:
     # Incremented by record_cooldown_feedback() on each dismiss/snooze.
     learned_cooldown_multipliers: dict[str, int] = field(default_factory=dict)
 
+    # Change alerts held at autonomy level 0, owed until one reaches the user
+    # even if the change is undone meanwhile (#799): kind -> its findings as
+    # ``AnomalyFinding.as_dict`` saved them (see sentinel/owed.py). Optional
+    # and additive, so the schema version is unchanged: an older build drops
+    # the key, where a version bump would load this file read-only there
+    # (forcing level 0).
+    owed_change_alerts: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SuppressionState:
         """Create suppression state from persisted data."""
@@ -128,6 +141,11 @@ class SuppressionState:
                 k: int(v)
                 for k, v in data.get("learned_cooldown_multipliers", {}).items()
             },
+            owed_change_alerts={
+                str(kind): [dict(f) for f in findings if isinstance(f, dict)]
+                for kind, findings in _mapping(data.get("owed_change_alerts")).items()
+                if isinstance(findings, list)
+            },
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -142,6 +160,10 @@ class SuppressionState:
             "snoozed_until": {k: dict(v) for k, v in self.snoozed_until.items()},
             "presence_grace_until": dict(self.presence_grace_until),
             "learned_cooldown_multipliers": dict(self.learned_cooldown_multipliers),
+            "owed_change_alerts": {
+                kind: [dict(f) for f in findings]
+                for kind, findings in self.owed_change_alerts.items()
+            },
         }
 
 
