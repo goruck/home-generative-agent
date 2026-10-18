@@ -61,7 +61,9 @@ CONF_CRITICAL_ACTIONS = "critical_actions"
 # calls and the contents of LLM-authored automations. An `entity_match` rule
 # also fires when the call's real targets cannot be resolved at check time
 # (an area, device, label, floor, group, registry ID, or template) — see
-# `agent/automation_pin.py`.
+# `agent/automation_pin.py`. Where Home Assistant's state is at hand, an
+# `entity_match` also matches a device class and any group holding a matching
+# entity (`agent/rule_entities.py`, #773).
 RECOMMENDED_CRITICAL_ACTIONS: list[dict[str, str]] = [
     {"domain": "lock", "service": "unlock"},
     {"domain": "lock", "service": "open"},

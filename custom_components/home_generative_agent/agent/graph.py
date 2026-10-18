@@ -137,6 +137,7 @@ from .indirect_pin import (
     service_runs_critical_action,
 )
 from .pin_messages import describe_pending_action, pin_msg
+from .rule_entities import expand_critical_rules
 from .token_counter import count_tokens_cross_provider
 
 if TYPE_CHECKING:
@@ -459,7 +460,10 @@ def _critical_action_guard(
     """Enforce critical-action PIN flow when needed."""
     if not ctx.pin_enabled:
         return None
-    if not _is_critical_action(tool_args, ctx.critical_actions, tool_name, ctx.hass):
+    # A rule naming garage covers also holds one whose device class is garage,
+    # and any group holding one (#773).
+    rules = expand_critical_rules(ctx.hass, ctx.critical_actions)
+    if not _is_critical_action(tool_args, rules, tool_name, ctx.hass):
         return None
     if not ctx.pin_hash or not ctx.pin_salt:
         LOGGER.warning(

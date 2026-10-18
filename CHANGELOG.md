@@ -7,6 +7,10 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Opening a garage door, gate or door cover now asks for the Critical Action PIN however the cover is named** ([#773](https://github.com/goruck/home-generative-agent/issues/773)). The recommended rules looked for `door`, `gate` or `garage` in the cover's entity id only, so a cover whose device class is garage, gate or door but whose id is plain (such as `cover.msg100_abc`) opened with no PIN, and so did a cover group like `cover.all_covers` ("All Covers") holding the garage door, whether the agent opened it directly, by name through "turn on", in a scene it activated, or in an automation it wrote. A rule's `entity_match` now also matches a device class, and any group (cover group or old-style group, nested to any depth) holding a matching entity. Rules you added yourself get the same reach: one for `msg100` now also holds a group containing that cover.
+
 ### Changed
 
 - The model-provider libraries are no longer pinned to one exact version each: `langchain-openai`, `langchain-anthropic` and `langchain-ollama` accept any 1.x release (`langchain-ollama` from 0.3.10), `langchain-google-genai` any 3.x from 3.1.0, and the `anthropic` SDK anything from 0.125.0 below 2. When a Home Assistant release moved a library these depend on, such as `openai` in 2026.10, an exact pin could not be installed next to it and the integration failed to set up for everyone until a new release shipped (#735). Home Assistant can now pick a compatible release on its own. A fresh install, or the reinstall that follows a Home Assistant update, gets the newest release in each range: today `langchain-openai` 1.7.2, `langchain-anthropic` 1.7.6 with `anthropic` 1.15.0, `langchain-ollama` 1.1.0 and `langchain-google-genai` 3.2.0. The test suite runs against the newest releases every day.
