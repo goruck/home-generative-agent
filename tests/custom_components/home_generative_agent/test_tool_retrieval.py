@@ -3768,7 +3768,9 @@ def _cover_field_store() -> MagicMock:
     return store
 
 
-def _cover_field_config(*, excluded: list[str] | None = None) -> RunnableConfig:
+def _cover_field_config(
+    *, excluded: list[str] | None = None, live: bool = True
+) -> RunnableConfig:
     options: dict[str, Any] = {
         "llm_hass_api": ["assist"],
         "tool_relevance_threshold": 0.15,
@@ -3776,17 +3778,14 @@ def _cover_field_config(*, excluded: list[str] | None = None) -> RunnableConfig:
     }
     if excluded:
         options["tool_exclusions"] = {"assist": excluded}
-    return cast(
-        "RunnableConfig",
-        {
-            "configurable": {
-                "options": options,
-                "tool_index_ready": True,
-                "langchain_tools": {},
-                "ha_llm_api": _live_llm_api(*_COVER_FIELD_TOOLS),
-            }
-        },
-    )
+    configurable: dict[str, Any] = {
+        "options": options,
+        "tool_index_ready": True,
+        "langchain_tools": {},
+    }
+    if live:
+        configurable["ha_llm_api"] = _live_llm_api(*_COVER_FIELD_TOOLS)
+    return cast("RunnableConfig", {"configurable": configurable})
 
 
 @pytest.mark.asyncio
@@ -3827,3 +3826,42 @@ async def test_an_excluded_turn_on_is_not_bound() -> None:
         store=_cover_field_store(),
     )
     assert "intent__HassTurnOn" not in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_yes_to_an_open_offer_offers_turn_on() -> None:
+    """A "Yes" to the agent's offer carries no action word of its own (#795)."""
+    state = _query_state("Yes")
+    state["messages"] = [
+        HumanMessage(content="Is the study shade open?"),
+        AIMessage(content="It is closed. Want me to open the Study Shade?"),
+        HumanMessage(content="Yes"),
+    ]
+    result = await _retrieve_tools(
+        state, _cover_field_config(), store=_cover_field_store()
+    )
+    assert "intent__HassTurnOn" in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_a_namespaced_exclusion_blocks_the_bare_row_with_live_filter_off() -> (
+    None
+):
+    """
+    With the live filter off, the bare lookup finds the pre-2026.9 row.
+
+    "intent__HassTurnOn" never matches the name "HassTurnOn", so the exclusion
+    is checked by base name before the fetch.
+    """
+    config = _cover_field_config(excluded=["intent__HassTurnOn"], live=False)
+    store = _cover_field_store()
+    stale = _indexed_item("HassTurnOn")
+    store.aget = AsyncMock(
+        side_effect=lambda _ns, key: (
+            stale if key == tool_index_key("assist", "HassTurnOn") else None
+        )
+    )
+    result = await _retrieve_tools(
+        _query_state("Open the study shade"), config, store=store
+    )
+    assert not any(name.endswith("HassTurnOn") for name in result["tool_routing_map"])
