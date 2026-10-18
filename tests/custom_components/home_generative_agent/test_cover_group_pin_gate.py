@@ -19,12 +19,18 @@ from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.home_generative_agent.agent import graph as graph_module
 from custom_components.home_generative_agent.agent.automation_pin import (
     find_critical_automation_calls,
 )
 from custom_components.home_generative_agent.agent.graph import (
     _is_critical_action,
     _prepare_tool_args,
+)
+from custom_components.home_generative_agent.agent.helpers import (
+    CRITICAL_RULE_EXACT_ENTITY,
+    matches_critical_rule,
+    resolve_critical_action_policy,
 )
 from custom_components.home_generative_agent.agent.indirect_pin import (
     runs_critical_action,
@@ -39,6 +45,7 @@ from custom_components.home_generative_agent.const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
     CONF_CRITICAL_ACTION_PIN_HASH,
     CONF_CRITICAL_ACTION_PIN_SALT,
+    CONF_CRITICAL_ACTIONS,
     RECOMMENDED_CRITICAL_ACTIONS,
 )
 from custom_components.home_generative_agent.core.utils import hash_pin
@@ -245,7 +252,8 @@ async def test_an_entity_already_named_by_the_rule_adds_nothing(
 
 def _reaches(hass: HomeAssistant, rules: Any = RULES) -> set[str]:
     """Return the entity ids the extended rules name beyond the given ones."""
-    return {r["entity_match"] for r in expand_critical_rules(hass, rules)[len(rules) :]}
+    extra = expand_critical_rules(hass, rules)[len(rules) :]
+    return {r[CRITICAL_RULE_EXACT_ENTITY] for r in extra}
 
 
 async def test_a_garage_cover_not_loaded_yet_is_held(hass: HomeAssistant) -> None:
@@ -553,3 +561,157 @@ async def test_the_audit_falls_back_to_the_rules_when_extending_fails(
     )
     ha = ha_native_adapter(inputs, [], context).ha_security
     assert ha["webhook_automations_critical"] == ["automation.open"]
+
+
+async def test_a_disabled_cover_is_not_held_and_holds_no_neighbor(
+    hass: HomeAssistant,
+) -> None:
+    """A disabled leftover cannot run; its id must not hold a similar one."""
+    er.async_get(hass).async_get_or_create(
+        "cover",
+        "test",
+        "old",
+        suggested_object_id="living_room",
+        disabled_by=er.RegistryEntryDisabler.USER,
+    )
+    hass.states.async_set(
+        "cover.living_room_blinds", "closed", {"device_class": "shade"}
+    )
+    hass.states.async_set(
+        "cover.all_blinds",
+        "closed",
+        {"entity_id": ["cover.living_room", "cover.living_room_blinds"]},
+    )
+    rules = expand_critical_rules(hass, RULES)
+    for entity_id in ("cover.living_room_blinds", "cover.all_blinds"):
+        assert not _is_critical_action(
+            _open(entity_id), rules, "mcp__call_service", hass
+        )
+
+
+async def test_a_restored_placeholder_with_no_device_class_is_held(
+    hass: HomeAssistant,
+) -> None:
+    """At startup HA writes `restored` states for entities not set up yet."""
+    hass.states.async_set("cover.mqtt_grp", "unavailable", {"restored": True})
+    hass.states.async_set(
+        "cover.study", "unavailable", {"restored": True, "device_class": "blind"}
+    )
+    reached = _reaches(hass)
+    assert "cover.mqtt_grp" in reached
+    assert "cover.study" not in reached
+
+
+async def test_a_member_ha_does_not_know_holds_its_group(hass: HomeAssistant) -> None:
+    """The member's integration is not set up; its id says nothing."""
+    hass.states.async_set(
+        "cover.all_covers", "closed", {"entity_id": ["cover.msg100_abc"]}
+    )
+    assert "cover.all_covers" in _reaches(hass)
+
+
+@pytest.mark.parametrize(
+    ("name", "device_class", "held"),
+    [
+        ("Gate1", None, True),
+        ("Garage2", None, True),
+        ("Gatekeeper", None, False),
+        ("French Door Blinds", "blind", False),
+        ("Patio Door Shade", "shade", False),
+        ("Garage Door", "shutter", True),
+    ],
+)
+async def test_names_digits_and_window_coverings(
+    hass: HomeAssistant, name: str, device_class: str | None, *, held: bool
+) -> None:
+    attributes = {"friendly_name": name}
+    if device_class:
+        attributes["device_class"] = device_class
+    hass.states.async_set("cover.relay_7", "closed", attributes)
+    assert ("cover.relay_7" in _reaches(hass)) is held
+
+
+@pytest.mark.parametrize("source", ["name_by_user", "entity_name"])
+async def test_a_user_given_name_counts(hass: HomeAssistant, source: str) -> None:
+    config_entry = MockConfigEntry(domain="test")
+    config_entry.add_to_hass(hass)
+    device = dr.async_get(hass).async_get_or_create(
+        config_entry_id=config_entry.entry_id,
+        identifiers={("test", "relay")},
+        name="Relay Board",
+    )
+    entities = er.async_get(hass)
+    entry = entities.async_get_or_create(
+        "cover", "test", "relay", suggested_object_id="relay_1", device_id=device.id
+    )
+    if source == "name_by_user":
+        dr.async_get(hass).async_update_device(device.id, name_by_user="Garage Door")
+    else:
+        entities.async_update_entity(entry.entity_id, name="Garage Door")
+    hass.states.async_set(entry.entity_id, "closed", {"device_class": "damper"})
+    assert "cover.relay_1" in _reaches(hass)
+
+
+async def test_a_rule_made_for_one_entity_matches_only_that_entity(
+    hass: HomeAssistant,
+) -> None:
+    """`cover.a` is held; `cover.awning`, whose id starts the same, is not."""
+    hass.states.async_set("cover.a", "closed", {"device_class": "garage"})
+    hass.states.async_set("cover.awning", "closed", {"device_class": "awning"})
+    rules = expand_critical_rules(hass, RULES)
+    assert _is_critical_action(_open("cover.a"), rules, "mcp__call_service", hass)
+    assert not _is_critical_action(
+        _open("cover.awning"), rules, "mcp__call_service", hass
+    )
+    joined = _open("cover.awning, cover.a")
+    assert _is_critical_action(joined, rules, "mcp__call_service", hass)
+
+
+def test_a_stored_rule_cannot_carry_the_exact_entity_marker() -> None:
+    """A user rule is never narrowed to one entity by the internal key."""
+    stored = [
+        {"domain": "lock", "service": "unlock", CRITICAL_RULE_EXACT_ENTITY: "lock.x"}
+    ]
+    rules = resolve_critical_action_policy(
+        {CONF_CRITICAL_ACTIONS: stored}
+    ).critical_actions
+    assert rules == [{"domain": "lock", "service": "unlock"}]
+    assert matches_critical_rule(
+        domain="lock",
+        service="unlock",
+        entity_ids=["lock.front"],
+        critical_actions=rules,
+    )
+
+
+async def test_a_scene_setting_only_blinds_is_not_held(home: HomeAssistant) -> None:
+    """The scene screen reads the exact rules the same way."""
+    rules = expand_critical_rules(home, RULES)
+    assert not runs_critical_action(home, "scene.open_blinds", rules)
+
+
+async def test_the_gate_fails_closed_when_extending_fails(
+    home: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An error in the extension stops the call; it never runs unchecked."""
+
+    def _fail(*_args: Any) -> list[dict[str, str]]:
+        raise RuntimeError
+
+    monkeypatch.setattr(graph_module, "expand_critical_rules", _fail)
+    ctx = cast(
+        "Any",
+        SimpleNamespace(
+            hass=home,
+            config={"configurable": {"thread_id": "t1"}},
+            critical_actions=RULES,
+            pin_enabled=True,
+            pin_hash="hash",
+            pin_salt="salt",
+            pending_actions={},
+        ),
+    )
+    with pytest.raises(RuntimeError):
+        _prepare_tool_args(
+            "mcp__call_service", _open("cover.all_covers"), ctx, {"id": "c"}
+        )

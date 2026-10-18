@@ -11,30 +11,35 @@ their own id:
   device class ``garage``.
 * **An entity named with the word.** A cover with no device class, id
   ``cover.shelly1_abc`` and name "Garage Door", which "open the garage door"
-  finds by its name. The word, or its plural, must stand alone in the
-  friendly name, the registry or integration name, an alias, or the device's
-  name: "Driveway Gates" matches ``gate`` and "Indoor Blinds" does not match
-  ``door``. A word written like an id (``garage_door``) matches "Garage
-  Door". Compound words ("GarageDoor") and names in other languages are not
-  read; device class or a rule naming the id covers those.
+  finds by its name. The word, or its plural, must have no letter next to it
+  in the friendly name, the registry or integration name, an alias, or the
+  device's name: "Driveway Gates" and "Gate1" match ``gate``, "Indoor Blinds"
+  does not match ``door``. A cover whose device class is a window covering is
+  not matched by name ("French Door Blinds"). A word written like an id
+  (``garage_door``) matches "Garage Door". Compound words ("GarageDoor")
+  and names in other languages are not read; device class or a rule naming
+  the id covers those.
 * **A group holding a matching entity.** Opening ``cover.all_covers``, or a
   call on an old-style ``group.*``, acts on every member, the garage door
   included. Groups of groups are followed to any depth. A member matches by
   the ways above, or by the word starting its id or following ``_`` or
-  ``.`` in it (``cover.garage_door``, not ``cover.outdoor_awning``), even
-  when Home Assistant has not loaded or registered that member yet.
+  ``.`` in it (``cover.garage_door``, not ``cover.outdoor_awning``). A member
+  Home Assistant has not set up or registered yet could be anything, so its
+  groups are held.
 
-``expand_critical_rules`` adds, for each such entity, a copy of the rule whose
-``entity_match`` is that entity's id. Every screen downstream (the tool-call
-gate, intents, scripts, scenes, ``add_automation``) matches on entity ids, so
-each one holds the call without knowing why the entity counts. An id is
-matched as a substring, as the user's own rules are, so ``cover.gate`` also
-holds ``cover.gate_2``: more prompts, never fewer.
+``expand_critical_rules`` adds, for each such entity, a copy of the rule that
+matches that entity id exactly (``CRITICAL_RULE_EXACT_ENTITY``). Every screen
+downstream (the tool-call gate, intents, scripts, scenes, ``add_automation``)
+matches on entity ids through ``rule_entity_matches``, so each one holds the
+call without knowing why the entity counts, and ``cover.a`` being a garage
+door does not hold ``cover.awning``.
 
 Every check counts entities that are not loaded or not available, because an
 automation the agent writes runs later. An entity only in the entity registry
-is read from it, and one in the rule's domain with no device class is held,
-since it could be a group whose members cannot be seen yet. A group's members
+is read from it. One not set up yet (no state, or the placeholder Home
+Assistant restores at startup) in the rule's domain with no device class is
+held, since it could be a group whose members cannot be seen yet; a disabled
+one is not, since it cannot run. A group's members
 are read from its state (``entity_id``, or ``group_entities`` for MQTT and
 ZHA groups, which Home Assistant writes even while the group is unavailable),
 else from the group helper's config entry. A group helper whose members
@@ -52,10 +57,13 @@ from homeassistant.const import (
     ATTR_DEVICE_CLASS,
     ATTR_ENTITY_ID,
     ATTR_FRIENDLY_NAME,
+    ATTR_RESTORED,
     CONF_ENTITIES,
 )
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+
+from .helpers import CRITICAL_RULE_EXACT_ENTITY
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -72,6 +80,10 @@ _GROUP_PLATFORM = "group"
 _NOT_GROUP_DOMAINS = ("script.", "scene.")
 # Characters a name or a rule's word may use between words.
 _SEPARATORS = re.compile(r"[_\-]+")
+# Cover device classes that say the cover is a window covering. Its name is
+# not read for the word: "French Door Blinds" is not a door. `shutter` is not
+# here, since roller garage doors are often classed so.
+_WINDOW_COVERINGS = frozenset({"awning", "blind", "curtain", "shade", "window"})
 
 
 def _text_list(value: object) -> list[str]:
@@ -129,11 +141,20 @@ class _EntityIndex:
                 # An entity named by its device ("Garage Door") has no name
                 # of its own in the registry.
                 names += [device.name_by_user, device.name]
-        self.names[entity_id] = [
-            _plain(name) for name in names if isinstance(name, str)
-        ]
-        if state is None and not self.device_class[entity_id]:
-            # Not loaded and nothing says what it is: it could be a group.
+        self.names[entity_id] = (
+            []
+            if self.device_class[entity_id] in _WINDOW_COVERINGS
+            else [_plain(name) for name in names if isinstance(name, str)]
+        )
+        not_loaded = state is None or bool(attributes.get(ATTR_RESTORED))
+        if (
+            not_loaded
+            and not self.device_class[entity_id]
+            and not (entry is not None and entry.disabled)
+        ):
+            # Not loaded (no state, or the placeholder Home Assistant restores
+            # at startup) and nothing says what it is: it could be a group. A
+            # disabled entity cannot run, so it is not held.
             self.unknown.add(entity_id)
         if entity_id.startswith(_NOT_GROUP_DOMAINS):
             return
@@ -172,7 +193,9 @@ class _EntityIndex:
 
     def reach(self, domain: str, match: str) -> set[str]:
         """Return every entity a rule on ``domain`` with this match reaches."""
-        word = re.compile(rf"\b{re.escape(_plain(match))}(?:e?s)?\b")
+        # A word with no letter next to it: "Gate1" and "Barn Doors" match,
+        # "Gatekeeper" and "Indoor" do not.
+        word = re.compile(rf"(?<![a-z]){re.escape(_plain(match))}(?:e?s)?(?![a-z])")
         # The word starting an id or a part of it, not inside a longer word.
         in_id = re.compile(rf"(?<![a-z0-9]){re.escape(match)}")
 
@@ -189,13 +212,12 @@ class _EntityIndex:
                 or any(word.search(name) for name in self.names[entity_id])
             )
         }
-        # A member no state or registry entry describes is known by its id.
+        # A member no state or registry entry describes (its integration not
+        # set up yet) could be anything a group in the domain could hold.
         matched |= {
             member
             for member in self.holders
-            if member not in self.device_class
-            and in_domain(member)
-            and in_id.search(member)
+            if member not in self.device_class and in_domain(member)
         }
         # A group helper whose members cannot be read could hold anything, and
         # an entity not loaded with no device class could be such a group.
@@ -233,7 +255,7 @@ def expand_critical_rules(
         if key not in reached:
             reached[key] = index.reach(*key)
         extra.extend(
-            {**rule, "entity_match": entity_id}
+            {**rule, CRITICAL_RULE_EXACT_ENTITY: entity_id}
             for entity_id in sorted(reached[key])
             if match not in entity_id
         )
