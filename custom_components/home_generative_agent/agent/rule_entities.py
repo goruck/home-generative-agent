@@ -33,6 +33,14 @@ their own id:
   automation it is held as an unresolved target (``automation_pin``), and
   Home Assistant refuses HassTurnOn on it (the group domain has no turn_on).
 
+A fourth way to the same door is the switch under it (#794). A ``switch_as_x``
+cover or lock is a switch wrapped as one: opening the cover, or unlocking the
+lock, turns the switch on (off when the wrapper inverts it), and ``toggle``
+does either. So a rule that holds opening such a cover, or unlocking such a
+lock, also holds those calls on the switch, and on any group holding it. The
+switch is read from the wrapper's config entry; a template cover that drives
+another device is not followed here (#780).
+
 ``expand_critical_rules`` adds, for each such entity, a copy of the rule that
 matches that entity id exactly (``CRITICAL_RULE_EXACT_ENTITY``). Every screen
 downstream (the tool-call gate, intents, scripts, scenes, ``add_automation``)
@@ -80,6 +88,7 @@ LOGGER = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
+    from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant, State
 
 # MQTT and ZHA group entities list their members here. It is a capability
@@ -92,6 +101,19 @@ _GROUP_PLATFORM = "group"
 _NOT_GROUP_DOMAINS = ("script.", "scene.")
 # Characters a name or a rule's word may use between words.
 _SEPARATORS = re.compile(r"[_\-]+")
+# The integration that wraps a switch as a cover, lock and so on, and the
+# option keys of its config entry. Read as strings: importing the component
+# would make it a dependency.
+_SWITCH_AS_X = "switch_as_x"
+_WRAPPED_ENTITY = "entity_id"
+_WRAPPED_INVERT = "invert"
+# The services that open a cover or unlock a lock, per domain. A wrapper turns
+# its switch on for these (off when inverted); `toggle` on the switch does it
+# either way.
+_OPENING_SERVICES: dict[str, frozenset[str]] = {
+    "cover": frozenset({"open_cover", "open", "toggle", "set_cover_position"}),
+    "lock": frozenset({"unlock", "open", "toggle"}),
+}
 # Cover device classes that say the cover is a window covering. Its name is
 # not read for the word: "French Door Blinds" is not a door. `shutter` is not
 # here, since roller garage doors are often classed so.
@@ -139,6 +161,49 @@ class _EntityIndex:
         for group_id, group_members in self.members.items():
             for member in group_members:
                 self.holders.setdefault(member, set()).add(group_id)
+        # A switch_as_x cover or lock -> (the switch it wraps, inverted).
+        self.wrapped: dict[str, tuple[str, bool]] = {}
+        for config_entry in hass.config_entries.async_entries(_SWITCH_AS_X):
+            self._read_wrapper(registry, config_entry)
+
+    def _read_wrapper(
+        self, registry: er.EntityRegistry, config_entry: ConfigEntry
+    ) -> None:
+        """Record the switch a switch_as_x entry wraps, for its entities."""
+        try:
+            switch_id = er.async_resolve_entity_id(
+                registry, str(config_entry.options.get(_WRAPPED_ENTITY) or "")
+            )
+            invert = bool(config_entry.options.get(_WRAPPED_INVERT))
+            wrappers = [
+                entry.entity_id
+                for entry in er.async_entries_for_config_entry(
+                    registry, config_entry.entry_id
+                )
+                if not entry.disabled
+            ]
+        except Exception:
+            # One bad entry must not fail every guarded call in the house.
+            LOGGER.exception(
+                "Critical Action PIN: could not read switch_as_x entry %s",
+                config_entry.entry_id,
+            )
+            return
+        if not switch_id:
+            return
+        for wrapper in wrappers:
+            self.wrapped[wrapper.lower()] = (switch_id.lower(), invert)
+
+    def climb(self, entity_id: str) -> set[str]:
+        """Return ``entity_id`` and every group holding it, however deep."""
+        found = {entity_id}
+        pending = [entity_id]
+        while pending:
+            for group_id in self.holders.get(pending.pop(), ()):
+                if group_id not in found:
+                    found.add(group_id)
+                    pending.append(group_id)
+        return found
 
     def _read(
         self, entity_id: str, entry: er.RegistryEntry | None, state: State | None
@@ -277,13 +342,44 @@ class _EntityIndex:
             for entity_id in self.unreadable_groups | self.unknown
             if in_domain(entity_id)
         }
-        pending = list(matched)
-        while pending:
-            for group_id in self.holders.get(pending.pop(), ()):
-                if group_id not in matched:
-                    matched.add(group_id)
-                    pending.append(group_id)
-        return matched
+        return {group for entity_id in matched for group in self.climb(entity_id)}
+
+
+def _switch_rules(
+    index: _EntityIndex, rule: Mapping[str, str], reached: set[str] | None
+) -> list[dict[str, str]]:
+    """
+    Return copies of an opening ``rule`` for the switches under its entities.
+
+    ``reached`` is what the rule's ``entity_match`` reaches; None for a rule
+    with none, which covers every entity of its domain.
+    """
+    domain = (rule.get("domain") or "").lower()
+    service = (rule.get("service") or "").lower()
+    opening = _OPENING_SERVICES.get(domain)
+    if opening is None or (service and service not in opening):
+        return []
+    copies: list[dict[str, str]] = []
+    for wrapper, (switch_id, invert) in sorted(index.wrapped.items()):
+        if wrapper.split(".", 1)[0] != domain or (
+            reached is not None and wrapper not in reached
+        ):
+            continue
+        # A rule with no service holds every call on the switch.
+        services = (
+            [""] if not service else ["turn_off" if invert else "turn_on", "toggle"]
+        )
+        copies.extend(
+            {
+                **rule,
+                "domain": target.split(".", 1)[0],
+                "service": switch_service,
+                CRITICAL_RULE_EXACT_ENTITY: target,
+            }
+            for target in sorted(index.climb(switch_id))
+            for switch_service in services
+        )
+    return copies
 
 
 def expand_critical_rules(
@@ -298,7 +394,11 @@ def expand_critical_rules(
                 "matched by entity id only"
             )
         return expanded
-    if not any(rule.get("entity_match") for rule in expanded):
+    if not any(
+        rule.get("entity_match")
+        or (rule.get("domain") or "").lower() in _OPENING_SERVICES
+        for rule in expanded
+    ):
         return expanded
     index = _EntityIndex(hass)
     reached: dict[tuple[str, str], set[str]] = {}
@@ -306,6 +406,7 @@ def expand_critical_rules(
     for rule in expanded:
         match = (rule.get("entity_match") or "").lower()
         if not match:
+            extra.extend(_switch_rules(index, rule, None))
             continue
         key = ((rule.get("domain") or "").lower(), match)
         if key not in reached:
@@ -315,4 +416,8 @@ def expand_critical_rules(
             for entity_id in sorted(reached[key])
             if match not in entity_id
         )
-    return expanded + extra
+        extra.extend(_switch_rules(index, rule, reached[key]))
+    unique: dict[tuple[tuple[str, str], ...], dict[str, str]] = {}
+    for rule in extra:
+        unique.setdefault(tuple(sorted(rule.items())), rule)
+    return expanded + list(unique.values())
