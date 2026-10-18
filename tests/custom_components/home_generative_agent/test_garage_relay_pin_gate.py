@@ -84,21 +84,35 @@ def _held(hass: HomeAssistant, args: dict[str, Any], rules: Any = None) -> bool:
     return _is_critical_action(args, rules, "mcp__call_service", hass)
 
 
-async def test_turning_on_a_garage_relay_is_held(hass: HomeAssistant) -> None:
+async def test_every_call_on_a_garage_relay_is_held(hass: HomeAssistant) -> None:
+    """
+    A momentary relay moves the door whichever way it is switched.
+
+    The wrapper's "on = open" (or inverted) says nothing of the wiring.
+    """
     _wrap(hass, "switch.shelly_relay", "cover.garage", name="Garage Door")
-    assert _held(hass, _call("switch.shelly_relay", "turn_on"))
-    assert _held(hass, _call("switch.shelly_relay", "toggle"))
+    for service in ("turn_on", "turn_off", "toggle"):
+        assert _held(hass, _call("switch.shelly_relay", service))
     # Before #794: only the cover asked for the PIN.
     assert not _held(hass, _call("switch.shelly_relay", "turn_on"), RULES)
-    # Closing the door is turning the relay off: not held, as closing is not.
-    assert not _held(hass, _call("switch.shelly_relay", "turn_off"))
 
 
-async def test_an_inverted_relay_opens_on_turn_off(hass: HomeAssistant) -> None:
+async def test_an_inverted_relay_is_held_both_ways(hass: HomeAssistant) -> None:
     _wrap(hass, "switch.relay_2", "cover.gate", name="Front Gate", invert=True)
-    assert _held(hass, _call("switch.relay_2", "turn_off"))
-    assert _held(hass, _call("switch.relay_2", "toggle"))
-    assert not _held(hass, _call("switch.relay_2", "turn_on"))
+    for service in ("turn_on", "turn_off", "toggle"):
+        assert _held(hass, _call("switch.relay_2", service))
+
+
+async def test_the_relay_copies_are_exact(hass: HomeAssistant) -> None:
+    """One copy per relay, whatever the number of rules reaching its cover."""
+    _wrap(hass, "switch.shelly_relay", "cover.garage", name="Garage Door")
+    expanded = expand_critical_rules(hass, RULES)
+    relay = [
+        (rule[CRITICAL_RULE_EXACT_ENTITY], rule["service"])
+        for rule in expanded
+        if rule["domain"] == "switch"
+    ]
+    assert relay == [("switch.shelly_relay", "")]
 
 
 async def test_a_relay_under_a_blind_is_not_held(hass: HomeAssistant) -> None:
@@ -106,12 +120,24 @@ async def test_a_relay_under_a_blind_is_not_held(hass: HomeAssistant) -> None:
     assert not _held(hass, _call("switch.blind_relay", "turn_on"))
 
 
-async def test_a_relay_under_a_lock_is_held(hass: HomeAssistant) -> None:
+async def test_a_relay_under_a_lock_is_held_the_unlocking_way(
+    hass: HomeAssistant,
+) -> None:
     """Every unlock is guarded; unlocking a switch_as_x lock turns its switch on."""
     _wrap(hass, "switch.strike", "lock.side", name="Side Door", target="lock")
     assert _held(hass, _call("switch.strike", "turn_on"))
+    assert _held(hass, _call("switch.strike", "toggle"))
     assert not _held(hass, _call("switch.strike", "turn_on"), RULES)
+    # Locking is the other way, and locking is not held.
     assert not _held(hass, _call("switch.strike", "turn_off"))
+
+
+async def test_an_inverted_lock_relay_unlocks_on_turn_off(hass: HomeAssistant) -> None:
+    _wrap(
+        hass, "switch.strike", "lock.side", name="Side Door", target="lock", invert=True
+    )
+    assert _held(hass, _call("switch.strike", "turn_off"))
+    assert not _held(hass, _call("switch.strike", "turn_on"))
 
 
 async def test_a_lock_rule_alone_still_reaches_the_relay(hass: HomeAssistant) -> None:
@@ -185,11 +211,170 @@ async def test_a_wrapper_naming_the_relay_by_registry_id_is_followed(
     assert _held(hass, _call("switch.shelly_relay", "turn_on"))
 
 
-async def test_a_disabled_wrapper_is_not_followed(hass: HomeAssistant) -> None:
+async def test_a_disabled_wrapper_still_holds_its_relay(hass: HomeAssistant) -> None:
+    """Disabling the cover does not disconnect the relay from the door."""
     _wrap(
         hass, "switch.shelly_relay", "cover.garage", name="Garage Door", disabled=True
     )
-    assert not _held(hass, _call("switch.shelly_relay", "turn_on"))
+    hass.states.async_remove("cover.garage")
+    assert _held(hass, _call("switch.shelly_relay", "turn_on"))
+
+
+async def test_a_second_wrapper_of_the_relay_is_held(hass: HomeAssistant) -> None:
+    """The relay is also wrapped as a light: turning the light on opens the door."""
+    _wrap(hass, "switch.shelly_relay", "cover.garage", name="Garage Door")
+    entry = MockConfigEntry(
+        domain="switch_as_x",
+        options={
+            "entity_id": "switch.shelly_relay",
+            "invert": False,
+            "target_domain": "light",
+        },
+    )
+    entry.add_to_hass(hass)
+    er.async_get(hass).async_get_or_create(
+        "light",
+        "switch_as_x",
+        "aux_uid",
+        suggested_object_id="garage_aux",
+        config_entry=entry,
+    )
+    hass.states.async_set("light.garage_aux", "off", {"friendly_name": "Aux"})
+    assert _held(hass, _call("light.garage_aux", "turn_on", domain="light"))
+    generic = {"service": "turn_on", "entity_id": "light.garage_aux"}
+    assert _is_critical_action(
+        generic, expand_critical_rules(hass, RULES), "mcp__call_service", hass
+    )
+
+
+async def test_a_valve_rule_reaches_the_relay_under_a_valve(
+    hass: HomeAssistant,
+) -> None:
+    _wrap(hass, "switch.main", "valve.gate", name="Gate", target="valve")
+    rules = [{"domain": "valve", "service": "open_valve", "entity_match": "gate"}]
+    expanded = expand_critical_rules(hass, rules)
+    assert _held(hass, _call("switch.main", "turn_on"), expanded)
+
+
+async def test_a_rule_with_no_domain_reaches_the_relay(hass: HomeAssistant) -> None:
+    """A rule with no domain applies to the cover, so to its relay too."""
+    _wrap(hass, "switch.shelly_relay", "cover.garage", name="Garage Door")
+    rules = [{"service": "open_cover", "entity_match": "garage"}]
+    expanded = expand_critical_rules(hass, rules)
+    assert _held(hass, _call("switch.shelly_relay", "turn_on"), expanded)
+
+
+async def test_a_closing_rule_adds_no_relay_copy(hass: HomeAssistant) -> None:
+    _wrap(hass, "switch.shelly_relay", "cover.garage", name="Garage Door")
+    rules = [{"domain": "cover", "service": "close_cover", "entity_match": "garage"}]
+    expanded = expand_critical_rules(hass, rules)
+    assert not any(rule["domain"] == "switch" for rule in expanded)
+
+
+async def test_a_wrapped_switch_group_holds_its_members(hass: HomeAssistant) -> None:
+    """A cover over a switch group: each relay in the group opens the door."""
+    hass.states.async_set("switch.relay_1", "off")
+    _wrap(hass, "switch.garage_relays", "cover.garage", name="Garage Door")
+    hass.states.async_set(
+        "switch.garage_relays", "off", {"entity_id": ["switch.relay_1"]}
+    )
+    assert _held(hass, _call("switch.relay_1", "turn_on"))
+
+
+@pytest.mark.parametrize("holder", ["group.garage_stuff", "switch.outer"])
+async def test_nested_groups_holding_the_relay_are_held(
+    hass: HomeAssistant, holder: str
+) -> None:
+    _wrap(hass, "switch.shelly_relay", "cover.garage", name="Garage Door")
+    hass.states.async_set("switch.inner", "off", {"entity_id": ["switch.shelly_relay"]})
+    hass.states.async_set(holder, "off", {"entity_id": ["switch.inner"]})
+    rules = expand_critical_rules(hass, RULES)
+    generic = {"service": "turn_on", "entity_id": holder}
+    assert _is_critical_action(generic, rules, "mcp__call_service", hass)
+
+
+async def test_one_unreadable_wrapper_does_not_drop_the_others(
+    hass: HomeAssistant,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _wrap(hass, "switch.shelly_relay", "cover.garage", name="Garage Door")
+    _wrap(hass, "switch.strike", "lock.side", name="Side Door", target="lock")
+    real = er.async_resolve_entity_id
+
+    def _flaky(registry: Any, entity_id: str) -> str | None:
+        if entity_id == "switch.strike":
+            msg = "bad entry"
+            raise RuntimeError(msg)
+        return real(registry, entity_id)
+
+    monkeypatch.setattr(er, "async_resolve_entity_id", _flaky)
+    assert _held(hass, _call("switch.shelly_relay", "turn_on"))
+    assert "could not read switch_as_x entry" in caplog.text
+
+
+async def test_switches_in_automations_are_screened_per_entity(
+    hass: HomeAssistant,
+) -> None:
+    """A relay's copy holds that relay, not every switch in an automation."""
+    _wrap(hass, "switch.shelly_relay", "cover.garage", name="Garage Door")
+    hass.states.async_set("switch.lamp", "off")
+    rules = expand_critical_rules(hass, RULES)
+
+    def _apply(entity_id: str) -> dict[str, Any]:
+        return {
+            "actions": [
+                {"action": "scene.apply", "data": {"entities": {entity_id: "on"}}}
+            ]
+        }
+
+    assert find_critical_automation_calls(_apply("switch.shelly_relay"), rules)
+    assert not find_critical_automation_calls(_apply("switch.lamp"), rules)
+
+
+async def test_a_scene_turning_a_lock_relay_off_is_not_held(
+    hass: HomeAssistant,
+) -> None:
+    """Off locks a lock relay: a bedtime scene doing so asks for no PIN."""
+    _wrap(hass, "switch.strike", "lock.side", name="Side Door", target="lock")
+    assert await async_setup_component(
+        hass,
+        "scene",
+        {
+            "scene": [
+                {"name": "Bedtime", "entities": {"switch.strike": "off"}},
+                {"name": "Morning", "entities": {"switch.strike": "on"}},
+            ]
+        },
+    )
+    await hass.async_block_till_done()
+    rules = expand_critical_rules(hass, RULES)
+    assert not runs_critical_action(hass, "scene.bedtime", rules)
+    assert runs_critical_action(hass, "scene.morning", rules)
+
+
+async def test_the_pin_line_says_what_the_relay_opens(hass: HomeAssistant) -> None:
+    from custom_components.home_generative_agent.agent.pin_messages import (  # noqa: PLC0415
+        describe_pending_action,
+    )
+
+    _wrap(hass, "switch.shelly_relay", "cover.garage", name="Garage Door")
+    line = describe_pending_action(
+        hass,
+        {
+            "tool_name": "mcp__call_service",
+            "tool_args": _call("switch.shelly_relay", "turn_off"),
+        },
+    )
+    assert line.endswith('(open "Garage Door")')
+    plain = describe_pending_action(
+        hass,
+        {
+            "tool_name": "mcp__call_service",
+            "tool_args": _call("switch.lamp", "turn_on"),
+        },
+    )
+    assert "(" not in plain
 
 
 @pytest.mark.parametrize("options_entity", ["", "switch.gone"])

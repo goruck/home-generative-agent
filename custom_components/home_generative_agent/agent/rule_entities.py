@@ -1,5 +1,5 @@
 """
-Extend ``entity_match`` rules to the entities a name match misses (#773).
+Extend critical-action rules to the entities their ids miss (#773, #794).
 
 A rule's ``entity_match`` is matched against the entity ids a call targets.
 Three kinds of entity act like a matching one without carrying the word in
@@ -34,12 +34,17 @@ their own id:
   Home Assistant refuses HassTurnOn on it (the group domain has no turn_on).
 
 A fourth way to the same door is the switch under it (#794). A ``switch_as_x``
-cover or lock is a switch wrapped as one: opening the cover, or unlocking the
-lock, turns the switch on (off when the wrapper inverts it), and ``toggle``
-does either. So a rule that holds opening such a cover, or unlocking such a
-lock, also holds those calls on the switch, and on any group holding it. The
-switch is read from the wrapper's config entry; a template cover that drives
-another device is not followed here (#780).
+cover, valve or lock is a switch wrapped as one: opening it or unlocking it
+switches the relay. So a rule that holds opening such a cover or valve, or
+unlocking such a lock, also holds calls on the relay, on any group holding it,
+on the members of a switch group it wraps, and on any other wrapper of the
+same relay (a second cover, a light). For a cover or valve every call on the
+relay is held: a momentary relay moves the door whichever way it is switched,
+and the wrapper's invert option says nothing of the wiring. For a lock only
+the unlocking direction (on, or off when inverted) and ``toggle`` are held.
+The relay is read from the wrapper's config entry, whether or not the wrapper
+is enabled: disabling it does not disconnect the relay. A template cover that
+drives another device is not followed here (#780).
 
 ``expand_critical_rules`` adds, for each such entity, a copy of the rule that
 matches that entity id exactly (``CRITICAL_RULE_EXACT_ENTITY``). Every screen
@@ -88,7 +93,6 @@ LOGGER = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
-    from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant, State
 
 # MQTT and ZHA group entities list their members here. It is a capability
@@ -107,13 +111,58 @@ _SEPARATORS = re.compile(r"[_\-]+")
 _SWITCH_AS_X = "switch_as_x"
 _WRAPPED_ENTITY = "entity_id"
 _WRAPPED_INVERT = "invert"
-# The services that open a cover or unlock a lock, per domain. A wrapper turns
-# its switch on for these (off when inverted); `toggle` on the switch does it
-# either way.
+# The services that open a cover or valve or unlock a lock, per domain: a rule
+# holding one of these holds the relay under a wrapper of that domain.
 _OPENING_SERVICES: dict[str, frozenset[str]] = {
     "cover": frozenset({"open_cover", "open", "toggle", "set_cover_position"}),
+    "valve": frozenset({"open_valve", "open", "toggle", "set_valve_position"}),
     "lock": frozenset({"unlock", "open", "toggle"}),
 }
+# Wrapper domains whose relay is held both ways (see the module docstring).
+_EVERY_RELAY_CALL = frozenset({"cover", "valve"})
+
+
+def read_switch_wrappers(hass: HomeAssistant) -> dict[str, tuple[str, bool]]:
+    """
+    Return every switch_as_x wrapper -> (the switch it wraps, inverted).
+
+    Disabled wrappers count: the relay still works. An entry that cannot be
+    read is logged and skipped.
+    """
+    config_entries = getattr(hass, "config_entries", None)
+    entries = config_entries.async_entries(_SWITCH_AS_X) if config_entries else []
+    if not entries:
+        return {}
+    registry = er.async_get(hass)
+    wrapped: dict[str, tuple[str, bool]] = {}
+    for config_entry in entries:
+        try:
+            switch_id = er.async_resolve_entity_id(
+                registry, str(config_entry.options.get(_WRAPPED_ENTITY) or "")
+            )
+            invert = bool(config_entry.options.get(_WRAPPED_INVERT))
+            wrappers = [
+                entry.entity_id
+                for entry in er.async_entries_for_config_entry(
+                    registry, config_entry.entry_id
+                )
+            ]
+        except Exception:
+            # One bad entry must not fail every guarded call in the house.
+            # Nothing here raises for a well-formed entry (an unknown id
+            # resolves to None), so this is not a way past the gate.
+            LOGGER.exception(
+                "Critical Action PIN: could not read switch_as_x entry %s",
+                config_entry.entry_id,
+            )
+            continue
+        if not switch_id:
+            continue
+        for wrapper in wrappers:
+            wrapped[wrapper.lower()] = (switch_id.lower(), invert)
+    return wrapped
+
+
 # Cover device classes that say the cover is a window covering. Its name is
 # not read for the word: "French Door Blinds" is not a door. `shutter` is not
 # here, since roller garage doors are often classed so.
@@ -161,48 +210,29 @@ class _EntityIndex:
         for group_id, group_members in self.members.items():
             for member in group_members:
                 self.holders.setdefault(member, set()).add(group_id)
-        # A switch_as_x cover or lock -> (the switch it wraps, inverted).
-        self.wrapped: dict[str, tuple[str, bool]] = {}
-        for config_entry in hass.config_entries.async_entries(_SWITCH_AS_X):
-            self._read_wrapper(registry, config_entry)
+        # A switch_as_x cover, valve or lock -> (the switch it wraps, inverted).
+        self.wrapped = read_switch_wrappers(hass)
 
-    def _read_wrapper(
-        self, registry: er.EntityRegistry, config_entry: ConfigEntry
-    ) -> None:
-        """Record the switch a switch_as_x entry wraps, for its entities."""
-        try:
-            switch_id = er.async_resolve_entity_id(
-                registry, str(config_entry.options.get(_WRAPPED_ENTITY) or "")
-            )
-            invert = bool(config_entry.options.get(_WRAPPED_INVERT))
-            wrappers = [
-                entry.entity_id
-                for entry in er.async_entries_for_config_entry(
-                    registry, config_entry.entry_id
-                )
-                if not entry.disabled
-            ]
-        except Exception:
-            # One bad entry must not fail every guarded call in the house.
-            LOGGER.exception(
-                "Critical Action PIN: could not read switch_as_x entry %s",
-                config_entry.entry_id,
-            )
-            return
-        if not switch_id:
-            return
-        for wrapper in wrappers:
-            self.wrapped[wrapper.lower()] = (switch_id.lower(), invert)
-
-    def climb(self, entity_id: str) -> set[str]:
-        """Return ``entity_id`` and every group holding it, however deep."""
-        found = {entity_id}
-        pending = [entity_id]
+    def climb(self, entity_ids: Iterable[str]) -> set[str]:
+        """Return ``entity_ids`` and every group holding one, however deep."""
+        found = set(entity_ids)
+        pending = list(found)
         while pending:
             for group_id in self.holders.get(pending.pop(), ()):
                 if group_id not in found:
                     found.add(group_id)
                     pending.append(group_id)
+        return found
+
+    def descend(self, entity_id: str) -> set[str]:
+        """Return ``entity_id`` and every member of it, if it is a group."""
+        found = {entity_id}
+        pending = [entity_id]
+        while pending:
+            for member in self.members.get(pending.pop(), ()):
+                if member not in found:
+                    found.add(member)
+                    pending.append(member)
         return found
 
     def _read(
@@ -342,42 +372,57 @@ class _EntityIndex:
             for entity_id in self.unreadable_groups | self.unknown
             if in_domain(entity_id)
         }
-        return {group for entity_id in matched for group in self.climb(entity_id)}
+        return self.climb(matched)
 
 
 def _switch_rules(
     index: _EntityIndex, rule: Mapping[str, str], reached: set[str] | None
 ) -> list[dict[str, str]]:
     """
-    Return copies of an opening ``rule`` for the switches under its entities.
+    Return copies of an opening ``rule`` for the relays under its entities.
 
     ``reached`` is what the rule's ``entity_match`` reaches; None for a rule
-    with none, which covers every entity of its domain.
+    with none, which covers every entity of its domain. A rule with no domain
+    applies to each wrapper in the wrapper's own domain, as it does to calls.
     """
-    domain = (rule.get("domain") or "").lower()
+    rule_domain = (rule.get("domain") or "").lower()
     service = (rule.get("service") or "").lower()
-    opening = _OPENING_SERVICES.get(domain)
-    if opening is None or (service and service not in opening):
-        return []
     copies: list[dict[str, str]] = []
     for wrapper, (switch_id, invert) in sorted(index.wrapped.items()):
-        if wrapper.split(".", 1)[0] != domain or (
-            reached is not None and wrapper not in reached
+        domain = wrapper.split(".", 1)[0]
+        opening = _OPENING_SERVICES.get(domain)
+        if (
+            opening is None
+            or (rule_domain and rule_domain != domain)
+            or (service and service not in opening)
+            or (reached is not None and wrapper not in reached)
         ):
             continue
-        # A rule with no service holds every call on the switch.
-        services = (
-            [""] if not service else ["turn_off" if invert else "turn_on", "toggle"]
-        )
+        if domain in _EVERY_RELAY_CALL or not service:
+            relay_services = [""]
+        else:
+            relay_services = ["turn_off" if invert else "turn_on", "toggle"]
+        relays = index.descend(switch_id)
+        # Another wrapper of the same relay (a second cover, a light) drives it
+        # too; every call on it is held.
+        siblings = {
+            other
+            for other, (other_switch, _invert) in index.wrapped.items()
+            if other_switch == switch_id and other != wrapper
+        }
+        held = [
+            (target, relay_service)
+            for target in sorted(index.climb(relays))
+            for relay_service in relay_services
+        ] + [(target, "") for target in sorted(index.climb(siblings))]
         copies.extend(
             {
                 **rule,
                 "domain": target.split(".", 1)[0],
-                "service": switch_service,
+                "service": relay_service,
                 CRITICAL_RULE_EXACT_ENTITY: target,
             }
-            for target in sorted(index.climb(switch_id))
-            for switch_service in services
+            for target, relay_service in held
         )
     return copies
 
@@ -385,20 +430,24 @@ def _switch_rules(
 def expand_critical_rules(
     hass: HomeAssistant | None, rules: Iterable[Mapping[str, str]]
 ) -> list[dict[str, str]]:
-    """Return the rules plus one per entity an ``entity_match`` misses."""
+    """
+    Return the rules plus a copy per entity they reach that their ids miss.
+
+    One per entity an ``entity_match`` misses, and one per relay under a
+    switch_as_x wrapper a rule holds (see the module docstring).
+    """
     expanded = [dict(rule) for rule in rules]
     if hass is None or getattr(hass, "states", None) is None:
         if any(rule.get("entity_match") for rule in expanded):
             LOGGER.warning(
-                "Critical Action PIN: no Home Assistant instance; covers are "
-                "matched by entity id only"
+                "Critical Action PIN: no Home Assistant instance; covers, "
+                "locks and the relays under them are matched by entity id only"
             )
         return expanded
-    if not any(
-        rule.get("entity_match")
-        or (rule.get("domain") or "").lower() in _OPENING_SERVICES
-        for rule in expanded
+    if not any(rule.get("entity_match") for rule in expanded) and not (
+        hass.config_entries.async_entries(_SWITCH_AS_X)
     ):
+        # Nothing for a rule with no entity_match to reach but relays.
         return expanded
     index = _EntityIndex(hass)
     reached: dict[tuple[str, str], set[str]] = {}
@@ -417,7 +466,14 @@ def expand_critical_rules(
             if match not in entity_id
         )
         extra.extend(_switch_rules(index, rule, reached[key]))
-    unique: dict[tuple[tuple[str, str], ...], dict[str, str]] = {}
+    # One copy per entity, domain and service: copies made from several rules
+    # (`door` and `garage` both reaching "Garage Door") hold the same calls.
+    unique: dict[tuple[str, str, str], dict[str, str]] = {}
     for rule in extra:
-        unique.setdefault(tuple(sorted(rule.items())), rule)
+        key = (
+            rule[CRITICAL_RULE_EXACT_ENTITY],
+            (rule.get("domain") or "").lower(),
+            (rule.get("service") or "").lower(),
+        )
+        unique.setdefault(key, rule)
     return expanded + list(unique.values())

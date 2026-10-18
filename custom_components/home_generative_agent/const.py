@@ -63,7 +63,8 @@ CONF_CRITICAL_ACTIONS = "critical_actions"
 # (an area, device, label, floor, group, registry ID, or template) — see
 # `agent/automation_pin.py`. Where Home Assistant's state is at hand, an
 # `entity_match` also matches a device class, a name and any group holding a
-# matching entity (`agent/rule_entities.py`, #773).
+# matching entity (`agent/rule_entities.py`, #773), and a rule reaching a
+# switch_as_x cover, valve or lock also holds the relay under it (#794).
 RECOMMENDED_CRITICAL_ACTIONS: list[dict[str, str]] = [
     {"domain": "lock", "service": "unlock"},
     {"domain": "lock", "service": "open"},

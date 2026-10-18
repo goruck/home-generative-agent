@@ -105,6 +105,10 @@ _REPRODUCE_SERVICES: dict[tuple[str, str], str] = {
     ("cover", "closing"): "close_cover",
     ("valve", "closed"): "close_valve",
     ("valve", "closing"): "close_valve",
+    # A relay under a garage lock: off is the locking way unless inverted, so
+    # the rules decide by the service (#794).
+    ("switch", "on"): "turn_on",
+    ("switch", "off"): "turn_off",
 }
 # `CoverEntityFeature.CLOSE` and `ValveEntityFeature.CLOSE` are both 2.
 _CLOSE_FEATURE = 2
