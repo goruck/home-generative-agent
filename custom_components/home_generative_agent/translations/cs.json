@@ -284,6 +284,8 @@
             "sentinel_auth_ip_retention_days": "Doba uchování adres v inventáři přihlášení (dny)",
             "explain_enabled": "Povolit LLM vysvětlení pro nálezy Sentinel",
             "sentinel_require_pin_for_level_increase": "Vyžadovat PIN pro zvýšení úrovně autonomie",
+            "sentinel_autonomy_level": "Úroveň autonomie",
+            "sentinel_runtime_override_ttl_minutes": "Doba platnosti změny autonomie (minuty)",
             "sentinel_daily_digest_enabled": "Povolit denní souhrn oznámení",
             "sentinel_daily_digest_time": "Čas denního souhrnu (HH:MM:SS)",
             "sentinel_quiet_hours_start": "Začátek nočního klidu (potlačí vybrané závažnosti)",
@@ -308,7 +310,9 @@
             "sentinel_network_guest_idle_days": "Kolik dní může zůstat hostovská Wi-Fi zapnutá bez připojeného hosta, než Sentinel navrhne ji vypnout. Vyžaduje integraci routeru, která hlásí hostovskou síť (dnes eero). Výchozí 7.",
             "sentinel_network_audit_share_details": "Při zapnutí předá bezpečnostní audit chatovacího agenta chatovacímu modelu podrobnosti nálezů (názvy zařízení, porty, názvy tokenů), aby je mohl vysvětlit. Při vypnutí dostane model jen počty, závažnosti a pevné názvy a úplná zpráva se odešle jako trvalé oznámení Home Assistantu, pokud se ptal správce (hlasový satelit nebo účet bez práv správce dostane jen souhrn). Síťové adresy jsou v obou případech redigovány. Ve výchozím stavu zapnuto.",
             "sentinel_ha_token_stale_days": "Stáří ve dnech, po jehož překročení je dlouhodobý přístupový token nahlášen. Home Assistant nezaznamenává, kdy je dlouhodobý token použit, takže stáří je jediný dostupný údaj a upozornění doporučuje staré tokeny obměnit. Výchozí 90.",
-            "sentinel_auth_ip_retention_days": "Jak dlouho zůstává adresa, ze které byl použit přístupový token, v inventáři bezpečnostního auditu. Adresy se ukládají jako jednosměrné haše, nikdy v čitelné podobě, a na token se jich uchovává nejvýše 20. Výchozí 90 dní."
+            "sentinel_auth_ip_retention_days": "Jak dlouho zůstává adresa, ze které byl použit přístupový token, v inventáři bezpečnostního auditu. Adresy se ukládají jako jednosměrné haše, nikdy v čitelné podobě, a na token se jich uchovává nejvýše 20. Výchozí 90 dní.",
+            "sentinel_autonomy_level": "Úroveň, na které Sentinel běží, když není nastavena jiná; platí i po restartu a po základním nastavení. 0 je pasivní: upozornění na zjištění i denní souhrn ustanou; zjištění se dál zaznamenávají. Změna zjištěná mezitím (nové zařízení, správce nebo token, veřejná IP adresa nebo mapování portu) se ohlásí, až úroveň zvýšíte, a stav, který stále trvá, se ohlásí znovu po uplynutí své prodlevy. Oznámení o výchozích hodnotách a jednorázová oznámení po nastavení se zobrazují dál. 1 upozorňuje. Úrovně 2 a 3 jsou vyhrazeny pro automatické akce, které zatím nejsou k dispozici; dnes upozorňují stejně jako úroveň 1. Úroveň v platnosti ukazuje atribut autonomy_level senzoru stavu Sentinelu. Úroveň nastavená službou sentinel_set_autonomy_level skončí po uplynutí doby platnosti, restartem nebo změnou tohoto nastavení.",
+            "sentinel_runtime_override_ttl_minutes": "Jak dlouho platí úroveň nastavená službou sentinel_set_autonomy_level, než se Sentinel vrátí k nastavené úrovni autonomie. Skončí i restartem."
           }
         }
       }
@@ -431,6 +435,14 @@
       "options": {
         "turn_start": "Hned po spuštění agenta",
         "tool_call": "Před prvním voláním nástroje"
+      }
+    },
+    "sentinel_autonomy_level": {
+      "options": {
+        "0": "0 – Pasivní (bez upozornění na zjištění)",
+        "1": "1 – Upozornění (výchozí)",
+        "2": "2 – Upozornění (automatické akce: v budoucnu)",
+        "3": "3 – Upozornění (automatické akce: v budoucnu)"
       }
     }
   },

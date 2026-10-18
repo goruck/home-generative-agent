@@ -283,6 +283,10 @@ class SentinelHealthSensor(SensorEntity):
         ):
             self._attrs[key] = run_stats.get(key)
         self._attrs["inactive_rule_count"] = len(run_stats.get("inactive_rules") or {})
+        # The level in force, and when an override of it ends (#783): level 0
+        # silences finding alerts, so it must be visible.
+        if self._sentinel is not None:
+            self._attrs.update(self._sentinel.autonomy_status())
 
         # Merge trigger scheduler statistics.
         scheduler_stats: dict[str, Any] = run_stats.get("scheduler", {})

@@ -221,11 +221,15 @@ RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS = 200
 RECOMMENDED_AUDIT_HOT_MAX_RECORDS = 500
 
 # ---- Sentinel autonomy level (runtime kill-switch) ----
-# 0 = fully passive (no notifications, no actions)
+# 0 = passive (no finding alerts or digest, no actions; baseline and setup
+#     notices are still sent)
 # 1 = notify only (default)
-# 2 = suggest actions (notify + recommend)
-# 3 = act autonomously
+# 2, 3 = notify, and a finding's suggested action may run on its own when the
+#        auto-execution guardrails below pass (sentinel/execution.py); the two
+#        levels apply the same gates today. The guardrails are not settable
+#        from the options yet, so auto-execution stays off (#783).
 CONF_SENTINEL_AUTONOMY_LEVEL = "sentinel_autonomy_level"
+SENTINEL_AUTONOMY_LEVELS: tuple[int, ...] = (0, 1, 2, 3)
 CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES = "sentinel_runtime_override_ttl_minutes"
 CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE = "sentinel_require_pin_for_level_increase"
 CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH = "sentinel_level_increase_pin_hash"
@@ -1457,6 +1461,9 @@ ACTION_POLICY_BLOCKED = "blocked"
 DATA_QUALITY_FRESH = "fresh"
 DATA_QUALITY_STALE = "stale"
 DATA_QUALITY_UNAVAILABLE = "unavailable"
+# No action was weighed (below level 2, or automatic actions off), so the
+# triggering entities' freshness was not read.
+DATA_QUALITY_NOT_EVALUATED = "not_evaluated"
 
 # ---------------- RAG Tool Selection ----------------
 CONF_TOOL_RETRIEVAL_LIMIT = "tool_retrieval_limit"

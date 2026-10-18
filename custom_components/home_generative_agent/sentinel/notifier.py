@@ -67,12 +67,14 @@ from custom_components.home_generative_agent.sentinel.proposal_templates import 
     NETWORK_TEMPLATES,
 )
 from custom_components.home_generative_agent.sentinel.rules.network_common import (
+    CHANGE_ALERT_RULE_TYPES,
     NETWORK_RULE_TYPES,
 )
 from custom_components.home_generative_agent.sentinel.suppression import (
     SUPPRESSION_REASON_NOT_SUPPRESSED,
     record_cooldown_feedback,
     register_snooze,
+    resolve_prompt,
 )
 from custom_components.home_generative_agent.snapshot.network import sanitize_label
 
@@ -207,6 +209,8 @@ class SentinelNotifier:
         self._digest_unsub: Callable[[], None] | None = None
         # Task spawned by the daily digest callback; kept so stop() can cancel it.
         self._digest_task: asyncio.Task[None] | None = None
+        # True while Sentinel is at autonomy level 0 (set by the engine).
+        self._silenced: Callable[[], bool] = lambda: False
 
     # ---------------------------------------------------------------------- #
     # Lifecycle
@@ -278,6 +282,7 @@ class SentinelNotifier:
         explanation: str | None,
         *,
         also_line: str | None = None,
+        canary_line: str | None = None,
     ) -> bool:
         """
         Send a proactive notification for *finding*.
@@ -289,6 +294,9 @@ class SentinelNotifier:
           of a grouped push; the buttons still act on *finding* alone. Such a
           push is never held for the burst batch: the batch can cut a line or
           be lost at unload, while the engine holds every finding it names.
+        * Appends *canary_line* (see ``canary_line``), what auto-execution
+          would have run in canary mode. Such a push is not held either: a
+          dry-run review relies on seeing every line.
 
         Returns False when the push was dropped as a repeat of the same
         anomaly within the per-finding cooldown, so the audit does not count
@@ -317,9 +325,10 @@ class SentinelNotifier:
             self._hass,
         )
         persistent_msg = _persistent_message(clean_explanation, finding, self._hass)
-        if also_line:
-            mobile_msg = f"{mobile_msg}\n{also_line}"
-            persistent_msg = f"{persistent_msg}\n\n{escape_markdown(also_line)}"
+        for line in (also_line, canary_line):
+            if line:
+                mobile_msg = f"{mobile_msg}\n{line}"
+                persistent_msg = f"{persistent_msg}\n\n{escape_markdown(line)}"
         actions = _build_actions(finding)
 
         # Per-area routing.
@@ -357,7 +366,12 @@ class SentinelNotifier:
             self._notification_times = [
                 t for t in self._notification_times if t >= cutoff
             ]
-            if len(self._notification_times) >= _BATCH_RATE_LIMIT and not also_line:
+            if (
+                len(self._notification_times) >= _BATCH_RATE_LIMIT
+                and not also_line
+                and not canary_line
+                and finding.type not in CHANGE_ALERT_RULE_TYPES
+            ):
                 # Rate limit exceeded — buffer this finding.  Hold the redacted
                 # explanation, never the raw one: the flush discards it today,
                 # but storing the unredacted text would silently bypass
@@ -480,6 +494,16 @@ class SentinelNotifier:
             self._pending_always_snooze.pop(anomaly_id, None)
             LOGGER.debug("Permanent snooze cancelled for %s.", anomaly_id)
 
+    def set_silence_check(self, check: Callable[[], bool]) -> None:
+        """
+        Set what says Sentinel is at autonomy level 0 (#783).
+
+        The engine stops new alerts at level 0 itself; this covers what the
+        notifier sends on its own clock: a batch held before level 0 was set,
+        and the daily digest of alerts sent earlier that day.
+        """
+        self._silenced = check
+
     @callback
     def _async_flush_batch(self, _now: Any = None) -> None:
         """Flush held batch of non-high-severity notifications as a single summary."""
@@ -487,6 +511,18 @@ class SentinelNotifier:
         held = self._held_batch[:]
         self._held_batch.clear()
         if not held:
+            return
+        if self._silenced():
+            # Counted as sent when they were held, so say what was dropped,
+            # and clear their prompts: nothing was pushed to answer (#783).
+            LOGGER.warning(
+                "Sentinel autonomy level 0: dropped %d held alerts (%s).",
+                len(held),
+                ", ".join(sorted({finding.type for finding, _msg, _svc in held})),
+            )
+            for finding, _msg, _svc in held:
+                resolve_prompt(self._suppression.state, finding.anomaly_id)
+            self._hass.async_create_task(self._suppression.async_save())
             return
 
         count = len(held)
@@ -550,6 +586,9 @@ class SentinelNotifier:
     async def _async_run_daily_digest(self) -> None:
         """Fetch the last 24 hours of notified findings and push a summary."""
         if self._audit_store is None:
+            return
+        if self._silenced():
+            LOGGER.debug("Sentinel is at autonomy level 0; no daily digest.")
             return
 
         cutoff = dt_util.utcnow() - timedelta(hours=24)
@@ -920,6 +959,10 @@ def _record_notified_after(record: dict[str, Any], cutoff: datetime) -> bool:
     if notified_dt is None:
         return False
     return notified_dt >= cutoff
+
+
+# Longest device name the canary line repeats.
+_CANARY_NAME_MAX_LEN = 64
 
 
 def _friendly_entity(entity_id: str) -> str:
@@ -1906,6 +1949,32 @@ def _name_owners(
             if alias:
                 owners.setdefault(alias.casefold(), set()).add(owner)
     return owners
+
+
+def canary_line(
+    finding: AnomalyFinding, actions: list[str], hass: HomeAssistant | None
+) -> str:
+    """
+    Return the line naming what auto-execution would have run (#783).
+
+    Canary mode records the decision without acting; this puts it in the
+    notification, where a user reviewing Sentinel before turning execution
+    on reads it. Devices are named as Home Assistant names them.
+    """
+    states = getattr(hass, "states", None)
+    names = []
+    for entity_id in finding.triggering_entities:
+        state = states.get(entity_id) if states is not None else None
+        name = getattr(state, "name", None)
+        if not isinstance(name, str) or not name.strip():
+            name = _friendly_entity(entity_id)
+        names.append(" ".join(name.split())[:_CANARY_NAME_MAX_LEN])
+    return notif_msg(
+        hass,
+        "canary_would_run",
+        actions=", ".join(actions),
+        targets=", ".join(names) or notif_msg(hass, "fallback_unknown_entity"),
+    )
 
 
 def _also_text(names: list[str], more: int, hass: HomeAssistant | None) -> str:

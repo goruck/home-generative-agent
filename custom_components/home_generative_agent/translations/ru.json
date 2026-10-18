@@ -238,6 +238,8 @@
             "sentinel_appliance_duration_min": "Appliance power rule: duration before alert (minutes)",
             "explain_enabled": "Enable LLM explanations for sentinel findings",
             "sentinel_require_pin_for_level_increase": "Require PIN for autonomy level increases",
+            "sentinel_autonomy_level": "Autonomy level",
+            "sentinel_runtime_override_ttl_minutes": "Autonomy override duration (minutes)",
             "sentinel_daily_digest_enabled": "Enable daily digest notification",
             "sentinel_daily_digest_time": "Daily digest time (HH:MM:SS)",
             "sentinel_quiet_hours_start": "Quiet hours start (suppresses selected severities)",
@@ -382,6 +384,14 @@
       "options": {
         "turn_start": "Сразу после запуска агента",
         "tool_call": "Перед первым вызовом инструмента"
+      }
+    },
+    "sentinel_autonomy_level": {
+      "options": {
+        "0": "0 – Passive (no finding alerts)",
+        "1": "1 – Notify (default)",
+        "2": "2 – Notify (automatic actions: future)",
+        "3": "3 – Notify (automatic actions: future)"
       }
     }
   },

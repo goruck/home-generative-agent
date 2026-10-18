@@ -284,6 +284,8 @@
             "sentinel_auth_ip_retention_days": "Auth inventory address retention (days)",
             "explain_enabled": "Enable LLM explanations for sentinel findings",
             "sentinel_require_pin_for_level_increase": "Require PIN for autonomy level increases",
+            "sentinel_autonomy_level": "Autonomy level",
+            "sentinel_runtime_override_ttl_minutes": "Autonomy override duration (minutes)",
             "sentinel_daily_digest_enabled": "Enable daily digest notification",
             "sentinel_daily_digest_time": "Daily digest time (HH:MM:SS)",
             "sentinel_quiet_hours_start": "Quiet hours start (suppresses selected severities)",
@@ -308,7 +310,9 @@
             "sentinel_network_guest_idle_days": "Days the guest Wi-Fi may stay enabled with no guest connected before Sentinel suggests turning it off. Needs a router integration that reports the guest network (eero today). Default 7.",
             "sentinel_network_audit_share_details": "On, the chat agent's security audit gives the chat model the findings' details (device names, ports, token names) so it can explain them. Off, the model gets only counts, severities, and fixed titles, and the full report goes to a Home Assistant persistent notification when an administrator asked (a voice satellite or a non-admin account gets the digest only). Network addresses are redacted either way. On by default.",
             "sentinel_ha_token_stale_days": "Age in days past which a long-lived access token is reported. Home Assistant does not record when a long-lived token is used, so age is the only fact available and the alert suggests rotating old tokens. Default 90.",
-            "sentinel_auth_ip_retention_days": "How long an address seen using an access token stays in the security audit's inventory. Addresses are stored as one-way hashes, never in the clear, and at most 20 are kept per token. Default 90 days."
+            "sentinel_auth_ip_retention_days": "How long an address seen using an access token stays in the security audit's inventory. Addresses are stored as one-way hashes, never in the clear, and at most 20 are kept per token. Default 90 days.",
+            "sentinel_autonomy_level": "The level Sentinel runs at when no override is set, kept across restarts and Basic setup. 0 is passive: finding alerts and the daily digest stop; findings are still recorded. A change seen meanwhile (a new device, admin or token, public IP or port mapping) alerts when you raise the level, and a condition still true alerts again once its cooldown ends. Baseline and one-time setup notices still appear. 1 notifies. Levels 2 and 3 are reserved for automatic actions, which are not available yet; today they notify exactly like level 1. The Sentinel health sensor's autonomy_level attribute shows the level in force. A level set with the sentinel_set_autonomy_level service ends after the override duration, a restart, or a change to this setting.",
+            "sentinel_runtime_override_ttl_minutes": "How long a level set with the sentinel_set_autonomy_level service lasts before Sentinel returns to the configured autonomy level. A restart also ends it."
           }
         }
       }
@@ -431,6 +435,14 @@
       "options": {
         "turn_start": "As soon as the agent starts",
         "tool_call": "Before the first tool call"
+      }
+    },
+    "sentinel_autonomy_level": {
+      "options": {
+        "0": "0 – Passive (no finding alerts)",
+        "1": "1 – Notify (default)",
+        "2": "2 – Notify (automatic actions: future)",
+        "3": "3 – Notify (automatic actions: future)"
       }
     }
   },

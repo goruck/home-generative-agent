@@ -36,6 +36,8 @@ _DUMMY_KWARGS: dict[str, Any] = {
     "duration": "3 h",
     "hours": 3,
     "minutes": 30,
+    "actions": "lock.lock",
+    "targets": "Front Door",
 }
 
 
@@ -160,6 +162,7 @@ _CALL_SITE_KWARGS: dict[str, set[str]] = {
     "batch_message": {"count", "plural", "type_summary"},
     "batch_more": {"count"},
     "also_line": {"names"},
+    "canary_would_run": {"actions", "targets"},
     "also_more": {"count"},
     "digest_message": {"count", "plural", "sev_summary"},
     "snooze_confirm_message": {"friendly"},

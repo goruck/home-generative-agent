@@ -35,6 +35,22 @@ if TYPE_CHECKING:
         NetworkSnapshot,
     )
 
+# Rules that alert once on a change (a new admin or token, a new device or
+# client, a public IP or port-mapping change) and stay owed until the alert
+# reaches the user. The engine holds them at autonomy level 0 without a
+# cooldown, and the notifier never holds them for its burst batch, where a
+# level 0 set before the flush would drop an alert already counted as sent
+# (#783).
+CHANGE_ALERT_RULE_TYPES: frozenset[str] = frozenset(
+    {
+        "ha_new_admin_or_token",
+        "radio_new_device_joined",
+        "network_unknown_device_joined",
+        "network_public_ip_changed",
+        "network_upnp_port_mapping_added",
+    }
+)
+
 # Type keys of every rule in this family; the notifier renders their
 # ``summary`` evidence verbatim instead of the generic fallback copy.
 NETWORK_RULE_TYPES: frozenset[str] = frozenset(

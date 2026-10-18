@@ -37,6 +37,7 @@ from ..const import (  # noqa: TID252
     CONF_SENTINEL_APPLIANCE_DURATION_MIN,
     CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     CONF_SENTINEL_AUTH_IP_RETENTION_DAYS,
+    CONF_SENTINEL_AUTONOMY_LEVEL,
     CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     CONF_SENTINEL_BASELINE_ENABLED,
     CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
@@ -69,6 +70,7 @@ from ..const import (  # noqa: TID252
     CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     CONF_SENTINEL_RESPONSE_LANGUAGE,
     CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
+    CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
     CONF_SENTINEL_TRIAGE_ENABLED,
     CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
     CRITICAL_PIN_MAX_LEN,
@@ -77,6 +79,7 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN,
     RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     RECOMMENDED_SENTINEL_AUTH_IP_RETENTION_DAYS,
+    RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
     RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     RECOMMENDED_SENTINEL_BASELINE_ENABLED,
     RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
@@ -105,8 +108,10 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     RECOMMENDED_SENTINEL_RESPONSE_LANGUAGE,
     RECOMMENDED_SENTINEL_RULE_ENTITY_EXCLUSIONS,
+    RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
     RECOMMENDED_SENTINEL_TRIAGE_ENABLED,
     RECOMMENDED_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
+    SENTINEL_AUTONOMY_LEVELS,
     SENTINEL_SEVERITIES,
     SUBENTRY_TYPE_SENTINEL,
 )
@@ -114,6 +119,11 @@ from ..core.utils import (  # noqa: TID252
     hash_pin,
     list_mobile_notify_services,
     valid_exclusion_entry,
+)
+from ..sentinel.autonomy import (  # noqa: TID252
+    MAX_OVERRIDE_TTL_MINUTES,
+    autonomy_level,
+    override_minutes,
 )
 from .localization import async_common_translation
 
@@ -393,7 +403,8 @@ def _carry_basic_setup_survivors(
 
     Basic setup rebuilds the payload from ``_default_payload()`` and exposes four
     fields, so every unexposed setting silently returns to its recommended
-    default. That is the point for tunables, and wrong for two classes of value:
+    default. That is the point for tunables, and wrong for three classes of
+    value:
 
     * hand-curated maps no default can reconstruct -- the entity exclusions a
       user picked to silence phantom alerts, and the camera-to-entry links. The
@@ -409,6 +420,8 @@ def _carry_basic_setup_survivors(
       carried, since there is nothing to check a PIN against. A PIN typed into
       the Basic form still overwrites what is carried here, because the caller
       applies it after this runs.
+    * the autonomy level and its override duration (#783): what the user chose
+      Sentinel to do, not a tuning of how.
 
     Both maps are rebuilt rather than assigned: the values are mutable lists that
     would otherwise stay aliased to the previous subentry's stored data.
@@ -417,6 +430,16 @@ def _carry_basic_setup_survivors(
         return
 
     stored = dict(current.data)
+
+    # The autonomy level and its override duration are choices, not tunables:
+    # a Sentinel set to 0 to silence it must not start notifying again on a
+    # Basic re-run, nor a 30-day override shrink back to an hour (#783).
+    for key in (
+        CONF_SENTINEL_AUTONOMY_LEVEL,
+        CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
+    ):
+        if key in stored:
+            data[key] = stored[key]
 
     # _exclusions_map normalizes and copies: non-dict input, non-list values and
     # non-str members are dropped rather than persisted. Hand-edited storage is
@@ -446,6 +469,63 @@ def _carry_basic_setup_survivors(
         ):
             if stored.get(key):
                 data[key] = stored[key]
+
+
+# The autonomy level select's options: text, as a select takes them.
+_LEVEL_OPTIONS = tuple(str(level) for level in SENTINEL_AUTONOMY_LEVELS)
+
+
+def _autonomy_level_str(payload: dict[str, Any]) -> str:
+    """Return the stored level as the select's option text (it stores a number)."""
+    # Read as the engine reads it: a legacy 0.0 shows as "0", not the default.
+    return str(autonomy_level(payload.get(CONF_SENTINEL_AUTONOMY_LEVEL)))
+
+
+def _autonomy_schema(payload: dict[str, Any]) -> dict[Any, Any]:
+    """Return the form fields for the default autonomy level (#783)."""
+    return {
+        vol.Required(
+            CONF_SENTINEL_AUTONOMY_LEVEL, default=_autonomy_level_str(payload)
+        ): SelectSelector(
+            SelectSelectorConfig(
+                options=list(_LEVEL_OPTIONS),
+                mode=SelectSelectorMode.DROPDOWN,
+                translation_key="sentinel_autonomy_level",
+            )
+        ),
+        vol.Required(
+            CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
+            default=_override_minutes(payload),
+        ): NumberSelector(
+            NumberSelectorConfig(min=1, max=MAX_OVERRIDE_TTL_MINUTES, step=1)
+        ),
+    }
+
+
+def _legacy_autonomy(flow: ConfigSubentryFlow) -> dict[str, Any]:
+    """Return the autonomy settings an older install keeps in the entry options."""
+    options = flow._get_entry().options  # noqa: SLF001
+    return {
+        key: options[key]
+        for key in (
+            CONF_SENTINEL_AUTONOMY_LEVEL,
+            CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
+        )
+        if key in options
+    }
+
+
+def _override_minutes(payload: dict[str, Any]) -> int:
+    """Return the stored override duration, or the default for one unreadable."""
+    return override_minutes(payload.get(CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES))
+
+
+def _normalize_autonomy(data: dict[str, Any]) -> None:
+    """Store the autonomy fields as numbers, as the engine reads them."""
+    data[CONF_SENTINEL_AUTONOMY_LEVEL] = autonomy_level(
+        data.get(CONF_SENTINEL_AUTONOMY_LEVEL)
+    )
+    data[CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES] = _override_minutes(data)
 
 
 def _default_payload() -> dict[str, Any]:
@@ -508,6 +588,10 @@ def _default_payload() -> dict[str, Any]:
         CONF_SENTINEL_RESPONSE_LANGUAGE: RECOMMENDED_SENTINEL_RESPONSE_LANGUAGE,
         CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: (
             RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE
+        ),
+        CONF_SENTINEL_AUTONOMY_LEVEL: RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
+        CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES: (
+            RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES
         ),
         CONF_SENTINEL_DAILY_DIGEST_ENABLED: RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED,
         CONF_SENTINEL_DAILY_DIGEST_TIME: RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME,
@@ -793,6 +877,7 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     )
                 ),
             ): BooleanSelector(),
+            **_autonomy_schema(payload),
             vol.Required(
                 CONF_SENTINEL_DAILY_DIGEST_ENABLED,
                 default=bool(
@@ -1046,7 +1131,12 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             )
 
         data = _default_payload()
+        # The level and override duration an older install keeps in the entry
+        # options are the ones in force; the subentry's own, if any, win in the
+        # carry below.
+        data.update(_legacy_autonomy(self))
         _carry_basic_setup_survivors(data, current)
+        _normalize_autonomy(data)
 
         errors: dict[str, str] = {}
 
@@ -1120,6 +1210,9 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
         """Create or edit Sentinel configuration."""
         current = _current_subentry(self)
         payload = _default_payload()
+        # A level an older install keeps in the entry options is the one in
+        # force (see _apply_sentinel_options), so the form shows and keeps it.
+        payload.update(_legacy_autonomy(self))
         if current is not None:
             payload.update(dict(current.data))
         # A PIN saved before #762 can be stored with the flag off; the engine
@@ -1132,6 +1225,11 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             suggested: dict[str, Any] = {
                 k: v for k, v in payload.items() if k != CONF_CRITICAL_ACTION_PIN
             }
+            # The select's options are text; the stored level is a number.
+            suggested[CONF_SENTINEL_AUTONOMY_LEVEL] = _autonomy_level_str(payload)
+            suggested[CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES] = _override_minutes(
+                payload
+            )
             suggested[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = _camera_entry_links_json(
                 payload
             )
@@ -1195,6 +1293,8 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
         ):
             errors.setdefault("base", "pin_required")
 
+        _normalize_autonomy(data)
+
         raw_quiet_start = _raw_quiet_hour(data, CONF_SENTINEL_QUIET_HOURS_START)
         raw_quiet_end = _raw_quiet_hour(data, CONF_SENTINEL_QUIET_HOURS_END)
         if (raw_quiet_start == "") != (raw_quiet_end == ""):
@@ -1242,6 +1342,9 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             error_suggested: dict[str, Any] = {
                 k: v for k, v in error_payload.items() if k != CONF_CRITICAL_ACTION_PIN
             }
+            error_suggested[CONF_SENTINEL_AUTONOMY_LEVEL] = _autonomy_level_str(
+                error_payload
+            )
             error_suggested[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = (
                 _camera_entry_links_json(error_payload)
             )

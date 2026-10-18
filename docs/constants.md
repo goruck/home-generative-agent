@@ -319,7 +319,7 @@ This document covers the named constants that affect integration behaviour, orga
 
 | Constant | Config key | Default | Purpose |
 |---|---|---|---|
-| `RECOMMENDED_SENTINEL_AUTONOMY_LEVEL` | `sentinel_autonomy_level` | `1` | `0` = passive (no notifications); `1` = notify only; `2` = suggest actions; `3` = act autonomously |
+| `RECOMMENDED_SENTINEL_AUTONOMY_LEVEL` | `sentinel_autonomy_level` | `1` | `0` = passive (no finding alerts or daily digest; baseline and setup notices still sent); `1` = notify only; `2`/`3` = reserved for automatic actions, which the settings below would enable but which are not in the options yet. Set in Sentinel Advanced setup |
 | `RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES` | `sentinel_runtime_override_ttl_minutes` | `60` | How long a runtime autonomy-level override lasts before reverting to the configured value |
 | `RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE` | `sentinel_require_pin_for_level_increase` | `False` | Require the Sentinel PIN to increase autonomy level via the `sentinel_set_autonomy_level` service |
 
@@ -331,12 +331,12 @@ This document covers the named constants that affect integration behaviour, orga
 
 | Constant | Config key | Default | Purpose |
 |---|---|---|---|
-| `RECOMMENDED_SENTINEL_AUTO_EXECUTION_ENABLED` | `sentinel_auto_execution_enabled` | `False` | Allow Sentinel to execute suggested actions autonomously (requires autonomy level ≥ 2) |
+| `RECOMMENDED_SENTINEL_AUTO_EXECUTION_ENABLED` | `sentinel_auto_execution_enabled` | `False` | Allow Sentinel to execute suggested actions autonomously (requires autonomy level ≥ 2). Not settable from the options yet. |
 | `RECOMMENDED_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE` | `sentinel_auto_execute_default_min_confidence` | `0.70` | Minimum finding confidence score required for auto-execution |
 | `RECOMMENDED_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR` | `sentinel_auto_execute_max_actions_per_hour` | `5` | Rate cap on autonomous actions to prevent runaway execution |
 | `RECOMMENDED_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES` | `sentinel_execution_idempotency_window_minutes` | `15` | Duplicate-execution suppression window; the same action on the same finding will not fire twice within this period |
-| `RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE` | `sentinel_auto_exec_canary_mode` | `False` | Log what auto-execution *would* do without actually executing. Useful for validating policy before enabling live execution. |
-| `RECOMMENDED_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES` | `sentinel_auto_execute_allowed_services` | `[]` | Explicit allowlist of HA service calls Sentinel may invoke autonomously. Empty = no services permitted. |
+| `RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE` | `sentinel_auto_exec_canary_mode` | `False` | Report what auto-execution *would* do, as a line in the finding's notification, without executing (works whether or not live execution is on). Not settable from the options yet. |
+| `RECOMMENDED_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES` | `sentinel_auto_execute_allowed_services` | `[]` | Explicit allowlist of domains or `domain.service` calls Sentinel may invoke autonomously. Empty = no services permitted. Critical actions (Critical Action PIN rules, alarm panel and cover actions, lock actions other than `lock.lock`, anything that starts a script, scene or automation) are never run, whatever is listed. Not settable from the options yet. |
 
 **Code-only:**
 

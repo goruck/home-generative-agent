@@ -54,7 +54,6 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     RECOMMENDED_SENTINEL_AUTH_IP_RETENTION_DAYS,
     RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
-    RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
     RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
     RECOMMENDED_SENTINEL_BASELINE_SUSTAINED_MINUTES,
@@ -68,7 +67,6 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     RECOMMENDED_SENTINEL_PRESENCE_GRACE_MINUTES,
     RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
-    RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
     SENTINEL_SEVERITIES,
     SIGNAL_SENTINEL_RUN_COMPLETE,
 )
@@ -95,11 +93,13 @@ from custom_components.home_generative_agent.snapshot.upnp import (
 )
 
 from .alarm_enrichment import async_enrich_alarm_last_changed
+from .autonomy import autonomy_level, override_minutes
 from .baseline import CYCLICAL_LOAD_HINTS
 from .correlator import SentinelCorrelator
 from .dynamic_rules import evaluate_dynamic_rules
 from .execution import (
     SentinelExecutionService,
+    executable_actions,
     level_increase_pin_required,
 )
 from .lock_enrichment import async_enrich_lock_last_changed
@@ -112,7 +112,7 @@ from .network_inventory import (
     client_key,
     client_observation,
 )
-from .notifier import is_security_copy, related_findings_line
+from .notifier import canary_line, is_security_copy, related_findings_line
 from .power_enrichment import async_enrich_power_last_changed
 from .rules.alarm_disarmed_external_threat import AlarmDisarmedDuringExternalThreatRule
 from .rules.appliance_power_duration import AppliancePowerDurationRule
@@ -135,7 +135,7 @@ from .rules.network_client_usage_anomaly import (
     hour_metrics,
     usage_coverage,
 )
-from .rules.network_common import NETWORK_RULE_TYPES
+from .rules.network_common import CHANGE_ALERT_RULE_TYPES, NETWORK_RULE_TYPES
 from .rules.network_guest_client_present import NetworkGuestClientPresentRule
 from .rules.network_public_ip_changed import NetworkPublicIpChangedRule
 from .rules.network_router_posture import (
@@ -165,6 +165,7 @@ from .rules.zigbee_permit_join_open import ZigbeePermitJoinOpenRule
 from .rules.zwave_inclusion_active import ZwaveInclusionActiveRule
 from .rules.zwave_insecure_security_class import ZwaveInsecureSecurityClassRule
 from .suppression import (
+    SUPPRESSION_REASON_AUTONOMY_PASSIVE,
     SUPPRESSION_REASON_NOT_SUPPRESSED,
     SUPPRESSION_REASON_NOTIFIER_DUPLICATE,
     SUPPRESSION_REASON_POLICY_BLOCKED,
@@ -173,10 +174,14 @@ from .suppression import (
     SUPPRESSION_REASON_USER_SNOOZE_24H,
     SUPPRESSION_REASON_USER_SNOOZE_PERMANENT,
     SuppressionManager,
+    cooldown_stamps,
     purge_expired_prompts,
+    register_device_cooldown,
     register_finding,
     register_presence_grace,
     register_prompt,
+    resolve_prompt,
+    restore_cooldown_stamps,
     should_suppress,
 )
 from .triage import TRIAGE_SUPPRESS, SentinelTriageService
@@ -243,6 +248,12 @@ _POSTURE_MEMORY_RULES: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# Rules that alert once on a change and stay owed until the alert reaches the
+# user (the auth and network inventories, posture memory). Held at autonomy
+# level 0 they start no cooldown, so they alert as soon as the level rises
+# (#783); they are audited once per cooldown meanwhile, not every cycle.
+_CHANGE_ALERT_RULES: frozenset[str] = CHANGE_ALERT_RULE_TYPES
+
 
 @dataclass
 class GatedEvaluation:
@@ -260,6 +271,11 @@ class GatedEvaluation:
 # Module-level in-memory store for runtime autonomy-level overrides.
 # Maps entry_id -> (level: int, expires_at: datetime)
 _AUTONOMY_OVERRIDES: dict[str, tuple[int, datetime]] = {}
+# The configured level each override was set over (#783). An override is
+# relative to that level: once the configured level changes, it no longer
+# applies, so a level-3 override cannot outlive a lowered configuration and a
+# muted one cannot outlive a raised one.
+_OVERRIDE_BASES: dict[str, int] = {}
 
 # ---------------------------------------------------------------------------
 # Entity → anomaly-type mapping for event-driven triggering
@@ -376,6 +392,8 @@ class SentinelEngine:
         # when it was delivered), read by callers that must tell a snooze from
         # a cooldown (the device inventory's pending alerts).
         self._last_dispatch_reason: str | None = None
+        # Change alerts held at level 0: anomaly_id -> when last audited.
+        self._passive_recorded: dict[str, datetime] = {}
         self._network_enabled = bool(
             options.get(
                 CONF_SENTINEL_NETWORK_ENABLED, RECOMMENDED_SENTINEL_NETWORK_ENABLED
@@ -389,6 +407,9 @@ class SentinelEngine:
         )
         self._suppression = suppression
         self._notifier = notifier
+        # The notifier flushes batches and sends the digest on its own clock:
+        # it asks whether Sentinel is at level 0 first (#783).
+        notifier.set_silence_check(self._is_passive)
         self._audit_store = audit_store
         self._explainer = explainer
         self._rule_registry = rule_registry
@@ -399,7 +420,7 @@ class SentinelEngine:
         self._stop_event = asyncio.Event()
         self._correlator = SentinelCorrelator()
         self._trigger_scheduler = SentinelTriggerScheduler()
-        self._execution_service = SentinelExecutionService(dict(options))
+        self._execution_service = SentinelExecutionService(dict(options), hass=hass)
         self._log_limiter = RepeatingLogLimiter(LOGGER)
         self._rule_entity_exclusions = _parse_rule_entity_exclusions(
             options.get(CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS)
@@ -609,16 +630,20 @@ class SentinelEngine:
             # is never checked, so a stale PIN cannot block lowering the level.
             self._verify_level_increase_pin(pin)
             pin_verified = True
-        ttl_minutes = _coerce_int(
-            self._options.get(CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES),
-            default=RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
+        # Bounded as the form bounds it: a legacy or hand-edited 0 would end
+        # the override at once, and a huge value overflows the timedelta.
+        ttl_minutes = override_minutes(
+            self._options.get(CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES)
         )
         expires_at = dt_util.utcnow() + timedelta(minutes=ttl_minutes)
         existing = _AUTONOMY_OVERRIDES.get(entry_id)
         if require_pin and not pin_verified and level > base_level and existing:
             expires_at = min(expires_at, existing[1])
         _AUTONOMY_OVERRIDES[entry_id] = (level, expires_at)
-        LOGGER.info(
+        _OVERRIDE_BASES[entry_id] = base_level
+        # Level 0 silences every finding alert until it ends: say so louder.
+        LOGGER.log(
+            logging.WARNING if level == 0 else logging.INFO,
             "Sentinel autonomy level set to %s for entry %s (expires %s).",
             level,
             entry_id,
@@ -657,23 +682,173 @@ class SentinelEngine:
 
         Checks the in-memory override (respecting TTL); falls back to the
         config value ``CONF_SENTINEL_AUTONOMY_LEVEL``, then the recommended
-        default.
+        default. An override set over a configured level that has since
+        changed no longer applies, and is discarded (#783).
         """
+        base = self._base_autonomy_level()
         override = _AUTONOMY_OVERRIDES.get(entry_id)
         if override is not None:
             level, expires_at = override
-            if dt_util.utcnow() < expires_at:
+            set_over = _OVERRIDE_BASES.get(entry_id, base)
+            if dt_util.utcnow() < expires_at and set_over == base:
                 return level
-            # TTL expired - clean up and fall through to config default
-            del _AUTONOMY_OVERRIDES[entry_id]
-        return self._base_autonomy_level()
+            # Expired, or set over a configured level that has since changed:
+            # clean up and fall through to the configured level. Not from a
+            # stopped engine: during a reload its options are the old ones,
+            # and the override may be the new engine's.
+            if not self._stopped:
+                del _AUTONOMY_OVERRIDES[entry_id]
+                _OVERRIDE_BASES.pop(entry_id, None)
+        return base
 
     def _base_autonomy_level(self) -> int:
         """Return the configured autonomy level, without any runtime override."""
-        return _coerce_int(
-            self._options.get(CONF_SENTINEL_AUTONOMY_LEVEL),
-            default=RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
+        # Read as the form reads it; a hand-edited value outside the levels
+        # reads as the default.
+        return autonomy_level(self._options.get(CONF_SENTINEL_AUTONOMY_LEVEL))
+
+    def autonomy_status(self) -> dict[str, Any]:
+        """
+        Return the level in force and when an override of it ends, if one does.
+
+        Shown on the health sensor, so a level-0 override that silences
+        Sentinel is visible rather than only logged (#783).
+        """
+        if not self._entry_id:
+            return {"autonomy_level": None, "autonomy_override_expires": None}
+        level = self.get_autonomy_level(self._entry_id)
+        override = _AUTONOMY_OVERRIDES.get(self._entry_id)
+        # Only an override in force: a stopped engine keeps a stale one it
+        # does not apply, and must not show its expiry next to another level.
+        applies = (
+            override is not None
+            and override[0] == level
+            and dt_util.utcnow() < override[1]
+            and _OVERRIDE_BASES.get(self._entry_id) == self._base_autonomy_level()
         )
+        return {
+            "autonomy_level": level,
+            "autonomy_override_expires": (
+                override[1].isoformat() if override and applies else None
+            ),
+        }
+
+    def _is_passive(self) -> bool:
+        """
+        Return True at autonomy level 0, set or overridden: no finding alerts.
+
+        The level the user chose, not the read-only fallback to 0 after a
+        downgrade, which only stops triage and actions: that must never mute
+        security alerts.
+        """
+        return bool(self._entry_id) and self.get_autonomy_level(self._entry_id) == 0
+
+    async def _hold_passive(
+        self, findings: list[AnomalyFinding], now: datetime, window: timedelta
+    ) -> bool:
+        """
+        Hold findings at autonomy level 0; return True to audit the hold.
+
+        Nothing is lost (#783). A standing condition starts its cooldown for
+        its own devices, so it is not re-recorded every cycle and alerts again
+        once that ends; another device's finding of the same type is not
+        muted. A change alert starts no cooldown and stays owed, so it alerts
+        as soon as the level rises; it is audited once per ``window``.
+        """
+        # Forget holds older than any window, so the map does not grow.
+        cutoff = now - max(window, timedelta(days=1))
+        self._passive_recorded = {
+            key: seen for key, seen in self._passive_recorded.items() if seen > cutoff
+        }
+        record = False
+        cooled = False
+        for finding in findings:
+            # Audited once per window: a device cooldown can be far shorter
+            # than a posture rule's day-long one.
+            last = self._passive_recorded.get(finding.anomaly_id)
+            if last is None or now - last >= window:
+                self._passive_recorded[finding.anomaly_id] = now
+                record = True
+            if finding.type not in _CHANGE_ALERT_RULES:
+                register_device_cooldown(self._suppression.state, finding, now)
+                cooled = True
+        if cooled:
+            await self._suppression.async_save()
+        return record
+
+    async def _passive_dispatch(  # noqa: PLR0913
+        self,
+        findings: list[AnomalyFinding],
+        audited: AnomalyFinding | CompoundFinding,
+        snapshot: FullStateSnapshot,
+        now: datetime,
+        window: timedelta,
+        trigger_source: str,
+        *,
+        reason: str | None = None,
+    ) -> bool:
+        """
+        Stop a dispatch at level 0 (or with nothing due), audit it, return False.
+
+        ``reason`` overrides the audit reason (a suppression's own, or a
+        compound with no finding due); with nothing held, the stop is always
+        audited.
+        """
+        reason = reason or SUPPRESSION_REASON_AUTONOMY_PASSIVE
+        if await self._hold_passive(findings, now, window) or not findings:
+            await _append_finding_audit(
+                self._audit_store,
+                snapshot,
+                audited,
+                None,
+                reason,
+                trigger_source=trigger_source,
+            )
+        self._last_dispatch_reason = reason
+        return False
+
+    async def _abandon_for_silence(  # noqa: PLR0913
+        self,
+        held: list[tuple[AnomalyFinding, tuple[str | None, dict[str, str | None]]]],
+        prompt_id: str,
+        audited: AnomalyFinding | CompoundFinding,
+        snapshot: FullStateSnapshot,
+        now: datetime,
+        window: timedelta,
+        trigger_source: str,
+    ) -> bool:
+        """
+        Stop a dispatch that level 0 overtook, undoing what it already wrote.
+
+        The cooldowns and prompt were registered before triage and the
+        explanation ran; left in place they would mute other devices of the
+        type, delay an owed change alert, or (the prompt, after a restart)
+        hold it back. They are put back and saved, then the findings are held
+        as at level 0 (#783).
+        """
+        state = self._suppression.state
+        for finding, stamps in held:
+            restore_cooldown_stamps(state, finding, stamps)
+        resolve_prompt(state, prompt_id)
+        await self._suppression.async_save()
+        return await self._passive_dispatch(
+            [finding for finding, _stamps in held],
+            audited,
+            snapshot,
+            now,
+            window,
+            trigger_source,
+        )
+
+    def _canary_kwargs(
+        self, finding: AnomalyFinding, *, canary_would_execute: bool | None
+    ) -> dict[str, str]:
+        """Return the dry-run line for a finding canary mode would have run."""
+        if not canary_would_execute:
+            return {}
+        return {
+            "canary_line": canary_line(finding, executable_actions(finding), self._hass)
+        }
 
     # ---------------------------------------------------------------------- #
     # Lifecycle
@@ -699,6 +874,18 @@ class SentinelEngine:
             return
         self._stop_event.clear()
 
+        if self._entry_id and self.get_autonomy_level(self._entry_id) == 0:
+            # Level 0 silences every finding alert until it changes: say so at
+            # start, whether set in the options or by a service call that a
+            # reload kept (#783).
+            override = _AUTONOMY_OVERRIDES.get(self._entry_id)
+            LOGGER.warning(
+                "Sentinel autonomy level 0 is in force for entry %s%s: findings "
+                "are recorded but no alerts or daily digest are sent.",
+                self._entry_id,
+                f" until {override[1].isoformat()}" if override else "",
+            )
+
         # Subscribe to state-change events for relevant entity domains.
         unsub = self._hass.bus.async_listen(EVENT_STATE_CHANGED, self._on_state_changed)
         self._event_unsubscribers.append(unsub)
@@ -721,6 +908,7 @@ class SentinelEngine:
         override = _AUTONOMY_OVERRIDES.get(self._entry_id) if self._entry_id else None
         if override is not None and override[0] > self._base_autonomy_level():
             del _AUTONOMY_OVERRIDES[cast("str", self._entry_id)]
+            _OVERRIDE_BASES.pop(cast("str", self._entry_id), None)
             if dt_util.utcnow() < override[1]:
                 LOGGER.info(
                     "Sentinel autonomy level %s for entry %s ended by reload; "
@@ -1795,17 +1983,19 @@ class SentinelEngine:
             cooldown_entity,
             **suppress_kwargs,
         )
-        if suppression_decision.suppress:
-            await _append_finding_audit(
-                self._audit_store,
-                snapshot,
+        if suppression_decision.suppress or self._is_passive():
+            # Suppressed: audited with its reason, nothing held. Level 0: held
+            # (see _hold_passive).
+            suppressed = suppression_decision.suppress
+            return await self._passive_dispatch(
+                [] if suppressed else [finding],
                 finding,
-                None,
-                suppression_decision.reason_code,
-                trigger_source=trigger_source,
+                snapshot,
+                now,
+                cooldown_type,
+                trigger_source,
+                reason=suppression_decision.reason_code if suppressed else None,
             )
-            self._last_dispatch_reason = suppression_decision.reason_code
-            return False
 
         # Suppression state is read-only → downgrade to Level 0.
         effective_autonomy = (
@@ -1879,6 +2069,9 @@ class SentinelEngine:
                 )
 
         # Always register the finding for cooldown tracking, regardless of policy.
+        # The stamps it replaces are kept, to undo it if level 0 is set before
+        # the alert is sent.
+        stamps = cooldown_stamps(self._suppression.state, finding)
         register_finding(self._suppression.state, finding, now)
 
         # BLOCKED findings: audit and skip notification — no pending user action.
@@ -1908,7 +2101,23 @@ class SentinelEngine:
         if (explainer := self._explainer_for(explain_enabled, finding)) is not None:
             explanation = await explainer.async_explain(finding)
 
-        sent = await self._notifier.async_notify(finding, snapshot, explanation)
+        if self._is_passive():
+            # Set to 0 while triage or the explanation ran: not sent (#783).
+            return await self._abandon_for_silence(
+                [(finding, stamps)],
+                finding.anomaly_id,
+                finding,
+                snapshot,
+                now,
+                cooldown_type,
+                trigger_source,
+            )
+        sent = await self._notifier.async_notify(
+            finding,
+            snapshot,
+            explanation,
+            **self._canary_kwargs(finding, canary_would_execute=canary_would_execute),
+        )
         await _append_finding_audit(
             self._audit_store,
             snapshot,
@@ -1979,16 +2188,16 @@ class SentinelEngine:
             if not decision.suppress:
                 passing.append((constituent, decision.reason_code))
 
-        if not passing:
-            await _append_finding_audit(
-                self._audit_store,
-                snapshot,
+        if not passing or self._is_passive():
+            return await self._passive_dispatch(
+                [c for c, _reason in passing],
                 compound,
-                None,
-                "suppressed",
-                trigger_source=trigger_source,
+                snapshot,
+                now,
+                cooldown_type,
+                trigger_source,
+                reason="suppressed" if not passing else None,
             )
-            return False
 
         # The push shows one finding, so show one that is due: picking from
         # every constituent re-sent a finding still under its own cooldown or
@@ -2012,7 +2221,12 @@ class SentinelEngine:
             best, snapshot, effective_autonomy, now
         )
 
-        # Always register cooldown for passing constituents.
+        # Always register cooldown for passing constituents, keeping the stamps
+        # replaced, as for a single finding.
+        held = [
+            (constituent, cooldown_stamps(self._suppression.state, constituent))
+            for constituent, _reason in passing
+        ]
         for constituent, _reason in passing:
             register_finding(self._suppression.state, constituent, now)
 
@@ -2079,13 +2293,27 @@ class SentinelEngine:
             self._options,
             self._hass,
         )
+        if self._is_passive():
+            # Set to 0 while triage or the explanation ran: not sent (#783).
+            return await self._abandon_for_silence(
+                held,
+                best.anomaly_id,
+                compound,
+                snapshot,
+                now,
+                cooldown_type,
+                trigger_source,
+            )
         sent = await self._notifier.async_notify(
-            best, snapshot, explanation, also_line=also_line
+            best,
+            snapshot,
+            explanation,
+            also_line=also_line,
+            **self._canary_kwargs(best, canary_would_execute=canary_would_execute),
         )
         # A push the notifier dropped as a repeat named nothing, so its named
         # partners stay due.
-        if sent is False:
-            named = []
+        named = [] if sent is False else named
         if named:
             for constituent in named:
                 register_prompt(self._suppression.state, constituent, now)
@@ -2132,7 +2360,8 @@ async def _auto_execute_finding(
     - ``actions``: list of per-action result dicts
     - ``execution_id``: echoed from the caller
     """
-    service_actions = [a for a in finding.suggested_actions if "." in a]
+    # The same actions the execution gate screened (executable_actions).
+    service_actions = executable_actions(finding)
 
     if not service_actions:
         return {

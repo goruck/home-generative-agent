@@ -20,6 +20,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS,
 )
+from custom_components.home_generative_agent.sentinel import engine as engine_module
 from custom_components.home_generative_agent.sentinel.engine import (
     SentinelEngine,
     _delivered_reason,
@@ -80,14 +81,23 @@ class DummySuppression(SuppressionManager):
 class DummyNotifier:
     """Notification dispatcher stub."""
 
+    def set_silence_check(self, check: object) -> None:
+        """Accept the engine's level-0 check; unused by this stub."""
+        del check
+
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
     async def async_notify(  # type: ignore[no-untyped-def]
-        self, finding, snapshot, explanation, also_line=None
+        self, finding, snapshot, explanation, also_line=None, canary_line=None
     ) -> bool | None:
         self.calls.append(
-            {"finding": finding, "snapshot": snapshot, "also_line": also_line}
+            {
+                "finding": finding,
+                "snapshot": snapshot,
+                "also_line": also_line,
+                "canary_line": canary_line,
+            }
         )
         return None
 
@@ -354,6 +364,11 @@ async def test_sentinel_canary_mode_does_not_consume_live_auto_execute(
     assert audit.calls
     assert audit.calls[0]["canary_would_execute"] is True
     assert audit.calls[0]["action_policy_path"] == "auto_execute"
+    # The dry run is named in the notification (#783).
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    assert notifier.calls[0]["canary_line"] == (
+        "Dry run: Sentinel would have run lock.lock on Front Door."
+    )
 
     engine._options[CONF_SENTINEL_AUTO_EXEC_CANARY_MODE] = False
     await engine._run_once()
@@ -366,6 +381,39 @@ async def test_sentinel_canary_mode_does_not_consume_live_auto_execute(
     )
     assert len(audit.calls) >= 2
     assert audit.calls[-1]["action_policy_path"] == "auto_execute"
+
+
+async def test_level_zero_records_but_never_notifies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Level 0 (passive) silences Sentinel: audited, not notified (#783)."""
+    engine, hass = _make_ae_engine(monkeypatch, autonomy_level=0)
+
+    await engine._run_once()
+
+    hass.services.async_call.assert_not_called()
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    assert notifier.calls == []
+    audit = cast("DummyAudit", cast("Any", engine)._audit_store)
+    assert audit.calls
+    assert all(c["suppression_reason_code"] == "autonomy_passive" for c in audit.calls)
+
+
+async def test_dry_run_with_execution_off_never_acts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dry-run mode reports with live execution off, and never calls HA (#783)."""
+    engine, hass = _make_ae_engine(monkeypatch)
+    engine._options[CONF_SENTINEL_AUTO_EXEC_CANARY_MODE] = True
+    engine._options[CONF_SENTINEL_AUTO_EXECUTION_ENABLED] = False
+
+    await engine._run_once()
+
+    hass.services.async_call.assert_not_called()
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    assert notifier.calls[0]["canary_line"] == (
+        "Dry run: Sentinel would have run lock.lock on Front Door."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1339,3 +1387,331 @@ async def test_trigger_source_on_demand_in_audit(
 
     assert audit.calls
     assert audit.calls[0]["trigger_source"] == "on_demand"
+
+
+async def test_a_grouped_alert_is_silent_at_level_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The compound path honours level 0 too: recorded, not notified (#783)."""
+    snapshot = _make_snapshot()
+    engine, notifier, audit = _make_engine(monkeypatch, snapshot, cooldown_minutes=0)
+    engine._entry_id = "passive-entry"
+    monkeypatch.setattr(engine, "get_autonomy_level", lambda _entry_id: 0)
+
+    sent = await _dispatch_group(
+        engine,
+        _standing_finding("g1", "unlocked_lock_at_night"),
+        _standing_finding("g2", "unlocked_lock_when_away"),
+        at=datetime.now(UTC),
+    )
+
+    assert sent is False
+    assert cast("Any", notifier).calls == []
+    assert audit.calls[-1]["suppression_reason_code"] == "autonomy_passive"
+
+
+async def test_a_level_zero_override_silences_a_notifying_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An override of 0 over a configured level 1, end to end, sends nothing."""
+    engine, hass = _make_ae_engine(monkeypatch, autonomy_level=1)
+    del cast("Any", engine).get_autonomy_level  # the real level lookup
+    engine._options["sentinel_autonomy_level"] = 1
+    engine_module._AUTONOMY_OVERRIDES["test_entry"] = (
+        0,
+        _AE_FROZEN_NOW + timedelta(hours=1),
+    )
+    engine_module._OVERRIDE_BASES["test_entry"] = 1
+    try:
+        await engine._run_once()
+    finally:
+        engine_module._AUTONOMY_OVERRIDES.pop("test_entry", None)
+        engine_module._OVERRIDE_BASES.pop("test_entry", None)
+
+    hass.services.async_call.assert_not_called()
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    assert notifier.calls == []
+    status = engine.autonomy_status()
+    assert status["autonomy_level"] == 1  # the override was cleaned up above
+
+
+async def test_a_finding_held_at_level_zero_is_settled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Level 0 counts a finding as handled (#783): it starts its cooldown.
+
+    Raising the level does not release a burst of every finding held while
+    Sentinel was silent.
+    """
+    engine, notifier, audit = _make_engine(monkeypatch, _make_snapshot())
+    engine._entry_id = "passive-entry"
+    level = [0]
+    monkeypatch.setattr(engine, "get_autonomy_level", lambda _entry_id: level[0])
+
+    await engine._run_once()
+    assert notifier.calls == []
+    assert audit.calls
+    assert all(c["suppression_reason_code"] == "autonomy_passive" for c in audit.calls)
+
+    level[0] = 1
+    await engine._run_once()
+    assert notifier.calls == []
+
+
+async def test_a_group_held_at_level_zero_is_settled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The compound path starts the constituents' cooldowns at level 0 too."""
+    engine, notifier, _audit = _make_engine(
+        monkeypatch, _make_snapshot(), cooldown_minutes=30
+    )
+    engine._entry_id = "passive-entry"
+    level = [0]
+    monkeypatch.setattr(engine, "get_autonomy_level", lambda _entry_id: level[0])
+    findings = (
+        _standing_finding("g1", "unlocked_lock_at_night"),
+        _standing_finding("g2", "unlocked_lock_when_away"),
+    )
+    now = datetime.now(UTC)
+
+    assert await _dispatch_group(engine, *findings, at=now) is False
+    level[0] = 1
+    assert await _dispatch_group(engine, *findings, at=now) is False
+    assert cast("Any", notifier).calls == []
+
+
+def test_a_configured_level_zero_is_logged_at_start(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A level 0 from the settings is as visible as one set by the service."""
+    engine, _notifier, _audit = _make_engine(monkeypatch, _make_snapshot())
+    engine._entry_id = "passive-entry"
+    engine._options["sentinel_autonomy_level"] = 0
+    monkeypatch.setattr(engine, "_hass", MagicMock())
+    with caplog.at_level("WARNING"):
+        engine.start()
+    assert any(
+        r.levelname == "WARNING" and "level 0" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_the_engine_tells_the_notifier_when_sentinel_is_silent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The notifier asks the engine before it flushes a batch or a digest."""
+    checks: list[Any] = []
+    notifier = DummyNotifier()
+    cast("Any", notifier).set_silence_check = checks.append
+    engine = SentinelEngine(
+        hass=cast("HomeAssistant", object()),
+        options={},
+        suppression=DummySuppression(),
+        notifier=cast("SentinelNotifier", notifier),
+        audit_store=cast("AuditStore", DummyAudit()),
+        explainer=None,
+        entry_id="e",
+    )
+    monkeypatch.setattr(engine, "get_autonomy_level", lambda _entry_id: 0)
+    assert len(checks) == 1
+    assert checks[0]() is True
+
+
+async def test_a_held_finding_mutes_only_its_own_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At level 0 the cooldown starts per device, not for the whole type."""
+    engine, notifier, _audit = _make_engine(
+        monkeypatch, _make_snapshot(), cooldown_minutes=30
+    )
+    engine._entry_id = "passive-entry"
+    level = [0]
+    monkeypatch.setattr(engine, "get_autonomy_level", lambda _entry_id: level[0])
+    now = datetime.now(UTC)
+    door_a = _standing_finding(
+        "a", "open_entry_while_away", entities=["binary_sensor.door_a"]
+    )
+    door_b = _standing_finding(
+        "b", "open_entry_while_away", entities=["binary_sensor.door_b"]
+    )
+
+    held = await engine._dispatch_item(
+        door_a,
+        _make_snapshot(),
+        now,
+        timedelta(minutes=30),
+        timedelta(minutes=30),
+        explain_enabled=False,
+    )
+    assert held is False
+    level[0] = 1
+    sent = await engine._dispatch_item(
+        door_b,
+        _make_snapshot(),
+        now,
+        timedelta(minutes=30),
+        timedelta(minutes=30),
+        explain_enabled=False,
+    )
+    assert sent is True
+    assert [cast("Any", c["finding"]).anomaly_id for c in notifier.calls] == ["b"]
+
+
+async def test_level_zero_set_while_an_alert_is_prepared_stops_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Silence is checked again right before sending (#783)."""
+    engine, notifier, audit = _make_engine(
+        monkeypatch, _make_snapshot(), cooldown_minutes=0
+    )
+    engine._entry_id = "passive-entry"
+    level = [1]
+    monkeypatch.setattr(engine, "get_autonomy_level", lambda _entry_id: level[0])
+
+    class _SlowExplainer:
+        async def async_explain(self, _finding: Any) -> str:
+            level[0] = 0  # set while the explanation was being written
+            return "explained"
+
+    monkeypatch.setattr(engine, "_explainer_for", lambda *_a: _SlowExplainer())
+    finding = _standing_finding("late", "open_entry_while_away")
+
+    sent = await engine._dispatch_item(
+        finding,
+        _make_snapshot(),
+        datetime.now(UTC),
+        timedelta(0),
+        timedelta(0),
+        explain_enabled=True,
+    )
+
+    assert sent is False
+    assert notifier.calls == []
+    assert audit.calls[-1]["suppression_reason_code"] == "autonomy_passive"
+    state = cast("Any", engine)._suppression.state
+    assert "late" not in state.pending_prompts
+
+
+async def test_late_silence_leaves_no_cooldown_or_prompt_behind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Level 0 set while an alert is prepared undoes what the dispatch wrote.
+
+    Another device of the same type is not muted when the level rises.
+    """
+    engine, notifier, _audit = _make_engine(
+        monkeypatch, _make_snapshot(), cooldown_minutes=30
+    )
+    engine._entry_id = "passive-entry"
+    level = [1]
+    monkeypatch.setattr(engine, "get_autonomy_level", lambda _entry_id: level[0])
+
+    class _SlowExplainer:
+        async def async_explain(self, _finding: Any) -> str:
+            level[0] = 0
+            return "explained"
+
+    monkeypatch.setattr(engine, "_explainer_for", lambda *_a: _SlowExplainer())
+    now = datetime.now(UTC)
+    window = timedelta(minutes=30)
+    door_a = _standing_finding(
+        "a", "open_entry_while_away", entities=["binary_sensor.door_a"]
+    )
+    assert (
+        await engine._dispatch_item(
+            door_a, _make_snapshot(), now, window, window, explain_enabled=True
+        )
+        is False
+    )
+    state = cast("Any", engine)._suppression.state
+    assert "open_entry_while_away" not in state.last_by_type
+
+    level[0] = 1
+    monkeypatch.setattr(engine, "_explainer_for", lambda *_a: None)
+    door_b = _standing_finding(
+        "b", "open_entry_while_away", entities=["binary_sensor.door_b"]
+    )
+    assert (
+        await engine._dispatch_item(
+            door_b, _make_snapshot(), now, window, window, explain_enabled=True
+        )
+        is True
+    )
+    assert [cast("Any", c["finding"]).anomaly_id for c in notifier.calls] == ["b"]
+
+
+async def test_late_silence_in_a_group_stops_the_push(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The grouped path checks level 0 right before sending too."""
+    engine, notifier, audit = _make_engine(
+        monkeypatch, _make_snapshot(), cooldown_minutes=30
+    )
+    engine._entry_id = "passive-entry"
+    level = [1]
+    monkeypatch.setattr(engine, "get_autonomy_level", lambda _entry_id: level[0])
+
+    class _SlowExplainer:
+        async def async_explain(self, _finding: Any) -> str:
+            level[0] = 0
+            return "explained"
+
+    monkeypatch.setattr(engine, "_explainer_for", lambda *_a: _SlowExplainer())
+    findings = (
+        _standing_finding("g1", "unlocked_lock_at_night"),
+        _standing_finding("g2", "unlocked_lock_when_away"),
+    )
+    now = datetime.now(UTC)
+    sent = await engine._dispatch_compound(
+        CompoundFinding.from_findings(list(findings)),
+        _make_snapshot(),
+        now,
+        timedelta(minutes=30),
+        timedelta(minutes=15),
+        True,  # noqa: FBT003
+    )
+    assert sent is False
+    assert cast("Any", notifier).calls == []
+    assert audit.calls[-1]["suppression_reason_code"] == "autonomy_passive"
+    state = cast("Any", engine)._suppression.state
+    assert not state.pending_prompts
+    assert "unlocked_lock_at_night" not in state.last_by_type
+
+
+async def test_a_standing_condition_held_at_zero_is_audited_once_per_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Its device cooldown is short; its audit follows the rule's window.
+
+    A posture condition held for days is not re-recorded every 15 minutes.
+    """
+    engine, _notifier, audit = _make_engine(monkeypatch, _make_snapshot())
+    engine._entry_id = "passive-entry"
+    monkeypatch.setattr(engine, "get_autonomy_level", lambda _entry_id: 0)
+    finding = _standing_finding(
+        "p1", "open_entry_while_away", entities=["binary_sensor.door_a"]
+    )
+    start = datetime.now(UTC)
+    for minutes in (0, 20, 40):
+        await engine._dispatch_item(
+            finding,
+            _make_snapshot(),
+            start + timedelta(minutes=minutes),
+            timedelta(hours=24),
+            timedelta(minutes=15),
+            explain_enabled=False,
+        )
+    held = [
+        c for c in audit.calls if c["suppression_reason_code"] == "autonomy_passive"
+    ]
+    assert len(held) == 1
+
+
+def test_the_change_alert_rules_are_the_ones_the_notifier_never_batches() -> None:
+    from custom_components.home_generative_agent.sentinel.rules import (  # noqa: PLC0415
+        network_common,
+    )
+
+    assert engine_module._CHANGE_ALERT_RULES == network_common.CHANGE_ALERT_RULE_TYPES

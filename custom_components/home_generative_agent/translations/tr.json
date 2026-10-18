@@ -232,6 +232,8 @@
             "sentinel_baseline_freshness_threshold_seconds": "Temel tazelik eşiği (saniye)",
             "explain_enabled": "Sentinel bulguları için LLM açıklamaları",
             "sentinel_require_pin_for_level_increase": "Özerklik düzeyi artışları için PIN iste",
+            "sentinel_autonomy_level": "Özerklik düzeyi",
+            "sentinel_runtime_override_ttl_minutes": "Özerklik geçersiz kılma süresi (dakika)",
             "sentinel_daily_digest_enabled": "Günlük özet bildirimini etkinleştir",
             "sentinel_daily_digest_time": "Günlük özet saati (SS:DD:SN)",
             "sentinel_quiet_hours_start": "Sessiz saatler başlangıcı (seçili önem düzeylerini bastırır)",
@@ -382,6 +384,14 @@
       "options": {
         "turn_start": "Ajan başlar başlamaz",
         "tool_call": "İlk araç çağrısından önce"
+      }
+    },
+    "sentinel_autonomy_level": {
+      "options": {
+        "0": "0 – Pasif (bulgu uyarısı yok)",
+        "1": "1 – Bildir (varsayılan)",
+        "2": "2 – Bildir (otomatik eylemler: ileride)",
+        "3": "3 – Bildir (otomatik eylemler: ileride)"
       }
     }
   },

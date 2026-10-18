@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from homeassistant.core import Context
@@ -3905,3 +3906,77 @@ def test_related_line_same_device_conditions_czech() -> None:
     line, _named = _also(shown, [partners["disarmed"]], _garage_snapshot(), hass=hass)
 
     assert line == "Také: Garage and Play Room Windows (alarm vypnutý)"
+
+
+@pytest.mark.asyncio
+async def test_a_silenced_sentinel_drops_the_held_batch(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Level 0 (#783): alerts batched before it was set are not flushed."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    notifier.set_silence_check(lambda: True)
+    finding = _finding_with_severity("low", anomaly_id="held1")
+    notifier._held_batch.append((finding, "Some message", "notify.mobile_app_phone"))
+
+    suppression = cast("Any", notifier)._suppression
+    suppression.state.pending_prompts["held1"] = "2025-01-01T00:00:00+00:00"
+
+    with caplog.at_level(logging.WARNING):
+        notifier._async_flush_batch()
+        await hass.drain_tasks()
+
+    assert hass.services.calls == []
+    assert notifier._held_batch == []
+    # Said, not hidden at debug: these alerts were counted as sent.
+    assert any(
+        r.levelno == logging.WARNING and finding.type in r.getMessage()
+        for r in caplog.records
+    )
+    # A prompt with no push behind it no longer holds the finding back.
+    assert "held1" not in suppression.state.pending_prompts
+
+
+@pytest.mark.asyncio
+async def test_a_silenced_sentinel_sends_no_daily_digest() -> None:
+    """Level 0 (#783): no digest, even for alerts sent earlier that day."""
+    from homeassistant.util import dt as dt_util
+
+    records = [_notified_record(dt_util.utcnow().isoformat(), severity="high")]
+    notifier, hass, _store = _make_digest_notifier(records=records)
+    notifier.set_silence_check(lambda: True)
+
+    await notifier._async_run_daily_digest()
+
+    assert hass.services.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "ftype",
+    [
+        "radio_new_device_joined",
+        "network_unknown_device_joined",
+        "network_public_ip_changed",
+        "network_upnp_port_mapping_added",
+    ],
+)
+async def test_a_change_alert_is_never_held_for_the_batch(ftype: str) -> None:
+    """
+    A change alert counts as delivered once handed over (#783).
+
+    Held in the batch, a level 0 set before the flush would drop it for good.
+    """
+    from datetime import datetime as _dt
+
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    now = _dt.now()  # noqa: DTZ005 - the notifier's own clock (rate window)
+    notifier._notification_times = [now, now, now]
+    finding = _finding_with_severity("low", anomaly_id="chg1", ftype=ftype)
+
+    assert await notifier.async_notify(finding, _minimal_snapshot(), None)  # type: ignore[arg-type]
+    await hass.drain_tasks()
+
+    assert notifier._held_batch == []
+    assert len(hass.services.calls) == 1
