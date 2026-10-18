@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
@@ -41,6 +42,7 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_CRITICAL_ACTIONS,
 )
 from custom_components.home_generative_agent.core.utils import hash_pin
+from custom_components.home_generative_agent.snapshot import network as network_module
 from custom_components.home_generative_agent.snapshot.network import (
     AutomationInput,
     HaNativeInputs,
@@ -283,6 +285,8 @@ async def test_device_class_must_equal_the_word(hass: HomeAssistant) -> None:
         ("Back gate", True),
         ("Indoor Blinds", False),
         ("Garagekeeper", False),
+        ("Driveway Gates", True),
+        ("Barn-Doors", True),
     ],
 )
 async def test_a_cover_named_with_the_word_is_held(
@@ -427,3 +431,125 @@ async def test_the_audit_flags_a_webhook_automation_opening_the_group(
     )
     ha = ha_native_adapter(inputs, [], context).ha_security
     assert ha["webhook_automations_critical"] == ["automation.open_all"]
+
+
+async def test_a_rule_word_written_like_an_id_matches_a_name(
+    hass: HomeAssistant,
+) -> None:
+    """The issue's workaround spells the word as in an id."""
+    hass.states.async_set(
+        "cover.shelly1_abc", "closed", {"friendly_name": "Garage Door"}
+    )
+    rules = [
+        {"domain": "cover", "service": "open_cover", "entity_match": "garage_door"}
+    ]
+    assert "cover.shelly1_abc" in _reaches(hass, rules)
+
+
+async def test_a_cover_not_loaded_is_known_by_its_device_name(
+    hass: HomeAssistant,
+) -> None:
+    """An entity named by its device has no name of its own in the registry."""
+    config_entry = MockConfigEntry(domain="test")
+    config_entry.add_to_hass(hass)
+    device = dr.async_get(hass).async_get_or_create(
+        config_entry_id=config_entry.entry_id,
+        identifiers={("test", "relay")},
+        name="Garage Door",
+    )
+    er.async_get(hass).async_get_or_create(
+        "cover",
+        "test",
+        "relay",
+        suggested_object_id="shelly_relay",
+        device_id=device.id,
+        original_device_class="shutter",
+    )
+    assert "cover.shelly_relay" in _reaches(hass)
+
+
+@pytest.mark.parametrize(("device_class", "held"), [(None, True), ("shade", False)])
+async def test_a_cover_not_loaded_with_no_device_class_is_held(
+    hass: HomeAssistant, device_class: str | None, *, held: bool
+) -> None:
+    """Unloaded, it could be an MQTT or ZHA group whose members are unseen."""
+    er.async_get(hass).async_get_or_create(
+        "cover",
+        "mqtt",
+        "grp",
+        suggested_object_id="all_covers",
+        original_device_class=device_class,
+    )
+    assert ("cover.all_covers" in _reaches(hass)) is held
+
+
+async def test_a_member_not_known_yet_is_matched_by_its_id(
+    hass: HomeAssistant,
+) -> None:
+    """The garage door's integration is still loading; the group lists it."""
+    hass.states.async_set(
+        "cover.all_covers", "closed", {"entity_id": ["cover.garage_door"]}
+    )
+    assert "cover.all_covers" in _reaches(hass)
+
+
+async def test_a_group_of_outdoor_awnings_is_not_held(hass: HomeAssistant) -> None:
+    """`door` inside `outdoor` is not the word."""
+    hass.states.async_set("cover.outdoor_awning", "closed", {"device_class": "awning"})
+    hass.states.async_set("cover.study_blinds", "closed")
+    hass.states.async_set(
+        "cover.all_shades",
+        "closed",
+        {"entity_id": ["cover.outdoor_awning", "cover.study_blinds"]},
+    )
+    assert "cover.all_shades" not in _reaches(hass)
+
+
+async def test_an_unavailable_yaml_cover_group_is_held(hass: HomeAssistant) -> None:
+    """A YAML group has no registry entry; its platform says it is a group."""
+    hass.states.async_set("cover.garage_door", "closed")
+    assert await async_setup_component(
+        hass,
+        "cover",
+        {"cover": [{"platform": "group", "name": "Yard", "entities": ["cover.x"]}]},
+    )
+    await hass.async_block_till_done()
+    assert er.async_get(hass).async_get("cover.yard") is None
+    hass.states.async_set("cover.yard", "unavailable")
+    assert "cover.yard" in _reaches(hass)
+
+
+async def test_an_unreadable_group_is_held_only_for_its_domain(
+    hass: HomeAssistant,
+) -> None:
+    for domain in ("cover", "light"):
+        reg = er.async_get(hass).async_get_or_create(
+            domain, "group", domain, suggested_object_id="mystery"
+        )
+        hass.states.async_set(reg.entity_id, "unavailable")
+    reached = _reaches(hass)
+    assert "cover.mystery" in reached
+    assert "light.mystery" not in reached
+
+
+async def test_the_audit_falls_back_to_the_rules_when_extending_fails(
+    home: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _fail(*_args: Any) -> list[dict[str, str]]:
+        raise RuntimeError
+
+    monkeypatch.setattr(network_module, "expand_critical_rules", _fail)
+    context = NetworkBuildContext(options={})
+    assert _collect_critical_actions(home, context) is None
+    automation = {
+        "triggers": [{"trigger": "webhook", "webhook_id": "x", "local_only": False}],
+        "actions": [
+            {"action": "cover.open_cover", "target": {"entity_id": "cover.garage_x"}}
+        ],
+    }
+    inputs = HaNativeInputs(
+        now=dt_util.utcnow(),
+        automations=[AutomationInput("automation.open", automation)],
+    )
+    ha = ha_native_adapter(inputs, [], context).ha_security
+    assert ha["webhook_automations_critical"] == ["automation.open"]

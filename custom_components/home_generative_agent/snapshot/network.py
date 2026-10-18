@@ -1129,8 +1129,9 @@ def is_sensitive_entity(entity: SnapshotEntity) -> bool:
     Return True for an entity whose voice exposure is a security concern.
 
     Locks and alarm panels always; covers only when they are a door, gate,
-    or garage (by device class or name), mirroring the critical-action
-    matcher so "sensitive" means the same thing in both places.
+    or garage (by device class or name). The Critical Action PIN also holds
+    a group holding such a cover (`agent/rule_entities.py`); this check does
+    not follow groups yet (#793).
     """
     domain = entity["domain"]
     if domain in {"lock", "alarm_control_panel"}:

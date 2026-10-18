@@ -460,8 +460,8 @@ def _critical_action_guard(
     """Enforce critical-action PIN flow when needed."""
     if not ctx.pin_enabled:
         return None
-    # A rule naming garage covers also holds one whose device class is garage,
-    # and any group holding one (#773).
+    # Extend entity_match rules to device classes, names and groups (#773,
+    # see rule_entities).
     rules = expand_critical_rules(ctx.hass, ctx.critical_actions)
     if not _is_critical_action(tool_args, rules, tool_name, ctx.hass):
         return None
