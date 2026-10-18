@@ -74,6 +74,7 @@ def _evaluate(
     allowed: list[str],
     *,
     entities: list[str] | None = None,
+    hass: HomeAssistant | None = None,
     **options: Any,
 ) -> Any:
     svc = SentinelExecutionService(
@@ -81,7 +82,8 @@ def _evaluate(
             **_ACTING,
             CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: allowed,
             **options,
-        }
+        },
+        hass=hass,
     )
     targets = entities or ["lock.front_door"]
     finding = _make_finding(
@@ -140,13 +142,39 @@ def test_a_critical_action_never_runs_whatever_the_allowlist(
 
 def test_a_users_own_pin_rule_bars_an_action() -> None:
     """The user's Critical Action PIN rules, not only the defaults, apply."""
-    result = _evaluate(
-        ["light.turn_off"],
-        ["light"],
-        entities=["light.porch"],
-        **{CONF_CRITICAL_ACTIONS: [{"domain": "light", "service": "turn_off"}]},
-    )
+    rules: dict[str, Any] = {
+        CONF_CRITICAL_ACTIONS: [{"domain": "light", "service": "turn_off"}]
+    }
+    result = _evaluate(["light.turn_off"], ["light"], entities=["light.porch"], **rules)
     assert result.block_reason == "critical_action"
+
+
+async def test_a_pin_rule_reaches_entities_by_name_and_group(
+    hass: HomeAssistant,
+) -> None:
+    """
+    Sentinel extends the rules as the PIN gate does (#773).
+
+    A user rule for `garage` on switches holds the relay named "Garage
+    Opener" and a switch group holding it, though neither id says garage.
+    """
+    hass.states.async_set("switch.relay_1", "off", {"friendly_name": "Garage Opener"})
+    hass.states.async_set("switch.porch", "off", {"friendly_name": "Porch"})
+    hass.states.async_set("switch.outside", "off", {"entity_id": ["switch.relay_1"]})
+    rules: dict[str, Any] = {
+        CONF_CRITICAL_ACTIONS: [
+            {"domain": "switch", "service": "turn_on", "entity_match": "garage"}
+        ]
+    }
+    for entity in ("switch.relay_1", "switch.outside"):
+        result = _evaluate(
+            ["switch.turn_on"], ["switch"], entities=[entity], hass=hass, **rules
+        )
+        assert result.block_reason == "critical_action", entity
+    result = _evaluate(
+        ["switch.turn_on"], ["switch"], entities=["switch.porch"], hass=hass, **rules
+    )
+    assert result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
 
 
 def test_an_unlock_never_runs_without_the_lock_rules() -> None:

@@ -407,7 +407,7 @@ class SentinelEngine:
         self._stop_event = asyncio.Event()
         self._correlator = SentinelCorrelator()
         self._trigger_scheduler = SentinelTriggerScheduler()
-        self._execution_service = SentinelExecutionService(dict(options))
+        self._execution_service = SentinelExecutionService(dict(options), hass=hass)
         self._log_limiter = RepeatingLogLimiter(LOGGER)
         self._rule_entity_exclusions = _parse_rule_entity_exclusions(
             options.get(CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS)

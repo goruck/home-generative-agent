@@ -69,6 +69,8 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from datetime import datetime
 
+    from homeassistant.core import HomeAssistant
+
     from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
     from custom_components.home_generative_agent.snapshot.schema import (
         FullStateSnapshot,
@@ -129,9 +131,14 @@ class SentinelExecutionService:
     cycles.
     """
 
-    def __init__(self, options: dict[str, Any]) -> None:
+    def __init__(
+        self, options: dict[str, Any], *, hass: HomeAssistant | None = None
+    ) -> None:
         """Initialize with the resolved runtime options dict."""
         self._options = options
+        # Read to extend the Critical Action rules to device classes, names
+        # and groups, as the PIN gate does (#773).
+        self._hass = hass
         # UTC datetimes of recent successful auto-execute approvals (for rate limiting).
         self._recent_action_times: list[datetime] = []
         # Idempotency keys seen within the current time window.
@@ -582,6 +589,9 @@ class SentinelExecutionService:
         from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
             resolve_critical_action_policy,
         )
+        from custom_components.home_generative_agent.agent.rule_entities import (  # noqa: PLC0415
+            expand_critical_rules,
+        )
 
         target_domains = {e.split(".", 1)[0] for e in finding.triggering_entities}
         for action in actions:
@@ -599,7 +609,11 @@ class SentinelExecutionService:
             }:
                 LOGGER.debug("Auto-execute blocked: %s on %s.", action, target_domains)
                 return True
-        rules = resolve_critical_action_policy(self._options).critical_actions
+        # Extended as the PIN gate extends them (#773): a rule's word also
+        # reaches entities by device class, name and group.
+        rules = expand_critical_rules(
+            self._hass, resolve_critical_action_policy(self._options).critical_actions
+        )
         target = {"entity_id": list(finding.triggering_entities)}
         steps = [{"action": action, "target": target} for action in actions]
         found = find_critical_automation_calls({"actions": steps}, rules)

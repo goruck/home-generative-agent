@@ -17,7 +17,7 @@ their own. See [RELEASING.md](RELEASING.md).
   - **Autonomy override duration** (default 60 minutes, up to 30 days) sets how long a level from the service lasts. An override now also ends when the configured level changes, so a raised one cannot outlive a lowered setting.
   - Levels 2 and 3 are reserved for automatic actions, which are not available yet ([#789](https://github.com/goruck/home-generative-agent/issues/789)), and now notify exactly like level 1. Before, they could drop a finding whose device was unavailable. The docs described them as acting on their own, which no setup could do, and now say so.
   - A level an older install stored in its main options is kept on upgrade, and shown in the form.
-  - When automatic actions arrive, Sentinel will never run a critical action on its own, whatever is allowed: an unlock, an alarm panel or cover action (also through `homeassistant.*`), anything a Critical Action PIN rule covers, or anything that starts a script, scene or automation. That guard is already in place, and automatic actions stay off even if an older setting enabled them.
+  - When automatic actions arrive, Sentinel will never run a critical action on its own, whatever is allowed: an unlock, an alarm panel or cover action (also through `homeassistant.*`), anything a Critical Action PIN rule covers (reaching entities by device class, name and group, as the PIN gate does since v3.44.3), or anything that starts a script, scene or automation. That guard is already in place, and automatic actions stay off even if an older setting enabled them.
 
 ### Fixed
 
