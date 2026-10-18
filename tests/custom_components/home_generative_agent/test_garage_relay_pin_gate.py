@@ -264,10 +264,17 @@ async def test_a_rule_with_no_domain_reaches_the_relay(hass: HomeAssistant) -> N
     assert _held(hass, _call("switch.shelly_relay", "turn_on"), expanded)
 
 
-async def test_a_closing_rule_adds_no_relay_copy(hass: HomeAssistant) -> None:
+async def test_a_closing_rule_holds_a_cover_relay_too(hass: HomeAssistant) -> None:
+    """A momentary relay closes the door the same way it opens it."""
     _wrap(hass, "switch.shelly_relay", "cover.garage", name="Garage Door")
     rules = [{"domain": "cover", "service": "close_cover", "entity_match": "garage"}]
     expanded = expand_critical_rules(hass, rules)
+    assert _held(hass, _call("switch.shelly_relay", "turn_off"), expanded)
+
+
+async def test_a_locking_rule_adds_no_lock_relay_copy(hass: HomeAssistant) -> None:
+    _wrap(hass, "switch.strike", "lock.side", name="Side Door", target="lock")
+    expanded = expand_critical_rules(hass, [{"domain": "lock", "service": "lock"}])
     assert not any(rule["domain"] == "switch" for rule in expanded)
 
 
@@ -366,7 +373,7 @@ async def test_the_pin_line_says_what_the_relay_opens(hass: HomeAssistant) -> No
             "tool_args": _call("switch.shelly_relay", "turn_off"),
         },
     )
-    assert line.endswith('(open "Garage Door")')
+    assert line.endswith('(controls "Garage Door")')
     plain = describe_pending_action(
         hass,
         {
@@ -402,3 +409,126 @@ async def test_a_wrapper_with_no_readable_switch_adds_nothing(
     }
     assert switch_targets == ({options_entity} if options_entity else set())
     assert not _held(hass, _call("switch.shelly_relay", "turn_on"))
+
+
+def _second_wrapper(
+    hass: HomeAssistant, switch_id: str, wrapper_id: str, target: str = "light"
+) -> None:
+    """Wrap ``switch_id`` again, as a light by default."""
+    entry = MockConfigEntry(
+        domain="switch_as_x",
+        options={"entity_id": switch_id, "invert": False, "target_domain": target},
+    )
+    entry.add_to_hass(hass)
+    object_id = wrapper_id.split(".", 1)[1]
+    er.async_get(hass).async_get_or_create(
+        target,
+        "switch_as_x",
+        f"{object_id}_uid",
+        suggested_object_id=object_id,
+        config_entry=entry,
+    )
+    hass.states.async_set(wrapper_id, "off", {"friendly_name": object_id})
+
+
+async def test_a_wrapper_over_a_group_holding_the_relay_is_held(
+    hass: HomeAssistant,
+) -> None:
+    """A light over a switch group holding the relay drives the relay too."""
+    _wrap(hass, "switch.shelly_relay", "cover.garage", name="Garage Door")
+    hass.states.async_set("switch.bank", "off", {"entity_id": ["switch.shelly_relay"]})
+    _second_wrapper(hass, "switch.bank", "light.bank")
+    assert _held(hass, _call("light.bank", "turn_on", domain="light"))
+
+
+async def test_a_wrapper_of_a_member_of_the_wrapped_group_is_held(
+    hass: HomeAssistant,
+) -> None:
+    """The cover wraps a switch group; a light wraps one relay in it."""
+    hass.states.async_set("switch.relay_1", "off")
+    _wrap(hass, "switch.garage_relays", "cover.garage", name="Garage Door")
+    hass.states.async_set(
+        "switch.garage_relays", "off", {"entity_id": ["switch.relay_1"]}
+    )
+    _second_wrapper(hass, "switch.relay_1", "light.relay_1")
+    assert _held(hass, _call("light.relay_1", "turn_on", domain="light"))
+
+
+async def test_a_second_wrapper_of_a_lock_relay_is_held_both_ways(
+    hass: HomeAssistant,
+) -> None:
+    """The lock relay keeps its direction; a light over it is held both ways."""
+    _wrap(hass, "switch.strike", "lock.side", name="Side Door", target="lock")
+    _second_wrapper(hass, "switch.strike", "light.strike_aux")
+    for service in ("turn_on", "turn_off"):
+        assert _held(hass, _call("light.strike_aux", service, domain="light"))
+    assert not _held(hass, _call("switch.strike", "turn_off"))
+
+
+async def test_a_switch_group_not_set_up_yet_is_held(hass: HomeAssistant) -> None:
+    """Its members cannot be seen: it could hold the relay, as #773 holds covers."""
+    _wrap(hass, "switch.shelly_relay", "cover.garage", name="Garage Door")
+    er.async_get(hass).async_get_or_create(
+        "switch", "mqtt", "grp", suggested_object_id="mqtt_group"
+    )
+    assert _held(hass, _call("switch.mqtt_group", "turn_on"))
+
+
+@pytest.mark.parametrize("entity_id", ["switch.shelly_relay", "switch.lamp"])
+async def test_switch_device_actions_fail_closed_with_a_relay(
+    hass: HomeAssistant, entity_id: str
+) -> None:
+    """
+    A device action targets a device id, which the screen cannot name.
+
+    So while a relay garage exists, any switch device action is held, the
+    relay's own included (see the docs and the follow-up to narrow it).
+    """
+    _wrap(hass, "switch.shelly_relay", "cover.garage", name="Garage Door")
+    hass.states.async_set("switch.lamp", "off")
+    device = {
+        "actions": [
+            {
+                "device_id": "abc",
+                "domain": "switch",
+                "type": "turn_on",
+                "entity_id": entity_id,
+            }
+        ]
+    }
+    assert find_critical_automation_calls(device, expand_critical_rules(hass, RULES))
+    assert not find_critical_automation_calls(device, RULES)
+
+
+async def test_the_pin_line_names_the_lock_and_other_paths(
+    hass: HomeAssistant,
+) -> None:
+    from custom_components.home_generative_agent.agent.pin_messages import (  # noqa: PLC0415
+        describe_pending_action,
+    )
+
+    _wrap(hass, "switch.strike", "lock.side", name="Side Door", target="lock")
+    _wrap(hass, "switch.shelly_relay", "cover.garage", name="Garage Door")
+    hass.states.async_set(
+        "switch.everything", "off", {"entity_id": ["switch.shelly_relay"]}
+    )
+
+    def _line(args: dict[str, Any]) -> str:
+        return describe_pending_action(
+            hass, {"tool_name": "mcp__call_service", "tool_args": args}
+        )
+
+    assert _line(_call("switch.strike", "turn_on")).endswith('(controls "Side Door")')
+    in_data = {
+        "domain": "switch",
+        "service": "turn_on",
+        "data": {"entity_id": "switch.shelly_relay"},
+    }
+    assert _line(in_data).endswith('(controls "Garage Door")')
+    assert _line(_call("switch.everything", "turn_on")).endswith(
+        '(controls "Garage Door")'
+    )
+    automation = describe_pending_action(
+        hass, {"tool_name": "add_automation", "tool_args": {}}
+    )
+    assert "controls" not in automation

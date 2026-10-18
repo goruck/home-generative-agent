@@ -46,7 +46,7 @@ from .helpers import (
     sanitize_tool_text,
 )
 from .indirect_pin import bare_script_tool_entity_id, script_tool_entity_id
-from .rule_entities import read_switch_wrappers
+from .rule_entities import relay_wrappers_reached
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -147,6 +147,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "action_lock": "lock {target}",
         "action_unlock": "unlock {target}",
         "action_open": "open {target}",
+        "action_relay_controls": "controls {target}",
         "action_close": "close {target}",
         "action_turn_on": "turn on {target}",
         "action_turn_off": "turn off {target}",
@@ -269,6 +270,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "action_lock": "zamknout {target}",
         "action_unlock": "odemknout {target}",
         "action_open": "otevřít {target}",
+        "action_relay_controls": "ovládá {target}",
         "action_close": "zavřít {target}",
         "action_turn_on": "zapnout {target}",
         "action_turn_off": "vypnout {target}",
@@ -546,7 +548,7 @@ def describe_pending_action(
 
     A call on the switch under a switch_as_x garage cover or lock (#794) reads
     as a switch ("turn off Garage Relay"); the line adds what it moves
-    ("(open Garage Door)"), so the user knows what the PIN allows.
+    ("(controls Garage Door)"), so the user knows what the PIN allows.
     """
     line = _describe_line(hass, action)
     if hass is None or str(action.get("tool_name") or "") == "add_automation":
@@ -556,10 +558,14 @@ def describe_pending_action(
 
 
 def _named_entity_ids(tool_args: Mapping[str, Any]) -> set[str]:
-    """Return the entity ids a call names, at the top level or in `target`."""
+    """Return the entity ids a call names, at the top level or in a container."""
     found: set[str] = set()
-    target = tool_args.get("target")
-    for source in (tool_args, target if isinstance(target, Mapping) else {}):
+    sources = [tool_args] + [
+        tool_args[key]
+        for key in ("target", "data", "service_data")
+        if isinstance(tool_args.get(key), Mapping)
+    ]
+    for source in sources:
         for key in ("entity_id", "entity_ids"):
             value = source.get(key)
             values = value if isinstance(value, list) else [value]
@@ -574,10 +580,7 @@ def _named_entity_ids(tool_args: Mapping[str, Any]) -> set[str]:
 
 
 def _relay_effects(hass: HomeAssistant, action: Mapping[str, Any]) -> list[str]:
-    """Return 'open <cover>' / 'unlock <lock>' for each relay the call targets."""
-    wrapped = read_switch_wrappers(hass)
-    if not wrapped:
-        return []
+    """Return 'controls <cover>' for each wrapper the call moves through a relay."""
     tool_name = str(action.get("tool_name") or "")
     raw_args = action.get("tool_args")
     tool_args: dict[str, Any] = dict(raw_args) if isinstance(raw_args, Mapping) else {}
@@ -586,18 +589,15 @@ def _relay_effects(hass: HomeAssistant, action: Mapping[str, Any]) -> list[str]:
         calls = intent_service_calls(hass, tool_name, tool_args) or []
         targets |= {call.entity_id.lower() for call in calls if call.entity_id}
     effects: list[str] = []
-    for wrapper, (switch_id, _invert) in sorted(wrapped.items()):
-        if switch_id not in targets:
-            continue
-        verbs = _ON_OFF_VERBS.get(wrapper.split(".", 1)[0])
-        if verbs is None:
-            continue
+    for wrapper in relay_wrappers_reached(hass, targets):
         state = hass.states.get(wrapper)
         name = state.name if state is not None else wrapper
+        # Not "open": a relay moves a door either way, and the call may be the
+        # one that closes it.
         effects.append(
             pin_msg(
                 hass,
-                verbs[1] if wrapper.startswith("lock.") else verbs[0],
+                "action_relay_controls",
                 target=_named(hass, _one_line(name, _ACTION_TARGET_MAX_LEN)),
             )
         )
