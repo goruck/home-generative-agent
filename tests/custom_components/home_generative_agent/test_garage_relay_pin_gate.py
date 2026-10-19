@@ -318,6 +318,9 @@ async def test_one_unreadable_wrapper_does_not_drop_the_others(
     monkeypatch.setattr(er, "async_resolve_entity_id", _flaky)
     assert _held(hass, _call("switch.shelly_relay", "turn_on"))
     assert "could not read switch_as_x entry" in caplog.text
+    # The entry that could not be read adds no hold (logged, not failed
+    # closed): nothing raises for a well-formed entry.
+    assert not _held(hass, _call("switch.strike", "turn_on"))
 
 
 async def test_switches_in_automations_are_screened_per_entity(
@@ -532,3 +535,113 @@ async def test_the_pin_line_names_the_lock_and_other_paths(
         hass, {"tool_name": "add_automation", "tool_args": {}}
     )
     assert "controls" not in automation
+
+
+async def test_closing_a_cover_group_holding_the_garage_is_not_held(
+    hass: HomeAssistant,
+) -> None:
+    """Closing "All Covers" is not a call on the relay; closing is not held."""
+    _wrap(hass, "switch.shelly_relay", "cover.garage", name="Garage Door")
+    hass.states.async_set("cover.all_covers", "open", {"entity_id": ["cover.garage"]})
+    close = {**_call("cover.all_covers", "close_cover", domain="cover")}
+    assert not _held(hass, close)
+    assert _held(hass, {**close, "service": "open_cover"})
+
+
+async def test_locking_a_lock_group_holding_a_relay_lock_is_not_held(
+    hass: HomeAssistant,
+) -> None:
+    _wrap(hass, "switch.strike", "lock.side", name="Side Door", target="lock")
+    hass.states.async_set("lock.all_locks", "unlocked", {"entity_id": ["lock.side"]})
+    assert not _held(hass, _call("lock.all_locks", "lock", domain="lock"))
+
+
+async def test_a_lock_rule_with_no_service_holds_every_relay_call(
+    hass: HomeAssistant,
+) -> None:
+    _wrap(hass, "switch.strike", "lock.side", name="Side Door", target="lock")
+    expanded = expand_critical_rules(hass, [{"domain": "lock", "entity_match": "side"}])
+    for service in ("turn_on", "turn_off", "toggle"):
+        assert _held(hass, _call("switch.strike", service), expanded)
+
+
+async def test_a_rule_for_another_kind_of_call_adds_no_cover_relay_copy(
+    hass: HomeAssistant,
+) -> None:
+    """A domain-less rule on `unlock` does not reach a garage cover's relay."""
+    _wrap(hass, "switch.shelly_relay", "cover.garage", name="Garage Door")
+    expanded = expand_critical_rules(hass, [{"service": "unlock"}])
+    assert not any(rule.get("domain") == "switch" for rule in expanded)
+
+
+async def test_a_scene_turning_a_cover_relay_off_is_held(hass: HomeAssistant) -> None:
+    """A momentary relay moves the door either way, so off is held too."""
+    _wrap(hass, "switch.shelly_relay", "cover.garage", name="Garage Door")
+    assert await async_setup_component(
+        hass,
+        "scene",
+        {"scene": [{"name": "Leave", "entities": {"switch.shelly_relay": "off"}}]},
+    )
+    await hass.async_block_till_done()
+    assert runs_critical_action(hass, "scene.leave", expand_critical_rules(hass, RULES))
+
+
+async def test_the_pin_line_names_the_door_only_through_its_relay(
+    hass: HomeAssistant,
+) -> None:
+    from custom_components.home_generative_agent.agent.pin_messages import (  # noqa: PLC0415
+        describe_pending_action,
+    )
+
+    _wrap(hass, "switch.shelly_relay", "cover.garage", name="Garage Door")
+    _second_wrapper(hass, "switch.shelly_relay", "light.garage_aux")
+    # A switch not set up yet is held (it could hold the relay), but the line
+    # does not say it moves the door.
+    er.async_get(hass).async_get_or_create(
+        "switch", "mqtt", "grp", suggested_object_id="mqtt_group"
+    )
+
+    def _line(tool_name: str, args: dict[str, Any]) -> str:
+        return describe_pending_action(
+            hass, {"tool_name": tool_name, "tool_args": args}
+        )
+
+    service = "mcp__call_service"
+    assert "controls" not in _line(
+        service, _call("cover.garage", "open_cover", domain="cover")
+    )
+    assert "controls" not in _line(service, _call("switch.mqtt_group", "turn_on"))
+    assert _line(
+        service, _call("light.garage_aux", "turn_on", domain="light")
+    ).endswith('(controls "Garage Door")')
+    assert _line(
+        "intent__HassTurnOn", {"name": "Garage Door relay", "domain": ["switch"]}
+    ).endswith('(controls "Garage Door")')
+    in_template = {
+        "domain": "switch",
+        "service": "turn_on",
+        "data_template": {"entity_id": "switch.shelly_relay"},
+    }
+    assert _line(service, in_template).endswith('(controls "Garage Door")')
+
+
+async def test_the_pin_line_survives_a_relay_lookup_failure(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from custom_components.home_generative_agent.agent import (  # noqa: PLC0415
+        pin_messages,
+    )
+
+    def _boom(*_a: Any, **_k: Any) -> list[str]:
+        msg = "registry gone"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(pin_messages, "relay_wrappers_reached", _boom)
+    line = pin_messages.describe_pending_action(
+        hass,
+        {
+            "tool_name": "mcp__call_service",
+            "tool_args": _call("switch.shelly_relay", "turn_on"),
+        },
+    )
+    assert line.startswith("turn on")

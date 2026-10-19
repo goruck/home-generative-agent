@@ -378,9 +378,9 @@ def _service_name(step: Mapping[str, Any]) -> tuple[str, str, bool]:
 def _domain_is_guarded(
     domain: str,
     rules: Iterable[Mapping[str, str]],
-    entities: Sequence[str] = (),
+    entities: Sequence[str],
     *,
-    unresolved: bool = True,
+    unresolved: bool,
 ) -> bool:
     """
     Return True if any critical rule could apply to these entities of a domain.
@@ -633,7 +633,8 @@ def _screen_device_action(
     # `cover.set_cover_position`, `open` into `cover.open_cover`), and that
     # mapping cannot be introspected. Matching the raw type is therefore only
     # sound when it happens to match; when it does not, any rule on the domain
-    # still has to count.
+    # still has to count, except a copy for one entity (#794), which counts
+    # only for that entity or for targets that cannot be named.
     if _domain_is_guarded(domain, rules, entities, unresolved=unresolved):
         return [
             CriticalAutomationCall(

@@ -31,9 +31,11 @@ act on), and ``conversation.py`` joins it to every reply as the
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from .automation_pin import DATA_CONTAINER_KEYS
 from .helpers import (
     INTENT_NAME_ALL,
     SET_POSITION_INTENT,
@@ -47,6 +49,8 @@ from .helpers import (
 )
 from .indirect_pin import bare_script_tool_entity_id, script_tool_entity_id
 from .rule_entities import relay_wrappers_reached
+
+LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -544,7 +548,7 @@ def describe_pending_action(
     hass: HomeAssistant | None, action: Mapping[str, Any]
 ) -> str:
     """
-    Name the action a PIN confirms, and what a relay it switches opens.
+    Name the action a PIN confirms, and what a relay it switches controls.
 
     A call on the switch under a switch_as_x garage cover or lock (#794) reads
     as a switch ("turn off Garage Relay"); the line adds what it moves
@@ -553,7 +557,13 @@ def describe_pending_action(
     line = _describe_line(hass, action)
     if hass is None or str(action.get("tool_name") or "") == "add_automation":
         return line
-    effects = _relay_effects(hass, action)
+    try:
+        effects = _relay_effects(hass, action)
+    except Exception:
+        # The note only adds to the line: it must never cost the prompt, nor
+        # turn a confirmed action that already ran into an error.
+        LOGGER.exception("Critical Action PIN: could not name what a relay moves")
+        effects = []
     return f"{line} ({', '.join(effects)})" if effects else line
 
 
@@ -562,7 +572,7 @@ def _named_entity_ids(tool_args: Mapping[str, Any]) -> set[str]:
     found: set[str] = set()
     sources = [tool_args] + [
         tool_args[key]
-        for key in ("target", "data", "service_data")
+        for key in ("target", *DATA_CONTAINER_KEYS)
         if isinstance(tool_args.get(key), Mapping)
     ]
     for source in sources:

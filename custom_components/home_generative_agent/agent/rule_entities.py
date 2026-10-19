@@ -120,8 +120,15 @@ _OPENING_SERVICES: dict[str, frozenset[str]] = {
     "valve": frozenset({"open_valve", "open", "toggle", "set_valve_position"}),
     "lock": frozenset({"unlock", "open", "toggle"}),
 }
-# Wrapper domains whose relay is held both ways (see the module docstring).
+# Wrapper domains whose relay is held both ways (see the module docstring),
+# and the services that move such a wrapper either way.
 _EVERY_RELAY_CALL = frozenset({"cover", "valve"})
+_MOVING_SERVICES: dict[str, frozenset[str]] = {
+    "cover": _OPENING_SERVICES["cover"]
+    | frozenset({"close_cover", "close", "stop_cover"}),
+    "valve": _OPENING_SERVICES["valve"]
+    | frozenset({"close_valve", "close", "stop_valve"}),
+}
 
 
 def read_switch_wrappers(hass: HomeAssistant) -> dict[str, tuple[str, bool]]:
@@ -187,7 +194,11 @@ def _plain(text: str) -> str:
 class _EntityIndex:
     """Every entity's names, device classes and group membership, read once."""
 
-    def __init__(self, hass: HomeAssistant) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        wrapped: dict[str, tuple[str, bool]] | None = None,
+    ) -> None:
         self._hass = hass
         registry = er.async_get(hass)
         self._devices = dr.async_get(hass)
@@ -214,7 +225,8 @@ class _EntityIndex:
                 self.holders.setdefault(member, set()).add(group_id)
         # A switch_as_x cover, valve or lock -> (the switch it wraps, inverted),
         # and each wrapped switch -> its wrappers.
-        self.wrapped = read_switch_wrappers(hass)
+        self.wrapped = read_switch_wrappers(hass) if wrapped is None else wrapped
+        self._relay_switches: dict[tuple[str, bool], set[str]] = {}
         self.wrappers_of: dict[str, set[str]] = {}
         for wrapper, (switch_id, _invert) in self.wrapped.items():
             self.wrappers_of.setdefault(switch_id, set()).add(wrapper)
@@ -230,27 +242,38 @@ class _EntityIndex:
                     pending.append(group_id)
         return found
 
-    def relay_reach(self, switch_id: str) -> tuple[set[str], set[str]]:
+    def relay_reach(
+        self, switch_id: str, wrapper: str, *, fail_closed: bool = True
+    ) -> tuple[set[str], set[str]]:
         """
-        Return what reaches a relay: switches and groups, and other wrappers.
+        Return what reaches the relay under ``wrapper``: switches, other wrappers.
 
         The relay and the members of a switch group it is; every group holding
-        any of them; and, failing closed as ``reach`` does, any entity in the
-        relay's domain that is not set up or whose members cannot be read.
-        Then every switch_as_x wrapper of any of those, and the groups holding
-        a wrapper.
+        any of them; and, with ``fail_closed``, any entity in the relay's
+        domain that is not set up or whose members cannot be read, as
+        ``reach`` holds one. Then every other switch_as_x wrapper of any of
+        those, and the groups holding one. Not ``wrapper`` itself, nor a group
+        holding only it: closing "All Covers" is not a call on the relay.
         """
-        domain = switch_id.split(".", 1)[0]
-        switches = self.climb(self.descend(switch_id))
-        switches |= {
-            entity_id
-            for entity_id in self.unknown | self.unreadable_groups
-            if entity_id.split(".", 1)[0] == domain
+        key = (switch_id, fail_closed)
+        switches = self._relay_switches.get(key)
+        if switches is None:
+            domain = switch_id.split(".", 1)[0]
+            switches = self.climb(self.descend(switch_id))
+            if fail_closed:
+                switches |= {
+                    entity_id
+                    for entity_id in self.unknown | self.unreadable_groups
+                    if entity_id.split(".", 1)[0] == domain
+                }
+            self._relay_switches[key] = switches
+        others = {
+            other
+            for held in switches
+            for other in self.wrappers_of.get(held, ())
+            if other != wrapper
         }
-        wrappers = {
-            wrapper for held in switches for wrapper in self.wrappers_of.get(held, ())
-        }
-        return switches, self.climb(wrappers)
+        return set(switches), self.climb(others)
 
     def descend(self, entity_id: str) -> set[str]:
         """Return ``entity_id`` and every member of it, if it is a group."""
@@ -412,15 +435,18 @@ def relay_wrappers_reached(hass: HomeAssistant, targets: Iterable[str]) -> list[
     For the PIN prompt, which names what the PIN allows (#794).
     """
     wanted = {target.lower() for target in targets}
-    if not wanted or not read_switch_wrappers(hass):
+    wrapped = read_switch_wrappers(hass) if wanted else {}
+    if not wrapped:
         return []
-    index = _EntityIndex(hass)
+    index = _EntityIndex(hass, wrapped)
     moved: list[str] = []
     for wrapper, (switch_id, _invert) in sorted(index.wrapped.items()):
         if wrapper.split(".", 1)[0] not in _OPENING_SERVICES:
             continue
-        switches, wrappers = index.relay_reach(switch_id)
-        if wanted & ((switches | wrappers) - {wrapper}):
+        # Not the fail-closed unknowns: the gate holds those, but a switch not
+        # set up yet is not known to move this door, so the line does not say so.
+        switches, wrappers = index.relay_reach(switch_id, wrapper, fail_closed=False)
+        if wanted & (switches | wrappers):
             moved.append(wrapper)
     return moved
 
@@ -444,10 +470,10 @@ def _switch_rules(
         if (
             opening is None
             or (rule_domain and rule_domain != domain)
-            # A cover or valve relay moves either way, so any rule on its
-            # wrapper holds it (one holding closing, too); a lock relay, only
-            # an unlocking rule.
-            or (service and domain not in _EVERY_RELAY_CALL and service not in opening)
+            # A cover or valve relay moves either way, so a rule holding any
+            # movement of its wrapper holds it (closing, too); a lock relay,
+            # only an unlocking rule.
+            or (service and service not in _MOVING_SERVICES.get(domain, opening))
             or (reached is not None and wrapper not in reached)
         ):
             continue
@@ -455,8 +481,7 @@ def _switch_rules(
             relay_services = [""]
         else:
             relay_services = ["turn_off" if invert else "turn_on", "toggle"]
-        switches, wrappers = index.relay_reach(switch_id)
-        wrappers.discard(wrapper)
+        switches, wrappers = index.relay_reach(switch_id, wrapper)
         # Another wrapper of the relay (a second cover, a light, one over a
         # group holding it) drives it too: every call on it is held.
         held = [
@@ -493,13 +518,13 @@ def expand_critical_rules(
                 "locks and the relays under them are matched by entity id only"
             )
         return expanded
-    config_entries = getattr(hass, "config_entries", None)
-    if not any(rule.get("entity_match") for rule in expanded) and not (
-        config_entries and config_entries.async_entries(_SWITCH_AS_X)
+    wrapped = read_switch_wrappers(hass)
+    if not any(rule.get("entity_match") for rule in expanded) and not any(
+        wrapper.split(".", 1)[0] in _OPENING_SERVICES for wrapper in wrapped
     ):
         # Nothing for a rule with no entity_match to reach but relays.
         return expanded
-    index = _EntityIndex(hass)
+    index = _EntityIndex(hass, wrapped)
     reached: dict[tuple[str, str], set[str]] = {}
     extra: list[dict[str, str]] = []
     for rule in expanded:
