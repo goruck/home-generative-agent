@@ -4496,9 +4496,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
     # setup re-raises it if the database is still missing.
     async_clear_database_issue(hass, entry.entry_id)
     async_clear_ollama_embedding_model_issue(hass, entry.entry_id)
-    # An unloaded entry runs no rules at all, so singling four out is wrong the
-    # same way; the next successful setup re-raises it if it still applies.
-    async_clear_unknown_person_issue(hass, entry.entry_id)
+    # A disabled entry runs no rules at all, so singling four out is wrong the
+    # same way. A reload (every Sentinel config save) keeps it: deleting it
+    # would also delete the user's dismissal, so a dismissed notice came back
+    # on every save (#810). Setup re-checks it, and clears it once it no
+    # longer applies.
+    if entry.disabled_by is not None:
+        async_clear_unknown_person_issue(hass, entry.entry_id)
     return True
 
 

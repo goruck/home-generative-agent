@@ -16,7 +16,7 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
-from homeassistant.config_entries import ConfigEntryState
+from homeassistant.config_entries import ConfigEntryDisabler, ConfigEntryState
 from homeassistant.core import CoreState
 from homeassistant.exceptions import (
     ConfigEntryError,
@@ -32,7 +32,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 import custom_components.home_generative_agent as hga_component
 from custom_components.home_generative_agent.const import DOMAIN
-from custom_components.home_generative_agent.core import pipeline_guard
+from custom_components.home_generative_agent.core import face_guard, pipeline_guard
 from custom_components.home_generative_agent.core.database_guard import (
     DATABASE_INVALID_SETTINGS,
     DATABASE_UNREACHABLE,
@@ -405,6 +405,42 @@ async def test_unload_drops_the_issue(
 
     assert result is True
     assert _issue(hass, entry.entry_id) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("disabled_by", "kept"), [(None, True), (ConfigEntryDisabler.USER, False)]
+)
+async def test_unload_keeps_the_face_notice_unless_disabled(
+    hass: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    disabled_by: ConfigEntryDisabler | None,
+    kept: bool,  # noqa: FBT001
+) -> None:
+    """
+    A reload keeps the unknown-person notice, so a dismissal survives (#810).
+
+    Every Sentinel config save reloads the entry; deleting the notice on
+    unload also deleted the user's dismissal, so it came back on every save.
+    A disabled entry runs no rules, so its notice still goes.
+    """
+    entry = await _setup_without_database(hass, monkeypatch)
+    issue_id = face_guard._issue_id(entry.entry_id)
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        issue_id,
+        is_fixable=False,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key=face_guard.TRANSLATION_KEY_NO_FACE,
+        translation_placeholders={"rules": "- unknown_person_camera_no_home"},
+    )
+    object.__setattr__(entry, "disabled_by", disabled_by)
+
+    assert await cast("Any", hga_component).async_unload_entry(hass, entry) is True
+
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, issue_id)
+    assert (issue is not None) is kept
 
 
 @pytest.mark.asyncio
