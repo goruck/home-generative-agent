@@ -163,8 +163,10 @@ def _restricted(
     dropped = {entity for item, entity in entities.items() if item not in names}
     kept_entities = {entities[item] for item in names if item in entities}
     evidence = {**member.evidence, **keep, _NOT_LISTED: unlisted}
-    # Its summary named every item it was seen with: no longer true.
+    # Its summary named every item it was seen with, and what raised its
+    # severity may have been an item now gone: neither is still known true.
     evidence.pop("summary", None)
+    evidence.pop(SEEN_WHEN_KEY, None)
     if labels:
         evidence[ITEM_LABELS_KEY] = {i: t for i, t in labels.items() if i in names}
     if entities:
@@ -417,11 +419,13 @@ def _record_posture(members: list[AnomalyFinding], finding: AnomalyFinding) -> b
 def _record_items(members: list[AnomalyFinding], finding: AnomalyFinding) -> bool:
     holder = next((m for m in members if covers(m, finding)), None)
     if holder is not None:
-        if _rank(finding) <= _rank(holder):
-            return False
-        members[members.index(holder)] = _with_seen_when(
-            replace(holder, severity=finding.severity), _seen_when(holder, finding)
+        updated = _with_seen_when(
+            replace(holder, severity=max(holder, finding, key=_rank).severity),
+            _seen_when(holder, finding),
         )
+        if updated == holder:
+            return False
+        members[members.index(holder)] = updated
         return True
     older = [m for m in members if covers(finding, m)]
     if not older and len(members) >= MAX_OWED_PER_KIND:
@@ -546,7 +550,7 @@ def _described(kind: str, members: list[AnomalyFinding]) -> tuple[str, int]:
         if not set(keys) <= _SELF_LABELLED_KEYS
         and not _item_map(m, ITEM_LABELS_KEY)
         and str(m.evidence.get("summary") or "")
-        and not all(
+        and not any(
             i in labels for key in keys for i in items(m, key) - items(m, _NOT_LISTED)
         )
     ]
@@ -574,11 +578,19 @@ def _described(kind: str, members: list[AnomalyFinding]) -> tuple[str, int]:
             noun = heading[0] if len(named) == 1 else heading[1]
             if parts:
                 noun = noun[0].lower() + noun[1:]
-            parts.append(f"{noun}: {listed(sorted(named))}")
+            # Accounts and tokens are all named, as a live alert names them;
+            # devices are capped like a live alert's list.
+            shown = (
+                ", ".join(sorted(named))
+                if key in _SELF_LABELLED_KEYS
+                else listed(sorted(named))
+            )
+            parts.append(f"{noun}: {shown}")
     texts = ["; ".join(parts) + "." if parts else ""]
     texts.extend(str(m.evidence.get("summary")).strip() for m in legacy)
     if seen_when := _seen_when(*members):
-        who = "It" if total + len(legacy_items) == 1 else "At least one"
+        count = total + len(legacy_items) + len(undescribed)
+        who = "It" if count == 1 else "At least one"
         texts.append(f"{who} joined {seen_when}.")
     return " ".join(_unique(texts)), len(undescribed)
 

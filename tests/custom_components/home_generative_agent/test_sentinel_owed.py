@@ -654,3 +654,52 @@ def test_an_account_and_a_token_read_as_one_sentence() -> None:
         "New administrator account: alice; new long-lived access token: laptop."
         in sent.evidence["summary"]
     )
+
+
+def test_a_trimmed_merge_drops_a_circumstance_it_can_no_longer_vouch_for() -> None:
+    """The away device told meanwhile: the rest is not said to have joined away."""
+    store: dict[str, list[dict[str, Any]]] = {}
+    owed.record(store, _seen(_labelled_clients("a", "b"), ""))
+    owed.record(
+        store, _seen(_labelled_clients("b", severity="high"), "while nobody was home")
+    )
+    (member,) = owed.read_members(store["network_unknown_device_joined"])
+    assert member.evidence["seen_when"] == "while nobody was home"
+    rest = owed.without(member, {"client_keys": {"b"}})
+    assert rest is not None
+    summary = owed.replay("network_unknown_device_joined", [rest]).evidence["summary"]
+    assert "nobody was home" not in summary
+
+
+def test_an_equal_severity_sighting_still_adds_its_circumstance() -> None:
+    store: dict[str, list[dict[str, Any]]] = {}
+    owed.record(store, _seen(_labelled_clients("a", "b", severity="high"), "at night"))
+    owed.record(
+        store, _seen(_labelled_clients("a", severity="high"), "while nobody was home")
+    )
+    (member,) = owed.read_members(store["network_unknown_device_joined"])
+    assert member.evidence["seen_when"] == "while nobody was home"
+
+
+def test_every_account_and_token_is_named() -> None:
+    """Unlike devices, accounts and tokens are not capped: none can hide."""
+    tokens = tuple(f"t{n:02d}" for n in range(12))
+    sent = owed.replay("ha_new_admin_or_token", [_admins(tokens=tokens)])
+    summary = sent.evidence["summary"]
+    assert all(t in summary for t in tokens)
+    assert "more" not in summary.split("tokens:", 1)[1]
+
+
+def test_it_joined_counts_the_undescribed_too() -> None:
+    member = _seen(_labelled_clients("a"), "while nobody was home")
+    member = replace(
+        member,
+        evidence={
+            **member.evidence,
+            "client_keys": ["a", "x", "y"],
+            "owed_not_listed": ["x", "y"],
+        },
+    )
+    summary = owed.replay("network_unknown_device_joined", [member]).evidence["summary"]
+    assert "At least one joined while nobody was home." in summary
+    assert "It joined" not in summary

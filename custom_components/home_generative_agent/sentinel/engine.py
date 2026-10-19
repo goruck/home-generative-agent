@@ -982,8 +982,14 @@ class SentinelEngine:
             days = idle.get("days")
             days = days if isinstance(days, int) and days > 0 else 0
             last = idle.get("last")
-            if isinstance(last, str) and last >= today:
-                continue  # counted today already, or the clock went back
+            if last == today:
+                continue  # counted today already
+            if isinstance(last, str) and last > today:
+                # Saved while the clock ran ahead: start from today, adding
+                # nothing, so the count resumes tomorrow.
+                state.owed_rule_idle[kind] = {"days": days, "last": today}
+                changed = True
+                continue
             days += 1
             state.owed_rule_idle[kind] = {"days": days, "last": today}
             changed = True

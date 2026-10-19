@@ -1317,6 +1317,8 @@ async def test_no_replay_while_the_suppression_state_is_read_only(
     await engine._timed_run()
     assert notifier.calls == []
     assert list(_owed(engine)) == ["network_public_ip_changed"]
+    # Nothing can be saved, so no idle days are counted either.
+    assert cast("Any", engine)._suppression.state.owed_rule_idle == {}
 
 
 @pytest.mark.asyncio
@@ -2218,6 +2220,43 @@ async def test_a_waiting_live_alert_keeps_its_devices_out_of_the_replay(
     assert _owed(engine) == {}
 
 
+def _owed_radio(*keys: str) -> AnomalyFinding:
+    """Return an owed radio device alert as the rule reports it since #802."""
+    return AnomalyFinding(
+        anomaly_id="owed-radio-" + "-".join(keys),
+        type="radio_new_device_joined",
+        severity="low",
+        confidence=0.9,
+        triggering_entities=[],
+        evidence={
+            "device_keys": list(keys),
+            "summary": "New radio devices joined.",
+            "item_labels": {k: f"Plug {k}" for k in keys},
+        },
+        suggested_actions=["Check it"],
+        is_sensitive=True,
+        detected_at=NOW,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_rule_skipped_on_a_real_run_counts_as_idle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run without the rule's data counts a day and shows it (#802)."""
+    engine, _ = _engine(monkeypatch, _snapshot())
+    state = cast("Any", engine)._suppression.state
+    kind = "radio_new_device_joined"
+    state.owed_change_alerts[kind] = [_owed_radio("zigbee:z").as_dict()]
+
+    await engine._timed_run()
+
+    assert kind in cast("Any", engine).run_stats["inactive_rules"]
+    assert kind in state.owed_change_alerts
+    assert state.owed_rule_idle[kind]["days"] == 1
+    assert engine.owed_status()["owed_rules_idle_days"] == {kind: 1}
+
+
 def _owed_clients(*keys: str) -> AnomalyFinding:
     """Return an owed unknown-client alert as the rule reports it since #802."""
     return AnomalyFinding(
@@ -2269,23 +2308,27 @@ async def test_an_owed_kind_whose_rule_stops_running_waits_visibly(
 async def test_only_days_sentinel_ran_count_as_idle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A shutdown or a clock set back cannot add idle days."""
+    """A shutdown adds nothing; a clock that ran ahead does not freeze the count."""
     engine, _ = _engine(monkeypatch, _snapshot())
     state = cast("Any", engine)._suppression.state
     kind = "network_unknown_device_joined"
     state.owed_change_alerts[kind] = [_owed_clients("k1").as_dict()]
     track = cast("Any", engine)._track_idle_owed
 
+    # Ninety days off, then one run: one day.
     await track(set(), NOW + timedelta(days=90))
-    for _ in range(5):
-        # A clock flapping between two dates counts neither again.
-        await track(set(), NOW + timedelta(days=89))
-        await track(set(), NOW + timedelta(days=90))
+    assert state.owed_rule_idle[kind]["days"] == 1
 
+    # The clock ran a year ahead for one run, then was corrected.
+    await track(set(), NOW + timedelta(days=455))
+    assert state.owed_rule_idle[kind]["days"] == 2
+    await track(set(), NOW + timedelta(days=91))
     assert state.owed_rule_idle[kind] == {
-        "days": 1,
-        "last": (NOW + timedelta(days=90)).date().isoformat(),
+        "days": 2,
+        "last": (NOW + timedelta(days=91)).date().isoformat(),
     }
+    await track(set(), NOW + timedelta(days=92))
+    assert state.owed_rule_idle[kind]["days"] == 3
 
 
 @pytest.mark.asyncio
@@ -2318,8 +2361,8 @@ async def test_a_rule_that_raised_is_not_idle(
     engine, _ = _engine(monkeypatch, snapshot)
     state = cast("Any", engine)._suppression.state
     kind = "radio_new_device_joined"
-    state.owed_change_alerts[kind] = [_owed_clients("k1").as_dict()]
-    state.owed_rule_idle[kind] = {"days": 29, "last": "2026-09-06"}
+    state.owed_change_alerts[kind] = [_owed_radio("zigbee:z").as_dict()]
+    state.owed_rule_idle[kind] = {"days": 6, "last": "2026-09-06"}
 
     def _raise(self: Any, snapshot: Any) -> list[AnomalyFinding]:
         del self, snapshot
@@ -2342,7 +2385,7 @@ async def test_a_rule_that_raised_is_not_idle(
 async def test_a_rule_running_at_level_zero_is_not_idle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """At level 0 the rule still counts as running, so nothing ages out."""
+    """At level 0 the rule still counts as running, so no idle days are counted."""
     engine, _notifier, _section = await _radio_engine(monkeypatch)
     state = cast("Any", engine)._suppression.state
     state.owed_rule_idle["radio_new_device_joined"] = {"days": 3, "last": "2026-09-01"}

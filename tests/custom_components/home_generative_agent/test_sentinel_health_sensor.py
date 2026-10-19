@@ -703,10 +703,12 @@ async def test_refresh_shows_owed_change_alerts() -> None:
     engine = cast("MagicMock", sensor._sentinel)
     engine.autonomy_status.return_value = {"autonomy_level": 1}
     engine.owed_status.return_value = {
-        "owed_change_alerts": {"radio_new_device_joined": 2}
+        "owed_change_alerts": {"radio_new_device_joined": 2},
+        "owed_rules_idle_days": {"radio_new_device_joined": 7},
     }
     _mock_async_write_ha_state(sensor)
 
     await sensor._async_refresh()
 
     assert sensor._attrs["owed_change_alerts"] == {"radio_new_device_joined": 2}
+    assert sensor._attrs["owed_rules_idle_days"] == {"radio_new_device_joined": 7}
