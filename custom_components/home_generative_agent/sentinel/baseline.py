@@ -30,9 +30,12 @@ import asyncio
 import contextlib
 import logging
 import math
+from dataclasses import dataclass, field
 from datetime import UTC, timedelta
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.components import persistent_notification
+from homeassistant.core import callback
 from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.const import (
@@ -61,6 +64,10 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from datetime import datetime
 
+    from homeassistant.components.persistent_notification import (
+        Notification,
+        UpdateType,
+    )
     from homeassistant.core import HomeAssistant
     from psycopg import AsyncConnection
     from psycopg.rows import DictRow
@@ -154,6 +161,60 @@ METRIC_DOW_STD_PREFIX = "hourly_stddev_"
 # Number of numeric parts in a DOW metric name (e.g. "5_14" = DOW 5, hour 14).
 # Global hourly metrics have one part ("14"); DOW metrics have two ("5_14").
 _DOW_METRIC_PARTS = 2
+
+# One persistent notice per kind instead of one per entity (#791). Each cycle
+# adds to the notice until it is dismissed; it names at most this many.
+_ESTABLISHED_NOTIFICATION_ID = "hga_baseline_established"
+_DRIFT_NOTIFICATION_ID = "hga_baseline_drift"
+_NOTICE_MAX_LISTED = 10
+_NOTICES_KEY = "home_generative_agent_baseline_notices"
+
+
+@dataclass
+class _BaselineNotices:
+    """
+    What the open established and drift notices tell, by entity id.
+
+    Entries are (name, value) and (name, current, reference, drift percent).
+    Each cycle adds to these and re-posts the notice; dismissing a notice
+    clears its entries, so an unread notice is never overwritten (#791).
+    """
+
+    established: dict[str, tuple[str, float]] = field(default_factory=dict)
+    drift: dict[str, tuple[str, float, float, float]] = field(default_factory=dict)
+
+
+@callback
+def _baseline_notices(hass: HomeAssistant) -> _BaselineNotices:
+    """
+    Return the notice entries, kept in hass.data with their dismissal listener.
+
+    They live exactly as long as Home Assistant's notifications: through an
+    entry reload (a new updater must not overwrite an unread notice with only
+    its own entries) and not past a restart. The listener is registered once,
+    so a dismissal while no updater runs still clears its entries.
+    """
+    notices: _BaselineNotices | None = hass.data.get(_NOTICES_KEY)
+    if notices is not None:
+        return notices
+    notices = _BaselineNotices()
+
+    @callback
+    def _on_updated(
+        update_type: UpdateType, notifications: dict[str, Notification]
+    ) -> None:
+        if update_type != persistent_notification.UpdateType.REMOVED:
+            return
+        if _ESTABLISHED_NOTIFICATION_ID in notifications:
+            notices.established.clear()
+        if _DRIFT_NOTIFICATION_ID in notifications:
+            notices.drift.clear()
+
+    # Listen before publishing the store, so no store exists without it.
+    persistent_notification.async_register_callback(hass, _on_updated)
+    hass.data[_NOTICES_KEY] = notices
+    return notices
+
 
 # DDL for the baseline table.
 _CREATE_TABLE_SQL = """
@@ -585,8 +646,9 @@ class SentinelBaselineUpdater:
         """
         Store the counters offered since the last write, then prune the old.
 
-        No establishment or drift notice (dozens of clients would each
-        announce themselves) and no day-of-week rows: the usage rule reads
+        No establishment or drift notice (counters are not entities, and
+        dozens of clients would crowd out the entities the notices name)
+        and no day-of-week rows: the usage rule reads
         the hourly profile, and the weekly rows would be 336 more per
         counter for nothing. Rows of clients that left expire after
         ``COUNTER_ROW_RETENTION_DAYS`` (once a day).
@@ -622,8 +684,8 @@ class SentinelBaselineUpdater:
             if entity.get("platform") in ROUTER_PLATFORMS:
                 # A router integration's sensors are per-client figures
                 # (eero creates a rate, signal, and traffic sensor for every
-                # client it tracks): dozens of entities that would each earn
-                # an establishment notice and drift on every poll, and whose
+                # client it tracks): dozens of entities that would crowd the
+                # establishment notice and drift on every poll, and whose
                 # ids can carry a MAC. Their figures reach the baselines as
                 # the network section's counters instead.
                 router_entities.append(str(entity_id))
@@ -816,105 +878,180 @@ class SentinelBaselineUpdater:
                 await conn.commit()
 
                 # Check establishment crossings using RETURNING sample_count values.
+                established: list[str] = []
                 for entity_id, count in rolling_sample_counts.items():
                     if entity_id in self._established:
                         continue
                     if count >= min_samples:
                         self._established.add(entity_id)
-                        if snapshot is not None:
-                            await self._fire_establishment_notification(
-                                entity_id, entity_values[entity_id], snapshot
-                            )
-            # Fire drift notifications after commit (outside the conn context).
-            # Only fire for established entities — skip entities still in build-up.
-            for entity_id, value in entity_values.items():
-                if entity_id not in self._established or snapshot is None:
-                    continue
-                ref_val = refs.get(entity_id)
-                if ref_val is None:
-                    continue
-                if ref_val == 0.0:
-                    drift_pct = 100.0 if value != 0.0 else 0.0
-                else:
-                    drift_pct = abs(value - ref_val) / abs(ref_val) * 100.0
-                if drift_pct >= drift_threshold_pct:
-                    await self._fire_drift_notification(
-                        entity_id, value, ref_val, drift_pct, snapshot
-                    )
-
+                        established.append(entity_id)
         except Exception:
             LOGGER.exception("Baseline DB write failed.")
+            return
 
-    async def _fire_establishment_notification(
-        self,
-        entity_id: str,
-        value: float,
-        snapshot: FullStateSnapshot,
-    ) -> None:
-        """Fire a persistent HA notification when a baseline is established."""
-        # Attempt to find a friendly name from the snapshot entities.
-        friendly_name = entity_id
-        for entity in snapshot.get("entities", []):
-            if entity.get("entity_id") == entity_id:
-                friendly_name = entity.get("friendly_name") or entity_id
-                break
-        message = (
-            f"Baseline established for {friendly_name}: normal \u2248 {value:.2f}."
-        )
-        LOGGER.debug("Baseline established for %s (value=%.2f).", entity_id, value)
+        # Notices go out after the commit, outside the connection. The network
+        # counters (snapshot None) are established like entities but raise no
+        # notice, see _write_offered_counters.
+        if snapshot is None:
+            return
         try:
-            await self._hass.services.async_call(
-                "persistent_notification",
-                "create",
-                {
-                    "title": "Sentinel Baseline Established",
-                    "message": message,
-                    "notification_id": f"hga_baseline_established_{entity_id}",
-                },
-                blocking=False,
+            self._tell_notices(
+                snapshot, entity_values, established, refs, drift_threshold_pct
+            )
+        except Exception:
+            LOGGER.exception("Baseline notice failed; the baselines were saved.")
+
+    def _tell_notices(
+        self,
+        snapshot: FullStateSnapshot,
+        entity_values: dict[str, float],
+        established: list[str],
+        refs: Mapping[str, float | None],
+        drift_threshold_pct: float,
+    ) -> None:
+        """Add this cycle's establishments and drifts to their notices."""
+        notices = _baseline_notices(self._hass)
+        names = _friendly_names(snapshot)
+        # A reset can land while the write gives its connection back; an
+        # entity it reset is no longer established and must not be told.
+        established = [e for e in established if e in self._established]
+        for entity_id in established:
+            LOGGER.debug(
+                "Baseline established for %s (value=%.2f).",
+                entity_id,
+                entity_values[entity_id],
+            )
+            notices.established[entity_id] = (
+                names.get(entity_id, entity_id),
+                entity_values[entity_id],
+            )
+        if established:
+            self._post_established(notices)
+        # Only established entities drift; entities still building up do not.
+        drifted = False
+        for entity_id, value in entity_values.items():
+            if entity_id not in self._established:
+                continue
+            ref_val = refs.get(entity_id)
+            if ref_val is None:
+                continue
+            if ref_val == 0.0:
+                drift_pct = 100.0 if value != 0.0 else 0.0
+            else:
+                drift_pct = abs(value - ref_val) / abs(ref_val) * 100.0
+            if drift_pct >= drift_threshold_pct:
+                LOGGER.debug(
+                    "Baseline drift for %s: %.2f -> %.2f (%.1f%%).",
+                    entity_id,
+                    ref_val,
+                    value,
+                    drift_pct,
+                )
+                notices.drift[entity_id] = (
+                    names.get(entity_id, entity_id),
+                    value,
+                    ref_val,
+                    drift_pct,
+                )
+                drifted = True
+        if drifted:
+            self._post_drift(notices)
+
+    def _notify(self, title: str, message: str, notification_id: str) -> None:
+        """
+        Create or replace one persistent HA notification.
+
+        Called directly, not through the service, so the notice and its
+        entries change in the same loop step: a dismissal cannot land between
+        them and have a queued create bring the dismissed notice back.
+        """
+        try:
+            persistent_notification.async_create(
+                self._hass, message, title, notification_id
             )
         except Exception:  # noqa: BLE001
-            LOGGER.debug("Could not fire establishment notification for %s.", entity_id)
+            LOGGER.warning("Could not post notification %s.", notification_id)
 
-    async def _fire_drift_notification(
-        self,
-        entity_id: str,
-        current_value: float,
-        reference_value: float,
-        drift_pct: float,
-        snapshot: FullStateSnapshot,
-    ) -> None:
-        """Fire a persistent HA notification when an entity's baseline drifts."""
-        friendly_name = entity_id
-        for entity in snapshot.get("entities", []):
-            if entity.get("entity_id") == entity_id:
-                friendly_name = entity.get("friendly_name") or entity_id
-                break
-        message = (
-            f"Baseline drift detected for {friendly_name}: "
-            f"was {reference_value:.2f}, now {current_value:.2f} "
-            f"({drift_pct:.1f}% change). Reference updated."
+    def _post_established(self, notices: _BaselineNotices) -> None:
+        """
+        Post the notice of every baseline established since it was dismissed.
+
+        Entities that start sampling together cross the threshold together, so
+        one notice per entity flooded the panel (#791). They share one notice,
+        and a later cycle adds to it rather than overwriting it. The newest
+        are named first, so a later one is not hidden in the count.
+        """
+        entries = notices.established
+        if len(entries) == 1:
+            name, value = next(iter(entries.values()))
+            message = f"Baseline established for {name}: normal \u2248 {value:.2f}."
+        else:
+            lines = [
+                f"- {name}: normal \u2248 {value:.2f}"
+                for name, value in list(reversed(entries.values()))[:_NOTICE_MAX_LISTED]
+            ]
+            header = f"Baselines established for {len(entries)} entities:"
+            message = "\n".join([header, *lines, *_more_line(len(entries))])
+        self._notify(
+            "Sentinel Baseline Established", message, _ESTABLISHED_NOTIFICATION_ID
         )
-        LOGGER.debug(
-            "Baseline drift for %s: %.2f -> %.2f (%.1f%%).",
-            entity_id,
-            reference_value,
-            current_value,
-            drift_pct,
+
+    def _post_drift(self, notices: _BaselineNotices) -> None:
+        """
+        Post the notice of every baseline drift since it was dismissed.
+
+        A home-wide shift drifts many entities at once, so they share one
+        notice (#791), largest drift first. A drift's reference is reset when
+        it is told, so a later cycle adds to the notice rather than
+        overwriting it; an entity that drifts again shows its latest drift.
+        """
+        entries = sorted(
+            notices.drift.values(), key=lambda entry: entry[3], reverse=True
         )
-        try:
-            await self._hass.services.async_call(
-                "persistent_notification",
-                "create",
-                {
-                    "title": "Sentinel Baseline Drift Detected",
-                    "message": message,
-                    "notification_id": f"hga_baseline_drift_{entity_id}",
-                },
-                blocking=False,
+        if len(entries) == 1:
+            name, current, reference, pct = entries[0]
+            message = (
+                f"Baseline drift detected for {name}: "
+                f"was {reference:.2f}, now {current:.2f} "
+                f"({pct:.1f}% change). Reference updated."
             )
-        except Exception:  # noqa: BLE001
-            LOGGER.debug("Could not fire drift notification for %s.", entity_id)
+        else:
+            lines = [
+                f"- {name}: was {reference:.2f}, now {current:.2f} ({pct:.1f}% change)"
+                for name, current, reference, pct in entries[:_NOTICE_MAX_LISTED]
+            ]
+            header = (
+                f"Baseline drift detected for {len(entries)} entities "
+                "(references updated):"
+            )
+            message = "\n".join([header, *lines, *_more_line(len(entries))])
+        self._notify(
+            "Sentinel Baseline Drift Detected", message, _DRIFT_NOTIFICATION_ID
+        )
+
+    def _forget_notices(self, entity_id: str | None) -> None:
+        """
+        Drop a reset baseline from the notices (every baseline when None).
+
+        A notice left with nothing to tell is dismissed; one that still names
+        other entities is posted again without the reset one.
+        """
+        notices = _baseline_notices(self._hass)
+        for entries, notification_id, post in (
+            (notices.established, _ESTABLISHED_NOTIFICATION_ID, self._post_established),
+            (notices.drift, _DRIFT_NOTIFICATION_ID, self._post_drift),
+        ):
+            if entity_id is None:
+                removed = bool(entries)
+                entries.clear()
+            else:
+                removed = entries.pop(entity_id, None) is not None
+            if not removed:
+                continue
+            if entries:
+                post(notices)
+            else:
+                persistent_notification.async_dismiss(self._hass, notification_id)
 
     # ---------------------------------------------------------------------- #
     # DOW Welford helpers
@@ -1214,6 +1351,7 @@ class SentinelBaselineUpdater:
                     self._established.discard(entity_id)
                 else:
                     self._established.clear()
+                self._forget_notices(entity_id)
         except Exception:
             LOGGER.exception("Baseline reset failed.")
             return -1
@@ -1671,6 +1809,30 @@ def _evaluate_dow_anomaly(  # noqa: PLR0913
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+
+def _friendly_names(snapshot: FullStateSnapshot) -> dict[str, str]:
+    """
+    Map each snapshot entity id to its friendly name, on one line.
+
+    Whitespace runs collapse to one space, so a name with a line break cannot
+    start a line of its own in a notice's list.
+    """
+    names: dict[str, str] = {}
+    for entity in snapshot.get("entities", []):
+        entity_id = entity.get("entity_id")
+        if not entity_id:
+            continue
+        name = " ".join(str(entity.get("friendly_name") or entity_id).split())
+        names[str(entity_id)] = name or str(entity_id)
+    return names
+
+
+def _more_line(total: int) -> list[str]:
+    """Return the "and N more" line for a notice listing at most the cap."""
+    if total <= _NOTICE_MAX_LISTED:
+        return []
+    return [f"\u2026and {total - _NOTICE_MAX_LISTED} more."]
 
 
 def _coerce_int(value: Any, default: int) -> int:

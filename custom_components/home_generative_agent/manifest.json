@@ -5,6 +5,7 @@
     "assist_pipeline",
     "hassio",
     "intent",
+    "persistent_notification",
     "ssdp"
   ],
   "codeowners": [
