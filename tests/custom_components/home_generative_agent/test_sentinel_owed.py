@@ -300,3 +300,40 @@ def test_a_held_back_replay_does_not_say_sentinel_was_silenced() -> None:
     assert silenced.evidence["summary"].startswith(
         "Seen while Sentinel was at autonomy level 0 ("
     )
+
+
+def test_a_mixed_replay_names_both_ways_it_was_held() -> None:
+    sent = owed.replay(
+        "network_unknown_device_joined",
+        [_clients("k1"), owed.held_back(_clients("k2", minute=5))],
+    )
+    assert sent.evidence["summary"].startswith(
+        "Seen while Sentinel was at autonomy level 0 or its alert was held back ("
+    )
+
+
+def test_posture_past_the_cap_keeps_the_latest(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store: dict[str, list[dict[str, Any]]] = {}
+    for n in range(owed.MAX_OWED_PER_KIND + 2):
+        owed.record(
+            store,
+            _finding(
+                "network_public_ip_changed", {"public_ip_key": f"ip{n}"}, minute=n
+            ),
+        )
+    members = owed.read_members(store["network_public_ip_changed"])
+    assert len(members) == owed.MAX_OWED_PER_KIND
+    assert members[0].evidence["public_ip_key"] == "ip0"
+    assert members[-1].evidence["public_ip_key"] == f"ip{owed.MAX_OWED_PER_KIND + 1}"
+    assert "keeping the first and the latest" in caplog.text
+
+
+def test_unlisted_items_are_bounded() -> None:
+    store: dict[str, list[dict[str, Any]]] = {}
+    for n in range(owed.MAX_OWED_PER_KIND + owed.MAX_UNLISTED_ITEMS + 10):
+        owed.record(store, _clients(f"k{n:04d}", minute=n))
+    members = owed.read_members(store["network_unknown_device_joined"])
+    unlisted = members[-1].evidence["owed_not_listed"]
+    assert len(unlisted) == owed.MAX_UNLISTED_ITEMS

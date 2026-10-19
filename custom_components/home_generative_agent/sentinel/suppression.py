@@ -114,8 +114,9 @@ class SuppressionState:
     # Incremented by record_cooldown_feedback() on each dismiss/snooze.
     learned_cooldown_multipliers: dict[str, int] = field(default_factory=dict)
 
-    # Change alerts held at autonomy level 0, owed until one reaches the user
-    # even if the change is undone meanwhile (#799): kind -> its findings as
+    # Change alerts held at autonomy level 0 or held back by a cooldown, quiet
+    # hours or a pending prompt, owed until one reaches the user even if the
+    # change is undone meanwhile (#799, #801): kind -> its findings as
     # ``AnomalyFinding.as_dict`` saved them (see sentinel/owed.py). Optional
     # and additive, so the schema version is unchanged: an older build drops
     # the key, where a version bump would load this file read-only there

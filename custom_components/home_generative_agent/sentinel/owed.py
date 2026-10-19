@@ -1,15 +1,16 @@
 """
-Change alerts held at autonomy level 0, owed until one reaches the user (#799).
+Change alerts held back, owed until one reaches the user (#799, #801).
 
 A change alert (a new admin or token, a new radio device or router client, a
-public IP or UPnP port-mapping change) seen while Sentinel is silenced is kept
-here, so it is still told once the level rises even if the change was undone
-meanwhile. One entry per kind of change, so a busy kind (a rotating IP, MAC
-churn on guest Wi-Fi) neither floods the user afterwards nor pushes out
-another kind:
+public IP or UPnP port-mapping change) held at autonomy level 0, or held back
+by a cooldown, quiet hours or a pending prompt at any level, is kept here, so
+it is still told once it can be, even if the change was undone meanwhile. One
+entry per kind of change, so a busy kind (a rotating IP, MAC churn on guest
+Wi-Fi) neither floods the user afterwards nor pushes out another kind:
 
 - Posture kinds (a public IP, a UPnP mapping count) keep each change seen,
-  as its own value, up to ``MAX_OWED_PER_KIND``.
+  as its own value (more port mappings from the same baseline replace fewer),
+  up to ``MAX_OWED_PER_KIND``: the first ones and the latest.
 - Item kinds (devices, clients, accounts) keep up to ``MAX_OWED_PER_KIND``
   findings, replacing any a later one names in full, and are told in one
   alert listing every item.
@@ -43,6 +44,8 @@ LOGGER = logging.getLogger(__name__)
 # to the latest kept, unlisted, so churn never pushes out the first seen; and
 # never another kind's.
 MAX_OWED_PER_KIND = 20
+# Past this many unlisted items, more are not kept.
+MAX_UNLISTED_ITEMS = 500
 
 # The list evidence an item kind names its items by. A finding of the kind
 # still reports an owed one while it names every item that one named.
@@ -74,11 +77,12 @@ _TRUST_EVIDENCE_KEYS = (TRUST_DEVICE_IDS_KEY, "security_device_ids")
 _FIRST_SEEN = "owed_first_seen"
 _NOT_LISTED = "owed_not_listed"
 
-# Marks a replay in its evidence, so the audit trail tells it from a live
-# alert and a replay held again by level 0 is not owed a second time.
+# Marks a replay in its evidence (held at level 0 or held back), so the audit
+# trail tells it from a live alert and a replay held again is not owed a
+# second time. The key name predates #801.
 SEEN_WHILE_SILENCED = "seen_while_silenced"
-# Kept on an owed finding held back above level 0 (a cooldown, quiet hours),
-# not silenced: its replay says so (#801).
+# Kept on an owed finding held back above level 0 (a cooldown, quiet hours,
+# a pending prompt), not silenced: its replay says so (#801).
 _HELD_BACK = "owed_held_back"
 
 
@@ -111,9 +115,24 @@ def covers(live: AnomalyFinding, owed: AnomalyFinding) -> bool:
     if keys is None:
         # A posture change is one value (an address, a mapping count): another
         # value is another change, even from the same baseline (an IP that
-        # went A to B and back, then to C, changed twice).
-        return live.anomaly_id == owed.anomaly_id
+        # went A to B and back, then to C, changed twice). Except more port
+        # mappings counted from the same baseline, which include the fewer.
+        return live.anomaly_id == owed.anomaly_id or _more_mappings(live, owed)
     return all(items(owed, key) <= items(live, key) for key in keys)
+
+
+def _more_mappings(live: AnomalyFinding, owed: AnomalyFinding) -> bool:
+    """Return True for a UPnP count at least as high from the same baseline."""
+    if owed.type != "network_upnp_port_mapping_added":
+        return False
+    live_count, owed_count = live.evidence.get("count"), owed.evidence.get("count")
+    return (
+        isinstance(live_count, int)
+        and isinstance(owed_count, int)
+        and live.evidence.get("previous_count") == owed.evidence.get("previous_count")
+        and live.triggering_entities == owed.triggering_entities
+        and live_count >= owed_count
+    )
 
 
 def read_members(stored: object) -> list[AnomalyFinding]:
@@ -162,6 +181,10 @@ def _absorb(latest: AnomalyFinding, finding: AnomalyFinding) -> AnomalyFinding:
     """Add ``finding``'s items to ``latest`` as unlisted (the kind is full)."""
     keys = ITEM_KEYS[latest.type]
     new = {i for key in keys for i in items(finding, key) - items(latest, key)}
+    if len(items(latest, _NOT_LISTED)) + len(new) > MAX_UNLISTED_ITEMS:
+        # Bounded, so churn cannot grow the saved state without end; the
+        # first ones are kept and named.
+        return latest
     evidence = {
         **latest.evidence,
         **{key: sorted(items(latest, key) | items(finding, key)) for key in keys},
@@ -198,9 +221,23 @@ def record(owed: dict[str, list[dict[str, Any]]], finding: AnomalyFinding) -> bo
 def _record_posture(members: list[AnomalyFinding], finding: AnomalyFinding) -> bool:
     if any(covers(m, finding) for m in members):
         return False
+    older = [m for m in members if covers(finding, m)]
+    if older:
+        # More port mappings from the same baseline: the new count reports
+        # the earlier one too.
+        members[:] = [m for m in members if m not in older]
+        members.append(_carry(finding, older))
+        return True
     if len(members) >= MAX_OWED_PER_KIND:
-        LOGGER.debug("Owed %s alerts are full; not kept.", finding.type)
-        return False
+        # Keep the first changes and the latest; churn (a LAN host opening
+        # and closing mappings) cannot make the latest go untold.
+        LOGGER.warning(
+            "Sentinel holds %d owed %s alerts; keeping the first and the latest.",
+            MAX_OWED_PER_KIND,
+            finding.type,
+        )
+        members[-1] = finding
+        return True
     members.append(finding)
     return True
 
@@ -216,8 +253,8 @@ def _record_items(members: list[AnomalyFinding], finding: AnomalyFinding) -> boo
     if not older and len(members) >= MAX_OWED_PER_KIND:
         if not items(members[-1], _NOT_LISTED):
             LOGGER.warning(
-                "Sentinel holds %d %s alerts from autonomy level 0; later ones "
-                "are counted, not described.",
+                "Sentinel holds %d owed %s alerts; later ones are counted, "
+                "not described.",
                 MAX_OWED_PER_KIND,
                 finding.type,
             )
@@ -300,17 +337,14 @@ def replay(kind: str, members: list[AnomalyFinding]) -> AnomalyFinding:
     seen = _minute(first)
     if _minute(latest.detected_at) != seen:
         seen = f"{seen} to {_minute(latest.detected_at)}"
-    if any(m.evidence.get(_HELD_BACK) for m in members):
-        # Held back by a cooldown or quiet hours (#801), maybe level 0 too.
-        note = (
-            f"Seen while its alert was held back ({seen}){count}; "
-            "it may have been undone since."
-        )
+    held = [bool(m.evidence.get(_HELD_BACK)) for m in members]
+    if all(held):
+        where = "its alert was held back"
+    elif any(held):
+        where = "Sentinel was at autonomy level 0 or its alert was held back"
     else:
-        note = (
-            f"Seen while Sentinel was at autonomy level 0 ({seen}){count}; "
-            "it may have been undone since."
-        )
+        where = "Sentinel was at autonomy level 0"
+    note = f"Seen while {where} ({seen}){count}; it may have been undone since."
     evidence["summary"] = f"{note} {summary}".strip()
     evidence[SEEN_WHILE_SILENCED] = True
     return AnomalyFinding(

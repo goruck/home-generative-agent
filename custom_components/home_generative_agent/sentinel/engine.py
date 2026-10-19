@@ -167,11 +167,12 @@ from .rules.zwave_inclusion_active import ZwaveInclusionActiveRule
 from .rules.zwave_insecure_security_class import ZwaveInsecureSecurityClassRule
 from .suppression import (
     SUPPRESSION_REASON_AUTONOMY_PASSIVE,
+    SUPPRESSION_REASON_ENTITY_COOLDOWN,
     SUPPRESSION_REASON_NOT_SUPPRESSED,
     SUPPRESSION_REASON_NOTIFIER_DUPLICATE,
-    SUPPRESSION_REASON_PENDING_PROMPT,
     SUPPRESSION_REASON_POLICY_BLOCKED,
     SUPPRESSION_REASON_TRIAGE_SUPPRESSED,
+    SUPPRESSION_REASON_TYPE_COOLDOWN,
     SUPPRESSION_REASON_USER_SNOOZE_7D,
     SUPPRESSION_REASON_USER_SNOOZE_24H,
     SUPPRESSION_REASON_USER_SNOOZE_PERMANENT,
@@ -253,8 +254,22 @@ _POSTURE_MEMORY_RULES: dict[str, tuple[str, ...]] = {
 # Rules that alert once on a change and stay owed until the alert reaches the
 # user (the auth and network inventories, posture memory). Held at autonomy
 # level 0 they start no cooldown, so they alert once the level rises
-# (#783); they are audited once per cooldown meanwhile, not every cycle.
+# (#783); held back by a cooldown, quiet hours or a pending prompt at any
+# level they are owed too (#801). They are audited once per cooldown
+# meanwhile, not every cycle.
 _CHANGE_ALERT_RULES: frozenset[str] = CHANGE_ALERT_RULE_TYPES
+
+
+def _keyed_items(finding: AnomalyFinding) -> set[str]:
+    """Return a finding's items as 'key:item', so equal names stay apart."""
+    items = owed_alerts.told_items(finding.type, [finding])
+    return {f"{key}:{item}" for key, group in items.items() for item in group}
+
+
+# Cooldowns an owed replay does not wait out (see _dispatch_item).
+_COOLDOWN_REASONS: frozenset[str] = frozenset(
+    {SUPPRESSION_REASON_TYPE_COOLDOWN, SUPPRESSION_REASON_ENTITY_COOLDOWN}
+)
 
 
 @dataclass
@@ -394,7 +409,8 @@ class SentinelEngine:
         # when it was delivered), read by callers that must tell a snooze from
         # a cooldown (the device inventory's pending alerts).
         self._last_dispatch_reason: str | None = None
-        # Change alerts held at level 0: anomaly_id -> when last audited.
+        # Findings held (at level 0, or a change alert held back at any level,
+        # #801): anomaly_id -> when last audited.
         self._passive_recorded: dict[str, datetime] = {}
         self._network_enabled = bool(
             options.get(
@@ -778,9 +794,10 @@ class SentinelEngine:
                 register_device_cooldown(state, finding, now)
                 changed = True
             elif not finding.evidence.get(owed_alerts.SEEN_WHILE_SILENCED):
-                # Kept, so it alerts even if the change is undone before the
-                # level rises (#799). A replay overtaken by level 0 is not:
-                # what it tells is still owed.
+                # Kept, so it alerts even if the change is undone before it
+                # can (a level rise, a cooldown or quiet hours ending; #799,
+                # #801). A replay held again is not: what it tells is still
+                # owed.
                 changed = self._owe(finding) or changed
         if changed:
             await self._suppression.async_save()
@@ -790,8 +807,8 @@ class SentinelEngine:
         """Owe a held change alert; return True if what is owed changed."""
         owed = self._suppression.state.owed_change_alerts
         if not self._is_passive():
-            # Held back above level 0 (a cooldown, quiet hours): the replay
-            # must not say Sentinel was silenced.
+            # Held back above level 0 (a cooldown, quiet hours, a pending
+            # prompt): the replay must not say Sentinel was silenced.
             finding = owed_alerts.held_back(finding)
         try:
             return owed_alerts.record(owed, finding)
@@ -803,6 +820,16 @@ class SentinelEngine:
             )
             owed.pop(finding.type, None)
             return owed_alerts.record(owed, finding)
+
+    def _auth_told_by_replay(self, live: list[AnomalyFinding]) -> bool:
+        """Return True when an owed replay this run told every live auth item."""
+        told = getattr(self, "_owed_told_auth", set())
+        for finding in live:
+            if finding.type != HaNewAdminOrTokenRule.rule_id:
+                continue
+            named = _keyed_items(finding)
+            return bool(named) and named <= told
+        return False
 
     async def _send_owed_changes(  # noqa: PLR0913
         self,
@@ -818,7 +845,7 @@ class SentinelEngine:
         trigger_source: str,
     ) -> list[str]:
         """
-        Send the change alerts owed from level 0, once the level has risen.
+        Send the owed change alerts once they can go out.
 
         One alert per kind (#799). What a live alert reported this run is
         settled with that alert, not sent twice: a whole owed finding it
@@ -972,6 +999,10 @@ class SentinelEngine:
             _FINAL_SUPPRESSION_REASONS
         ):
             return False
+        if finding.type == HaNewAdminOrTokenRule.rule_id:
+            # Told: the auth commit may take in the accounts and tokens it
+            # named, as it does when their live alert is delivered.
+            self._owed_told_auth |= _keyed_items(finding)
         # Told: the devices and clients are no longer new, even if one comes
         # back.
         key = owed_alerts.INVENTORY_ITEM_KEYS.get(finding.type)
@@ -995,7 +1026,7 @@ class SentinelEngine:
         audit: bool = True,
     ) -> bool:
         """
-        Stop a dispatch at level 0 (or with nothing due), audit it, return False.
+        Stop a dispatch (level 0, a suppression, or nothing due), return False.
 
         ``reason`` overrides the audit reason (a suppression's own, or a
         compound with no finding due); with nothing held, the stop is always
@@ -1843,8 +1874,8 @@ class SentinelEngine:
         # Change rules over the remembered posture whose alert did not go out.
         posture_alerts_held: set[str] = set()
         # anomaly_id -> whether this run settled it (delivered, or stopped for
-        # good), for the change alerts owed from level 0; None when triage
-        # stopped it: what was owed from level 0 is not the model's to drop.
+        # good), for the change alerts owed; None when triage
+        # stopped it: what was owed is not the model's to drop.
         settled: dict[str, bool | None] = {}
         if all_findings:
             # Correlation pass: group related findings from this single cycle.
@@ -1903,6 +1934,7 @@ class SentinelEngine:
                 ):
                     posture_alerts_held.add(item.type)
 
+        self._owed_told_auth: set[str] = set()
         settled_inventory_keys = await self._send_owed_changes(
             all_findings,
             settled,
@@ -1914,6 +1946,9 @@ class SentinelEngine:
             explain_enabled=explain_enabled,
             trigger_source=trigger_source,
         )
+
+        if not auth_change_delivered and self._auth_told_by_replay(all_findings):
+            auth_change_delivered = True
 
         # Commit after dispatch: the auth change rule compared this run's
         # observation against the inventory as it stood before the run, and a
@@ -2219,20 +2254,23 @@ class SentinelEngine:
             cooldown_entity,
             **suppress_kwargs,
         )
-        suppressed = suppression_decision.suppress
         reason = suppression_decision.reason_code
+        # A replay is a one-time catch-up that has already waited: a cooldown
+        # a live alert of its kind started (often this very run) would
+        # otherwise hold it back for as long as changes keep coming.
+        suppressed = suppression_decision.suppress and not (
+            replay and reason in _COOLDOWN_REASONS
+        )
         if suppressed or self._is_passive():
             # Suppressed: audited with its reason, nothing held. Level 0: held
             # (see _hold_passive). At any level a change alert a cooldown,
-            # quiet hours or presence grace stopped is owed too, or it would
-            # be lost if undone before they end (#799, #801); not one whose
-            # prompt is pending, which already reached the user.
+            # quiet hours or a pending prompt stopped is owed too, or it would
+            # be lost if undone before they end (#799, #801). A pending prompt
+            # is keyed by the alert's id, which a change made again later can
+            # repeat; owing it only waits the prompt out.
             waiting = suppressed and reason not in _FINAL_SUPPRESSION_REASONS
             hold = not suppressed or (
-                waiting
-                and not replay
-                and reason != SUPPRESSION_REASON_PENDING_PROMPT
-                and finding.type in _CHANGE_ALERT_RULES
+                waiting and not replay and finding.type in _CHANGE_ALERT_RULES
             )
             return await self._passive_dispatch(
                 [finding] if hold else [],
@@ -2260,7 +2298,7 @@ class SentinelEngine:
         triage_decision_value: str | None = None
         triage_reason_code_value: str | None = None
         triage_confidence_value: float | None = None
-        # Not a replay: what was owed from level 0 is not the model's to drop.
+        # Not a replay: what was owed is not the model's to drop.
         if effective_autonomy >= 1 and self._triage_service is not None and not replay:
             triage_result = await self._triage_service.triage(finding, snapshot)
             triage_decision_value = triage_result.decision

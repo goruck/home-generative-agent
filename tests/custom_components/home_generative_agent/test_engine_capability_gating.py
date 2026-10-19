@@ -1096,7 +1096,8 @@ async def test_a_port_mapping_opened_and_closed_at_level_zero_alerts_once(
     await engine._timed_run()
     posture.update({"upnp_port_mappings_added": 2, "upnp_port_mapping_count": 4})
     await engine._timed_run()
-    assert len(_owed(engine)["network_upnp_port_mapping_added"]) == 2
+    # More mappings from the same baseline include the fewer: one is kept.
+    assert len(_owed(engine)["network_upnp_port_mapping_added"]) == 1
     posture.update({"upnp_port_mappings_added": 0, "upnp_port_mapping_count": 2})
     await engine._timed_run()
 
@@ -1105,7 +1106,6 @@ async def test_a_port_mapping_opened_and_closed_at_level_zero_alerts_once(
     await engine._timed_run()
     assert [f.type for f in notifier.calls] == ["network_upnp_port_mapping_added"]
     summary = notifier.calls[0].evidence["summary"]
-    assert "1 new port mapping was opened" in summary
     assert "2 new port mappings were opened" in summary
     assert "(4 mappings open in total)" in summary
     assert _owed(engine) == {}
@@ -1154,15 +1154,25 @@ async def test_an_owed_change_stays_while_its_live_alert_waits(
 async def test_an_owed_change_stays_owed_until_it_can_be_sent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A cooldown delays an owed replay without auditing every wait."""
+    """Quiet hours delay an owed replay without auditing every wait."""
+    from custom_components.home_generative_agent.sentinel import (  # noqa: PLC0415
+        engine as engine_mod,
+    )
+    from custom_components.home_generative_agent.sentinel.suppression import (  # noqa: PLC0415
+        SuppressionDecision,
+    )
+
     snapshot, posture = _public_ip_snapshot()
     engine, notifier = _silenced(monkeypatch, snapshot)
     await engine._timed_run()
     posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
-    state = cast("Any", engine)._suppression.state
-    state.last_by_type["network_public_ip_changed"] = datetime.now(UTC).isoformat()
+    real = engine_mod.should_suppress
+    monkeypatch.setattr(
+        engine_mod,
+        "should_suppress",
+        lambda *_a, **_k: SuppressionDecision(True, "quiet_hours"),  # noqa: FBT003
+    )
     engine._options["sentinel_autonomy_level"] = 1
-    engine._options["sentinel_cooldown_minutes"] = 60
     audit = cast("DummyAudit", cast("Any", engine)._audit_store)
     before = len(audit.calls)
     await engine._timed_run()
@@ -1171,7 +1181,23 @@ async def test_an_owed_change_stays_owed_until_it_can_be_sent(
     assert len(audit.calls) == before
     assert list(_owed(engine)) == ["network_public_ip_changed"]
 
-    state.last_by_type.clear()
+    monkeypatch.setattr(engine_mod, "should_suppress", real)
+    await engine._timed_run()
+    assert [f.type for f in notifier.calls] == ["network_public_ip_changed"]
+    assert _owed(engine) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_replay_does_not_wait_out_a_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live alert's cooldown would otherwise hold a replay back for good."""
+    snapshot, posture = _public_ip_snapshot()
+    engine, notifier = _silenced(monkeypatch, snapshot)
+    await engine._timed_run()
+    posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
+    _cooling(engine, "network_public_ip_changed")
+    engine._options["sentinel_autonomy_level"] = 1
     await engine._timed_run()
     assert [f.type for f in notifier.calls] == ["network_public_ip_changed"]
     assert _owed(engine) == {}
@@ -1578,18 +1604,14 @@ async def test_a_partly_told_device_alert_keeps_what_its_live_alert_waits_on(
     engine._options["sentinel_cooldown_minutes"] = 60
     state.last_by_type["radio_new_device_joined"] = datetime.now(UTC).isoformat()
     await engine._timed_run()
-    assert notifier.calls == []
-    assert len(_owed(engine)["radio_new_device_joined"]) == 2
-
-    state.last_by_type.clear()
-    await engine._timed_run()
-    assert [f.evidence["device_keys"] for f in notifier.calls] == [["zigbee:b"]]
+    # c's replay goes out at once; b's live alert waits out the cooldown.
+    assert [f.evidence["device_keys"] for f in notifier.calls] == [["zigbee:c"]]
     owed_now = _owed(engine)["radio_new_device_joined"]
-    assert [m["evidence"]["device_keys"] for m in owed_now] == [["zigbee:c"]]
+    assert [m["evidence"]["device_keys"] for m in owed_now] == [["zigbee:b"]]
 
     state.last_by_type.clear()
     await engine._timed_run()
-    assert [f.evidence["device_keys"] for f in notifier.calls][-1] == ["zigbee:c"]
+    assert [f.evidence["device_keys"] for f in notifier.calls][-1] == ["zigbee:b"]
     assert _owed(engine) == {}
 
 
@@ -1745,14 +1767,12 @@ async def test_a_change_undone_during_a_cooldown_still_alerts(
     assert notifier.calls == []
     assert list(_owed(engine)) == ["network_public_ip_changed"]
 
-    # Undone before the cooldown ends: the rule no longer fires.
+    # Undone before the cooldown ends: the rule no longer fires, and the
+    # replay does not wait the cooldown out.
     posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
     await engine._timed_run()
-    assert notifier.calls == []
-
-    state.last_by_type.clear()
-    await engine._timed_run()
     assert [f.type for f in notifier.calls] == ["network_public_ip_changed"]
+    del state
     summary = notifier.calls[0].evidence["summary"]
     assert summary.startswith("Seen while its alert was held back (")
     assert "autonomy level 0" not in summary
@@ -1763,7 +1783,7 @@ async def test_a_change_undone_during_a_cooldown_still_alerts(
 async def test_a_change_still_there_after_its_cooldown_alerts_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    snapshot, _posture = _public_ip_snapshot()
+    snapshot, posture = _public_ip_snapshot()
     engine, _ = _engine(monkeypatch, snapshot)
     notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
     state = _cooling(engine, "network_public_ip_changed")
@@ -1772,6 +1792,8 @@ async def test_a_change_still_there_after_its_cooldown_alerts_once(
     assert notifier.calls == []
     state.last_by_type.clear()
     await engine._timed_run()
+    # Delivered: the remembered address moves on, so the rule goes quiet.
+    posture["public_ip_changed"] = False
     await engine._timed_run()
     assert len(notifier.calls) == 1
     assert "seen_while_silenced" not in notifier.calls[0].evidence
@@ -1807,10 +1829,15 @@ async def test_a_change_quiet_hours_held_back_is_owed(
 
 
 @pytest.mark.asyncio
-async def test_a_change_whose_prompt_is_pending_is_not_owed(
+async def test_a_change_stopped_by_a_pending_prompt_is_owed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A pending prompt means this very alert already reached the user."""
+    """
+    A prompt is keyed by the alert's id, which a change made again can repeat.
+
+    A UPnP mapping opened, closed and opened again inside the prompt's life
+    has the first alert's id: owing it only waits the prompt out.
+    """
     from custom_components.home_generative_agent.sentinel import (  # noqa: PLC0415
         engine as engine_mod,
     )
@@ -1826,7 +1853,7 @@ async def test_a_change_whose_prompt_is_pending_is_not_owed(
         lambda *_a, **_k: SuppressionDecision(True, "pending_prompt"),  # noqa: FBT003
     )
     await engine._timed_run()
-    assert _owed(engine) == {}
+    assert list(_owed(engine)) == ["network_public_ip_changed"]
 
 
 @pytest.mark.asyncio
@@ -1862,3 +1889,128 @@ async def test_a_device_paired_and_removed_during_a_cooldown_still_alerts(
     assert [f.type for f in notifier.calls] == ["radio_new_device_joined"]
     assert "New Plug" in notifier.calls[0].evidence["summary"]
     assert _owed(engine) == {}
+
+
+@pytest.mark.asyncio
+async def test_an_admin_added_and_removed_during_a_cooldown_still_alerts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The case #801 leads with: a second admin inside the first one's cooldown."""
+    ha = {"new_admin_users": ["eve"], "new_long_lived_tokens": []}
+    snapshot = _snapshot(ha)
+    engine, _ = _engine(monkeypatch, snapshot)
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    _cooling(engine, "ha_new_admin_or_token")
+    await engine._timed_run()
+    assert notifier.calls == []
+    assert list(_owed(engine)) == ["ha_new_admin_or_token"]
+    ha_section = cast("dict[str, Any]", cast("Any", snapshot)["network"]["ha_security"])
+    ha_section["new_admin_users"] = []
+    await engine._timed_run()
+    assert [f.type for f in notifier.calls] == ["ha_new_admin_or_token"]
+    sent = notifier.calls[0]
+    assert sent.evidence["new_admin_users"] == ["eve"]
+    assert sent.evidence["summary"].startswith("Seen while its alert was held back (")
+    assert _owed(engine) == {}
+
+
+def test_a_replay_that_told_the_auth_change_lets_the_inventory_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Told by a replay, the accounts are not held back to alert again."""
+    engine, _ = _engine(monkeypatch, _snapshot())
+    live = AnomalyFinding(
+        anomaly_id="a",
+        type="ha_new_admin_or_token",
+        severity="high",
+        confidence=0.9,
+        triggering_entities=[],
+        evidence={"new_admin_users": ["eve"], "new_long_lived_tokens": ["t1"]},
+        suggested_actions=[],
+        is_sensitive=True,
+    )
+    cast("Any", engine)._owed_told_auth = {
+        "new_admin_users:eve",
+        "new_long_lived_tokens:t1",
+    }
+    assert engine._auth_told_by_replay([live])
+    cast("Any", engine)._owed_told_auth = {"new_admin_users:eve"}
+    assert not engine._auth_told_by_replay([live])
+
+
+@pytest.mark.asyncio
+async def test_a_change_an_entity_cooldown_held_back_is_owed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from custom_components.home_generative_agent.sentinel import (  # noqa: PLC0415
+        engine as engine_mod,
+    )
+    from custom_components.home_generative_agent.sentinel.suppression import (  # noqa: PLC0415
+        SuppressionDecision,
+    )
+
+    snapshot, _posture = _public_ip_snapshot()
+    engine, _ = _engine(monkeypatch, snapshot)
+    monkeypatch.setattr(
+        engine_mod,
+        "should_suppress",
+        lambda *_a, **_k: SuppressionDecision(True, "entity_cooldown"),  # noqa: FBT003
+    )
+    await engine._timed_run()
+    assert list(_owed(engine)) == ["network_public_ip_changed"]
+
+
+@pytest.mark.asyncio
+async def test_more_port_mappings_from_the_same_baseline_settle_fewer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mappings 4 to 5, then 4 to 6 in a cooldown: one alert, nothing 'undone'."""
+    snapshot, posture = _upnp_snapshot()
+    engine, _ = _engine(monkeypatch, snapshot)
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    state = _cooling(engine, "network_upnp_port_mapping_added")
+    await engine._timed_run()
+    posture.update({"upnp_port_mappings_added": 2, "upnp_port_mapping_count": 4})
+    await engine._timed_run()
+    state.last_by_type.clear()
+    await engine._timed_run()
+    posture["upnp_port_mappings_added"] = 0
+    await engine._timed_run()
+    assert len(notifier.calls) == 1
+    assert "seen_while_silenced" not in notifier.calls[0].evidence
+    assert _owed(engine) == {}
+
+
+def test_a_replay_push_offers_no_snooze() -> None:
+    """A snooze mutes the whole kind; a replay notice must not invite it."""
+    from custom_components.home_generative_agent.sentinel import (  # noqa: PLC0415
+        notifier as notifier_mod,
+    )
+
+    finding = AnomalyFinding(
+        anomaly_id="a",
+        type="network_public_ip_changed",
+        severity="low",
+        confidence=0.9,
+        triggering_entities=[],
+        evidence={"summary": "s", "seen_while_silenced": True},
+        suggested_actions=[],
+        is_sensitive=True,
+    )
+    titles = [a["title"] for a in notifier_mod._build_actions(finding)]
+    assert "Snooze 24 h" not in titles
+    assert "Snooze Always" not in titles
+    assert "False Alarm" in titles
+    live = notifier_mod._build_actions(
+        AnomalyFinding(
+            anomaly_id="b",
+            type="network_public_ip_changed",
+            severity="low",
+            confidence=0.9,
+            triggering_entities=[],
+            evidence={"summary": "s"},
+            suggested_actions=[],
+            is_sensitive=True,
+        )
+    )
+    assert "Snooze Always" in [a["title"] for a in live]
