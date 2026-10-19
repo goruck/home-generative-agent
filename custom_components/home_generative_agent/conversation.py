@@ -2475,14 +2475,20 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     _LOGGER.debug("Tool index write skipped: the entry unloaded.")
                     runtime_data.tool_indexing_in_progress = False
                 else:
-                    runtime_data.tool_index_task = self.hass.async_create_task(
-                        _run_tool_index_background(
-                            index_tasks=index_tasks,
-                            tool_hashes=new_hashes,
-                            rd=runtime_data,
-                            hass=self.hass,
-                        ),
-                        name="hga_tool_index",
+                    # A background task: HA's bootstrap waits on ordinary
+                    # tasks, so a slow index build (embeddings over the
+                    # network) held up startup until its timeout (#811). The
+                    # entry unload cancels it through tool_index_task.
+                    runtime_data.tool_index_task = (
+                        self.hass.async_create_background_task(
+                            _run_tool_index_background(
+                                index_tasks=index_tasks,
+                                tool_hashes=new_hashes,
+                                rd=runtime_data,
+                                hass=self.hass,
+                            ),
+                            name="hga_tool_index",
+                        )
                     )
                     handed_off = True
             elif inline_delta:
