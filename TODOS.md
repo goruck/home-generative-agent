@@ -1277,6 +1277,34 @@ Since step 6 this also covers `radio_new_device_joined`, and since step 7 `netwo
 
 ---
 
+### The once-per-window replay cooldown skip is kept in memory only
+
+**What:** `SentinelEngine._replay_cooldown_skipped` (`sentinel/engine.py`) records when each change-alert kind last sent an owed replay past its type cooldown, so a churning kind replays at most once per cooldown window. It is not saved with the suppression state, so after a restart or reload a kind can skip its cooldown once more inside the same window.
+
+**Why:** Review of PR #806 (#801), cycle 3 (2026-10-18). Bounded at one extra push per kind per restart, so left for later.
+
+**How to apply:** Keep the per-kind stamp in `SuppressionState` (saved with `owed_change_alerts`), read it in `_suppression_for`, and drop it with the kind's owed entry. Pin it with a test that restarts the engine between two replays of one kind inside a window.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
+### A posture kind past its owed cap saves on every flap of its latest value
+
+**What:** Past `MAX_OWED_PER_KIND`, `_record_posture` (`sentinel/owed.py`) replaces the latest owed public IP or UPnP finding with each new value. A value flapping between two states while its alert is held back rewrites the suppression store every run, though the first 19 changes stay fixed.
+
+**Why:** Review of PR #806 (#801), cycle 3 (2026-10-18). Write churn only; nothing is lost or told twice.
+
+**How to apply:** Skip the replacement when the new finding has the same anomaly id as the capped latest (only refresh its last-seen time in memory), or rate-limit saves of the owed entry once a kind is capped.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ## Audit Store
 
 ### Audit notifier-drop findings as non-user-facing (delivery status from async_notify)

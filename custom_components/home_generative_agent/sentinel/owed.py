@@ -87,6 +87,11 @@ SEEN_WHILE_SILENCED = "seen_while_silenced"
 # Kept on an owed finding held back above level 0 (a cooldown, quiet hours,
 # a pending prompt), not silenced: its replay says so (#801).
 _HELD_BACK = "owed_held_back"
+# Set on the latest member of an item kind once MAX_UNLISTED_ITEMS is reached.
+_FULL = "owed_full"
+# On a replay: the ids of the owed findings it told. A live finding with one
+# of them is the same change, told by the replay.
+MEMBER_IDS = "owed_member_ids"
 
 
 def items(finding: AnomalyFinding, key: str) -> set[str]:
@@ -124,17 +129,25 @@ def covers(live: AnomalyFinding, owed: AnomalyFinding) -> bool:
     return all(items(owed, key) <= items(live, key) for key in keys)
 
 
+def _upnp_counts(finding: AnomalyFinding) -> tuple[int, int] | None:
+    """Return a UPnP finding's (baseline, count), or None when not both known."""
+    count, added = finding.evidence.get("count"), finding.evidence.get("added")
+    if not all(isinstance(v, int) and not isinstance(v, bool) for v in (count, added)):
+        return None
+    return cast("int", count) - cast("int", added), cast("int", count)
+
+
 def _more_mappings(live: AnomalyFinding, owed: AnomalyFinding) -> bool:
     """Return True for a UPnP count at least as high from the same baseline."""
     if owed.type != "network_upnp_port_mapping_added":
         return False
-    live_count, owed_count = live.evidence.get("count"), owed.evidence.get("count")
+    live_counts, owed_counts = _upnp_counts(live), _upnp_counts(owed)
     return (
-        isinstance(live_count, int)
-        and isinstance(owed_count, int)
-        and live.evidence.get("previous_count") == owed.evidence.get("previous_count")
+        live_counts is not None
+        and owed_counts is not None
+        and live_counts[0] == owed_counts[0]
         and live.triggering_entities == owed.triggering_entities
-        and live_count >= owed_count
+        and live_counts[1] >= owed_counts[1]
     )
 
 
@@ -163,6 +176,11 @@ def held_back(finding: AnomalyFinding) -> AnomalyFinding:
     return replace(finding, evidence={**finding.evidence, _HELD_BACK: True})
 
 
+def is_held_back(finding: AnomalyFinding) -> bool:
+    """Return True for an owed finding held back above level 0 only."""
+    return bool(finding.evidence.get(_HELD_BACK))
+
+
 def _rank(finding: AnomalyFinding) -> int:
     return SEVERITY_RANK[finding.severity]
 
@@ -177,6 +195,11 @@ def _carry(finding: AnomalyFinding, older: list[AnomalyFinding]) -> AnomalyFindi
     evidence = {**finding.evidence, _FIRST_SEEN: _first_seen(first).isoformat()}
     if unlisted:
         evidence[_NOT_LISTED] = unlisted
+    # Held back only if every sighting was: one seen at level 0 says so.
+    if all(is_held_back(m) for m in [finding, *older]):
+        evidence[_HELD_BACK] = True
+    else:
+        evidence.pop(_HELD_BACK, None)
     return replace(finding, severity=top.severity, evidence=evidence)
 
 
@@ -189,8 +212,14 @@ def _absorb(latest: AnomalyFinding, finding: AnomalyFinding) -> AnomalyFinding:
     if len(items(latest, _NOT_LISTED)) + len(new) > MAX_UNLISTED_ITEMS:
         # Bounded, so churn cannot grow the saved state without end; the
         # first ones are kept and named.
-        LOGGER.debug("Owed %s alerts hold too many items; not kept.", latest.type)
-        return latest
+        if latest.evidence.get(_FULL):
+            return latest
+        LOGGER.warning(
+            "Sentinel holds %d unlisted owed %s items; later ones are not kept.",
+            MAX_UNLISTED_ITEMS,
+            latest.type,
+        )
+        return replace(latest, evidence={**latest.evidence, _FULL: True})
     evidence = {
         **latest.evidence,
         **{key: sorted(items(latest, key) | items(finding, key)) for key in keys},
@@ -295,6 +324,33 @@ def without(member: AnomalyFinding, told: dict[str, set[str]]) -> AnomalyFinding
     return replace(member, evidence={**member.evidence, **left, _NOT_LISTED: unlisted})
 
 
+def only(member: AnomalyFinding, told: dict[str, set[str]]) -> AnomalyFinding | None:
+    """
+    Return ``member`` with only the items in ``told``, or None if it has none.
+
+    The part a waiting live alert names stays owed apart, settled with it. A
+    posture finding has no items: None.
+    """
+    keys = ITEM_KEYS.get(member.type)
+    if keys is None:
+        return None
+    kept = {key: sorted(items(member, key) & told.get(key, set())) for key in keys}
+    if not any(kept.values()):
+        return None
+    every = {i for told_set in told.values() for i in told_set}
+    unlisted = sorted(items(member, _NOT_LISTED) & every)
+    return replace(member, evidence={**member.evidence, **kept, _NOT_LISTED: unlisted})
+
+
+def merged(*told: dict[str, set[str]]) -> dict[str, set[str]]:
+    """Return the union of item maps, by key."""
+    out: dict[str, set[str]] = {}
+    for one in told:
+        for key, values in one.items():
+            out[key] = out.get(key, set()) | values
+    return out
+
+
 def _replay_id(kind: str, entities: list[str], members: list[AnomalyFinding]) -> str:
     """
     Return an id for a replay of its own, never a live alert's.
@@ -303,8 +359,16 @@ def _replay_id(kind: str, entities: list[str], members: list[AnomalyFinding]) ->
     is keyed by it: a replay sharing a live alert's id (a port mapping reopened
     with the same count) would be dropped as told while never shown.
     """
+    # With when each was first seen: the same change made again later (a
+    # mapping reopened) is told again, not dropped as the earlier replay.
     return build_anomaly_id(
-        kind, entities, {"owed_replay": sorted(m.anomaly_id for m in members)}
+        kind,
+        entities,
+        {
+            "owed_replay": sorted(
+                f"{m.anomaly_id}@{_first_seen(m).isoformat()}" for m in members
+            )
+        },
     )
 
 
@@ -354,13 +418,20 @@ def replay(kind: str, members: list[AnomalyFinding]) -> AnomalyFinding:
         total = sum(len(named) for named in evidence.values())
         count = f": {total} {singular if total == 1 else plural}"
         anomaly_id = _replay_id(kind, entities, members)
-    for key in (*_TRUST_EVIDENCE_KEYS, _FIRST_SEEN, _NOT_LISTED, _HELD_BACK, _CAPPED):
+    for key in (
+        *_TRUST_EVIDENCE_KEYS,
+        _FIRST_SEEN,
+        _NOT_LISTED,
+        _HELD_BACK,
+        _CAPPED,
+        _FULL,
+    ):
         evidence.pop(key, None)
     first = min(_first_seen(m) for m in members)
     seen = _minute(first)
     if _minute(latest.detected_at) != seen:
         seen = f"{seen} to {_minute(latest.detected_at)}"
-    held = [bool(m.evidence.get(_HELD_BACK)) for m in members]
+    held = [is_held_back(m) for m in members]
     if all(held):
         where = "its alert was held back"
     elif any(held):
@@ -370,6 +441,7 @@ def replay(kind: str, members: list[AnomalyFinding]) -> AnomalyFinding:
     note = f"Seen while {where} ({seen}){count}; it may have been undone since."
     evidence["summary"] = f"{note} {summary}".strip()
     evidence[SEEN_WHILE_SILENCED] = True
+    evidence[MEMBER_IDS] = sorted({m.anomaly_id for m in members})
     return AnomalyFinding(
         anomaly_id=anomaly_id,
         type=kind,

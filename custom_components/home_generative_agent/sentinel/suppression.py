@@ -529,11 +529,32 @@ def should_suppress(  # noqa: PLR0911, PLR0913
         )
 
     # 6. Entity cooldown (scaled by any learned multiplier for the rule+entity pair)
+    entity_decision = _check_entity_cooldown(state, finding, now, cooldown_entity)
+    if entity_decision is not None:
+        return entity_decision
+
+    return SuppressionDecision(
+        suppress=False,
+        reason_code=SUPPRESSION_REASON_NOT_SUPPRESSED,
+        context={},
+    )
+
+
+def _check_entity_cooldown(
+    state: SuppressionState,
+    finding: AnomalyFinding,
+    now: datetime,
+    cooldown_entity: timedelta,
+    *,
+    learned_only: bool = False,
+) -> SuppressionDecision | None:
     for entity_id in finding.triggering_entities:
         multiplier = min(
             state.learned_cooldown_multipliers.get(f"{finding.type}:{entity_id}", 1),
             MAX_COOLDOWN_MULTIPLIER,
         )
+        if learned_only and multiplier <= 1:
+            continue
         effective_cooldown = cooldown_entity * multiplier
         last_entity = _parse_dt(
             state.last_by_entity.get(entity_id, {}).get(finding.type)
@@ -551,11 +572,23 @@ def should_suppress(  # noqa: PLR0911, PLR0913
                     "multiplier": multiplier,
                 },
             )
+    return None
 
-    return SuppressionDecision(
-        suppress=False,
-        reason_code=SUPPRESSION_REASON_NOT_SUPPRESSED,
-        context={},
+
+def false_alarm_cooldown(
+    state: SuppressionState,
+    finding: AnomalyFinding,
+    now: datetime,
+    cooldown_entity: timedelta,
+) -> SuppressionDecision | None:
+    """
+    Return the entity cooldown False Alarm lengthened for ``finding``, if any.
+
+    Only pairs whose learned multiplier is above 1: the plain entity cooldown
+    is renewed by every alert of the type, as the type cooldown is.
+    """
+    return _check_entity_cooldown(
+        state, finding, now, cooldown_entity, learned_only=True
     )
 
 

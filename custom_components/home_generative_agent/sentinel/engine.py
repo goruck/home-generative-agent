@@ -177,6 +177,7 @@ from .suppression import (
     SUPPRESSION_REASON_USER_SNOOZE_PERMANENT,
     SuppressionManager,
     cooldown_stamps,
+    false_alarm_cooldown,
     purge_expired_prompts,
     register_device_cooldown,
     register_finding,
@@ -404,6 +405,9 @@ class SentinelEngine:
         # ones delivered this run.
         self._replay_cooldown_skipped: dict[str, datetime] = {}
         self._owed_replayed: list[AnomalyFinding] = []
+        # What the notifier returned for the last item sent (False: dropped as
+        # a repeat).
+        self._last_dispatch_sent: bool | None = None
         self._network_enabled = bool(
             options.get(
                 CONF_SENTINEL_NETWORK_ENABLED, RECOMMENDED_SENTINEL_NETWORK_ENABLED
@@ -813,42 +817,57 @@ class SentinelEngine:
             owed.pop(finding.type, None)
             return owed_alerts.record(owed, finding)
 
-    def _suppression_for(
+    def _suppression_for(  # noqa: PLR0913
         self,
         decision: SuppressionDecision,
         finding: AnomalyFinding,
         now: datetime,
         window: timedelta,
+        entity_window: timedelta,
         *,
         replay: bool,
     ) -> tuple[bool, str]:
-        """Return (suppressed, reason), letting a replay past its type cooldown."""
-        if (
-            replay
-            and decision.suppress
-            and self._replay_skips_cooldown(finding, decision.reason_code, now, window)
-        ):
-            return False, SUPPRESSION_REASON_NOT_SUPPRESSED
-        return decision.suppress, decision.reason_code
-
-    def _replay_skips_cooldown(
-        self, finding: AnomalyFinding, reason: str, now: datetime, window: timedelta
-    ) -> bool:
         """
-        Return True to send a replay its kind's type cooldown would hold.
+        Return (suppressed, reason), letting a replay past its type cooldown.
 
         A replay has already waited, and a live alert of its kind (often this
         very run) would otherwise renew the cooldown for as long as changes
         keep coming. Once per window per kind, so a churning kind cannot push
-        every run. Not an entity cooldown: False Alarm lengthens that one.
+        every run. An entity cooldown False Alarm lengthened still holds it
+        (the type check returns before the entity one); the plain one is
+        renewed by every alert of the kind, as the type cooldown is.
         """
-        if reason != SUPPRESSION_REASON_TYPE_COOLDOWN:
-            return False
+        if not (
+            replay
+            and decision.suppress
+            and decision.reason_code == SUPPRESSION_REASON_TYPE_COOLDOWN
+        ):
+            return decision.suppress, decision.reason_code
         last = self._replay_cooldown_skipped.get(finding.type)
         if last is not None and now - last < window:
-            return False
+            return decision.suppress, decision.reason_code
+        learned = false_alarm_cooldown(
+            self._suppression.state, finding, now, entity_window
+        )
+        if learned is not None:
+            return True, learned.reason_code
         self._replay_cooldown_skipped[finding.type] = now
-        return True
+        return False, SUPPRESSION_REASON_NOT_SUPPRESSED
+
+    def _told_by_replay(self, live: AnomalyFinding) -> bool:
+        """
+        Return True when a replay delivered this run told ``live``'s change.
+
+        By id: a replay carries the ids of the owed findings it told, and a
+        live finding with one is that very change still standing. Or by
+        content: every item it names, or more port mappings from the same
+        baseline.
+        """
+        return any(
+            live.anomaly_id in told.evidence.get(owed_alerts.MEMBER_IDS, ())
+            or owed_alerts.covers(told, live)
+            for told in self._owed_replayed
+        )
 
     async def _send_owed_changes(  # noqa: PLR0913
         self,
@@ -931,18 +950,37 @@ class SentinelEngine:
             for f in live
             if f.type == kind and settled.get(f.anomaly_id, False) is False
         ]
+        # Live alerts triage stopped: the model's call on what was held back
+        # above level 0, not on what was owed from level 0 (#783).
+        triaged = [
+            f
+            for f in live
+            if f.type == kind
+            and f.anomaly_id in settled
+            and settled[f.anomaly_id] is None
+        ]
         told_items = self._add_trusted_items(
             kind, members, owed_alerts.told_items(kind, told)
         )
+        waiting_items = owed_alerts.told_items(kind, waiting)
         kept: list[AnomalyFinding] = []
         pending: list[AnomalyFinding] = []
         for member in members:
-            if any(owed_alerts.covers(f, member) for f in told):
+            if any(owed_alerts.covers(f, member) for f in told) or (
+                owed_alerts.is_held_back(member)
+                and any(owed_alerts.covers(f, member) for f in triaged)
+            ):
                 continue
             if any(owed_alerts.covers(f, member) for f in waiting):
                 kept.append(member)  # its live alert is waiting
                 continue
-            rest = owed_alerts.without(member, told_items)
+            # The items a waiting live alert names stay owed with it; the
+            # rest is told now, so nothing is told twice.
+            if (part := owed_alerts.only(member, waiting_items)) is not None:
+                kept.append(part)
+            rest = owed_alerts.without(
+                member, owed_alerts.merged(told_items, waiting_items)
+            )
             if rest is not None:
                 pending.append(rest)
         if self._rule_entity_exclusions:
@@ -1004,6 +1042,9 @@ class SentinelEngine:
         inventory_keys: list[str],
     ) -> bool:
         """Send one replay; return True once it is settled (sent or stopped)."""
+        state = self._suppression.state
+        stamps = cooldown_stamps(state, finding)
+        self._last_dispatch_sent = None
         delivered = await self._dispatch_item(
             finding,
             snapshot,
@@ -1014,6 +1055,14 @@ class SentinelEngine:
             trigger_source=trigger_source,
             replay=True,
         )
+        if self._replay_cooldown_skipped.get(finding.type) == now:
+            # It skipped its kind's cooldown: put the stamps back, or the
+            # replay would hold the next live alert of its kind a window more.
+            restore_cooldown_stamps(state, finding, stamps)
+            await self._suppression.async_save()
+        if self._last_dispatch_sent is False:
+            # The notifier dropped it as a repeat: never shown, still owed.
+            return False
         if not delivered and self._last_dispatch_reason not in (
             _FINAL_SUPPRESSION_REASONS
         ):
@@ -1968,12 +2017,17 @@ class SentinelEngine:
         # (more port mappings from the same baseline): the baseline moves on,
         # or the lower count would alert again.
         posture_alerts_held -= {
-            kind
-            for kind in posture_alerts_held
+            live.type
             for live in all_findings
-            if live.type == kind
-            and any(owed_alerts.covers(told, live) for told in self._owed_replayed)
+            if live.type in posture_alerts_held and self._told_by_replay(live)
         }
+        # Likewise a held new admin or token a replay told: committed, or it
+        # would alert again.
+        if auth_change_delivered is False and any(
+            live.type == HaNewAdminOrTokenRule.rule_id and self._told_by_replay(live)
+            for live in all_findings
+        ):
+            auth_change_delivered = True
 
         # Commit after dispatch: the auth change rule compared this run's
         # observation against the inventory as it stood before the run, and a
@@ -2280,7 +2334,12 @@ class SentinelEngine:
             **suppress_kwargs,
         )
         suppressed, reason = self._suppression_for(
-            suppression_decision, finding, now, cooldown_type, replay=replay
+            suppression_decision,
+            finding,
+            now,
+            cooldown_type,
+            cooldown_entity,
+            replay=replay,
         )
         if suppressed or self._is_passive():
             # Suppressed: audited with its reason, nothing held. Level 0: held
@@ -2422,7 +2481,7 @@ class SentinelEngine:
                 cooldown_type,
                 trigger_source,
             )
-        sent = await self._notifier.async_notify(
+        sent = self._last_dispatch_sent = await self._notifier.async_notify(
             finding,
             snapshot,
             explanation,
