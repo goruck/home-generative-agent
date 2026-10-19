@@ -197,7 +197,7 @@ def _baseline_notices(hass: HomeAssistant) -> _BaselineNotices:
     notices: _BaselineNotices | None = hass.data.get(_NOTICES_KEY)
     if notices is not None:
         return notices
-    notices = hass.data[_NOTICES_KEY] = _BaselineNotices()
+    notices = _BaselineNotices()
 
     @callback
     def _on_updated(
@@ -210,7 +210,9 @@ def _baseline_notices(hass: HomeAssistant) -> _BaselineNotices:
         if _DRIFT_NOTIFICATION_ID in notifications:
             notices.drift.clear()
 
+    # Listen before publishing the store, so no store exists without it.
     persistent_notification.async_register_callback(hass, _on_updated)
+    hass.data[_NOTICES_KEY] = notices
     return notices
 
 
@@ -910,6 +912,9 @@ class SentinelBaselineUpdater:
         """Add this cycle's establishments and drifts to their notices."""
         notices = _baseline_notices(self._hass)
         names = _friendly_names(snapshot)
+        # A reset can land while the write gives its connection back; an
+        # entity it reset is no longer established and must not be told.
+        established = [e for e in established if e in self._established]
         for entity_id in established:
             LOGGER.debug(
                 "Baseline established for %s (value=%.2f).",
@@ -973,7 +978,8 @@ class SentinelBaselineUpdater:
 
         Entities that start sampling together cross the threshold together, so
         one notice per entity flooded the panel (#791). They share one notice,
-        and a later cycle adds to it rather than overwriting it.
+        and a later cycle adds to it rather than overwriting it. The newest
+        are named first, so a later one is not hidden in the count.
         """
         entries = notices.established
         if len(entries) == 1:
@@ -982,7 +988,7 @@ class SentinelBaselineUpdater:
         else:
             lines = [
                 f"- {name}: normal \u2248 {value:.2f}"
-                for name, value in list(entries.values())[:_NOTICE_MAX_LISTED]
+                for name, value in list(reversed(entries.values()))[:_NOTICE_MAX_LISTED]
             ]
             header = f"Baselines established for {len(entries)} entities:"
             message = "\n".join([header, *lines, *_more_line(len(entries))])
@@ -1028,19 +1034,23 @@ class SentinelBaselineUpdater:
         Drop a reset baseline from the notices (every baseline when None).
 
         A notice left with nothing to tell is dismissed; one that still names
-        other entities keeps them until its next post.
+        other entities is posted again without the reset one.
         """
         notices = _baseline_notices(self._hass)
-        for entries, notification_id in (
-            (notices.established, _ESTABLISHED_NOTIFICATION_ID),
-            (notices.drift, _DRIFT_NOTIFICATION_ID),
+        for entries, notification_id, post in (
+            (notices.established, _ESTABLISHED_NOTIFICATION_ID, self._post_established),
+            (notices.drift, _DRIFT_NOTIFICATION_ID, self._post_drift),
         ):
             if entity_id is None:
                 removed = bool(entries)
                 entries.clear()
             else:
                 removed = entries.pop(entity_id, None) is not None
-            if removed and not entries:
+            if not removed:
+                continue
+            if entries:
+                post(notices)
+            else:
                 persistent_notification.async_dismiss(self._hass, notification_id)
 
     # ---------------------------------------------------------------------- #

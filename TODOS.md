@@ -758,6 +758,19 @@ validation.
 
 ---
 
+### Entity names reach Sentinel's baseline notice as unescaped Markdown
+
+**What:** `_friendly_names` (`sentinel/baseline.py`) collapses whitespace in the names the "Baseline established" notice lists, so a name cannot start a list line of its own, but Markdown inside a name (`[text](https://…)`, emphasis) still renders in the persistent notification. Some names come from the device itself (BLE or network device names), so a nearby device could put a link into a notice every Home Assistant user sees.
+
+**Why:** Pre-existing: the old per-entity notices had the same exposure. Found by the Claude adversarial pass in review 3 of #791. Left out of #791 to keep that a flood fix.
+
+**How to apply:** Escape `\[]()*_` and backticks in names before they go into any persistent notification (one helper, used by the baseline notices and anywhere else Sentinel puts an entity name in Markdown), or wrap names in code spans. Pin it with a test whose friendly name holds a link.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
 ### A Sentinel batch held at unload is never sent but is audited as delivered
 
 **What:** `SentinelNotifier.async_notify` (`sentinel/notifier.py`) holds non-high findings past the rate limit in `_held_batch` and returns True, so the engine audits them `not_suppressed`. `stop()` cancels the batch timer without flushing, so findings held when the entry unloads or reloads are never pushed, yet they stay counted in the daily digest and the health sensor's notification KPIs, and are protected from eviction. A batch summary that does go out also carries no per-finding action buttons.

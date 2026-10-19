@@ -22,6 +22,7 @@ from custom_components.home_generative_agent.const import (
 )
 from custom_components.home_generative_agent.sentinel.baseline import (
     _DOW_METRIC_PARTS,
+    _NOTICES_KEY,
     BASELINE_FRESH,
     BASELINE_STALE,
     BASELINE_UNAVAILABLE,
@@ -1186,9 +1187,10 @@ async def test_establishment_in_one_cycle_posts_one_summary_notice(
     assert data["notification_id"] == "hga_baseline_established"
     message = data["message"]
     assert message.startswith("Baselines established for 12 entities:")
-    assert "sensor.temp_00" in message
-    assert "sensor.temp_09" in message
-    assert "sensor.temp_10" not in message
+    # Newest first: the last ten established are named.
+    assert "sensor.temp_11" in message
+    assert "sensor.temp_02" in message
+    assert "sensor.temp_01" not in message
     assert message.endswith("\u2026and 2 more.")
 
 
@@ -1284,8 +1286,8 @@ async def test_summary_notice_lists_friendly_names_on_one_line(
     await updater._update_baselines(_snapshot([hall, sneaky]))
 
     assert _listed(calls[0][1]["message"]) == [
-        "- Hall Temp: normal \u2248 1.00",
         "- Attic - Front Door: normal \u2248 0.00: normal \u2248 2.00",
+        "- Hall Temp: normal \u2248 1.00",
     ]
 
 
@@ -1517,7 +1519,9 @@ async def test_reset_drops_the_baseline_from_its_notice(
     dismissed: bool,  # noqa: FBT001
 ) -> None:
     """A reset baseline leaves the notice; an emptied notice is dismissed."""
-    updater, _ = _notice_updater(hass, [], 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20})
+    updater, calls = _notice_updater(
+        hass, [], 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20}
+    )
     updater._established = set()
     await updater._update_baselines(
         _snapshot([_entity("sensor.a", "1.0"), _entity("sensor.b", "2.0")])
@@ -1528,27 +1532,70 @@ async def test_reset_drops_the_baseline_from_its_notice(
     assert list(_baseline_notices(hass).established) == left
     notifications = persistent_notification._async_get_or_create_notifications(hass)
     assert ("hga_baseline_established" not in notifications) is dismissed
+    if not dismissed:
+        # The notice is posted again without the reset entity.
+        assert calls[-1][1]["message"] == (
+            "Baseline established for sensor.b: normal \u2248 2.00."
+        )
 
 
 @pytest.mark.asyncio
-async def test_drift_notice_lists_largest_drift_first(hass: HomeAssistant) -> None:
-    """The drift notice names the largest drifts, not the first ones seen."""
-    ids = [f"sensor.p_{i:02d}" for i in range(12)]
-    ref_rows = [{"entity_id": eid, "reference_value": 100.0} for eid in ids]
+async def test_reset_drops_the_baseline_from_the_drift_notice(
+    hass: HomeAssistant,
+) -> None:
+    """A reset clears the drift notice too, leaving the established one alone."""
+    updater, _ = _notice_updater(hass, [], 20, {})
+    notices = _baseline_notices(hass)
+    notices.established["sensor.b"] = ("B", 2.0)
+    notices.drift["sensor.a"] = ("A", 2.0, 1.0, 100.0)
+    updater._post_established(notices)
+    updater._post_drift(notices)
+
+    assert await updater.async_reset_baseline("sensor.a") != -1
+
+    assert notices.drift == {}
+    notifications = persistent_notification._async_get_or_create_notifications(hass)
+    assert "hga_baseline_drift" not in notifications
+    assert "hga_baseline_established" in notifications
+
+
+@pytest.mark.asyncio
+async def test_reset_during_a_write_is_not_told(hass: HomeAssistant) -> None:
+    """An entity reset between the commit and the notice is left off it."""
+    updater, calls = _notice_updater(hass, [], 20, {})
+    updater._established = {"sensor.b"}
+
+    updater._tell_notices(
+        _snapshot([_entity("sensor.a", "1.0"), _entity("sensor.b", "2.0")]),
+        {"sensor.a": 1.0, "sensor.b": 2.0},
+        ["sensor.a", "sensor.b"],
+        {},
+        30.0,
+    )
+
+    assert list(_baseline_notices(hass).established) == ["sensor.b"]
+    assert calls[-1][1]["message"] == (
+        "Baseline established for sensor.b: normal \u2248 2.00."
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_write_posts_no_notice(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A write that fails to commit announces nothing."""
     updater, calls = _notice_updater(
-        hass, ref_rows, 1, {CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT: 30.0}
+        hass, [], 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20}
     )
-    updater._established = set(ids)
-    # sensor.p_00 drifts 31%, ..., sensor.p_11 drifts 42%.
-    entities = [_entity(eid, str(131.0 + i)) for i, eid in enumerate(ids)]
+    updater._established = set()
+    pool = cast("MagicMock", updater._pool)
+    pool.connection.return_value.commit.side_effect = OSError("db down")
 
-    await updater._update_baselines(_snapshot(entities))
+    await updater._update_baselines(_snapshot([_entity("sensor.a", "1.0")]))
 
-    listed = _listed(calls[0][1]["message"])
-    assert listed[0].startswith("- sensor.p_11:")
-    assert not any(
-        line.startswith(("- sensor.p_00:", "- sensor.p_01:")) for line in listed
-    )
+    assert calls == []
+    assert _NOTICES_KEY not in hass.data
+    assert "Baseline DB write failed" in caplog.text
 
 
 # ---------------------------------------------------------------------------
