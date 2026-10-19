@@ -565,13 +565,15 @@ async def test_undelivered_public_ip_change_keeps_the_previous_key(
     notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
     await engine._timed_run()
     assert [f.type for f in notifier.calls] == ["network_public_ip_changed"]
-    # Delivered: the new key is remembered.
+    # Delivered: the new key is remembered, so the snapshot stops reporting
+    # the change (the builder compares against that memory).
+    posture["public_ip_changed"] = False
     await engine._timed_run()
     remembered = {"public_ip_key": "bbbb0000", "public_ip_entity_id": "sensor.gw_ip"}
     assert contexts[1].previous_posture == remembered
     # Second change inside the type cooldown: produced, not delivered, so the
     # remembered key stays and the change is re-detected on a later run.
-    posture["public_ip_key"] = "cccc0000"
+    posture.update({"public_ip_changed": True, "public_ip_key": "cccc0000"})
     await engine._timed_run()
     assert len(notifier.calls) == 1
     await engine._timed_run()
@@ -1914,30 +1916,6 @@ async def test_an_admin_added_and_removed_during_a_cooldown_still_alerts(
     assert _owed(engine) == {}
 
 
-def test_a_replay_that_told_the_auth_change_lets_the_inventory_commit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Told by a replay, the accounts are not held back to alert again."""
-    engine, _ = _engine(monkeypatch, _snapshot())
-    live = AnomalyFinding(
-        anomaly_id="a",
-        type="ha_new_admin_or_token",
-        severity="high",
-        confidence=0.9,
-        triggering_entities=[],
-        evidence={"new_admin_users": ["eve"], "new_long_lived_tokens": ["t1"]},
-        suggested_actions=[],
-        is_sensitive=True,
-    )
-    cast("Any", engine)._owed_told_auth = {
-        "new_admin_users:eve",
-        "new_long_lived_tokens:t1",
-    }
-    assert engine._auth_told_by_replay([live])
-    cast("Any", engine)._owed_told_auth = {"new_admin_users:eve"}
-    assert not engine._auth_told_by_replay([live])
-
-
 @pytest.mark.asyncio
 async def test_a_change_an_entity_cooldown_held_back_is_owed(
     monkeypatch: pytest.MonkeyPatch,
@@ -2014,3 +1992,61 @@ def test_a_replay_push_offers_no_snooze() -> None:
         )
     )
     assert "Snooze Always" in [a["title"] for a in live]
+
+
+@pytest.mark.asyncio
+async def test_a_kind_skips_its_cooldown_for_one_replay_per_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A churning kind cannot push a replay every run past its cooldown."""
+    snapshot, posture = _public_ip_snapshot()
+    engine, notifier = _silenced(monkeypatch, snapshot)
+    await engine._timed_run()
+    posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
+    _cooling(engine, "network_public_ip_changed")
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert len(notifier.calls) == 1
+    audit = cast("DummyAudit", cast("Any", engine)._audit_store)
+    sent = [
+        c
+        for c in audit.calls
+        if c["finding"].anomaly_id == notifier.calls[0].anomaly_id
+    ]
+    assert sent[-1]["suppression_reason_code"] == "not_suppressed"
+
+    # Another change, held by the cooldown and undone: owed, but the kind
+    # already skipped its cooldown this window, so it waits.
+    posture.update({"public_ip_changed": True, "public_ip_key": "dddd0000"})
+    await engine._timed_run()
+    posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
+    await engine._timed_run()
+    assert len(notifier.calls) == 1
+    assert list(_owed(engine)) == ["network_public_ip_changed"]
+
+
+@pytest.mark.asyncio
+async def test_a_replay_waits_out_an_entity_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """False Alarm lengthens the entity cooldown; a replay honours it."""
+    from custom_components.home_generative_agent.sentinel import (  # noqa: PLC0415
+        engine as engine_mod,
+    )
+    from custom_components.home_generative_agent.sentinel.suppression import (  # noqa: PLC0415
+        SuppressionDecision,
+    )
+
+    snapshot, posture = _public_ip_snapshot()
+    engine, notifier = _silenced(monkeypatch, snapshot)
+    await engine._timed_run()
+    posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
+    monkeypatch.setattr(
+        engine_mod,
+        "should_suppress",
+        lambda *_a, **_k: SuppressionDecision(True, "entity_cooldown"),  # noqa: FBT003
+    )
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert notifier.calls == []
+    assert list(_owed(engine)) == ["network_public_ip_changed"]

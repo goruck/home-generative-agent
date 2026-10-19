@@ -254,16 +254,19 @@ def test_a_replay_names_every_item_with_the_note_first() -> None:
     assert sent.evidence[owed.SEEN_WHILE_SILENCED] is True
 
 
-def test_a_posture_replay_keeps_its_identity() -> None:
+def test_a_replay_has_an_id_of_its_own() -> None:
+    """Never a live alert's: the notifier would drop it as a repeat."""
     latest = _finding(
         "network_public_ip_changed",
         {"public_ip_key": "c", "summary": "IP changed."},
         anomaly_id="ip-c",
     )
     sent = owed.replay("network_public_ip_changed", [latest])
-    assert sent.anomaly_id == "ip-c"
+    assert sent.anomaly_id != "ip-c"
     assert sent.evidence["public_ip_key"] == "c"
     assert " to " not in sent.evidence["summary"].split(")", 1)[0]
+    devices = owed.replay("network_unknown_device_joined", [_clients("k1")])
+    assert devices.anomaly_id != _clients("k1").anomaly_id
 
 
 @pytest.mark.parametrize(
@@ -337,3 +340,28 @@ def test_unlisted_items_are_bounded() -> None:
     members = owed.read_members(store["network_unknown_device_joined"])
     unlisted = members[-1].evidence["owed_not_listed"]
     assert len(unlisted) == owed.MAX_UNLISTED_ITEMS
+
+
+def test_the_posture_cap_warns_once(caplog: pytest.LogCaptureFixture) -> None:
+    store: dict[str, list[dict[str, Any]]] = {}
+    for n in range(owed.MAX_OWED_PER_KIND + 5):
+        owed.record(
+            store,
+            _finding(
+                "network_public_ip_changed", {"public_ip_key": f"ip{n}"}, minute=n
+            ),
+        )
+    assert caplog.text.count("keeping the first and the latest") == 1
+    sent = owed.replay(
+        "network_public_ip_changed",
+        owed.read_members(store["network_public_ip_changed"]),
+    )
+    assert "owed_capped" not in sent.evidence
+
+
+def test_a_full_kind_reports_no_change_it_did_not_make() -> None:
+    """Past the unlisted bound, or with nothing new, nothing is saved."""
+    store: dict[str, list[dict[str, Any]]] = {}
+    for n in range(owed.MAX_OWED_PER_KIND + owed.MAX_UNLISTED_ITEMS):
+        owed.record(store, _clients(f"k{n:04d}", minute=n))
+    assert not owed.record(store, _clients("knew", minute=9999))

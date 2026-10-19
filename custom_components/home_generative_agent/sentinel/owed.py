@@ -40,9 +40,10 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
-# Past this, a kind keeps no more findings: the items of later ones are added
-# to the latest kept, unlisted, so churn never pushes out the first seen; and
-# never another kind's.
+# Past this, a kind keeps no more findings: a posture kind replaces its latest
+# with the newest, and an item kind adds later items to its latest, unlisted,
+# up to MAX_UNLISTED_ITEMS; churn never pushes out the first seen, nor another
+# kind's.
 MAX_OWED_PER_KIND = 20
 # Past this many unlisted items, more are not kept.
 MAX_UNLISTED_ITEMS = 500
@@ -75,6 +76,8 @@ _TRUST_EVIDENCE_KEYS = (TRUST_DEVICE_IDS_KEY, "security_device_ids")
 # Kept on an owed finding only: when the change was first seen, and the items
 # of later findings past the bound (told, but not described).
 _FIRST_SEEN = "owed_first_seen"
+# The latest member of a posture kind past the bound, replaced by each new one.
+_CAPPED = "owed_capped"
 _NOT_LISTED = "owed_not_listed"
 
 # Marks a replay in its evidence (held at level 0 or held back), so the audit
@@ -181,9 +184,12 @@ def _absorb(latest: AnomalyFinding, finding: AnomalyFinding) -> AnomalyFinding:
     """Add ``finding``'s items to ``latest`` as unlisted (the kind is full)."""
     keys = ITEM_KEYS[latest.type]
     new = {i for key in keys for i in items(finding, key) - items(latest, key)}
+    if not new:
+        return latest
     if len(items(latest, _NOT_LISTED)) + len(new) > MAX_UNLISTED_ITEMS:
         # Bounded, so churn cannot grow the saved state without end; the
         # first ones are kept and named.
+        LOGGER.debug("Owed %s alerts hold too many items; not kept.", latest.type)
         return latest
     evidence = {
         **latest.evidence,
@@ -231,12 +237,13 @@ def _record_posture(members: list[AnomalyFinding], finding: AnomalyFinding) -> b
     if len(members) >= MAX_OWED_PER_KIND:
         # Keep the first changes and the latest; churn (a LAN host opening
         # and closing mappings) cannot make the latest go untold.
-        LOGGER.warning(
-            "Sentinel holds %d owed %s alerts; keeping the first and the latest.",
-            MAX_OWED_PER_KIND,
-            finding.type,
-        )
-        members[-1] = finding
+        if not members[-1].evidence.get(_CAPPED):
+            LOGGER.warning(
+                "Sentinel holds %d owed %s alerts; keeping the first and the latest.",
+                MAX_OWED_PER_KIND,
+                finding.type,
+            )
+        members[-1] = replace(finding, evidence={**finding.evidence, _CAPPED: True})
         return True
     members.append(finding)
     return True
@@ -258,7 +265,10 @@ def _record_items(members: list[AnomalyFinding], finding: AnomalyFinding) -> boo
                 MAX_OWED_PER_KIND,
                 finding.type,
             )
-        members[-1] = _absorb(members[-1], finding)
+        absorbed = _absorb(members[-1], finding)
+        if absorbed is members[-1]:
+            return False  # nothing new, or past MAX_UNLISTED_ITEMS
+        members[-1] = absorbed
         return True
     members[:] = [m for m in members if m not in older]
     members.append(_carry(finding, older))
@@ -283,6 +293,19 @@ def without(member: AnomalyFinding, told: dict[str, set[str]]) -> AnomalyFinding
     every = {i for told_set in told.values() for i in told_set}
     unlisted = sorted(items(member, _NOT_LISTED) - every)
     return replace(member, evidence={**member.evidence, **left, _NOT_LISTED: unlisted})
+
+
+def _replay_id(kind: str, entities: list[str], members: list[AnomalyFinding]) -> str:
+    """
+    Return an id for a replay of its own, never a live alert's.
+
+    The notifier drops a repeat of an id it pushed lately, and a pending prompt
+    is keyed by it: a replay sharing a live alert's id (a port mapping reopened
+    with the same count) would be dropped as told while never shown.
+    """
+    return build_anomaly_id(
+        kind, entities, {"owed_replay": sorted(m.anomaly_id for m in members)}
+    )
 
 
 def _minute(when: datetime) -> str:
@@ -315,7 +338,7 @@ def replay(kind: str, members: list[AnomalyFinding]) -> AnomalyFinding:
     )
     if keys is None:
         evidence = dict(latest.evidence)
-        anomaly_id = latest.anomaly_id
+        anomaly_id = _replay_id(kind, entities, members)
     else:
         evidence = {
             key: sorted({item for m in members for item in items(m, key)})
@@ -330,8 +353,8 @@ def replay(kind: str, members: list[AnomalyFinding]) -> AnomalyFinding:
             summary += f" {TRUST_SEVERAL_ACTION}."
         total = sum(len(named) for named in evidence.values())
         count = f": {total} {singular if total == 1 else plural}"
-        anomaly_id = build_anomaly_id(kind, entities, evidence)
-    for key in (*_TRUST_EVIDENCE_KEYS, _FIRST_SEEN, _NOT_LISTED, _HELD_BACK):
+        anomaly_id = _replay_id(kind, entities, members)
+    for key in (*_TRUST_EVIDENCE_KEYS, _FIRST_SEEN, _NOT_LISTED, _HELD_BACK, _CAPPED):
         evidence.pop(key, None)
     first = min(_first_seen(m) for m in members)
     seen = _minute(first)
