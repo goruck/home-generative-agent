@@ -1130,6 +1130,113 @@ async def test_update_baselines_fires_drift_notification_when_threshold_exceeded
     assert "sensor.power" in drift_notifications[0]["message"]
 
 
+def _notice_updater(
+    ref_rows: list[dict[str, Any]],
+    sample_count: int,
+    options: dict[str, Any],
+) -> tuple[SentinelBaselineUpdater, list[tuple[str, dict[str, Any]]]]:
+    """Return an updater on a mocked pool, and the service calls it makes."""
+    calls: list[tuple[str, dict[str, Any]]] = []
+    fetchall_calls = 0
+
+    async def _fetchall() -> list[Any]:
+        nonlocal fetchall_calls
+        fetchall_calls += 1
+        return ref_rows if fetchall_calls == 1 else []
+
+    mock_cursor = MagicMock()
+    mock_cursor.execute = AsyncMock()
+    mock_cursor.fetchall = _fetchall
+    mock_cursor.fetchone = AsyncMock(return_value={"sample_count": sample_count})
+    mock_cursor.__aenter__ = AsyncMock(return_value=mock_cursor)
+    mock_cursor.__aexit__ = AsyncMock(return_value=False)
+
+    mock_conn = MagicMock()
+    mock_conn.cursor = MagicMock(return_value=mock_cursor)
+    mock_conn.commit = AsyncMock()
+    mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_conn.__aexit__ = AsyncMock(return_value=False)
+
+    mock_pool = MagicMock()
+    mock_pool.connection = MagicMock(return_value=mock_conn)
+
+    async def _fake_service_call(
+        _domain: str, service: str, data: dict[str, Any], **_kw: Any
+    ) -> None:
+        calls.append((service, data))
+
+    mock_hass = MagicMock()
+    mock_hass.services = MagicMock()
+    mock_hass.services.async_call = _fake_service_call
+    return SentinelBaselineUpdater(mock_hass, mock_pool, options), calls
+
+
+@pytest.mark.asyncio
+async def test_establishment_in_one_cycle_posts_one_summary_notice() -> None:
+    """Entities established in the same cycle share one notice (#791)."""
+    updater, calls = _notice_updater([], 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20})
+    updater._established = set()
+    entities = [_entity(f"sensor.temp_{i:02d}", "22.0") for i in range(12)]
+
+    await updater._update_baselines(_snapshot(entities))
+
+    assert len(updater._established) == 12
+    assert len(calls) == 1
+    service, data = calls[0]
+    assert service == "create"
+    assert data["notification_id"] == "hga_baseline_established"
+    message = data["message"]
+    assert message.startswith("Baselines established for 12 entities:")
+    assert "sensor.temp_00" in message
+    assert "sensor.temp_09" in message
+    assert "sensor.temp_10" not in message
+    assert message.endswith("\u2026and 2 more.")
+
+
+@pytest.mark.asyncio
+async def test_single_establishment_keeps_the_one_line_notice() -> None:
+    """One entity established is told in the old one-line wording."""
+    updater, calls = _notice_updater([], 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20})
+    updater._established = set()
+    entity = _entity("sensor.temperature", "22.0")
+    entity["friendly_name"] = "Hall Temperature"
+
+    await updater._update_baselines(_snapshot([entity]))
+
+    assert len(calls) == 1
+    assert calls[0][1]["notification_id"] == "hga_baseline_established"
+    assert calls[0][1]["message"] == (
+        "Baseline established for Hall Temperature: normal \u2248 22.00."
+    )
+
+
+@pytest.mark.asyncio
+async def test_drift_in_one_cycle_posts_one_summary_notice() -> None:
+    """Entities that drift in the same cycle share one notice (#791)."""
+    ids = [f"sensor.power_{i}" for i in range(3)]
+    ref_rows = [
+        {"entity_id": eid, "reference_value": 20.0, "reference_at": None} for eid in ids
+    ]
+    updater, calls = _notice_updater(
+        ref_rows, 1, {CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT: 30.0}
+    )
+    updater._established = set(ids)
+
+    await updater._update_baselines(_snapshot([_entity(e, "30.0") for e in ids]))
+
+    assert len(calls) == 1
+    data = calls[0][1]
+    assert data["notification_id"] == "hga_baseline_drift"
+    assert data["message"].startswith(
+        "Baseline drift detected for 3 entities (references updated):"
+    )
+    assert all(
+        f"- {eid}: was 20.00, now 30.00 (50.0% change)" in data["message"]
+        for eid in ids
+    )
+    assert "more" not in data["message"]
+
+
 # ---------------------------------------------------------------------------
 # 14. Appliance completion detection
 # ---------------------------------------------------------------------------

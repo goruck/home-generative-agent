@@ -155,6 +155,12 @@ METRIC_DOW_STD_PREFIX = "hourly_stddev_"
 # Global hourly metrics have one part ("14"); DOW metrics have two ("5_14").
 _DOW_METRIC_PARTS = 2
 
+# One persistent notice per kind, replaced each cycle, instead of one per
+# entity (#791). A notice lists at most this many entities by name.
+_ESTABLISHED_NOTIFICATION_ID = "hga_baseline_established"
+_DRIFT_NOTIFICATION_ID = "hga_baseline_drift"
+_NOTICE_MAX_LISTED = 10
+
 # DDL for the baseline table.
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS sentinel_baselines (
@@ -816,19 +822,23 @@ class SentinelBaselineUpdater:
                 await conn.commit()
 
                 # Check establishment crossings using RETURNING sample_count values.
+                established: list[tuple[str, float]] = []
                 for entity_id, count in rolling_sample_counts.items():
                     if entity_id in self._established:
                         continue
                     if count >= min_samples:
                         self._established.add(entity_id)
-                        if snapshot is not None:
-                            await self._fire_establishment_notification(
-                                entity_id, entity_values[entity_id], snapshot
-                            )
+                        established.append((entity_id, entity_values[entity_id]))
+            if snapshot is None:
+                return
+            names = _friendly_names(snapshot)
+            if established:
+                await self._fire_establishment_notification(established, names)
             # Fire drift notifications after commit (outside the conn context).
             # Only fire for established entities — skip entities still in build-up.
+            drifted: list[tuple[str, float, float, float]] = []
             for entity_id, value in entity_values.items():
-                if entity_id not in self._established or snapshot is None:
+                if entity_id not in self._established:
                     continue
                 ref_val = refs.get(entity_id)
                 if ref_val is None:
@@ -838,83 +848,101 @@ class SentinelBaselineUpdater:
                 else:
                     drift_pct = abs(value - ref_val) / abs(ref_val) * 100.0
                 if drift_pct >= drift_threshold_pct:
-                    await self._fire_drift_notification(
-                        entity_id, value, ref_val, drift_pct, snapshot
-                    )
+                    drifted.append((entity_id, value, ref_val, drift_pct))
+            if drifted:
+                await self._fire_drift_notification(drifted, names)
 
         except Exception:
             LOGGER.exception("Baseline DB write failed.")
 
-    async def _fire_establishment_notification(
-        self,
-        entity_id: str,
-        value: float,
-        snapshot: FullStateSnapshot,
-    ) -> None:
-        """Fire a persistent HA notification when a baseline is established."""
-        # Attempt to find a friendly name from the snapshot entities.
-        friendly_name = entity_id
-        for entity in snapshot.get("entities", []):
-            if entity.get("entity_id") == entity_id:
-                friendly_name = entity.get("friendly_name") or entity_id
-                break
-        message = (
-            f"Baseline established for {friendly_name}: normal \u2248 {value:.2f}."
-        )
-        LOGGER.debug("Baseline established for %s (value=%.2f).", entity_id, value)
+    async def _notify(self, title: str, message: str, notification_id: str) -> None:
+        """Create or replace one persistent HA notification."""
         try:
             await self._hass.services.async_call(
                 "persistent_notification",
                 "create",
                 {
-                    "title": "Sentinel Baseline Established",
+                    "title": title,
                     "message": message,
-                    "notification_id": f"hga_baseline_established_{entity_id}",
+                    "notification_id": notification_id,
                 },
                 blocking=False,
             )
         except Exception:  # noqa: BLE001
-            LOGGER.debug("Could not fire establishment notification for %s.", entity_id)
+            LOGGER.debug("Could not fire notification %s.", notification_id)
+
+    async def _fire_establishment_notification(
+        self,
+        established: list[tuple[str, float]],
+        names: Mapping[str, str],
+    ) -> None:
+        """
+        Fire one persistent HA notification for baselines established this cycle.
+
+        Entities that start sampling together cross the threshold together, so
+        one notice per entity flooded the panel (#791). The notice is replaced
+        by a later cycle's, not added to.
+        """
+        for entity_id, value in established:
+            LOGGER.debug("Baseline established for %s (value=%.2f).", entity_id, value)
+        if len(established) == 1:
+            entity_id, value = established[0]
+            message = (
+                f"Baseline established for {names.get(entity_id, entity_id)}: "
+                f"normal \u2248 {value:.2f}."
+            )
+        else:
+            lines = [
+                f"- {names.get(entity_id, entity_id)}: normal \u2248 {value:.2f}"
+                for entity_id, value in established[:_NOTICE_MAX_LISTED]
+            ]
+            header = f"Baselines established for {len(established)} entities:"
+            message = "\n".join([header, *lines, *_more_line(len(established))])
+        await self._notify(
+            "Sentinel Baseline Established", message, _ESTABLISHED_NOTIFICATION_ID
+        )
 
     async def _fire_drift_notification(
         self,
-        entity_id: str,
-        current_value: float,
-        reference_value: float,
-        drift_pct: float,
-        snapshot: FullStateSnapshot,
+        drifted: list[tuple[str, float, float, float]],
+        names: Mapping[str, str],
     ) -> None:
-        """Fire a persistent HA notification when an entity's baseline drifts."""
-        friendly_name = entity_id
-        for entity in snapshot.get("entities", []):
-            if entity.get("entity_id") == entity_id:
-                friendly_name = entity.get("friendly_name") or entity_id
-                break
-        message = (
-            f"Baseline drift detected for {friendly_name}: "
-            f"was {reference_value:.2f}, now {current_value:.2f} "
-            f"({drift_pct:.1f}% change). Reference updated."
-        )
-        LOGGER.debug(
-            "Baseline drift for %s: %.2f -> %.2f (%.1f%%).",
-            entity_id,
-            reference_value,
-            current_value,
-            drift_pct,
-        )
-        try:
-            await self._hass.services.async_call(
-                "persistent_notification",
-                "create",
-                {
-                    "title": "Sentinel Baseline Drift Detected",
-                    "message": message,
-                    "notification_id": f"hga_baseline_drift_{entity_id}",
-                },
-                blocking=False,
+        """
+        Fire one persistent HA notification for baselines that drifted this cycle.
+
+        Each item is (entity_id, current value, reference value, drift percent).
+        A home-wide shift drifts many entities at once, so they share one
+        notice, replaced by a later cycle's (#791).
+        """
+        for entity_id, current, reference, pct in drifted:
+            LOGGER.debug(
+                "Baseline drift for %s: %.2f -> %.2f (%.1f%%).",
+                entity_id,
+                reference,
+                current,
+                pct,
             )
-        except Exception:  # noqa: BLE001
-            LOGGER.debug("Could not fire drift notification for %s.", entity_id)
+        if len(drifted) == 1:
+            entity_id, current, reference, pct = drifted[0]
+            message = (
+                f"Baseline drift detected for {names.get(entity_id, entity_id)}: "
+                f"was {reference:.2f}, now {current:.2f} "
+                f"({pct:.1f}% change). Reference updated."
+            )
+        else:
+            lines = [
+                f"- {names.get(entity_id, entity_id)}: was {reference:.2f}, "
+                f"now {current:.2f} ({pct:.1f}% change)"
+                for entity_id, current, reference, pct in drifted[:_NOTICE_MAX_LISTED]
+            ]
+            header = (
+                f"Baseline drift detected for {len(drifted)} entities "
+                "(references updated):"
+            )
+            message = "\n".join([header, *lines, *_more_line(len(drifted))])
+        await self._notify(
+            "Sentinel Baseline Drift Detected", message, _DRIFT_NOTIFICATION_ID
+        )
 
     # ---------------------------------------------------------------------- #
     # DOW Welford helpers
@@ -1671,6 +1699,22 @@ def _evaluate_dow_anomaly(  # noqa: PLR0913
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+
+def _friendly_names(snapshot: FullStateSnapshot) -> dict[str, str]:
+    """Map each snapshot entity id to its friendly name."""
+    return {
+        str(entity["entity_id"]): entity.get("friendly_name") or entity["entity_id"]
+        for entity in snapshot.get("entities", [])
+        if entity.get("entity_id")
+    }
+
+
+def _more_line(total: int) -> list[str]:
+    """Return the "and N more" line for a notice listing at most the cap."""
+    if total <= _NOTICE_MAX_LISTED:
+        return []
+    return [f"\u2026and {total - _NOTICE_MAX_LISTED} more."]
 
 
 def _coerce_int(value: Any, default: int) -> int:
