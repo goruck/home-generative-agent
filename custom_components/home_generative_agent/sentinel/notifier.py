@@ -59,6 +59,7 @@ from custom_components.home_generative_agent.sentinel.models import (
 from custom_components.home_generative_agent.sentinel.notifier_messages import (
     notif_msg,
 )
+from custom_components.home_generative_agent.sentinel.owed import SEEN_WHILE_SILENCED
 from custom_components.home_generative_agent.sentinel.power_units import (
     is_energy_unit,
     is_power_unit,
@@ -751,12 +752,19 @@ def _build_actions(finding: AnomalyFinding) -> list[dict[str, Any]]:
                 }
             )
 
+    actions.append(
+        {
+            "action": f"{ACTION_PREFIX}dismiss_{finding.anomaly_id}",
+            "title": "False Alarm",
+        }
+    )
+    if finding.evidence.get(SEEN_WHILE_SILENCED):
+        # A replay of a held-back change (#799, #801): a snooze mutes its
+        # whole kind, every new admin or device to come included, which is
+        # not what clearing a "may have been undone" notice should do.
+        return actions
     actions.extend(
         [
-            {
-                "action": f"{ACTION_PREFIX}dismiss_{finding.anomaly_id}",
-                "title": "False Alarm",
-            },
             {
                 "action": f"{ACTION_PREFIX}{ACT_SNOOZE_24H}_{finding.anomaly_id}",
                 "title": "Snooze 24 h",

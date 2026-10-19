@@ -254,16 +254,19 @@ def test_a_replay_names_every_item_with_the_note_first() -> None:
     assert sent.evidence[owed.SEEN_WHILE_SILENCED] is True
 
 
-def test_a_posture_replay_keeps_its_identity() -> None:
+def test_a_replay_has_an_id_of_its_own() -> None:
+    """Never a live alert's: the notifier would drop it as a repeat."""
     latest = _finding(
         "network_public_ip_changed",
         {"public_ip_key": "c", "summary": "IP changed."},
         anomaly_id="ip-c",
     )
     sent = owed.replay("network_public_ip_changed", [latest])
-    assert sent.anomaly_id == "ip-c"
+    assert sent.anomaly_id != "ip-c"
     assert sent.evidence["public_ip_key"] == "c"
     assert " to " not in sent.evidence["summary"].split(")", 1)[0]
+    devices = owed.replay("network_unknown_device_joined", [_clients("k1")])
+    assert devices.anomaly_id != _clients("k1").anomaly_id
 
 
 @pytest.mark.parametrize(
@@ -289,3 +292,148 @@ def test_an_unreadable_stored_finding_is_skipped(
 def test_a_stored_finding_round_trips() -> None:
     finding = _admins("eve", tokens=("t1",))
     assert anomaly_finding_from_dict(finding.as_dict()) == finding
+
+
+def test_a_held_back_replay_does_not_say_sentinel_was_silenced() -> None:
+    held = owed.held_back(_clients("k1"))
+    sent = owed.replay("network_unknown_device_joined", [held])
+    assert sent.evidence["summary"].startswith("Seen while its alert was held back (")
+    assert "owed_held_back" not in sent.evidence
+    silenced = owed.replay("network_unknown_device_joined", [_clients("k1")])
+    assert silenced.evidence["summary"].startswith(
+        "Seen while Sentinel was at autonomy level 0 ("
+    )
+
+
+def test_a_mixed_replay_names_both_ways_it_was_held() -> None:
+    sent = owed.replay(
+        "network_unknown_device_joined",
+        [_clients("k1"), owed.held_back(_clients("k2", minute=5))],
+    )
+    assert sent.evidence["summary"].startswith(
+        "Seen while Sentinel was at autonomy level 0 or its alert was held back ("
+    )
+
+
+def test_posture_past_the_cap_keeps_the_latest(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store: dict[str, list[dict[str, Any]]] = {}
+    for n in range(owed.MAX_OWED_PER_KIND + 2):
+        owed.record(
+            store,
+            _finding(
+                "network_public_ip_changed", {"public_ip_key": f"ip{n}"}, minute=n
+            ),
+        )
+    members = owed.read_members(store["network_public_ip_changed"])
+    assert len(members) == owed.MAX_OWED_PER_KIND
+    assert members[0].evidence["public_ip_key"] == "ip0"
+    assert members[-1].evidence["public_ip_key"] == f"ip{owed.MAX_OWED_PER_KIND + 1}"
+    assert "keeping the first and the latest" in caplog.text
+
+
+def test_unlisted_items_are_bounded() -> None:
+    store: dict[str, list[dict[str, Any]]] = {}
+    for n in range(owed.MAX_OWED_PER_KIND + owed.MAX_UNLISTED_ITEMS + 10):
+        owed.record(store, _clients(f"k{n:04d}", minute=n))
+    members = owed.read_members(store["network_unknown_device_joined"])
+    unlisted = members[-1].evidence["owed_not_listed"]
+    assert len(unlisted) == owed.MAX_UNLISTED_ITEMS
+
+
+def test_the_posture_cap_warns_once(caplog: pytest.LogCaptureFixture) -> None:
+    store: dict[str, list[dict[str, Any]]] = {}
+    for n in range(owed.MAX_OWED_PER_KIND + 5):
+        owed.record(
+            store,
+            _finding(
+                "network_public_ip_changed", {"public_ip_key": f"ip{n}"}, minute=n
+            ),
+        )
+    assert caplog.text.count("keeping the first and the latest") == 1
+    sent = owed.replay(
+        "network_public_ip_changed",
+        owed.read_members(store["network_public_ip_changed"]),
+    )
+    assert "owed_capped" not in sent.evidence
+
+
+def test_a_full_kind_reports_no_change_it_did_not_make() -> None:
+    """Past the unlisted bound, only the first overflow is saved (warns once)."""
+    store: dict[str, list[dict[str, Any]]] = {}
+    for n in range(owed.MAX_OWED_PER_KIND + owed.MAX_UNLISTED_ITEMS):
+        owed.record(store, _clients(f"k{n:04d}", minute=n))
+    assert owed.record(store, _clients("knew", minute=9999))  # marks it full
+    assert not owed.record(store, _clients("knew2", minute=9999))
+    told = owed.replay(
+        "network_unknown_device_joined",
+        owed.read_members(store["network_unknown_device_joined"]),
+    )
+    assert "knew" not in told.evidence["client_keys"]
+
+
+def _upnp(count: int, added: int, **kw: Any) -> AnomalyFinding:
+    return _finding(
+        "network_upnp_port_mapping_added",
+        {"count": count, "added": added, "summary": "Mapping opened."},
+        entities=["sensor.gw_upnp"],
+        **kw,
+    )
+
+
+def test_more_mappings_are_counted_from_the_same_baseline() -> None:
+    """The baseline is the count less the mappings added, not a display value."""
+    assert owed.covers(_upnp(4, 2), _upnp(3, 1))  # both from 2
+    assert not owed.covers(_upnp(4, 1), _upnp(3, 1))  # from 3, not 2
+    assert not owed.covers(_upnp(3, 1), _upnp(4, 2))  # fewer
+    assert not owed.covers(_upnp(True, 1), _upnp(1, 1))  # type: ignore[arg-type]  # noqa: FBT003
+
+
+def test_a_change_seen_at_level_zero_stays_level_zero_once_merged() -> None:
+    """A later held-back sighting does not make a level-0 one 'held back'."""
+    store: dict[str, list[dict[str, Any]]] = {}
+    owed.record(store, _clients("k1"))
+    owed.record(store, owed.held_back(_clients("k1", "k2", minute=5)))
+    (member,) = owed.read_members(store["network_unknown_device_joined"])
+    assert not owed.is_held_back(member)
+    store = {}
+    owed.record(store, owed.held_back(_clients("k1")))
+    owed.record(store, owed.held_back(_clients("k1", "k2", minute=5)))
+    (member,) = owed.read_members(store["network_unknown_device_joined"])
+    assert owed.is_held_back(member)
+
+
+def test_the_same_change_made_again_gets_a_new_replay_id() -> None:
+    """A mapping reopened later is a new replay, not a repeat the notifier drops."""
+    first = _upnp(3, 1, anomaly_id="m")
+    again = replace(first, detected_at=NOW + timedelta(hours=2))
+    kind = "network_upnp_port_mapping_added"
+    assert (
+        owed.replay(kind, [first]).anomaly_id == owed.replay(kind, [first]).anomaly_id
+    )
+    assert (
+        owed.replay(kind, [first]).anomaly_id != owed.replay(kind, [again]).anomaly_id
+    )
+
+
+def test_a_replay_names_the_owed_findings_it_told() -> None:
+    sent = owed.replay(
+        "network_unknown_device_joined",
+        [_clients("k1", anomaly_id="a"), _clients("k2", anomaly_id="b", minute=5)],
+    )
+    assert sent.evidence[owed.MEMBER_IDS] == ["a", "b"]
+
+
+def test_only_keeps_the_items_a_live_alert_names() -> None:
+    member = _clients("k1", "k2")
+    part = owed.only(member, {"client_keys": {"k2", "k9"}})
+    assert part is not None
+    assert part.evidence["client_keys"] == ["k2"]
+    assert owed.only(member, {"client_keys": {"k9"}}) is None
+    ip = _finding("network_public_ip_changed", {"public_ip_key": "b"})
+    assert owed.only(ip, {}) is None
+    assert owed.merged({"a": {"1"}}, {"a": {"2"}, "b": {"3"}}) == {
+        "a": {"1", "2"},
+        "b": {"3"},
+    }

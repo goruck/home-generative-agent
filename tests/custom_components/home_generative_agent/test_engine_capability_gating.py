@@ -565,13 +565,15 @@ async def test_undelivered_public_ip_change_keeps_the_previous_key(
     notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
     await engine._timed_run()
     assert [f.type for f in notifier.calls] == ["network_public_ip_changed"]
-    # Delivered: the new key is remembered.
+    # Delivered: the new key is remembered, so the snapshot stops reporting
+    # the change (the builder compares against that memory).
+    posture["public_ip_changed"] = False
     await engine._timed_run()
     remembered = {"public_ip_key": "bbbb0000", "public_ip_entity_id": "sensor.gw_ip"}
     assert contexts[1].previous_posture == remembered
     # Second change inside the type cooldown: produced, not delivered, so the
     # remembered key stays and the change is re-detected on a later run.
-    posture["public_ip_key"] = "cccc0000"
+    posture.update({"public_ip_changed": True, "public_ip_key": "cccc0000"})
     await engine._timed_run()
     assert len(notifier.calls) == 1
     await engine._timed_run()
@@ -1096,7 +1098,8 @@ async def test_a_port_mapping_opened_and_closed_at_level_zero_alerts_once(
     await engine._timed_run()
     posture.update({"upnp_port_mappings_added": 2, "upnp_port_mapping_count": 4})
     await engine._timed_run()
-    assert len(_owed(engine)["network_upnp_port_mapping_added"]) == 2
+    # More mappings from the same baseline include the fewer: one is kept.
+    assert len(_owed(engine)["network_upnp_port_mapping_added"]) == 1
     posture.update({"upnp_port_mappings_added": 0, "upnp_port_mapping_count": 2})
     await engine._timed_run()
 
@@ -1105,7 +1108,6 @@ async def test_a_port_mapping_opened_and_closed_at_level_zero_alerts_once(
     await engine._timed_run()
     assert [f.type for f in notifier.calls] == ["network_upnp_port_mapping_added"]
     summary = notifier.calls[0].evidence["summary"]
-    assert "1 new port mapping was opened" in summary
     assert "2 new port mappings were opened" in summary
     assert "(4 mappings open in total)" in summary
     assert _owed(engine) == {}
@@ -1154,15 +1156,25 @@ async def test_an_owed_change_stays_while_its_live_alert_waits(
 async def test_an_owed_change_stays_owed_until_it_can_be_sent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A cooldown delays an owed replay without auditing every wait."""
+    """Quiet hours delay an owed replay without auditing every wait."""
+    from custom_components.home_generative_agent.sentinel import (  # noqa: PLC0415
+        engine as engine_mod,
+    )
+    from custom_components.home_generative_agent.sentinel.suppression import (  # noqa: PLC0415
+        SuppressionDecision,
+    )
+
     snapshot, posture = _public_ip_snapshot()
     engine, notifier = _silenced(monkeypatch, snapshot)
     await engine._timed_run()
     posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
-    state = cast("Any", engine)._suppression.state
-    state.last_by_type["network_public_ip_changed"] = datetime.now(UTC).isoformat()
+    real = engine_mod.should_suppress
+    monkeypatch.setattr(
+        engine_mod,
+        "should_suppress",
+        lambda *_a, **_k: SuppressionDecision(True, "quiet_hours"),  # noqa: FBT003
+    )
     engine._options["sentinel_autonomy_level"] = 1
-    engine._options["sentinel_cooldown_minutes"] = 60
     audit = cast("DummyAudit", cast("Any", engine)._audit_store)
     before = len(audit.calls)
     await engine._timed_run()
@@ -1171,7 +1183,23 @@ async def test_an_owed_change_stays_owed_until_it_can_be_sent(
     assert len(audit.calls) == before
     assert list(_owed(engine)) == ["network_public_ip_changed"]
 
-    state.last_by_type.clear()
+    monkeypatch.setattr(engine_mod, "should_suppress", real)
+    await engine._timed_run()
+    assert [f.type for f in notifier.calls] == ["network_public_ip_changed"]
+    assert _owed(engine) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_replay_does_not_wait_out_a_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live alert's cooldown would otherwise hold a replay back for good."""
+    snapshot, posture = _public_ip_snapshot()
+    engine, notifier = _silenced(monkeypatch, snapshot)
+    await engine._timed_run()
+    posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
+    _cooling(engine, "network_public_ip_changed")
+    engine._options["sentinel_autonomy_level"] = 1
     await engine._timed_run()
     assert [f.type for f in notifier.calls] == ["network_public_ip_changed"]
     assert _owed(engine) == {}
@@ -1578,18 +1606,14 @@ async def test_a_partly_told_device_alert_keeps_what_its_live_alert_waits_on(
     engine._options["sentinel_cooldown_minutes"] = 60
     state.last_by_type["radio_new_device_joined"] = datetime.now(UTC).isoformat()
     await engine._timed_run()
-    assert notifier.calls == []
-    assert len(_owed(engine)["radio_new_device_joined"]) == 2
-
-    state.last_by_type.clear()
-    await engine._timed_run()
-    assert [f.evidence["device_keys"] for f in notifier.calls] == [["zigbee:b"]]
+    # c's replay goes out at once; b's live alert waits out the cooldown.
+    assert [f.evidence["device_keys"] for f in notifier.calls] == [["zigbee:c"]]
     owed_now = _owed(engine)["radio_new_device_joined"]
-    assert [m["evidence"]["device_keys"] for m in owed_now] == [["zigbee:c"]]
+    assert [m["evidence"]["device_keys"] for m in owed_now] == [["zigbee:b"]]
 
     state.last_by_type.clear()
     await engine._timed_run()
-    assert [f.evidence["device_keys"] for f in notifier.calls][-1] == ["zigbee:c"]
+    assert [f.evidence["device_keys"] for f in notifier.calls][-1] == ["zigbee:b"]
     assert _owed(engine) == {}
 
 
@@ -1718,4 +1742,477 @@ async def test_triage_dropping_a_live_device_alert_sends_the_owed_one(
     assert len(notifier.calls) == 1
     assert notifier.calls[0].evidence["device_keys"] == ["zigbee:b"]
     assert notifier.calls[0].evidence["seen_while_silenced"] is True
+    assert _owed(engine) == {}
+
+
+# --- #801: a change held back above level 0 is owed too -------------------
+
+
+def _cooling(engine: SentinelEngine, kind: str) -> Any:
+    """Start the type cooldown for ``kind`` on the real clock (60 minutes)."""
+    state = cast("Any", engine)._suppression.state
+    state.last_by_type[kind] = datetime.now(UTC).isoformat()
+    engine._options["sentinel_cooldown_minutes"] = 60
+    return state
+
+
+@pytest.mark.asyncio
+async def test_a_change_undone_during_a_cooldown_still_alerts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Level 1: a second IP change inside the cooldown, changed back, is told."""
+    snapshot, posture = _public_ip_snapshot()
+    engine, _ = _engine(monkeypatch, snapshot)
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    state = _cooling(engine, "network_public_ip_changed")
+    await engine._timed_run()
+    assert notifier.calls == []
+    assert list(_owed(engine)) == ["network_public_ip_changed"]
+
+    # Undone before the cooldown ends: the rule no longer fires, and the
+    # replay does not wait the cooldown out.
+    posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
+    await engine._timed_run()
+    assert [f.type for f in notifier.calls] == ["network_public_ip_changed"]
+    del state
+    summary = notifier.calls[0].evidence["summary"]
+    assert summary.startswith("Seen while its alert was held back (")
+    assert "autonomy level 0" not in summary
+    assert _owed(engine) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_change_still_there_after_its_cooldown_alerts_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot, posture = _public_ip_snapshot()
+    engine, _ = _engine(monkeypatch, snapshot)
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    state = _cooling(engine, "network_public_ip_changed")
+    await engine._timed_run()
+    await engine._timed_run()
+    assert notifier.calls == []
+    state.last_by_type.clear()
+    await engine._timed_run()
+    # Delivered: the remembered address moves on, so the rule goes quiet.
+    posture["public_ip_changed"] = False
+    await engine._timed_run()
+    assert len(notifier.calls) == 1
+    assert "seen_while_silenced" not in notifier.calls[0].evidence
+    assert _owed(engine) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_change_quiet_hours_held_back_is_owed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from custom_components.home_generative_agent.sentinel import (  # noqa: PLC0415
+        engine as engine_mod,
+    )
+    from custom_components.home_generative_agent.sentinel.suppression import (  # noqa: PLC0415
+        SuppressionDecision,
+    )
+
+    snapshot, posture = _public_ip_snapshot()
+    engine, _ = _engine(monkeypatch, snapshot)
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    real = engine_mod.should_suppress
+    monkeypatch.setattr(
+        engine_mod,
+        "should_suppress",
+        lambda *_a, **_k: SuppressionDecision(True, "quiet_hours"),  # noqa: FBT003
+    )
+    await engine._timed_run()
+    assert list(_owed(engine)) == ["network_public_ip_changed"]
+    monkeypatch.setattr(engine_mod, "should_suppress", real)
+    posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
+    await engine._timed_run()
+    assert [f.evidence.get("seen_while_silenced") for f in notifier.calls] == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_change_stopped_by_a_pending_prompt_is_owed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A prompt is keyed by the alert's id, which a change made again can repeat.
+
+    A UPnP mapping opened, closed and opened again inside the prompt's life
+    has the first alert's id: owing it only waits the prompt out.
+    """
+    from custom_components.home_generative_agent.sentinel import (  # noqa: PLC0415
+        engine as engine_mod,
+    )
+    from custom_components.home_generative_agent.sentinel.suppression import (  # noqa: PLC0415
+        SuppressionDecision,
+    )
+
+    snapshot, _posture = _public_ip_snapshot()
+    engine, _ = _engine(monkeypatch, snapshot)
+    monkeypatch.setattr(
+        engine_mod,
+        "should_suppress",
+        lambda *_a, **_k: SuppressionDecision(True, "pending_prompt"),  # noqa: FBT003
+    )
+    await engine._timed_run()
+    assert list(_owed(engine)) == ["network_public_ip_changed"]
+
+
+@pytest.mark.asyncio
+async def test_a_snoozed_change_at_level_one_is_not_owed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot, _posture = _public_ip_snapshot()
+    engine, _ = _engine(monkeypatch, snapshot)
+    state = cast("Any", engine)._suppression.state
+    state.snoozed_until["network_public_ip_changed"] = {"until": "permanent"}
+    await engine._timed_run()
+    assert _owed(engine) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_device_paired_and_removed_during_a_cooldown_still_alerts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory = _memory_inventory()
+    await inventory.async_commit([_radio_device("a")], NOW)
+    snapshot, section = _radio_snapshot()
+    hass, _calls = _service_recorder()
+    engine, _ = _engine(monkeypatch, snapshot, hass=hass, network_inventory=inventory)
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    state = _cooling(engine, "radio_new_device_joined")
+    await engine._timed_run()
+    assert notifier.calls == []
+    section["devices"] = [_radio_device("a")]
+    section["new_devices"] = []
+    await engine._timed_run()
+    state.last_by_type.clear()
+    await engine._timed_run()
+    assert [f.type for f in notifier.calls] == ["radio_new_device_joined"]
+    assert "New Plug" in notifier.calls[0].evidence["summary"]
+    assert _owed(engine) == {}
+
+
+@pytest.mark.asyncio
+async def test_an_admin_added_and_removed_during_a_cooldown_still_alerts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The case #801 leads with: a second admin inside the first one's cooldown."""
+    ha = {"new_admin_users": ["eve"], "new_long_lived_tokens": []}
+    snapshot = _snapshot(ha)
+    engine, _ = _engine(monkeypatch, snapshot)
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    _cooling(engine, "ha_new_admin_or_token")
+    await engine._timed_run()
+    assert notifier.calls == []
+    assert list(_owed(engine)) == ["ha_new_admin_or_token"]
+    ha_section = cast("dict[str, Any]", cast("Any", snapshot)["network"]["ha_security"])
+    ha_section["new_admin_users"] = []
+    await engine._timed_run()
+    assert [f.type for f in notifier.calls] == ["ha_new_admin_or_token"]
+    sent = notifier.calls[0]
+    assert sent.evidence["new_admin_users"] == ["eve"]
+    assert sent.evidence["summary"].startswith("Seen while its alert was held back (")
+    assert _owed(engine) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_change_an_entity_cooldown_held_back_is_owed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from custom_components.home_generative_agent.sentinel import (  # noqa: PLC0415
+        engine as engine_mod,
+    )
+    from custom_components.home_generative_agent.sentinel.suppression import (  # noqa: PLC0415
+        SuppressionDecision,
+    )
+
+    snapshot, _posture = _public_ip_snapshot()
+    engine, _ = _engine(monkeypatch, snapshot)
+    monkeypatch.setattr(
+        engine_mod,
+        "should_suppress",
+        lambda *_a, **_k: SuppressionDecision(True, "entity_cooldown"),  # noqa: FBT003
+    )
+    await engine._timed_run()
+    assert list(_owed(engine)) == ["network_public_ip_changed"]
+
+
+@pytest.mark.asyncio
+async def test_more_port_mappings_from_the_same_baseline_settle_fewer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mappings 4 to 5, then 4 to 6 in a cooldown: one alert, nothing 'undone'."""
+    snapshot, posture = _upnp_snapshot()
+    engine, _ = _engine(monkeypatch, snapshot)
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    state = _cooling(engine, "network_upnp_port_mapping_added")
+    await engine._timed_run()
+    posture.update({"upnp_port_mappings_added": 2, "upnp_port_mapping_count": 4})
+    await engine._timed_run()
+    state.last_by_type.clear()
+    await engine._timed_run()
+    posture["upnp_port_mappings_added"] = 0
+    await engine._timed_run()
+    assert len(notifier.calls) == 1
+    assert "seen_while_silenced" not in notifier.calls[0].evidence
+    assert _owed(engine) == {}
+
+
+def test_a_replay_push_offers_no_snooze() -> None:
+    """A snooze mutes the whole kind; a replay notice must not invite it."""
+    from custom_components.home_generative_agent.sentinel import (  # noqa: PLC0415
+        notifier as notifier_mod,
+    )
+
+    finding = AnomalyFinding(
+        anomaly_id="a",
+        type="network_public_ip_changed",
+        severity="low",
+        confidence=0.9,
+        triggering_entities=[],
+        evidence={"summary": "s", "seen_while_silenced": True},
+        suggested_actions=[],
+        is_sensitive=True,
+    )
+    titles = [a["title"] for a in notifier_mod._build_actions(finding)]
+    assert "Snooze 24 h" not in titles
+    assert "Snooze Always" not in titles
+    assert "False Alarm" in titles
+    live = notifier_mod._build_actions(
+        AnomalyFinding(
+            anomaly_id="b",
+            type="network_public_ip_changed",
+            severity="low",
+            confidence=0.9,
+            triggering_entities=[],
+            evidence={"summary": "s"},
+            suggested_actions=[],
+            is_sensitive=True,
+        )
+    )
+    assert "Snooze Always" in [a["title"] for a in live]
+
+
+@pytest.mark.asyncio
+async def test_a_kind_skips_its_cooldown_for_one_replay_per_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A churning kind cannot push a replay every run past its cooldown."""
+    snapshot, posture = _public_ip_snapshot()
+    engine, notifier = _silenced(monkeypatch, snapshot)
+    await engine._timed_run()
+    posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
+    _cooling(engine, "network_public_ip_changed")
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert len(notifier.calls) == 1
+    audit = cast("DummyAudit", cast("Any", engine)._audit_store)
+    sent = [
+        c
+        for c in audit.calls
+        if c["finding"].anomaly_id == notifier.calls[0].anomaly_id
+    ]
+    assert sent[-1]["suppression_reason_code"] == "not_suppressed"
+
+    # Another change, held by the cooldown and undone: owed, but the kind
+    # already skipped its cooldown this window, so it waits.
+    posture.update({"public_ip_changed": True, "public_ip_key": "dddd0000"})
+    await engine._timed_run()
+    posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
+    await engine._timed_run()
+    assert len(notifier.calls) == 1
+    assert list(_owed(engine)) == ["network_public_ip_changed"]
+
+
+@pytest.mark.asyncio
+async def test_a_replay_waits_out_an_entity_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """False Alarm lengthens the entity cooldown; a replay honours it."""
+    from custom_components.home_generative_agent.sentinel import (  # noqa: PLC0415
+        engine as engine_mod,
+    )
+    from custom_components.home_generative_agent.sentinel.suppression import (  # noqa: PLC0415
+        SuppressionDecision,
+    )
+
+    snapshot, posture = _public_ip_snapshot()
+    engine, notifier = _silenced(monkeypatch, snapshot)
+    await engine._timed_run()
+    posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
+    monkeypatch.setattr(
+        engine_mod,
+        "should_suppress",
+        lambda *_a, **_k: SuppressionDecision(True, "entity_cooldown"),  # noqa: FBT003
+    )
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert notifier.calls == []
+    assert list(_owed(engine)) == ["network_public_ip_changed"]
+
+
+def _triage_suppresses(engine: SentinelEngine) -> None:
+    triage = MagicMock()
+
+    async def _suppress(*_a: Any, **_k: Any) -> Any:
+        return MagicMock(
+            decision="suppress", reason_code="llm_suppress", triage_confidence=0.9
+        )
+
+    triage.triage = _suppress
+    cast("Any", engine)._triage_service = triage
+
+
+async def _owed_ip_change_undone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[SentinelEngine, DummyNotifier, Any]:
+    """Owe an IP change at level 0, undo it, start the cooldown, go to level 1."""
+    snapshot, posture = _public_ip_snapshot()
+    engine, notifier = _silenced(monkeypatch, snapshot)
+    await engine._timed_run()
+    posture.update({"public_ip_changed": False, "public_ip_key": "aaaa0000"})
+    state = _cooling(engine, "network_public_ip_changed")
+    engine._options["sentinel_autonomy_level"] = 1
+    return engine, notifier, state
+
+
+@pytest.mark.asyncio
+async def test_a_replay_honours_an_entity_cooldown_false_alarm_lengthened(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skipping the type cooldown does not skip what False Alarm asked for."""
+    kind = "network_public_ip_changed"
+    engine, notifier, state = await _owed_ip_change_undone(monkeypatch)
+    engine._options["sentinel_entity_cooldown_minutes"] = 15
+    state.last_by_entity["sensor.gw_ip"] = {kind: datetime.now(UTC).isoformat()}
+    state.learned_cooldown_multipliers[f"{kind}:sensor.gw_ip"] = 2
+    await engine._timed_run()
+    assert notifier.calls == []
+    assert list(_owed(engine)) == [kind]
+
+    # The plain entity cooldown is renewed by every alert of the kind, as the
+    # type one is: it does not hold the replay.
+    state.learned_cooldown_multipliers.clear()
+    await engine._timed_run()
+    assert [f.evidence.get("seen_while_silenced") for f in notifier.calls] == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_replay_past_the_cooldown_does_not_renew_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kind = "network_public_ip_changed"
+    engine, notifier, state = await _owed_ip_change_undone(monkeypatch)
+    before = state.last_by_type[kind]
+    await engine._timed_run()
+    assert len(notifier.calls) == 1
+    assert state.last_by_type[kind] == before
+    assert kind not in state.last_by_entity.get("sensor.gw_ip", {})
+
+
+@pytest.mark.asyncio
+async def test_a_replay_the_notifier_drops_as_a_repeat_stays_owed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kind = "network_public_ip_changed"
+    engine, notifier, state = await _owed_ip_change_undone(monkeypatch)
+    state.last_by_type.clear()
+    sent: list[bool] = [False]
+
+    async def _notify(finding: Any, _snapshot: Any, _explanation: Any) -> bool:
+        notifier.calls.append(finding)
+        return sent[0]
+
+    cast("Any", notifier).async_notify = _notify
+    await engine._timed_run()
+    assert list(_owed(engine)) == [kind]
+    # Retried once its prompt and cooldown are over.
+    sent[0] = True
+    state.pending_prompts.clear()
+    state.last_by_type.clear()
+    await engine._timed_run()
+    assert _owed(engine) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_held_back_change_triage_stopped_is_settled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Above level 0, triage stopping the covering live alert is its call."""
+    snapshot, _posture = _public_ip_snapshot()
+    engine, _ = _engine(monkeypatch, snapshot)
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    state = _cooling(engine, "network_public_ip_changed")
+    await engine._timed_run()
+    assert list(_owed(engine)) == ["network_public_ip_changed"]
+    state.last_by_type.clear()
+    _triage_suppresses(engine)
+    await engine._timed_run()
+    assert notifier.calls == []
+    assert _owed(engine) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_replay_that_told_a_new_token_commits_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Triage stops the live alert, the replay tells it: not alerted again."""
+    from custom_components.home_generative_agent.sentinel.auth_inventory import (  # noqa: PLC0415
+        AuthDelta,
+    )
+
+    inventory = MagicMock()
+    inventory.is_bootstrapped = True
+    delta = AuthDelta(new_long_lived_tokens=["script"], new_token_ids=["t2"])
+    inventory.diff = MagicMock(return_value=delta)
+    commits: list[dict[str, Any]] = []
+
+    async def _commit(*_a: Any, **kwargs: Any) -> bool:
+        commits.append(kwargs)
+        return False
+
+    inventory.async_commit = _commit
+
+    async def _collect(_hass: Any, _p: Any) -> list[ObservedUser]:
+        return [ObservedUser("u1", "Lindo", True, True, False, ())]  # noqa: FBT003
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.sentinel.engine."
+        "async_collect_auth_observation",
+        _collect,
+    )
+    snapshot = _snapshot({"new_admin_users": [], "new_long_lived_tokens": ["script"]})
+    engine, notifier = _silenced(monkeypatch, snapshot, auth_inventory=inventory)
+    await engine._timed_run()
+    assert commits[-1]["hold_back"] is delta
+    _triage_suppresses(engine)
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert [f.evidence.get("seen_while_silenced") for f in notifier.calls] == [True]
+    assert commits[-1]["hold_back"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_waiting_live_alert_keeps_its_devices_out_of_the_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Owed b and c together; b's live alert waits: c now, b with its alert."""
+    engine, notifier, section = await _radio_engine(monkeypatch)
+    section["devices"] = [*section["devices"], _radio_device("c", "Other Plug")]
+    section["new_devices"] = ["zigbee:b", "zigbee:c"]
+    await engine._timed_run()
+    section["devices"] = [_radio_device("a"), _radio_device("b", "New Plug")]
+    section["new_devices"] = ["zigbee:b"]
+    state = _cooling(engine, "radio_new_device_joined")
+    engine._options["sentinel_autonomy_level"] = 1
+    await engine._timed_run()
+    assert [f.evidence["device_keys"] for f in notifier.calls] == [["zigbee:c"]]
+    owed_now = _owed(engine)["radio_new_device_joined"]
+    assert [m["evidence"]["device_keys"] for m in owed_now] == [["zigbee:b"]]
+
+    state.last_by_type.clear()
+    await engine._timed_run()
+    assert [f.evidence["device_keys"] for f in notifier.calls][-1] == ["zigbee:b"]
+    assert "seen_while_silenced" not in notifier.calls[-1].evidence
     assert _owed(engine) == {}

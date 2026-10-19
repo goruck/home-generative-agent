@@ -555,11 +555,22 @@ async def test_an_excluded_client_does_not_drop_the_other_owed_ones(
 async def test_a_waiting_client_replay_leaves_its_rows_owed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from custom_components.home_generative_agent.sentinel import (  # noqa: PLC0415
+        engine as engine_mod,
+    )
+    from custom_components.home_generative_agent.sentinel.suppression import (  # noqa: PLC0415
+        SuppressionDecision,
+    )
+
     engine, notifier, inventory, _ = await _two_owed_clients(monkeypatch)
     state = cast("Any", engine)._suppression.state
-    state.last_by_type["network_unknown_device_joined"] = datetime.now(UTC).isoformat()
+    # Quiet hours, not a cooldown: a replay does not wait out a cooldown.
+    monkeypatch.setattr(
+        engine_mod,
+        "should_suppress",
+        lambda *_a, **_k: SuppressionDecision(True, "quiet_hours"),  # noqa: FBT003
+    )
     engine._options["sentinel_autonomy_level"] = 1
-    engine._options["sentinel_cooldown_minutes"] = 60
     await engine._timed_run()
     assert notifier.calls == []
     k2 = inventory.row("router:k2")
