@@ -164,6 +164,11 @@ def test_new_device_summary_identity_and_actions() -> None:
     assert finding.evidence["device_keys"] == ["zigbee:b", "zwave:c"]
     assert finding.evidence["device_ids"] == ["b", "c"]
     assert not finding.triggering_entities
+    # Per device, so an owed replay for some of them names only those (#802).
+    assert finding.evidence["item_labels"] == {
+        "zigbee:b": "Front Lock (Zigbee, Schlage BE468)",
+        "zwave:c": "Unnamed device (Z-Wave)",
+    }
     # Two devices: the push offers no Trust button, so the action names the
     # service; one device keeps the tap.
     assert finding.suggested_actions[-1] == TRUST_SEVERAL_ACTION

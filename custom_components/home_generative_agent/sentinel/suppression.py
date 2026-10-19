@@ -58,6 +58,9 @@ SUPPRESSION_REASON_AUTONOMY_PASSIVE = "autonomy_passive"
 # The notifier dropped the push as a repeat of the same anomaly within its own
 # cooldown, so this finding did not reach the user (the earlier push did).
 SUPPRESSION_REASON_NOTIFIER_DUPLICATE = "notifier_duplicate"
+# An owed change alert dropped because its rule had not run for a long time
+# (network checks turned off, the integration removed): audited once (#802).
+SUPPRESSION_REASON_OWED_EXPIRED = "owed_expired"
 PENDING_PROMPT_DEFAULT_TTL = timedelta(hours=4)
 
 # Finding types considered presence-sensitive.  These are suppressed when a
@@ -122,6 +125,10 @@ class SuppressionState:
     # the key, where a version bump would load this file read-only there
     # (forcing level 0).
     owed_change_alerts: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    # Kind of owed alert -> the day (ISO date, UTC) its rule last ran while
+    # alerts of it were owed: one whose rule stops running is dropped in time
+    # rather than kept for good (#802). Optional and additive, like the above.
+    owed_rule_ran: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SuppressionState:
@@ -147,6 +154,11 @@ class SuppressionState:
                 for kind, findings in _mapping(data.get("owed_change_alerts")).items()
                 if isinstance(findings, list)
             },
+            owed_rule_ran={
+                str(kind): str(day)
+                for kind, day in _mapping(data.get("owed_rule_ran")).items()
+                if isinstance(day, str)
+            },
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -165,6 +177,7 @@ class SuppressionState:
                 kind: [dict(f) for f in findings]
                 for kind, findings in self.owed_change_alerts.items()
             },
+            "owed_rule_ran": dict(self.owed_rule_ran),
         }
 
 

@@ -157,6 +157,15 @@ class NetworkUnknownDeviceJoinedRule:
                     "randomized_known": sorted(
                         c["key"] for c in joined if c.get("hostname_trusted")
                     ),
+                    # Each client's description and tracker, so an owed
+                    # replay for some of them names, cools down and excludes
+                    # only those (#802).
+                    "item_labels": {c["key"]: describe_joined(c) for c in joined},
+                    "item_entities": {
+                        c["key"]: str(c["tracker_entity_id"])
+                        for c in joined
+                        if c.get("tracker_entity_id")
+                    },
                 },
                 summary=(
                     f"{head}{context}: {listed([describe_joined(c) for c in joined])}."

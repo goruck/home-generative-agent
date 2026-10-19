@@ -437,3 +437,109 @@ def test_only_keeps_the_items_a_live_alert_names() -> None:
         "a": {"1", "2"},
         "b": {"3"},
     }
+
+
+def _labelled_clients(*keys: str, **kw: Any) -> AnomalyFinding:
+    """Clients as the rule reports them since #802: a label and tracker each."""
+    base = _clients(*keys, **kw)
+    return replace(
+        base,
+        evidence={
+            **base.evidence,
+            owed.ITEM_LABELS: {k: f"Phone {k}" for k in keys},
+            owed.ITEM_ENTITIES: {k: f"device_tracker.{k}" for k in keys},
+        },
+        triggering_entities=[f"device_tracker.{k}" for k in keys],
+    )
+
+
+def test_a_replay_names_only_the_items_still_owed() -> None:
+    """A device told meanwhile is not named again, nor cools the rest (#802)."""
+    rest = owed.without(_labelled_clients("k1", "k2"), {"client_keys": {"k1"}})
+    assert rest is not None
+    assert rest.triggering_entities == ["device_tracker.k2"]
+    assert rest.evidence[owed.ITEM_LABELS] == {"k2": "Phone k2"}
+
+    sent = owed.replay("network_unknown_device_joined", [rest])
+
+    summary = sent.evidence["summary"]
+    assert "New device on the network: Phone k2." in summary
+    assert "k1" not in summary
+    assert sent.triggering_entities == ["device_tracker.k2"]
+    # The per-item maps are owed bookkeeping, not part of the alert.
+    assert owed.ITEM_LABELS not in sent.evidence
+    assert owed.ITEM_ENTITIES not in sent.evidence
+
+
+def test_a_replay_lists_every_described_item_across_members() -> None:
+    members = [_labelled_clients("k1", minute=0), _labelled_clients("k2", minute=5)]
+    sent = owed.replay("network_unknown_device_joined", members)
+    assert "New devices on the network: Phone k1, Phone k2." in sent.evidence["summary"]
+
+
+def test_an_alert_owed_before_labels_keeps_its_summary() -> None:
+    """Without a description for every item, the stored summary is used."""
+    members = [_labelled_clients("k1"), _clients("k2", minute=5)]
+    sent = owed.replay("network_unknown_device_joined", members)
+    summary = sent.evidence["summary"]
+    assert "New clients: k1. New clients: k2." in summary
+    assert "Phone k1" not in summary
+
+
+def test_an_account_replay_names_what_is_left_without_labels() -> None:
+    """Accounts and tokens are their own labels: the told one is not named."""
+    rest = owed.without(
+        _admins("alice", tokens=("laptop",)), {"new_admin_users": {"alice"}}
+    )
+    assert rest is not None
+    sent = owed.replay("ha_new_admin_or_token", [rest])
+    summary = sent.evidence["summary"]
+    assert "New long-lived access token: laptop." in summary
+    assert "alice" not in summary
+
+
+def test_only_keeps_the_maps_and_entities_of_its_items() -> None:
+    part = owed.only(_labelled_clients("k1", "k2"), {"client_keys": {"k2"}})
+    assert part is not None
+    assert part.evidence[owed.ITEM_ENTITIES] == {"k2": "device_tracker.k2"}
+    assert part.triggering_entities == ["device_tracker.k2"]
+
+
+def test_an_entity_without_an_item_stays_on_the_rest() -> None:
+    """Entities not tied to an item are kept: only a told item's entity goes."""
+    member = replace(
+        _labelled_clients("k1", "k2"),
+        triggering_entities=["device_tracker.k1", "device_tracker.k2", "sensor.x"],
+    )
+    rest = owed.without(member, {"client_keys": {"k1"}})
+    assert rest is not None
+    assert rest.triggering_entities == ["device_tracker.k2", "sensor.x"]
+
+
+def test_excluded_items_follow_their_tracker() -> None:
+    member = _labelled_clients("k1", "k2")
+    gone = owed.excluded_items(member, lambda entity: entity == "device_tracker.k1")
+    assert gone == {"client_keys": {"k1"}}
+    rest = owed.without(member, gone)
+    assert rest is not None
+    assert rest.evidence["client_keys"] == ["k2"]
+    assert owed.excluded_items(member, lambda _entity: False) == {}
+    assert owed.excluded_items(_clients("k3"), lambda _entity: True) == {}
+
+
+def test_absorbed_items_bring_their_maps() -> None:
+    """Items past the cap keep their trackers, so they are excluded alike."""
+    store: dict[str, list[dict[str, Any]]] = {}
+    for n in range(owed.MAX_OWED_PER_KIND):
+        owed.record(store, _labelled_clients(f"k{n}", minute=n))
+    owed.record(store, _labelled_clients("late", minute=60))
+    latest = owed.read_members(store["network_unknown_device_joined"])[-1]
+    assert latest.evidence[owed.ITEM_ENTITIES]["late"] == "device_tracker.late"
+    assert "device_tracker.late" in latest.triggering_entities
+
+
+def test_idle_since_reads_the_saved_day_or_the_first_sighting() -> None:
+    member = _clients("k1")
+    assert owed.idle_since("2026-10-01", [member]) == datetime(2026, 10, 1, tzinfo=UTC)
+    assert owed.idle_since(None, [member]) == member.detected_at
+    assert owed.idle_since("not a day", [member]) == member.detected_at

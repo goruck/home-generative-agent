@@ -82,6 +82,9 @@ class RadioNewDeviceJoinedRule:
                 display={
                     "device_ids": sorted(d["device_id"] for d in devices),
                     "security_device_ids": sorted(d["device_id"] for d in security),
+                    # Each device's description, so an owed replay for some
+                    # of them names only those (#802).
+                    "item_labels": {device_key(d): _describe(d) for d in devices},
                 },
                 summary=(
                     f"{head}{context}: {listed([_describe(d) for d in devices])}."

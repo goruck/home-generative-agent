@@ -169,6 +169,7 @@ from .suppression import (
     SUPPRESSION_REASON_AUTONOMY_PASSIVE,
     SUPPRESSION_REASON_NOT_SUPPRESSED,
     SUPPRESSION_REASON_NOTIFIER_DUPLICATE,
+    SUPPRESSION_REASON_OWED_EXPIRED,
     SUPPRESSION_REASON_POLICY_BLOCKED,
     SUPPRESSION_REASON_TRIAGE_SUPPRESSED,
     SUPPRESSION_REASON_TYPE_COOLDOWN,
@@ -405,6 +406,8 @@ class SentinelEngine:
         # ones delivered this run.
         self._replay_cooldown_skipped: dict[str, datetime] = {}
         self._owed_replayed: list[AnomalyFinding] = []
+        # Owed kinds whose idle rule was already logged this process (#802).
+        self._owed_idle_warned: set[str] = set()
         # What the notifier returned for the last item sent (False: dropped as
         # a repeat).
         self._last_dispatch_sent: bool | None = None
@@ -747,6 +750,20 @@ class SentinelEngine:
             ),
         }
 
+    def owed_status(self) -> dict[str, Any]:
+        """
+        Return how many change alerts are owed, by kind (#802).
+
+        Shown on the health sensor, so alerts waiting on a rule that no longer
+        runs are visible before they expire.
+        """
+        return {
+            "owed_change_alerts": {
+                kind: len(findings)
+                for kind, findings in self._suppression.state.owed_change_alerts.items()
+            }
+        }
+
     def _is_passive(self) -> bool:
         """
         Return True at autonomy level 0, set or overridden: no finding alerts.
@@ -898,7 +915,12 @@ class SentinelEngine:
         the inventory commit.
         """
         owed = self._suppression.state.owed_change_alerts
-        if not owed or self._is_passive() or self._suppression.is_read_only:
+        if not owed or self._suppression.is_read_only:
+            return []
+        # At level 0 too: a rule that runs while Sentinel is passive is not
+        # idle, and its alerts must not expire when the level is raised.
+        await self._expire_idle_owed(ran, snapshot, now)
+        if not owed or self._is_passive():
             return []
         inventory_keys: list[str] = []
         for kind in [kind for kind in owed if kind in ran]:
@@ -925,6 +947,69 @@ class SentinelEngine:
                 owed.pop(kind, None)
                 await self._suppression.async_save()
         return inventory_keys
+
+    async def _expire_idle_owed(
+        self, ran: set[str], snapshot: FullStateSnapshot, now: datetime
+    ) -> None:
+        """
+        Note the owed kinds whose rule ran; drop those idle too long (#802).
+
+        An owed alert is told once its rule runs. One whose rule stops for
+        good (network checks turned off, the integration removed) would stay
+        saved without end and come back months later: it is logged once after
+        ``OWED_IDLE_WARN_DAYS`` and dropped after ``OWED_IDLE_EXPIRE_DAYS``,
+        audited as ``owed_expired``.
+        """
+        state = self._suppression.state
+        owed = state.owed_change_alerts
+        today = dt_util.as_utc(now).date().isoformat()
+        changed = False
+        for kind in list(owed):
+            if kind in ran:
+                self._owed_idle_warned.discard(kind)
+                if state.owed_rule_ran.get(kind) != today:
+                    state.owed_rule_ran[kind] = today
+                    changed = True
+                continue
+            members = owed_alerts.read_members(owed[kind])
+            idle = now - owed_alerts.idle_since(state.owed_rule_ran.get(kind), members)
+            if idle >= timedelta(days=owed_alerts.OWED_IDLE_EXPIRE_DAYS):
+                LOGGER.warning(
+                    "Dropping %d owed Sentinel %s alerts: the rule has not run "
+                    "for %d days.",
+                    len(members),
+                    kind,
+                    idle.days,
+                )
+                if members:
+                    await _append_finding_audit(
+                        self._audit_store,
+                        snapshot,
+                        owed_alerts.replay(kind, members),
+                        None,
+                        SUPPRESSION_REASON_OWED_EXPIRED,
+                    )
+                del owed[kind]
+                self._owed_idle_warned.discard(kind)
+                changed = True
+            elif (
+                idle >= timedelta(days=owed_alerts.OWED_IDLE_WARN_DAYS)
+                and kind not in self._owed_idle_warned
+            ):
+                self._owed_idle_warned.add(kind)
+                LOGGER.warning(
+                    "Sentinel holds %d owed %s alerts, but the rule has not run "
+                    "for %d days; they are dropped after %d days.",
+                    len(members),
+                    kind,
+                    idle.days,
+                    owed_alerts.OWED_IDLE_EXPIRE_DAYS,
+                )
+        for kind in [k for k in state.owed_rule_ran if k not in owed]:
+            del state.owed_rule_ran[kind]
+            changed = True
+        if changed:
+            await self._suppression.async_save()
 
     async def _send_owed_kind(  # noqa: PLR0913
         self,
@@ -984,6 +1069,24 @@ class SentinelEngine:
             if rest is not None:
                 pending.append(rest)
         if self._rule_entity_exclusions:
+            # An exclusion added since drops the excluded devices only, not
+            # the rest of the alert they were seen with (#802).
+            pending = [
+                rest
+                for member in pending
+                if (
+                    rest := owed_alerts.without(
+                        member,
+                        owed_alerts.excluded_items(
+                            member,
+                            lambda entity, kind=kind: self._entity_excluded_for_type(
+                                entity, kind
+                            ),
+                        ),
+                    )
+                )
+                is not None
+            ]
             pending = self._filter_excluded_findings(pending)
         if pending and not await self._send_replay(
             owed_alerts.replay(kind, pending),

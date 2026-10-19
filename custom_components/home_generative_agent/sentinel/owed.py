@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.util import dt as dt_util
@@ -32,11 +33,10 @@ from .models import (
     build_anomaly_id,
 )
 from .network_inventory import client_key
-from .rules.network_common import TRUST_ONE_ACTION, TRUST_SEVERAL_ACTION
+from .rules.network_common import TRUST_ONE_ACTION, TRUST_SEVERAL_ACTION, listed
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
-    from datetime import datetime
+    from collections.abc import Callable, Iterable
 
 LOGGER = logging.getLogger(__name__)
 
@@ -47,6 +47,14 @@ LOGGER = logging.getLogger(__name__)
 MAX_OWED_PER_KIND = 20
 # Past this many unlisted items, more are not kept.
 MAX_UNLISTED_ITEMS = 500
+
+# An owed kind whose rule has not run for this many days is logged once, and
+# dropped (audited) after the second: its rule may never run again (network
+# checks turned off, the integration removed), and a replay months later would
+# describe a home that has moved on (#802). A rule that runs but is held (level
+# 0, a cooldown) does not count as idle.
+OWED_IDLE_WARN_DAYS = 7
+OWED_IDLE_EXPIRE_DAYS = 30
 
 # The list evidence an item kind names its items by. A finding of the kind
 # still reports an owed one while it names every item that one named.
@@ -68,6 +76,26 @@ _ITEM_NOUNS: dict[str, tuple[str, str]] = {
     "radio_new_device_joined": ("device", "devices"),
     "network_unknown_device_joined": ("device", "devices"),
 }
+
+# How a replay lists each item key's items when it can describe every one
+# (#802): (singular, plural) heading. An account or token is its own label;
+# devices and clients are described by ITEM_LABELS from their rule.
+_ITEM_HEADINGS: dict[str, tuple[str, str]] = {
+    "new_admin_users": ("New administrator account", "New administrator accounts"),
+    "new_long_lived_tokens": (
+        "New long-lived access token",
+        "New long-lived access tokens",
+    ),
+    "device_keys": ("New radio device", "New radio devices"),
+    "client_keys": ("New device on the network", "New devices on the network"),
+}
+_SELF_LABELLED_KEYS = frozenset({"new_admin_users", "new_long_lived_tokens"})
+
+# Display evidence an item kind's rule sets (#802): how each item is described
+# in a summary, and the entity each item is tracked by, if any. A replay for
+# part of an owed alert is told, cooled down and excluded by its own items.
+ITEM_LABELS = "item_labels"
+ITEM_ENTITIES = "item_entities"
 
 # Evidence that picks a push's Trust device button. A replay describes the
 # past: the device may be gone, and one still present gets its live alert.
@@ -100,6 +128,79 @@ def items(finding: AnomalyFinding, key: str) -> set[str]:
     if not isinstance(value, list):
         return set()
     return {str(item) for item in cast("list[object]", value)}
+
+
+def _item_map(finding: AnomalyFinding, key: str) -> dict[str, str]:
+    """Return a per-item display map (ITEM_LABELS, ITEM_ENTITIES); none if bad."""
+    value: object = finding.evidence.get(key)
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(item): str(text)
+        for item, text in cast("dict[object, object]", value).items()
+        if text
+    }
+
+
+def _restricted(
+    member: AnomalyFinding, keep: dict[str, list[str]], unlisted: list[str]
+) -> AnomalyFinding:
+    """
+    Return ``member`` naming only the items in ``keep``.
+
+    Its per-item labels and entities follow, and so do its triggering
+    entities: an entity tracking an item no longer named goes, so that
+    device's cooldown or exclusion no longer holds the rest (#802).
+    """
+    names = {item for kept in keep.values() for item in kept} | set(unlisted)
+    labels = _item_map(member, ITEM_LABELS)
+    entities = _item_map(member, ITEM_ENTITIES)
+    dropped = {entity for item, entity in entities.items() if item not in names}
+    kept_entities = {entities[item] for item in names if item in entities}
+    evidence = {**member.evidence, **keep, _NOT_LISTED: unlisted}
+    if labels:
+        evidence[ITEM_LABELS] = {i: t for i, t in labels.items() if i in names}
+    if entities:
+        evidence[ITEM_ENTITIES] = {i: e for i, e in entities.items() if i in names}
+    return replace(
+        member,
+        evidence=evidence,
+        triggering_entities=[
+            e
+            for e in member.triggering_entities
+            if e not in dropped or e in kept_entities
+        ],
+    )
+
+
+def idle_since(last_ran: str | None, members: list[AnomalyFinding]) -> datetime:
+    """
+    Return when an owed kind's rule was last seen running.
+
+    The day saved when it last ran while owed, or else (owed by a build
+    before #802) when its oldest alert was first seen.
+    """
+    try:
+        day = dt_util.parse_date(last_ran) if last_ran else None
+    except ValueError:
+        day = None
+    if day is not None:
+        # The day was saved in UTC: its UTC midnight.
+        return datetime(day.year, day.month, day.day, tzinfo=UTC)
+    return min((_first_seen(m) for m in members), default=dt_util.utcnow())
+
+
+def excluded_items(
+    member: AnomalyFinding, is_excluded: Callable[[str], bool]
+) -> dict[str, set[str]]:
+    """Return the items of ``member`` whose tracking entity ``is_excluded``."""
+    keys = ITEM_KEYS.get(member.type, ())
+    gone = {
+        item
+        for item, entity in _item_map(member, ITEM_ENTITIES).items()
+        if is_excluded(entity)
+    }
+    return dict.fromkeys(keys, gone) if gone else {}
 
 
 def told_items(kind: str, findings: Iterable[AnomalyFinding]) -> dict[str, set[str]]:
@@ -225,8 +326,19 @@ def _absorb(latest: AnomalyFinding, finding: AnomalyFinding) -> AnomalyFinding:
         **{key: sorted(items(latest, key) | items(finding, key)) for key in keys},
         _NOT_LISTED: sorted(items(latest, _NOT_LISTED) | new),
     }
+    for key in (ITEM_LABELS, ITEM_ENTITIES):
+        merged_map = {**_item_map(finding, key), **_item_map(latest, key)}
+        if merged_map:
+            evidence[key] = merged_map
     top = max(latest, finding, key=_rank)
-    return replace(latest, severity=top.severity, evidence=evidence)
+    return replace(
+        latest,
+        severity=top.severity,
+        evidence=evidence,
+        triggering_entities=_unique(
+            [*latest.triggering_entities, *finding.triggering_entities]
+        ),
+    )
 
 
 def record(owed: dict[str, list[dict[str, Any]]], finding: AnomalyFinding) -> bool:
@@ -320,8 +432,7 @@ def without(member: AnomalyFinding, told: dict[str, set[str]]) -> AnomalyFinding
     if all(len(left[key]) == len(items(member, key)) for key in keys):
         return member
     every = {i for told_set in told.values() for i in told_set}
-    unlisted = sorted(items(member, _NOT_LISTED) - every)
-    return replace(member, evidence={**member.evidence, **left, _NOT_LISTED: unlisted})
+    return _restricted(member, left, sorted(items(member, _NOT_LISTED) - every))
 
 
 def only(member: AnomalyFinding, told: dict[str, set[str]]) -> AnomalyFinding | None:
@@ -338,8 +449,7 @@ def only(member: AnomalyFinding, told: dict[str, set[str]]) -> AnomalyFinding | 
     if not any(kept.values()):
         return None
     every = {i for told_set in told.values() for i in told_set}
-    unlisted = sorted(items(member, _NOT_LISTED) & every)
-    return replace(member, evidence={**member.evidence, **kept, _NOT_LISTED: unlisted})
+    return _restricted(member, kept, sorted(items(member, _NOT_LISTED) & every))
 
 
 def merged(*told: dict[str, set[str]]) -> dict[str, set[str]]:
@@ -385,6 +495,38 @@ def _trust_free(action: str) -> str:
     return TRUST_SEVERAL_ACTION if action == TRUST_ONE_ACTION else action
 
 
+def _described(kind: str, members: list[AnomalyFinding]) -> str | None:
+    """
+    Return a summary naming each item ``members`` still list, or None.
+
+    Built from the items themselves, not the summaries the findings were
+    seen with, so items told meanwhile (a live alert, a trust) are not named
+    again (#802). None when an item has no description (an alert owed by a
+    build before #802): the stored summaries are used then.
+    """
+    labels: dict[str, str] = {}
+    for member in members:
+        labels.update(_item_map(member, ITEM_LABELS))
+    unlisted = {i for m in members for i in items(m, _NOT_LISTED)}
+    parts: list[str] = []
+    for key in ITEM_KEYS[kind]:
+        named = sorted({i for m in members for i in items(m, key)} - unlisted)
+        if not named:
+            continue
+        if key in _SELF_LABELLED_KEYS:
+            described = named
+        elif all(item in labels for item in named):
+            described = sorted(labels[item] for item in named)
+        else:
+            return None
+        singular, plural = _ITEM_HEADINGS[key]
+        heading = singular if len(named) == 1 else plural
+        parts.append(f"{heading}: {listed(described)}")
+    if not parts:
+        return None
+    return "; ".join(parts) + "."
+
+
 def replay(kind: str, members: list[AnomalyFinding]) -> AnomalyFinding:
     """
     Return the one alert that tells ``members`` (oldest first), marked as old.
@@ -408,6 +550,7 @@ def replay(kind: str, members: list[AnomalyFinding]) -> AnomalyFinding:
             key: sorted({item for m in members for item in items(m, key)})
             for key in keys
         }
+        summary = _described(kind, members) or summary
         singular, plural = _ITEM_NOUNS[kind]
         unlisted = len({i for m in members for i in items(m, _NOT_LISTED)})
         if unlisted:
@@ -425,6 +568,8 @@ def replay(kind: str, members: list[AnomalyFinding]) -> AnomalyFinding:
         _HELD_BACK,
         _CAPPED,
         _FULL,
+        ITEM_LABELS,
+        ITEM_ENTITIES,
     ):
         evidence.pop(key, None)
     first = min(_first_seen(m) for m in members)

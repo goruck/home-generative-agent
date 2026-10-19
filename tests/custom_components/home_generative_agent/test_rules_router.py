@@ -145,6 +145,16 @@ def test_offline_clients_are_reported_and_marked_excluded_ones_are_not() -> None
         in (finding.evidence["summary"])
     )
     assert finding.triggering_entities == ["device_tracker.a", "device_tracker.b"]
+    # Per client, so an owed replay for some of them names, cools down and
+    # excludes only those (#802).
+    assert finding.evidence["item_labels"] == {
+        "a": "Device a (Apple, wireless, 192.168.1.23)",
+        "b": "Device b (Apple, wireless, 192.168.1.23), not connected now",
+    }
+    assert finding.evidence["item_entities"] == {
+        "a": "device_tracker.a",
+        "b": "device_tracker.b",
+    }
 
 
 def test_severity_by_occupancy_night_and_known_random_address() -> None:
