@@ -64,7 +64,11 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.helpers import config_validation as cv
 
-from .helpers import matches_critical_rule
+from .helpers import (
+    CRITICAL_RULE_EXACT_ENTITY,
+    matches_critical_rule,
+    rule_entity_matches,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -371,10 +375,27 @@ def _service_name(step: Mapping[str, Any]) -> tuple[str, str, bool]:
     return domain, service, False
 
 
-def _domain_is_guarded(domain: str, rules: Iterable[Mapping[str, str]]) -> bool:
-    """Return True if any critical rule could apply to this entity domain."""
+def _domain_is_guarded(
+    domain: str,
+    rules: Iterable[Mapping[str, str]],
+    entities: Sequence[str],
+    *,
+    unresolved: bool,
+) -> bool:
+    """
+    Return True if any critical rule could apply to these entities of a domain.
+
+    A rule copy for one entity (a relay under a garage cover, #794) applies
+    only to that entity: with the targets known, it does not make the whole
+    domain guarded.
+    """
     return any(
-        not (rule.get("domain") or "") or (rule.get("domain") or "").lower() == domain
+        (not (rule.get("domain") or "") or (rule.get("domain") or "").lower() == domain)
+        and (
+            unresolved
+            or not rule.get(CRITICAL_RULE_EXACT_ENTITY)
+            or rule_entity_matches(rule, entities)
+        )
         for rule in rules
     )
 
@@ -429,7 +450,9 @@ def _screen_state_reproduction(
                 ),
             )
             for entity in entities
-            if _domain_is_guarded(entity.split(".", 1)[0], rules)
+            if _domain_is_guarded(
+                entity.split(".", 1)[0], rules, [entity], unresolved=False
+            )
         )
     return found
 
@@ -610,8 +633,9 @@ def _screen_device_action(
     # `cover.set_cover_position`, `open` into `cover.open_cover`), and that
     # mapping cannot be introspected. Matching the raw type is therefore only
     # sound when it happens to match; when it does not, any rule on the domain
-    # still has to count.
-    if _domain_is_guarded(domain, rules):
+    # still has to count, except a copy for one entity (#794), which counts
+    # only for that entity or for targets that cannot be named.
+    if _domain_is_guarded(domain, rules, entities, unresolved=unresolved):
         return [
             CriticalAutomationCall(
                 service=f"{domain}.{action_kind}",

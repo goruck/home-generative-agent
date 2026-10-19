@@ -7,6 +7,12 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+## [3.44.4] - 2026-10-18
+
+### Fixed
+
+- **Switching the relay a garage door is built on now asks for the Critical Action PIN** ([#794](https://github.com/goruck/home-generative-agent/issues/794)). A switch wrapped as a cover with **Change device type of a switch** (`switch_as_x`), the usual DIY garage wiring, opened the door with no PIN when the switch itself was turned on, though opening the cover asked for one. That held whether the agent called the switch's service, `homeassistant.turn_on`, "turn on" by name, a scene or a script, or wrote it into an automation. Now any call on the relay (on, off or toggle, since a momentary relay moves the door either way) asks for the PIN whenever a rule holds its cover, and when the call names the relay the prompt says what it controls ("turn off Garage Relay (controls Garage Door)"). Closing the cover itself is not held, as before. The same applies to a relay wrapped as a valve or a lock (only the unlocking direction for a lock), to a switch group holding the relay or wrapped by the helper, to any other wrapper of any of those, to a switch not set up yet, and to a wrapper you disabled. Once such a relay exists, a switch call aimed at an area, device, label or registry id, including any switch device action in an automation, is held too, as calls on covers and locks already are, since the relay may be among its targets. A template cover whose open action drives another device is still not followed ([#780](https://github.com/goruck/home-generative-agent/issues/780)).
+
 ## [3.44.3] - 2026-10-18
 
 ### Fixed
