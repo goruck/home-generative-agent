@@ -77,6 +77,9 @@ _NOT_LISTED = "owed_not_listed"
 # Marks a replay in its evidence, so the audit trail tells it from a live
 # alert and a replay held again by level 0 is not owed a second time.
 SEEN_WHILE_SILENCED = "seen_while_silenced"
+# Kept on an owed finding held back above level 0 (a cooldown, quiet hours),
+# not silenced: its replay says so (#801).
+_HELD_BACK = "owed_held_back"
 
 
 def items(finding: AnomalyFinding, key: str) -> set[str]:
@@ -131,6 +134,11 @@ def _first_seen(finding: AnomalyFinding) -> datetime:
     except ValueError:
         parsed = None
     return dt_util.as_utc(parsed) if parsed else finding.detected_at
+
+
+def held_back(finding: AnomalyFinding) -> AnomalyFinding:
+    """Return ``finding`` marked as held back above level 0, not silenced."""
+    return replace(finding, evidence={**finding.evidence, _HELD_BACK: True})
 
 
 def _rank(finding: AnomalyFinding) -> int:
@@ -286,16 +294,23 @@ def replay(kind: str, members: list[AnomalyFinding]) -> AnomalyFinding:
         total = sum(len(named) for named in evidence.values())
         count = f": {total} {singular if total == 1 else plural}"
         anomaly_id = build_anomaly_id(kind, entities, evidence)
-    for key in (*_TRUST_EVIDENCE_KEYS, _FIRST_SEEN, _NOT_LISTED):
+    for key in (*_TRUST_EVIDENCE_KEYS, _FIRST_SEEN, _NOT_LISTED, _HELD_BACK):
         evidence.pop(key, None)
     first = min(_first_seen(m) for m in members)
     seen = _minute(first)
     if _minute(latest.detected_at) != seen:
         seen = f"{seen} to {_minute(latest.detected_at)}"
-    note = (
-        f"Seen while Sentinel was at autonomy level 0 ({seen}){count}; "
-        "it may have been undone since."
-    )
+    if any(m.evidence.get(_HELD_BACK) for m in members):
+        # Held back by a cooldown or quiet hours (#801), maybe level 0 too.
+        note = (
+            f"Seen while its alert was held back ({seen}){count}; "
+            "it may have been undone since."
+        )
+    else:
+        note = (
+            f"Seen while Sentinel was at autonomy level 0 ({seen}){count}; "
+            "it may have been undone since."
+        )
     evidence["summary"] = f"{note} {summary}".strip()
     evidence[SEEN_WHILE_SILENCED] = True
     return AnomalyFinding(

@@ -169,6 +169,7 @@ from .suppression import (
     SUPPRESSION_REASON_AUTONOMY_PASSIVE,
     SUPPRESSION_REASON_NOT_SUPPRESSED,
     SUPPRESSION_REASON_NOTIFIER_DUPLICATE,
+    SUPPRESSION_REASON_PENDING_PROMPT,
     SUPPRESSION_REASON_POLICY_BLOCKED,
     SUPPRESSION_REASON_TRIAGE_SUPPRESSED,
     SUPPRESSION_REASON_USER_SNOOZE_7D,
@@ -748,13 +749,14 @@ class SentinelEngine:
         self, findings: list[AnomalyFinding], now: datetime, window: timedelta
     ) -> bool:
         """
-        Hold findings at autonomy level 0; return True to audit the hold.
+        Hold findings at level 0, or a held-back change; return True to audit.
 
-        Nothing is lost (#783). A standing condition starts its cooldown for
-        its own devices, so it is not re-recorded every cycle and alerts again
-        once that ends; another device's finding of the same type is not
-        muted. A change alert starts no cooldown and stays owed, so it alerts
-        once the level rises (see _send_owed_changes); it is audited once per
+        Nothing is lost (#783). At level 0 a standing condition starts its
+        cooldown for its own devices, so it is not re-recorded every cycle and
+        alerts again once that ends; another device's finding of the same type
+        is not muted. A change alert, at level 0 or held back by a cooldown or
+        quiet hours at any level (#801), starts no cooldown and stays owed, so
+        it alerts once it can (see _send_owed_changes); it is audited once per
         ``window``.
         """
         # Forget holds older than any window, so the map does not grow.
@@ -785,8 +787,12 @@ class SentinelEngine:
         return record
 
     def _owe(self, finding: AnomalyFinding) -> bool:
-        """Owe a change alert held at level 0; return True if the owed changed."""
+        """Owe a held change alert; return True if what is owed changed."""
         owed = self._suppression.state.owed_change_alerts
+        if not self._is_passive():
+            # Held back above level 0 (a cooldown, quiet hours): the replay
+            # must not say Sentinel was silenced.
+            finding = owed_alerts.held_back(finding)
         try:
             return owed_alerts.record(owed, finding)
         except (ValueError, TypeError, KeyError, AttributeError):
@@ -2217,11 +2223,16 @@ class SentinelEngine:
         reason = suppression_decision.reason_code
         if suppressed or self._is_passive():
             # Suppressed: audited with its reason, nothing held. Level 0: held
-            # (see _hold_passive), and so is a change alert a cooldown or
-            # quiet hours stopped, or it would be lost if undone (#799).
+            # (see _hold_passive). At any level a change alert a cooldown,
+            # quiet hours or presence grace stopped is owed too, or it would
+            # be lost if undone before they end (#799, #801); not one whose
+            # prompt is pending, which already reached the user.
             waiting = suppressed and reason not in _FINAL_SUPPRESSION_REASONS
             hold = not suppressed or (
-                waiting and self._is_passive() and finding.type in _CHANGE_ALERT_RULES
+                waiting
+                and not replay
+                and reason != SUPPRESSION_REASON_PENDING_PROMPT
+                and finding.type in _CHANGE_ALERT_RULES
             )
             return await self._passive_dispatch(
                 [finding] if hold else [],

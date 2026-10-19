@@ -289,3 +289,14 @@ def test_an_unreadable_stored_finding_is_skipped(
 def test_a_stored_finding_round_trips() -> None:
     finding = _admins("eve", tokens=("t1",))
     assert anomaly_finding_from_dict(finding.as_dict()) == finding
+
+
+def test_a_held_back_replay_does_not_say_sentinel_was_silenced() -> None:
+    held = owed.held_back(_clients("k1"))
+    sent = owed.replay("network_unknown_device_joined", [held])
+    assert sent.evidence["summary"].startswith("Seen while its alert was held back (")
+    assert "owed_held_back" not in sent.evidence
+    silenced = owed.replay("network_unknown_device_joined", [_clients("k1")])
+    assert silenced.evidence["summary"].startswith(
+        "Seen while Sentinel was at autonomy level 0 ("
+    )
