@@ -864,6 +864,34 @@ validation.
 
 ---
 
+### Fan-speed and light-brightness intents are not screened by the PIN gate
+
+**What:** `_is_critical_action` (`agent/graph.py`) screens on/off, set-position and stop intents, and any call with a service. `HassLightSet` (brightness, color) and `fan__HassFanSetSpeed` carry no service and are not actuating intents, so they return "not critical" before any rule is checked. HA turns the entity on for both. After #803, a relay wrapped as a garage cover and also as a light or fan (`switch_as_x`) can be turned on through these intents with no PIN, though every other call on that light or fan is held.
+
+**Why:** Security and Codex passes in the PR #803 review (2026-10-18). Pre-existing for any light or fan rule; it only reaches a door in the rare double-wrapped setup. The docs say these intents are not screened.
+
+**How to apply:** Treat every HA intent tool the gate doesn't model as actuating: resolve its targets with `intent_service_calls` (turn_on for the entity's domain) and match them against the expanded rules.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
+### An unreadable switch_as_x entry adds no relay hold
+
+**What:** `read_switch_wrappers` (`agent/rule_entities.py`) logs and skips an entry that raises, so its relay has no PIN hold. Everywhere else in the module, an entity that can't be read is held. Nothing raises for a well-formed entry (an unknown id resolves to None), so this needs a corrupt config entry.
+
+**Why:** Red team and adversarial passes in the PR #803 review (2026-10-18). Kept: failing closed here would mean holding every switch in the house. A test pins the behavior.
+
+**How to apply:** If it ever matters, record the failure and hold switch calls on that entry's devices only, read from the registry.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ## Explain / Prompts
 
 ### Sanitize area/entity strings before injecting into LLM prompts
