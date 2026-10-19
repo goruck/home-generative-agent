@@ -758,6 +758,19 @@ validation.
 
 ---
 
+### A trimmed owed alert keeps the severity of the items told meanwhile
+
+**What:** `owed.without()`/`only()` (`sentinel/owed.py`) take told, trusted or excluded items out of an owed change alert but keep its severity. A radio alert that was high because a security device joined while nobody was home is replayed for the remaining, non-security devices still as high; the network client rule's "low" (every client a known randomized address) can likewise only be raised by merging, never lowered by trimming.
+
+**Why:** Predates #802 (since #801's `without()`); the review of #802 found it reachable through more paths (per-item exclusions, `only()`). A high replay can bypass quiet-hours handling.
+
+**How to apply:** Keep a per-item severity input on the owed finding (for radio, `security_device_ids` filtered in `_restricted`; for clients, `randomized_known`) and recompute severity in `_restricted` the way the rules do, or cap a trimmed member at the highest severity its remaining items would earn. Pin it with a test that trusts the security device and checks the replay's severity.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
 ### Entity names reach Sentinel's baseline notice as unescaped Markdown
 
 **What:** `_friendly_names` (`sentinel/baseline.py`) collapses whitespace in the names the "Baseline established" notice lists, so a name cannot start a list line of its own, but Markdown inside a name (`[text](https://…)`, emphasis) still renders in the persistent notification. Some names come from the device itself (BLE or network device names), so a nearby device could put a link into a notice every Home Assistant user sees.

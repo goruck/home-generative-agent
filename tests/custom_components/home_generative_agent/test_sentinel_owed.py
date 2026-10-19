@@ -105,7 +105,7 @@ def test_one_kind_never_pushes_out_another(caplog: pytest.LogCaptureFixture) -> 
     kept = owed.read_members(store["network_unknown_device_joined"])
     assert kept[0].evidence["client_keys"] == ["k00"]
     assert len(store["ha_new_admin_or_token"]) == 1
-    assert caplog.text.count("are counted, not described") == 1
+    assert caplog.text.count("later ones are added to the latest") == 1
     sent = owed.replay("network_unknown_device_joined", kept)
     # Every client is still named in the evidence and counted in the note.
     assert len(sent.evidence["client_keys"]) == owed.MAX_OWED_PER_KIND + 5
@@ -437,3 +437,269 @@ def test_only_keeps_the_items_a_live_alert_names() -> None:
         "a": {"1", "2"},
         "b": {"3"},
     }
+
+
+def _labelled_clients(*keys: str, **kw: Any) -> AnomalyFinding:
+    """Clients as the rule reports them since #802: a label and tracker each."""
+    base = _clients(*keys, **kw)
+    return replace(
+        base,
+        evidence={
+            **base.evidence,
+            owed.ITEM_LABELS_KEY: {k: f"Phone {k}" for k in keys},
+            owed.ITEM_ENTITIES_KEY: {k: f"device_tracker.{k}" for k in keys},
+        },
+        triggering_entities=[f"device_tracker.{k}" for k in keys],
+    )
+
+
+def test_a_replay_names_only_the_items_still_owed() -> None:
+    """A device told meanwhile is not named again, nor cools the rest (#802)."""
+    rest = owed.without(_labelled_clients("k1", "k2"), {"client_keys": {"k1"}})
+    assert rest is not None
+    assert rest.triggering_entities == ["device_tracker.k2"]
+    assert rest.evidence[owed.ITEM_LABELS_KEY] == {"k2": "Phone k2"}
+
+    sent = owed.replay("network_unknown_device_joined", [rest])
+
+    summary = sent.evidence["summary"]
+    assert "New device on the network: Phone k2." in summary
+    assert "k1" not in summary
+    assert sent.triggering_entities == ["device_tracker.k2"]
+    # The per-item maps are owed bookkeeping, not part of the alert.
+    assert owed.ITEM_LABELS_KEY not in sent.evidence
+    assert owed.ITEM_ENTITIES_KEY not in sent.evidence
+
+
+def test_a_replay_lists_every_described_item_across_members() -> None:
+    members = [_labelled_clients("k1", minute=0), _labelled_clients("k2", minute=5)]
+    sent = owed.replay("network_unknown_device_joined", members)
+    assert "New devices on the network: Phone k1, Phone k2." in sent.evidence["summary"]
+
+
+def test_an_alert_owed_before_labels_keeps_its_summary() -> None:
+    """An untouched alert owed before #802 is told by its stored summary."""
+    members = [_labelled_clients("k1"), _clients("k2", minute=5)]
+    sent = owed.replay("network_unknown_device_joined", members)
+    summary = sent.evidence["summary"]
+    assert "New device on the network: Phone k1. New clients: k2." in summary
+    assert "not described" not in summary
+
+
+def test_a_trimmed_alert_owed_before_labels_is_counted_not_named() -> None:
+    """Its stored summary would name a told device: the rest is only counted."""
+    rest = owed.without(_clients("k1", "k2"), {"client_keys": {"k1"}})
+    assert rest is not None
+    assert "summary" not in rest.evidence
+    summary = owed.replay("network_unknown_device_joined", [rest]).evidence["summary"]
+    assert "k1" not in summary
+    assert "since. 1 more device seen is not described here." in summary
+
+
+def test_an_overflow_only_replay_names_no_told_device() -> None:
+    """Only absorbed items left, without labels: counted, never the old text."""
+    member = replace(
+        _labelled_clients("k1"),
+        evidence={
+            **_labelled_clients("k1").evidence,
+            "client_keys": ["k1", "late"],
+            "owed_not_listed": ["late"],
+        },
+    )
+    rest = owed.without(member, {"client_keys": {"k1"}})
+    assert rest is not None
+    summary = owed.replay("network_unknown_device_joined", [rest]).evidence["summary"]
+    assert "Phone k1" not in summary
+    assert "since. 1 more device seen is not described here." in summary
+
+
+def test_a_replay_says_what_raised_the_severity() -> None:
+    member = replace(
+        _labelled_clients("k1"),
+        evidence={
+            **_labelled_clients("k1").evidence,
+            "seen_when": "while nobody was home",
+        },
+    )
+    sent = owed.replay("network_unknown_device_joined", [member])
+    assert "It joined while nobody was home." in sent.evidence["summary"]
+    assert "seen_when" not in sent.evidence
+
+
+def test_a_replay_summary_drops_control_characters() -> None:
+    member = replace(
+        _labelled_clients("k1"),
+        evidence={
+            **_labelled_clients("k1").evidence,
+            owed.ITEM_LABELS_KEY: {"k1": "Phone\u202ek1"},
+        },
+    )
+    sent = owed.replay("network_unknown_device_joined", [member])
+    assert "\u202e" not in sent.evidence["summary"]
+    assert "Phonek1" in sent.evidence["summary"]
+
+
+def test_an_account_replay_names_what_is_left_without_labels() -> None:
+    """Accounts and tokens are their own labels: the told one is not named."""
+    rest = owed.without(
+        _admins("alice", tokens=("laptop",)), {"new_admin_users": {"alice"}}
+    )
+    assert rest is not None
+    sent = owed.replay("ha_new_admin_or_token", [rest])
+    summary = sent.evidence["summary"]
+    assert "New long-lived access token: laptop." in summary
+    assert "alice" not in summary
+
+
+def test_only_keeps_the_maps_and_entities_of_its_items() -> None:
+    part = owed.only(_labelled_clients("k1", "k2"), {"client_keys": {"k2"}})
+    assert part is not None
+    assert part.evidence[owed.ITEM_ENTITIES_KEY] == {"k2": "device_tracker.k2"}
+    assert part.triggering_entities == ["device_tracker.k2"]
+
+
+def test_an_entity_without_an_item_stays_on_the_rest() -> None:
+    """Entities not tied to an item are kept: only a told item's entity goes."""
+    member = replace(
+        _labelled_clients("k1", "k2"),
+        triggering_entities=["device_tracker.k1", "device_tracker.k2", "sensor.x"],
+    )
+    rest = owed.without(member, {"client_keys": {"k1"}})
+    assert rest is not None
+    assert rest.triggering_entities == ["device_tracker.k2", "sensor.x"]
+
+
+def test_excluded_items_follow_their_tracker() -> None:
+    member = _labelled_clients("k1", "k2")
+    gone = owed.excluded_items(member, lambda entity: entity == "device_tracker.k1")
+    assert gone == {"client_keys": {"k1"}}
+    rest = owed.without(member, gone)
+    assert rest is not None
+    assert rest.evidence["client_keys"] == ["k2"]
+    assert owed.excluded_items(member, lambda _entity: False) == {}
+    assert owed.excluded_items(_clients("k3"), lambda _entity: True) == {}
+
+
+def test_absorbed_items_bring_their_maps() -> None:
+    """Items past the cap keep their trackers, so they are excluded alike."""
+    store: dict[str, list[dict[str, Any]]] = {}
+    for n in range(owed.MAX_OWED_PER_KIND):
+        owed.record(store, _labelled_clients(f"k{n}", minute=n))
+    owed.record(store, _labelled_clients("late", minute=60))
+    latest = owed.read_members(store["network_unknown_device_joined"])[-1]
+    assert latest.evidence[owed.ITEM_ENTITIES_KEY]["late"] == "device_tracker.late"
+    # Not a triggering entity: its cooldown must not hold back the whole kind.
+    assert "device_tracker.late" not in latest.triggering_entities
+    # Described when told, since its rule gave a description.
+    summary = owed.replay(
+        "network_unknown_device_joined",
+        owed.read_members(store["network_unknown_device_joined"]),
+    ).evidence["summary"]
+    assert "not described" not in summary
+
+
+def test_the_owed_count_is_items_for_item_kinds() -> None:
+    stored = [_clients("k1", "k2").as_dict(), _clients("k2", "k3", minute=5).as_dict()]
+    assert owed.owed_count("network_unknown_device_joined", stored) == 3
+    posture = [_finding("network_public_ip_changed", {"public_ip_key": "c"}).as_dict()]
+    assert owed.owed_count("network_public_ip_changed", posture) == 1
+
+
+def _seen(member: AnomalyFinding, seen_when: str) -> AnomalyFinding:
+    return replace(member, evidence={**member.evidence, "seen_when": seen_when})
+
+
+def test_a_merge_keeps_what_raised_the_severity() -> None:
+    """A daytime superset replacing an away sighting still says why it is high."""
+    store: dict[str, list[dict[str, Any]]] = {}
+    owed.record(
+        store,
+        _seen(_labelled_clients("k1", severity="high"), "while nobody was home"),
+    )
+    owed.record(store, _seen(_labelled_clients("k1", "k2", minute=5), ""))
+    (member,) = owed.read_members(store["network_unknown_device_joined"])
+    assert member.severity == "high"
+    sent = owed.replay("network_unknown_device_joined", [member])
+    assert "At least one joined while nobody was home." in sent.evidence["summary"]
+
+
+def test_a_raised_holder_takes_the_new_circumstance() -> None:
+    store: dict[str, list[dict[str, Any]]] = {}
+    owed.record(store, _seen(_labelled_clients("k1", "k2", severity="low"), ""))
+    owed.record(store, _seen(_labelled_clients("k1", severity="medium"), "at night"))
+    (member,) = owed.read_members(store["network_unknown_device_joined"])
+    assert member.severity == "medium"
+    assert member.evidence["seen_when"] == "at night"
+
+
+def test_an_absorbed_away_sighting_is_kept() -> None:
+    store: dict[str, list[dict[str, Any]]] = {}
+    for n in range(owed.MAX_OWED_PER_KIND):
+        owed.record(store, _seen(_labelled_clients(f"k{n}", minute=n), ""))
+    owed.record(
+        store,
+        _seen(
+            _labelled_clients("late", minute=60, severity="high"),
+            "while nobody was home",
+        ),
+    )
+    latest = owed.read_members(store["network_unknown_device_joined"])[-1]
+    assert latest.severity == "high"
+    assert latest.evidence["seen_when"] == "while nobody was home"
+
+
+def test_an_account_and_a_token_read_as_one_sentence() -> None:
+    sent = owed.replay("ha_new_admin_or_token", [_admins("alice", tokens=("laptop",))])
+    assert (
+        "New administrator account: alice; new long-lived access token: laptop."
+        in sent.evidence["summary"]
+    )
+
+
+def test_a_trimmed_merge_drops_a_circumstance_it_can_no_longer_vouch_for() -> None:
+    """The away device told meanwhile: the rest is not said to have joined away."""
+    store: dict[str, list[dict[str, Any]]] = {}
+    owed.record(store, _seen(_labelled_clients("a", "b"), ""))
+    owed.record(
+        store, _seen(_labelled_clients("b", severity="high"), "while nobody was home")
+    )
+    (member,) = owed.read_members(store["network_unknown_device_joined"])
+    assert member.evidence["seen_when"] == "while nobody was home"
+    rest = owed.without(member, {"client_keys": {"b"}})
+    assert rest is not None
+    summary = owed.replay("network_unknown_device_joined", [rest]).evidence["summary"]
+    assert "nobody was home" not in summary
+
+
+def test_an_equal_severity_sighting_still_adds_its_circumstance() -> None:
+    store: dict[str, list[dict[str, Any]]] = {}
+    owed.record(store, _seen(_labelled_clients("a", "b", severity="high"), "at night"))
+    owed.record(
+        store, _seen(_labelled_clients("a", severity="high"), "while nobody was home")
+    )
+    (member,) = owed.read_members(store["network_unknown_device_joined"])
+    assert member.evidence["seen_when"] == "while nobody was home"
+
+
+def test_every_account_and_token_is_named() -> None:
+    """Unlike devices, accounts and tokens are not capped: none can hide."""
+    tokens = tuple(f"t{n:02d}" for n in range(12))
+    sent = owed.replay("ha_new_admin_or_token", [_admins(tokens=tokens)])
+    summary = sent.evidence["summary"]
+    assert all(t in summary for t in tokens)
+    assert "more" not in summary.split("tokens:", 1)[1]
+
+
+def test_it_joined_counts_the_undescribed_too() -> None:
+    member = _seen(_labelled_clients("a"), "while nobody was home")
+    member = replace(
+        member,
+        evidence={
+            **member.evidence,
+            "client_keys": ["a", "x", "y"],
+            "owed_not_listed": ["x", "y"],
+        },
+    )
+    summary = owed.replay("network_unknown_device_joined", [member]).evidence["summary"]
+    assert "At least one joined while nobody was home." in summary
+    assert "It joined" not in summary

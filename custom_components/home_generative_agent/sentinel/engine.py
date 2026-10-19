@@ -747,6 +747,26 @@ class SentinelEngine:
             ),
         }
 
+    def owed_status(self) -> dict[str, Any]:
+        """
+        Return what is owed, by kind, and for how long its rule has not run (#802).
+
+        Shown on the health sensor, so alerts waiting on a rule that no
+        longer runs are visible: they are never dropped.
+        """
+        state = self._suppression.state
+        return {
+            "owed_change_alerts": {
+                kind: owed_alerts.owed_count(kind, findings)
+                for kind, findings in state.owed_change_alerts.items()
+            },
+            "owed_rules_idle_days": {
+                kind: idle["days"]
+                for kind, idle in state.owed_rule_idle.items()
+                if isinstance(idle, dict) and isinstance(idle.get("days"), int)
+            },
+        }
+
     def _is_passive(self) -> bool:
         """
         Return True at autonomy level 0, set or overridden: no finding alerts.
@@ -881,6 +901,7 @@ class SentinelEngine:
         *,
         explain_enabled: bool,
         trigger_source: str,
+        failed: frozenset[str] = frozenset(),
     ) -> list[str]:
         """
         Send the owed change alerts once they can go out.
@@ -893,12 +914,19 @@ class SentinelEngine:
         auditing off) may still be reporting the change. An owed finding stays
         until it reaches the user or is stopped for good (a snooze, policy, or
         an exclusion added since); a cooldown or quiet hours only postpone it,
-        and triage stopping the live alert sends the replay instead. Returns
-        the inventory keys of the devices and clients a replay settled, for
-        the inventory commit.
+        and triage stopping the live alert sends the replay instead. Kinds
+        whose rule did not run are counted first, at any level (see
+        _track_idle_owed); ``failed`` holds the rules that raised, which are
+        not idle. Returns the inventory keys of the devices and clients a
+        replay settled, for the inventory commit.
         """
         owed = self._suppression.state.owed_change_alerts
-        if not owed or self._is_passive() or self._suppression.is_read_only:
+        if self._suppression.is_read_only:
+            return []
+        # At level 0 too: a rule that runs while Sentinel is passive is not
+        # idle.
+        await self._track_idle_owed(ran | failed, now)
+        if not owed or self._is_passive():
             return []
         inventory_keys: list[str] = []
         for kind in [kind for kind in owed if kind in ran]:
@@ -923,8 +951,61 @@ class SentinelEngine:
                     kind,
                 )
                 owed.pop(kind, None)
+                self._suppression.state.owed_rule_idle.pop(kind, None)
                 await self._suppression.async_save()
         return inventory_keys
+
+    async def _track_idle_owed(self, alive: set[str], now: datetime) -> None:
+        """
+        Count the days owed kinds' rules did not run, and warn about them.
+
+        An owed alert is told once its rule runs. One whose rule stops (network
+        checks turned off, an integration broken or removed) waits; it is never
+        dropped, since a security change you never saw matters more than a
+        late one (#802). So the wait is visible: ``owed_status`` shows each
+        idle kind's count on the health sensor, and a warning is logged every
+        ``OWED_IDLE_WARN_DAYS`` such days. Only days Sentinel ran count, each
+        once, and only moving forward: a shutdown or a clock set back cannot
+        add to it. ``alive`` holds the rules that ran or raised.
+        """
+        state = self._suppression.state
+        owed = state.owed_change_alerts
+        today = dt_util.as_utc(now).date().isoformat()
+        changed = False
+        for kind in list(owed):
+            if kind in alive:
+                if state.owed_rule_idle.pop(kind, None) is not None:
+                    changed = True
+                continue
+            idle = state.owed_rule_idle.get(kind)
+            idle = idle if isinstance(idle, dict) else {}
+            days = idle.get("days")
+            days = days if isinstance(days, int) and days > 0 else 0
+            last = idle.get("last")
+            if last == today:
+                continue  # counted today already
+            if isinstance(last, str) and last > today:
+                # Saved while the clock ran ahead: start from today, adding
+                # nothing, so the count resumes tomorrow.
+                state.owed_rule_idle[kind] = {"days": days, "last": today}
+                changed = True
+                continue
+            days += 1
+            state.owed_rule_idle[kind] = {"days": days, "last": today}
+            changed = True
+            if days % owed_alerts.OWED_IDLE_WARN_DAYS == 0:
+                LOGGER.warning(
+                    "Sentinel still owes %d %s alerts, but the rule has not run on "
+                    "%d days Sentinel ran; they are told once it runs again.",
+                    owed_alerts.owed_count(kind, owed[kind]),
+                    kind,
+                    days,
+                )
+        for kind in [k for k in state.owed_rule_idle if k not in owed]:
+            del state.owed_rule_idle[kind]
+            changed = True
+        if changed:
+            await self._suppression.async_save()
 
     async def _send_owed_kind(  # noqa: PLR0913
         self,
@@ -984,6 +1065,24 @@ class SentinelEngine:
             if rest is not None:
                 pending.append(rest)
         if self._rule_entity_exclusions:
+            # An exclusion added since drops the excluded devices only, not
+            # the rest of the alert they were seen with (#802).
+            pending = [
+                rest
+                for member in pending
+                if (
+                    rest := owed_alerts.without(
+                        member,
+                        owed_alerts.excluded_items(
+                            member,
+                            lambda entity, kind=kind: self._entity_excluded_for_type(
+                                entity, kind
+                            ),
+                        ),
+                    )
+                )
+                is not None
+            ]
             pending = self._filter_excluded_findings(pending)
         if pending and not await self._send_replay(
             owed_alerts.replay(kind, pending),
@@ -2011,6 +2110,7 @@ class SentinelEngine:
             cooldown_entity,
             explain_enabled=explain_enabled,
             trigger_source=trigger_source,
+            failed=frozenset(evaluation.failed_rules),
         )
 
         # A replay told a held posture change that a live one still reports

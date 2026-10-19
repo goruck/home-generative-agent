@@ -287,6 +287,8 @@ class SentinelHealthSensor(SensorEntity):
         # silences finding alerts, so it must be visible.
         if self._sentinel is not None:
             self._attrs.update(self._sentinel.autonomy_status())
+            # Change alerts still owed, by kind (#802).
+            self._attrs.update(self._sentinel.owed_status())
 
         # Merge trigger scheduler statistics.
         scheduler_stats: dict[str, Any] = run_stats.get("scheduler", {})

@@ -32,10 +32,18 @@ from .models import (
     build_anomaly_id,
 )
 from .network_inventory import client_key
-from .rules.network_common import TRUST_ONE_ACTION, TRUST_SEVERAL_ACTION
+from .rules.network_common import (
+    ITEM_ENTITIES_KEY,
+    ITEM_LABELS_KEY,
+    SEEN_WHEN_KEY,
+    TRUST_ONE_ACTION,
+    TRUST_SEVERAL_ACTION,
+    listed,
+    printable,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
     from datetime import datetime
 
 LOGGER = logging.getLogger(__name__)
@@ -47,6 +55,12 @@ LOGGER = logging.getLogger(__name__)
 MAX_OWED_PER_KIND = 20
 # Past this many unlisted items, more are not kept.
 MAX_UNLISTED_ITEMS = 500
+
+# Every this many days on which Sentinel ran but an owed kind's rule did not
+# (network checks turned off, an integration broken or removed), a warning is
+# logged (#802). Owed alerts are never dropped for it: a security change you
+# never saw matters more than a late one, and each kind is bounded below.
+OWED_IDLE_WARN_DAYS = 7
 
 # The list evidence an item kind names its items by. A finding of the kind
 # still reports an owed one while it names every item that one named.
@@ -69,12 +83,31 @@ _ITEM_NOUNS: dict[str, tuple[str, str]] = {
     "network_unknown_device_joined": ("device", "devices"),
 }
 
+# How a replay lists each item key's items (#802): (singular, plural)
+# heading. An account or token is its own label; devices and clients are
+# described by ITEM_LABELS_KEY from their rule.
+_ITEM_HEADINGS: dict[str, tuple[str, str]] = {
+    "new_admin_users": ("New administrator account", "New administrator accounts"),
+    "new_long_lived_tokens": (
+        "New long-lived access token",
+        "New long-lived access tokens",
+    ),
+    "device_keys": ("New radio device", "New radio devices"),
+    "client_keys": ("New device on the network", "New devices on the network"),
+}
+_SELF_LABELLED_KEYS = frozenset({"new_admin_users", "new_long_lived_tokens"})
+
+# What raised a finding's severity (SEEN_WHEN_KEY), strongest first: merged
+# findings keep the strongest, with the highest severity (#802).
+_SEEN_WHEN_RANK = ("while nobody was home", "at night")
+
 # Evidence that picks a push's Trust device button. A replay describes the
 # past: the device may be gone, and one still present gets its live alert.
 _TRUST_EVIDENCE_KEYS = (TRUST_DEVICE_IDS_KEY, "security_device_ids")
 
 # Kept on an owed finding only: when the change was first seen, and the items
-# of later findings past the bound (told, but not described).
+# of later findings past the bound (told by their description, if their rule
+# gave one, else counted).
 _FIRST_SEEN = "owed_first_seen"
 # The latest member of a posture kind past the bound, replaced by each new one.
 _CAPPED = "owed_capped"
@@ -100,6 +133,87 @@ def items(finding: AnomalyFinding, key: str) -> set[str]:
     if not isinstance(value, list):
         return set()
     return {str(item) for item in cast("list[object]", value)}
+
+
+def _item_map(finding: AnomalyFinding, key: str) -> dict[str, str]:
+    """Return a per-item display map (labels, entities); none if bad."""
+    value: object = finding.evidence.get(key)
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(item): str(text)
+        for item, text in cast("dict[object, object]", value).items()
+        if text
+    }
+
+
+def _restricted(
+    member: AnomalyFinding, keep: dict[str, list[str]], unlisted: list[str]
+) -> AnomalyFinding:
+    """
+    Return ``member`` naming only the items in ``keep``.
+
+    Its per-item labels and entities follow, and so do its triggering
+    entities: an entity tracking an item no longer named goes, so that
+    device's cooldown or exclusion no longer holds the rest (#802).
+    """
+    names = {item for kept in keep.values() for item in kept} | set(unlisted)
+    labels = _item_map(member, ITEM_LABELS_KEY)
+    entities = _item_map(member, ITEM_ENTITIES_KEY)
+    dropped = {entity for item, entity in entities.items() if item not in names}
+    kept_entities = {entities[item] for item in names if item in entities}
+    evidence = {**member.evidence, **keep, _NOT_LISTED: unlisted}
+    # Its summary named every item it was seen with, and what raised its
+    # severity may have been an item now gone: neither is still known true.
+    evidence.pop("summary", None)
+    evidence.pop(SEEN_WHEN_KEY, None)
+    if labels:
+        evidence[ITEM_LABELS_KEY] = {i: t for i, t in labels.items() if i in names}
+    if entities:
+        evidence[ITEM_ENTITIES_KEY] = {i: e for i, e in entities.items() if i in names}
+    return replace(
+        member,
+        evidence=evidence,
+        triggering_entities=[
+            e
+            for e in member.triggering_entities
+            if e not in dropped or e in kept_entities
+        ],
+    )
+
+
+def owed_count(kind: str, stored: object) -> int:
+    """
+    Return how much is owed for ``kind``: devices, clients or accounts, else changes.
+
+    Shown on the health sensor (#802); a full kind keeps 20 findings but can
+    name hundreds of items.
+    """
+    # Quietly: this runs on every health refresh, and the send path logs
+    # (and drops) what cannot be read.
+    members: list[AnomalyFinding] = []
+    for data in cast("list[object]", stored) if isinstance(stored, list) else []:
+        try:
+            members.append(anomaly_finding_from_dict(cast("dict[str, Any]", data)))
+        except (KeyError, TypeError, ValueError):
+            continue
+    keys = ITEM_KEYS.get(kind)
+    if keys is None:
+        return len(members)
+    return len({(key, i) for m in members for key in keys for i in items(m, key)})
+
+
+def excluded_items(
+    member: AnomalyFinding, is_excluded: Callable[[str], bool]
+) -> dict[str, set[str]]:
+    """Return the items of ``member`` whose tracking entity ``is_excluded``."""
+    keys = ITEM_KEYS.get(member.type, ())
+    gone = {
+        item
+        for item, entity in _item_map(member, ITEM_ENTITIES_KEY).items()
+        if is_excluded(entity)
+    }
+    return dict.fromkeys(keys, gone) if gone else {}
 
 
 def told_items(kind: str, findings: Iterable[AnomalyFinding]) -> dict[str, set[str]]:
@@ -181,6 +295,19 @@ def is_held_back(finding: AnomalyFinding) -> bool:
     return bool(finding.evidence.get(_HELD_BACK))
 
 
+def _seen_when(*findings: AnomalyFinding) -> str:
+    """Return the strongest circumstance any of ``findings`` was seen in."""
+    seen = {str(f.evidence.get(SEEN_WHEN_KEY) or "") for f in findings}
+    return next((when for when in _SEEN_WHEN_RANK if when in seen), "")
+
+
+def _with_seen_when(finding: AnomalyFinding, seen_when: str) -> AnomalyFinding:
+    """Return ``finding`` saying ``seen_when``, if it differs."""
+    if str(finding.evidence.get(SEEN_WHEN_KEY) or "") == seen_when:
+        return finding
+    return replace(finding, evidence={**finding.evidence, SEEN_WHEN_KEY: seen_when})
+
+
 def _rank(finding: AnomalyFinding) -> int:
     return SEVERITY_RANK[finding.severity]
 
@@ -195,6 +322,8 @@ def _carry(finding: AnomalyFinding, older: list[AnomalyFinding]) -> AnomalyFindi
     evidence = {**finding.evidence, _FIRST_SEEN: _first_seen(first).isoformat()}
     if unlisted:
         evidence[_NOT_LISTED] = unlisted
+    if seen_when := _seen_when(finding, *older):
+        evidence[SEEN_WHEN_KEY] = seen_when
     # Held back only if every sighting was: one seen at level 0 says so.
     if all(is_held_back(m) for m in [finding, *older]):
         evidence[_HELD_BACK] = True
@@ -225,7 +354,16 @@ def _absorb(latest: AnomalyFinding, finding: AnomalyFinding) -> AnomalyFinding:
         **{key: sorted(items(latest, key) | items(finding, key)) for key in keys},
         _NOT_LISTED: sorted(items(latest, _NOT_LISTED) | new),
     }
+    for key in (ITEM_LABELS_KEY, ITEM_ENTITIES_KEY):
+        merged_map = {**_item_map(finding, key), **_item_map(latest, key)}
+        if merged_map:
+            evidence[key] = merged_map
+    if seen_when := _seen_when(latest, finding):
+        evidence[SEEN_WHEN_KEY] = seen_when
     top = max(latest, finding, key=_rank)
+    # The absorbed items' trackers stay in ITEM_ENTITIES_KEY, for exclusions, but
+    # not in the triggering entities: one of hundreds on cooldown would hold
+    # back the whole kind's replay.
     return replace(latest, severity=top.severity, evidence=evidence)
 
 
@@ -281,16 +419,19 @@ def _record_posture(members: list[AnomalyFinding], finding: AnomalyFinding) -> b
 def _record_items(members: list[AnomalyFinding], finding: AnomalyFinding) -> bool:
     holder = next((m for m in members if covers(m, finding)), None)
     if holder is not None:
-        if _rank(finding) <= _rank(holder):
+        updated = _with_seen_when(
+            replace(holder, severity=max(holder, finding, key=_rank).severity),
+            _seen_when(holder, finding),
+        )
+        if updated == holder:
             return False
-        members[members.index(holder)] = replace(holder, severity=finding.severity)
+        members[members.index(holder)] = updated
         return True
     older = [m for m in members if covers(finding, m)]
     if not older and len(members) >= MAX_OWED_PER_KIND:
         if not items(members[-1], _NOT_LISTED):
             LOGGER.warning(
-                "Sentinel holds %d owed %s alerts; later ones are counted, "
-                "not described.",
+                "Sentinel holds %d owed %s alerts; later ones are added to the latest.",
                 MAX_OWED_PER_KIND,
                 finding.type,
             )
@@ -320,8 +461,7 @@ def without(member: AnomalyFinding, told: dict[str, set[str]]) -> AnomalyFinding
     if all(len(left[key]) == len(items(member, key)) for key in keys):
         return member
     every = {i for told_set in told.values() for i in told_set}
-    unlisted = sorted(items(member, _NOT_LISTED) - every)
-    return replace(member, evidence={**member.evidence, **left, _NOT_LISTED: unlisted})
+    return _restricted(member, left, sorted(items(member, _NOT_LISTED) - every))
 
 
 def only(member: AnomalyFinding, told: dict[str, set[str]]) -> AnomalyFinding | None:
@@ -338,8 +478,7 @@ def only(member: AnomalyFinding, told: dict[str, set[str]]) -> AnomalyFinding | 
     if not any(kept.values()):
         return None
     every = {i for told_set in told.values() for i in told_set}
-    unlisted = sorted(items(member, _NOT_LISTED) & every)
-    return replace(member, evidence={**member.evidence, **kept, _NOT_LISTED: unlisted})
+    return _restricted(member, kept, sorted(items(member, _NOT_LISTED) & every))
 
 
 def merged(*told: dict[str, set[str]]) -> dict[str, set[str]]:
@@ -385,6 +524,77 @@ def _trust_free(action: str) -> str:
     return TRUST_SEVERAL_ACTION if action == TRUST_ONE_ACTION else action
 
 
+def _described(kind: str, members: list[AnomalyFinding]) -> tuple[str, int]:
+    """
+    Return a summary naming each item ``members`` still list, and how many it cannot.
+
+    Built from each item's own description, not the summaries the findings
+    were seen with, so an item told meanwhile (a live alert, a trust, an
+    exclusion) is not named again (#802). An item with no description is
+    told by the stored summary of a finding owed before #802 that still names
+    all it was seen with, and otherwise only counted. (Such a finding that
+    takes in later, described items past the cap loses its summary's items
+    to the count; owed alerts first shipped with #802's release, so only a
+    beta tester's state can hold one.)
+    """
+    keys = ITEM_KEYS[kind]
+    labels: dict[str, str] = {}
+    for member in members:
+        labels.update(_item_map(member, ITEM_LABELS_KEY))
+    # Owed before #802 and untouched since: its summary is still accurate.
+    # Accounts and tokens name themselves, so need none; one whose items are
+    # all described elsewhere is not repeated.
+    legacy = [
+        m
+        for m in members
+        if not set(keys) <= _SELF_LABELLED_KEYS
+        and not _item_map(m, ITEM_LABELS_KEY)
+        and str(m.evidence.get("summary") or "")
+        and not any(
+            i in labels for key in keys for i in items(m, key) - items(m, _NOT_LISTED)
+        )
+    ]
+    legacy_items = {
+        i for m in legacy for key in keys for i in items(m, key) - items(m, _NOT_LISTED)
+    }
+    parts: list[str] = []
+    undescribed: set[str] = set()
+    total = 0
+    for key in keys:
+        named: list[str] = []
+        for item in sorted({i for m in members for i in items(m, key)}):
+            if key in _SELF_LABELLED_KEYS:
+                named.append(item)
+            elif item in labels:
+                named.append(labels[item])
+            elif item not in legacy_items:
+                undescribed.add(item)
+        heading = _ITEM_HEADINGS.get(key)
+        if heading is None:
+            undescribed.update(i for m in members for i in items(m, key))
+            continue
+        if named:
+            total += len(named)
+            noun = heading[0] if len(named) == 1 else heading[1]
+            if parts:
+                noun = noun[0].lower() + noun[1:]
+            # Accounts and tokens are all named, as a live alert names them;
+            # devices are capped like a live alert's list.
+            shown = (
+                ", ".join(sorted(named))
+                if key in _SELF_LABELLED_KEYS
+                else listed(sorted(named))
+            )
+            parts.append(f"{noun}: {shown}")
+    texts = ["; ".join(parts) + "." if parts else ""]
+    texts.extend(str(m.evidence.get("summary")).strip() for m in legacy)
+    if seen_when := _seen_when(*members):
+        count = total + len(legacy_items) + len(undescribed)
+        who = "It" if count == 1 else "At least one"
+        texts.append(f"{who} joined {seen_when}.")
+    return " ".join(_unique(texts)), len(undescribed)
+
+
 def replay(kind: str, members: list[AnomalyFinding]) -> AnomalyFinding:
     """
     Return the one alert that tells ``members`` (oldest first), marked as old.
@@ -397,10 +607,10 @@ def replay(kind: str, members: list[AnomalyFinding]) -> AnomalyFinding:
     evidence: dict[str, Any]
     count = ""
     entities = sorted({e for m in members for e in m.triggering_entities})
-    summary = " ".join(
-        _unique(str(m.evidence.get("summary") or "").strip() for m in members)
-    )
     if keys is None:
+        summary = " ".join(
+            _unique(str(m.evidence.get("summary") or "").strip() for m in members)
+        )
         evidence = dict(latest.evidence)
         anomaly_id = _replay_id(kind, entities, members)
     else:
@@ -408,13 +618,17 @@ def replay(kind: str, members: list[AnomalyFinding]) -> AnomalyFinding:
             key: sorted({item for m in members for item in items(m, key)})
             for key in keys
         }
+        summary, unlisted = _described(kind, members)
         singular, plural = _ITEM_NOUNS[kind]
-        unlisted = len({i for m in members for i in items(m, _NOT_LISTED)})
         if unlisted:
             noun = singular if unlisted == 1 else plural
-            summary += f" {unlisted} more {noun} seen are not described here."
+            verb = "is" if unlisted == 1 else "are"
+            summary = (
+                f"{summary} {unlisted} more {noun} seen {verb} not described here."
+            )
         if kind in INVENTORY_ITEM_KEYS:
-            summary += f" {TRUST_SEVERAL_ACTION}."
+            summary = f"{summary} {TRUST_SEVERAL_ACTION}."
+        summary = summary.strip()
         total = sum(len(named) for named in evidence.values())
         count = f": {total} {singular if total == 1 else plural}"
         anomaly_id = _replay_id(kind, entities, members)
@@ -425,6 +639,9 @@ def replay(kind: str, members: list[AnomalyFinding]) -> AnomalyFinding:
         _HELD_BACK,
         _CAPPED,
         _FULL,
+        ITEM_LABELS_KEY,
+        ITEM_ENTITIES_KEY,
+        SEEN_WHEN_KEY,
     ):
         evidence.pop(key, None)
     first = min(_first_seen(m) for m in members)
@@ -439,7 +656,9 @@ def replay(kind: str, members: list[AnomalyFinding]) -> AnomalyFinding:
     else:
         where = "Sentinel was at autonomy level 0"
     note = f"Seen while {where} ({seen}){count}; it may have been undone since."
-    evidence["summary"] = f"{note} {summary}".strip()
+    # Labels come from devices and the network: the same filter as a live
+    # alert's summary.
+    evidence["summary"] = printable(f"{note} {summary}".strip())
     evidence[SEEN_WHILE_SILENCED] = True
     evidence[MEMBER_IDS] = sorted({m.anomaly_id for m in members})
     return AnomalyFinding(

@@ -22,6 +22,9 @@ from custom_components.home_generative_agent.snapshot.network import (
 )
 
 from .network_common import (
+    ITEM_ENTITIES_KEY,
+    ITEM_LABELS_KEY,
+    SEEN_WHEN_KEY,
     anyone_home,
     client_excluded,
     client_known_for,
@@ -157,6 +160,20 @@ class NetworkUnknownDeviceJoinedRule:
                     "randomized_known": sorted(
                         c["key"] for c in joined if c.get("hostname_trusted")
                     ),
+                    # Each client's description and tracker, and what raised
+                    # the severity, so an owed replay for some of them names,
+                    # cools down and excludes only those, and says why (#802).
+                    ITEM_LABELS_KEY: {c["key"]: describe_joined(c) for c in joined},
+                    SEEN_WHEN_KEY: (
+                        "while nobody was home"
+                        if away
+                        else ("at night" if night else "")
+                    ),
+                    ITEM_ENTITIES_KEY: {
+                        c["key"]: str(c["tracker_entity_id"])
+                        for c in joined
+                        if c.get("tracker_entity_id")
+                    },
                 },
                 summary=(
                     f"{head}{context}: {listed([describe_joined(c) for c in joined])}."

@@ -1317,6 +1317,8 @@ async def test_no_replay_while_the_suppression_state_is_read_only(
     await engine._timed_run()
     assert notifier.calls == []
     assert list(_owed(engine)) == ["network_public_ip_changed"]
+    # Nothing can be saved, so no idle days are counted either.
+    assert cast("Any", engine)._suppression.state.owed_rule_idle == {}
 
 
 @pytest.mark.asyncio
@@ -2216,3 +2218,261 @@ async def test_a_waiting_live_alert_keeps_its_devices_out_of_the_replay(
     assert [f.evidence["device_keys"] for f in notifier.calls][-1] == ["zigbee:b"]
     assert "seen_while_silenced" not in notifier.calls[-1].evidence
     assert _owed(engine) == {}
+
+
+def _owed_radio(*keys: str) -> AnomalyFinding:
+    """Return an owed radio device alert as the rule reports it since #802."""
+    return AnomalyFinding(
+        anomaly_id="owed-radio-" + "-".join(keys),
+        type="radio_new_device_joined",
+        severity="low",
+        confidence=0.9,
+        triggering_entities=[],
+        evidence={
+            "device_keys": list(keys),
+            "summary": "New radio devices joined.",
+            "item_labels": {k: f"Plug {k}" for k in keys},
+        },
+        suggested_actions=["Check it"],
+        is_sensitive=True,
+        detected_at=NOW,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_rule_skipped_on_a_real_run_counts_as_idle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run without the rule's data counts a day and shows it (#802)."""
+    engine, _ = _engine(monkeypatch, _snapshot())
+    state = cast("Any", engine)._suppression.state
+    kind = "radio_new_device_joined"
+    state.owed_change_alerts[kind] = [_owed_radio("zigbee:z").as_dict()]
+
+    await engine._timed_run()
+
+    assert kind in cast("Any", engine).run_stats["inactive_rules"]
+    assert kind in state.owed_change_alerts
+    assert state.owed_rule_idle[kind]["days"] == 1
+    assert engine.owed_status()["owed_rules_idle_days"] == {kind: 1}
+
+
+def _owed_clients(*keys: str) -> AnomalyFinding:
+    """Return an owed unknown-client alert as the rule reports it since #802."""
+    return AnomalyFinding(
+        anomaly_id="owed-clients-" + "-".join(keys),
+        type="network_unknown_device_joined",
+        severity="medium",
+        confidence=0.9,
+        triggering_entities=[f"device_tracker.{k}" for k in keys],
+        evidence={
+            "client_keys": list(keys),
+            "summary": "New devices: " + ", ".join(keys) + ".",
+            "item_labels": {k: f"Phone {k}" for k in keys},
+            "item_entities": {k: f"device_tracker.{k}" for k in keys},
+        },
+        suggested_actions=["Check it"],
+        is_sensitive=True,
+        detected_at=NOW,
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_owed_kind_whose_rule_stops_running_waits_visibly(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Never dropped; warned every 7 days Sentinel ran without the rule (#802)."""
+    engine, _ = _engine(monkeypatch, _snapshot())
+    state = cast("Any", engine)._suppression.state
+    kind = "network_unknown_device_joined"
+    state.owed_change_alerts[kind] = [_owed_clients("k1", "k2").as_dict()]
+    track = cast("Any", engine)._track_idle_owed
+
+    for day in range(60):
+        # Two runs a day count once.
+        await track(set(), NOW + timedelta(days=day))
+        await track(set(), NOW + timedelta(days=day, hours=1))
+
+    assert kind in state.owed_change_alerts
+    assert state.owed_rule_idle[kind]["days"] == 60
+    warned = [r for r in caplog.records if "they are told once it runs" in r.message]
+    assert len(warned) == 8  # days 7, 14, ..., 56
+    assert "Sentinel still owes 2 network_unknown_device_joined" in warned[0].message
+    assert engine.owed_status() == {
+        "owed_change_alerts": {kind: 2},
+        "owed_rules_idle_days": {kind: 60},
+    }
+
+
+@pytest.mark.asyncio
+async def test_only_days_sentinel_ran_count_as_idle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shutdown adds nothing; a clock that ran ahead does not freeze the count."""
+    engine, _ = _engine(monkeypatch, _snapshot())
+    state = cast("Any", engine)._suppression.state
+    kind = "network_unknown_device_joined"
+    state.owed_change_alerts[kind] = [_owed_clients("k1").as_dict()]
+    track = cast("Any", engine)._track_idle_owed
+
+    # Ninety days off, then one run: one day.
+    await track(set(), NOW + timedelta(days=90))
+    assert state.owed_rule_idle[kind]["days"] == 1
+
+    # The clock ran a year ahead for one run, then was corrected.
+    await track(set(), NOW + timedelta(days=455))
+    assert state.owed_rule_idle[kind]["days"] == 2
+    await track(set(), NOW + timedelta(days=91))
+    assert state.owed_rule_idle[kind] == {
+        "days": 2,
+        "last": (NOW + timedelta(days=91)).date().isoformat(),
+    }
+    await track(set(), NOW + timedelta(days=92))
+    assert state.owed_rule_idle[kind]["days"] == 3
+
+
+@pytest.mark.asyncio
+async def test_a_rule_that_runs_is_not_idle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run resets the count; a stale or malformed record is replaced."""
+    engine, _ = _engine(monkeypatch, _snapshot())
+    state = cast("Any", engine)._suppression.state
+    kind = "network_unknown_device_joined"
+    state.owed_change_alerts[kind] = [_owed_clients("k1").as_dict()]
+    state.owed_rule_idle[kind] = {"days": 8, "last": "2026-09-06"}
+    state.owed_rule_idle["gone_kind"] = {"days": 3, "last": "2026-09-06"}
+    track = cast("Any", engine)._track_idle_owed
+
+    await track({kind}, NOW)
+    assert state.owed_rule_idle == {}  # reset, and the orphan cleaned up
+
+    state.owed_rule_idle[kind] = ["not", "a", "record"]
+    await track(set(), NOW + timedelta(days=1))
+    assert state.owed_rule_idle[kind]["days"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_rule_that_raised_is_not_idle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rule that raised on a real run is alive, not idle."""
+    snapshot, _ = _radio_snapshot()
+    engine, _ = _engine(monkeypatch, snapshot)
+    state = cast("Any", engine)._suppression.state
+    kind = "radio_new_device_joined"
+    state.owed_change_alerts[kind] = [_owed_radio("zigbee:z").as_dict()]
+    state.owed_rule_idle[kind] = {"days": 6, "last": "2026-09-06"}
+
+    def _raise(self: Any, snapshot: Any) -> list[AnomalyFinding]:
+        del self, snapshot
+        msg = "bad adapter data"
+        raise ValueError(msg)
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.sentinel.rules."
+        "radio_new_device_joined.RadioNewDeviceJoinedRule.evaluate",
+        _raise,
+    )
+
+    await engine._timed_run()
+
+    assert kind in cast("Any", engine).run_stats["failed_rules"]
+    assert kind not in state.owed_rule_idle
+
+
+@pytest.mark.asyncio
+async def test_a_rule_running_at_level_zero_is_not_idle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At level 0 the rule still counts as running, so no idle days are counted."""
+    engine, _notifier, _section = await _radio_engine(monkeypatch)
+    state = cast("Any", engine)._suppression.state
+    state.owed_rule_idle["radio_new_device_joined"] = {"days": 3, "last": "2026-09-01"}
+
+    await engine._timed_run()
+
+    assert list(_owed(engine)) == ["radio_new_device_joined"]
+    assert state.owed_rule_idle == {}
+    assert engine.owed_status() == {
+        "owed_change_alerts": {"radio_new_device_joined": 1},
+        "owed_rules_idle_days": {},
+    }
+
+
+@pytest.mark.asyncio
+async def test_an_exclusion_added_since_drops_only_that_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Excluding one owed client's tracker still tells the others (#802)."""
+    engine, _ = _engine(
+        monkeypatch,
+        _snapshot(),
+        options={
+            "sentinel_rule_entity_exclusions": {
+                "network_unknown_device_joined": ["device_tracker.k1"]
+            }
+        },
+    )
+    state = cast("Any", engine)._suppression.state
+    state.owed_change_alerts["network_unknown_device_joined"] = [
+        _owed_clients("k1", "k2").as_dict()
+    ]
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+
+    await cast("Any", engine)._send_owed_kind(
+        "network_unknown_device_joined",
+        [],
+        {},
+        _snapshot(),
+        NOW,
+        timedelta(0),
+        timedelta(0),
+        explain_enabled=False,
+        trigger_source="poll",
+        inventory_keys=[],
+    )
+
+    assert len(notifier.calls) == 1
+    sent = notifier.calls[0]
+    assert sent.evidence["client_keys"] == ["k2"]
+    assert sent.triggering_entities == ["device_tracker.k2"]
+    assert "Phone k1" not in sent.evidence["summary"]
+    assert "New device on the network: Phone k2." in sent.evidence["summary"]
+    assert state.owed_change_alerts == {}
+
+
+@pytest.mark.asyncio
+async def test_an_owed_alert_with_every_device_excluded_is_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, _ = _engine(
+        monkeypatch,
+        _snapshot(),
+        options={
+            "sentinel_rule_entity_exclusions": {
+                "network_unknown_device_joined": ["device_tracker.*"]
+            }
+        },
+    )
+    state = cast("Any", engine)._suppression.state
+    state.owed_change_alerts["network_unknown_device_joined"] = [
+        _owed_clients("k1", "k2").as_dict()
+    ]
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+
+    await cast("Any", engine)._send_owed_kind(
+        "network_unknown_device_joined",
+        [],
+        {},
+        _snapshot(),
+        NOW,
+        timedelta(0),
+        timedelta(0),
+        explain_enabled=False,
+        trigger_source="poll",
+        inventory_keys=[],
+    )
+
+    assert notifier.calls == []
+    assert state.owed_change_alerts == {}

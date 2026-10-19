@@ -122,6 +122,11 @@ class SuppressionState:
     # the key, where a version bump would load this file read-only there
     # (forcing level 0).
     owed_change_alerts: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    # Kind of owed alert whose rule is not running -> {"days": the days
+    # Sentinel ran without it, "last": the last such day (ISO date, UTC)}, so
+    # an alert waiting on a rule that stopped is visible (#802). Optional and
+    # additive, like the above.
+    owed_rule_idle: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SuppressionState:
@@ -147,6 +152,11 @@ class SuppressionState:
                 for kind, findings in _mapping(data.get("owed_change_alerts")).items()
                 if isinstance(findings, list)
             },
+            owed_rule_idle={
+                str(kind): dict(idle)
+                for kind, idle in _mapping(data.get("owed_rule_idle")).items()
+                if isinstance(idle, dict)
+            },
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -164,6 +174,9 @@ class SuppressionState:
             "owed_change_alerts": {
                 kind: [dict(f) for f in findings]
                 for kind, findings in self.owed_change_alerts.items()
+            },
+            "owed_rule_idle": {
+                kind: dict(idle) for kind, idle in self.owed_rule_idle.items()
             },
         }
 

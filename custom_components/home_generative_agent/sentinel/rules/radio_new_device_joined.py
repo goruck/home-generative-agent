@@ -10,7 +10,9 @@ from custom_components.home_generative_agent.sentinel.network_inventory import (
 from custom_components.home_generative_agent.snapshot.network import radio_cap
 
 from .network_common import (
+    ITEM_LABELS_KEY,
     PROTOCOL_LABELS,
+    SEEN_WHEN_KEY,
     anyone_home,
     is_night,
     listed,
@@ -66,9 +68,10 @@ class RadioNewDeviceJoinedRule:
         away = not anyone_home(snapshot)
         security = [d for d in devices if d.get("is_security_device")]
         severity: Severity = "low"
+        night = is_night(snapshot)
         if away and security:
             severity = "high"
-        elif away or is_night(snapshot):
+        elif away or night:
             severity = "medium"
         keys = sorted(device_key(d) for d in devices)
         count = len(devices)
@@ -82,6 +85,15 @@ class RadioNewDeviceJoinedRule:
                 display={
                     "device_ids": sorted(d["device_id"] for d in devices),
                     "security_device_ids": sorted(d["device_id"] for d in security),
+                    # Each device's description, and what raised the severity,
+                    # so an owed replay for some of them names only those
+                    # and still says why (#802).
+                    ITEM_LABELS_KEY: {device_key(d): _describe(d) for d in devices},
+                    SEEN_WHEN_KEY: (
+                        "while nobody was home"
+                        if away
+                        else ("at night" if night else "")
+                    ),
                 },
                 summary=(
                     f"{head}{context}: {listed([_describe(d) for d in devices])}."
