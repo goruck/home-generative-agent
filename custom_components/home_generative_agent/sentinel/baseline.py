@@ -33,6 +33,8 @@ import math
 from datetime import UTC, timedelta
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.components import persistent_notification
+from homeassistant.core import callback
 from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.const import (
@@ -61,7 +63,11 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from datetime import datetime
 
-    from homeassistant.core import HomeAssistant
+    from homeassistant.components.persistent_notification import (
+        Notification,
+        UpdateType,
+    )
+    from homeassistant.core import CALLBACK_TYPE, HomeAssistant
     from psycopg import AsyncConnection
     from psycopg.rows import DictRow
     from psycopg_pool import AsyncConnectionPool
@@ -155,8 +161,8 @@ METRIC_DOW_STD_PREFIX = "hourly_stddev_"
 # Global hourly metrics have one part ("14"); DOW metrics have two ("5_14").
 _DOW_METRIC_PARTS = 2
 
-# One persistent notice per kind, replaced each cycle, instead of one per
-# entity (#791). A notice lists at most this many entities by name.
+# One persistent notice per kind instead of one per entity (#791). Each cycle
+# adds to the notice until it is dismissed; it names at most this many.
 _ESTABLISHED_NOTIFICATION_ID = "hga_baseline_established"
 _DRIFT_NOTIFICATION_ID = "hga_baseline_drift"
 _NOTICE_MAX_LISTED = 10
@@ -393,6 +399,13 @@ class SentinelBaselineUpdater:
         self._stopped = False
         # entity_ids that crossed MIN_SAMPLES (no re-notification on restart).
         self._established: set[str] = set()
+        # What the open established and drift notices tell, by entity id:
+        # (name, value) and (name, current, reference, drift percent). Each
+        # cycle adds to these and re-posts the notice; dismissing it clears
+        # its entries, so an unread notice is never overwritten (#791).
+        self._notice_established: dict[str, tuple[str, float]] = {}
+        self._notice_drift: dict[str, tuple[str, float, float, float]] = {}
+        self._unsub_notices: CALLBACK_TYPE | None = None
         # In-memory Welford state for DOW slots: key = "entity_id:dow:hour",
         # value = (mean, m2, count).  m2 is the sum of squared deviations
         # (Welford's accumulator for variance).  Populated on async_initialize()
@@ -513,6 +526,9 @@ class SentinelBaselineUpdater:
         if self._task is not None:
             return
         self._stop_event.clear()
+        self._unsub_notices = persistent_notification.async_register_callback(
+            self._hass, self._on_notifications_updated
+        )
         self._task = self._hass.async_create_task(self._run_loop())
 
     async def stop(self) -> None:
@@ -520,6 +536,9 @@ class SentinelBaselineUpdater:
         # Latch before the not-started early return, not after: the entry that
         # never started is exactly the one whose deferred start is still armed.
         self._stopped = True
+        if self._unsub_notices is not None:
+            self._unsub_notices()
+            self._unsub_notices = None
 
         if self._task is None:
             return
@@ -591,8 +610,9 @@ class SentinelBaselineUpdater:
         """
         Store the counters offered since the last write, then prune the old.
 
-        No establishment or drift notice (dozens of clients would each
-        announce themselves) and no day-of-week rows: the usage rule reads
+        No establishment or drift notice (counters are not entities, and
+        dozens of clients would crowd out the entities the notices name)
+        and no day-of-week rows: the usage rule reads
         the hourly profile, and the weekly rows would be 336 more per
         counter for nothing. Rows of clients that left expire after
         ``COUNTER_ROW_RETENTION_DAYS`` (once a day).
@@ -628,8 +648,8 @@ class SentinelBaselineUpdater:
             if entity.get("platform") in ROUTER_PLATFORMS:
                 # A router integration's sensors are per-client figures
                 # (eero creates a rate, signal, and traffic sensor for every
-                # client it tracks): dozens of entities that would each earn
-                # an establishment notice and drift on every poll, and whose
+                # client it tracks): dozens of entities that would crowd the
+                # establishment notice and drift on every poll, and whose
                 # ids can carry a MAC. Their figures reach the baselines as
                 # the network section's counters instead.
                 router_entities.append(str(entity_id))
@@ -822,38 +842,76 @@ class SentinelBaselineUpdater:
                 await conn.commit()
 
                 # Check establishment crossings using RETURNING sample_count values.
-                established: list[tuple[str, float]] = []
+                established: list[str] = []
                 for entity_id, count in rolling_sample_counts.items():
                     if entity_id in self._established:
                         continue
                     if count >= min_samples:
                         self._established.add(entity_id)
-                        established.append((entity_id, entity_values[entity_id]))
-            if snapshot is None:
-                return
-            names = _friendly_names(snapshot)
-            if established:
-                await self._fire_establishment_notification(established, names)
-            # Fire drift notifications after commit (outside the conn context).
-            # Only fire for established entities — skip entities still in build-up.
-            drifted: list[tuple[str, float, float, float]] = []
-            for entity_id, value in entity_values.items():
-                if entity_id not in self._established:
-                    continue
-                ref_val = refs.get(entity_id)
-                if ref_val is None:
-                    continue
-                if ref_val == 0.0:
-                    drift_pct = 100.0 if value != 0.0 else 0.0
-                else:
-                    drift_pct = abs(value - ref_val) / abs(ref_val) * 100.0
-                if drift_pct >= drift_threshold_pct:
-                    drifted.append((entity_id, value, ref_val, drift_pct))
-            if drifted:
-                await self._fire_drift_notification(drifted, names)
-
+                        established.append(entity_id)
         except Exception:
             LOGGER.exception("Baseline DB write failed.")
+            return
+
+        # Notices go out after the commit, outside the connection. The network
+        # counters (snapshot None) are established like entities but raise no
+        # notice, see _write_offered_counters.
+        if snapshot is None:
+            return
+        names = _friendly_names(snapshot)
+        if established:
+            for entity_id in established:
+                LOGGER.debug(
+                    "Baseline established for %s (value=%.2f).",
+                    entity_id,
+                    entity_values[entity_id],
+                )
+                self._notice_established[entity_id] = (
+                    names.get(entity_id, entity_id),
+                    entity_values[entity_id],
+                )
+            await self._fire_establishment_notification()
+        # Only established entities drift; entities still building up do not.
+        drifted = False
+        for entity_id, value in entity_values.items():
+            if entity_id not in self._established:
+                continue
+            ref_val = refs.get(entity_id)
+            if ref_val is None:
+                continue
+            if ref_val == 0.0:
+                drift_pct = 100.0 if value != 0.0 else 0.0
+            else:
+                drift_pct = abs(value - ref_val) / abs(ref_val) * 100.0
+            if drift_pct >= drift_threshold_pct:
+                LOGGER.debug(
+                    "Baseline drift for %s: %.2f -> %.2f (%.1f%%).",
+                    entity_id,
+                    ref_val,
+                    value,
+                    drift_pct,
+                )
+                self._notice_drift[entity_id] = (
+                    names.get(entity_id, entity_id),
+                    value,
+                    ref_val,
+                    drift_pct,
+                )
+                drifted = True
+        if drifted:
+            await self._fire_drift_notification()
+
+    @callback
+    def _on_notifications_updated(
+        self, update_type: UpdateType, notifications: dict[str, Notification]
+    ) -> None:
+        """Forget what a notice told once it is dismissed."""
+        if update_type != persistent_notification.UpdateType.REMOVED:
+            return
+        if _ESTABLISHED_NOTIFICATION_ID in notifications:
+            self._notice_established.clear()
+        if _DRIFT_NOTIFICATION_ID in notifications:
+            self._notice_drift.clear()
 
     async def _notify(self, title: str, message: str, notification_id: str) -> None:
         """Create or replace one persistent HA notification."""
@@ -869,77 +927,60 @@ class SentinelBaselineUpdater:
                 blocking=False,
             )
         except Exception:  # noqa: BLE001
-            LOGGER.debug("Could not fire notification %s.", notification_id)
+            LOGGER.warning("Could not post notification %s.", notification_id)
 
-    async def _fire_establishment_notification(
-        self,
-        established: list[tuple[str, float]],
-        names: Mapping[str, str],
-    ) -> None:
+    async def _fire_establishment_notification(self) -> None:
         """
-        Fire one persistent HA notification for baselines established this cycle.
+        Post the notice of every baseline established since it was dismissed.
 
         Entities that start sampling together cross the threshold together, so
-        one notice per entity flooded the panel (#791). The notice is replaced
-        by a later cycle's, not added to.
+        one notice per entity flooded the panel (#791). They share one notice,
+        and a later cycle adds to it rather than overwriting it.
         """
-        for entity_id, value in established:
-            LOGGER.debug("Baseline established for %s (value=%.2f).", entity_id, value)
-        if len(established) == 1:
-            entity_id, value = established[0]
-            message = (
-                f"Baseline established for {names.get(entity_id, entity_id)}: "
-                f"normal \u2248 {value:.2f}."
-            )
+        entries = self._notice_established
+        if len(entries) == 1:
+            name, value = next(iter(entries.values()))
+            message = f"Baseline established for {name}: normal \u2248 {value:.2f}."
         else:
             lines = [
-                f"- {names.get(entity_id, entity_id)}: normal \u2248 {value:.2f}"
-                for entity_id, value in established[:_NOTICE_MAX_LISTED]
+                f"- {name}: normal \u2248 {value:.2f}"
+                for name, value in list(entries.values())[:_NOTICE_MAX_LISTED]
             ]
-            header = f"Baselines established for {len(established)} entities:"
-            message = "\n".join([header, *lines, *_more_line(len(established))])
+            header = f"Baselines established for {len(entries)} entities:"
+            message = "\n".join([header, *lines, *_more_line(len(entries))])
         await self._notify(
             "Sentinel Baseline Established", message, _ESTABLISHED_NOTIFICATION_ID
         )
 
-    async def _fire_drift_notification(
-        self,
-        drifted: list[tuple[str, float, float, float]],
-        names: Mapping[str, str],
-    ) -> None:
+    async def _fire_drift_notification(self) -> None:
         """
-        Fire one persistent HA notification for baselines that drifted this cycle.
+        Post the notice of every baseline drift since it was dismissed.
 
-        Each item is (entity_id, current value, reference value, drift percent).
         A home-wide shift drifts many entities at once, so they share one
-        notice, replaced by a later cycle's (#791).
+        notice (#791), largest drift first. A drift's reference is reset when
+        it is told, so a later cycle adds to the notice rather than
+        overwriting it; an entity that drifts again shows its latest drift.
         """
-        for entity_id, current, reference, pct in drifted:
-            LOGGER.debug(
-                "Baseline drift for %s: %.2f -> %.2f (%.1f%%).",
-                entity_id,
-                reference,
-                current,
-                pct,
-            )
-        if len(drifted) == 1:
-            entity_id, current, reference, pct = drifted[0]
+        entries = sorted(
+            self._notice_drift.values(), key=lambda entry: entry[3], reverse=True
+        )
+        if len(entries) == 1:
+            name, current, reference, pct = entries[0]
             message = (
-                f"Baseline drift detected for {names.get(entity_id, entity_id)}: "
+                f"Baseline drift detected for {name}: "
                 f"was {reference:.2f}, now {current:.2f} "
                 f"({pct:.1f}% change). Reference updated."
             )
         else:
             lines = [
-                f"- {names.get(entity_id, entity_id)}: was {reference:.2f}, "
-                f"now {current:.2f} ({pct:.1f}% change)"
-                for entity_id, current, reference, pct in drifted[:_NOTICE_MAX_LISTED]
+                f"- {name}: was {reference:.2f}, now {current:.2f} ({pct:.1f}% change)"
+                for name, current, reference, pct in entries[:_NOTICE_MAX_LISTED]
             ]
             header = (
-                f"Baseline drift detected for {len(drifted)} entities "
+                f"Baseline drift detected for {len(entries)} entities "
                 "(references updated):"
             )
-            message = "\n".join([header, *lines, *_more_line(len(drifted))])
+            message = "\n".join([header, *lines, *_more_line(len(entries))])
         await self._notify(
             "Sentinel Baseline Drift Detected", message, _DRIFT_NOTIFICATION_ID
         )
@@ -1702,12 +1743,20 @@ def _evaluate_dow_anomaly(  # noqa: PLR0913
 
 
 def _friendly_names(snapshot: FullStateSnapshot) -> dict[str, str]:
-    """Map each snapshot entity id to its friendly name."""
-    return {
-        str(entity["entity_id"]): entity.get("friendly_name") or entity["entity_id"]
-        for entity in snapshot.get("entities", [])
-        if entity.get("entity_id")
-    }
+    """
+    Map each snapshot entity id to its friendly name, on one line.
+
+    Whitespace runs collapse to one space, so a name with a line break cannot
+    start a line of its own in a notice's list.
+    """
+    names: dict[str, str] = {}
+    for entity in snapshot.get("entities", []):
+        entity_id = entity.get("entity_id")
+        if not entity_id:
+            continue
+        name = " ".join(str(entity.get("friendly_name") or entity_id).split())
+        names[str(entity_id)] = name or str(entity_id)
+    return names
 
 
 def _more_line(total: int) -> list[str]:

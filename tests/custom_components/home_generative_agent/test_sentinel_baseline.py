@@ -6,9 +6,10 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from homeassistant.components.persistent_notification import UpdateType
 
 from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
@@ -1235,6 +1236,163 @@ async def test_drift_in_one_cycle_posts_one_summary_notice() -> None:
         for eid in ids
     )
     assert "more" not in data["message"]
+
+
+def _listed(message: str) -> list[str]:
+    """Return a summary notice's list lines."""
+    return [line for line in message.splitlines() if line.startswith("- ")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("count", "tail"), [(10, None), (11, "\u2026and 1 more.")])
+async def test_summary_notice_cap_boundary(count: int, tail: str | None) -> None:
+    """A notice names up to 10 entities and counts the rest."""
+    updater, calls = _notice_updater([], 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20})
+    updater._established = set()
+    entities = [_entity(f"sensor.t_{i:02d}", "22.0") for i in range(count)]
+
+    await updater._update_baselines(_snapshot(entities))
+
+    message = calls[0][1]["message"]
+    assert len(_listed(message)) == 10
+    if tail is None:
+        assert "more" not in message
+    else:
+        assert message.endswith(tail)
+
+
+@pytest.mark.asyncio
+async def test_summary_notice_lists_friendly_names_on_one_line() -> None:
+    """The list names entities by friendly name, with line breaks collapsed."""
+    updater, calls = _notice_updater([], 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20})
+    updater._established = set()
+    hall = _entity("sensor.a", "1.0")
+    hall["friendly_name"] = "Hall Temp"
+    sneaky = _entity("sensor.b", "2.0")
+    sneaky["friendly_name"] = "Attic\n- Front Door: normal \u2248 0.00"
+
+    await updater._update_baselines(_snapshot([hall, sneaky]))
+
+    assert _listed(calls[0][1]["message"]) == [
+        "- Hall Temp: normal \u2248 1.00",
+        "- Attic - Front Door: normal \u2248 0.00: normal \u2248 2.00",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_establishment_and_drift_in_one_cycle_post_two_notices() -> None:
+    """A cycle with both kinds posts each under its own id."""
+    ref_rows = [{"entity_id": "sensor.old", "reference_value": 20.0}]
+    updater, calls = _notice_updater(
+        ref_rows,
+        20,
+        {
+            CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20,
+            CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT: 30.0,
+        },
+    )
+    updater._established = {"sensor.old"}
+
+    await updater._update_baselines(
+        _snapshot([_entity("sensor.old", "30.0"), _entity("sensor.new", "5.0")])
+    )
+
+    assert sorted(data["notification_id"] for _, data in calls) == [
+        "hga_baseline_drift",
+        "hga_baseline_established",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_later_cycle_adds_to_an_undismissed_notice() -> None:
+    """A later cycle adds its entities instead of overwriting the notice (#791)."""
+    updater, calls = _notice_updater([], 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20})
+    updater._established = set()
+    first = [_entity(f"sensor.first_{i}", "1.0") for i in range(3)]
+    await updater._update_baselines(_snapshot(first))
+
+    await updater._update_baselines(_snapshot([_entity("sensor.late", "2.0")]))
+
+    assert len(calls) == 2
+    message = calls[1][1]["message"]
+    assert message.startswith("Baselines established for 4 entities:")
+    assert "- sensor.first_0: normal \u2248 1.00" in message
+    assert "- sensor.late: normal \u2248 2.00" in message
+
+
+@pytest.mark.asyncio
+async def test_dismissing_a_notice_starts_it_afresh() -> None:
+    """Once a notice is dismissed, the next one tells only what came after."""
+    updater, calls = _notice_updater([], 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20})
+    updater._established = set()
+    await updater._update_baselines(
+        _snapshot([_entity("sensor.a", "1.0"), _entity("sensor.b", "1.0")])
+    )
+    updater._notice_drift["sensor.x"] = ("X", 2.0, 1.0, 100.0)
+
+    updater._on_notifications_updated(
+        UpdateType.REMOVED, {"hga_baseline_established": MagicMock()}
+    )
+    await updater._update_baselines(_snapshot([_entity("sensor.c", "3.0")]))
+
+    assert calls[-1][1]["message"] == (
+        "Baseline established for sensor.c: normal \u2248 3.00."
+    )
+    # Dismissing one kind leaves the other's entries alone.
+    assert "sensor.x" in updater._notice_drift
+
+
+@pytest.mark.asyncio
+async def test_notice_updates_other_than_removal_keep_entries() -> None:
+    """Creating or updating a notice does not clear what it tells."""
+    updater, _ = _notice_updater([], 20, {})
+    updater._notice_established["sensor.a"] = ("A", 1.0)
+
+    updater._on_notifications_updated(
+        UpdateType.UPDATED, {"hga_baseline_established": MagicMock()}
+    )
+
+    assert "sensor.a" in updater._notice_established
+
+
+@pytest.mark.asyncio
+async def test_drift_notice_lists_largest_drift_first() -> None:
+    """The drift notice names the largest drifts, not the first ones seen."""
+    ids = [f"sensor.p_{i:02d}" for i in range(12)]
+    ref_rows = [{"entity_id": eid, "reference_value": 100.0} for eid in ids]
+    updater, calls = _notice_updater(
+        ref_rows, 1, {CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT: 30.0}
+    )
+    updater._established = set(ids)
+    # sensor.p_00 drifts 31%, ..., sensor.p_11 drifts 42%.
+    entities = [_entity(eid, str(131.0 + i)) for i, eid in enumerate(ids)]
+
+    await updater._update_baselines(_snapshot(entities))
+
+    listed = _listed(calls[0][1]["message"])
+    assert listed[0].startswith("- sensor.p_11:")
+    assert not any(
+        line.startswith(("- sensor.p_00:", "- sensor.p_01:")) for line in listed
+    )
+
+
+def test_start_and_stop_follow_notice_dismissals() -> None:
+    """The updater listens for dismissals while it runs, and stops after."""
+    hass = MagicMock()
+    # Close the run loop coroutine instead of scheduling it.
+    hass.async_create_task.side_effect = lambda coro: coro.close()
+    unsub = MagicMock()
+    updater = SentinelBaselineUpdater(hass, MagicMock(), {})
+    with patch(
+        "custom_components.home_generative_agent.sentinel.baseline."
+        "persistent_notification.async_register_callback",
+        return_value=unsub,
+    ) as register:
+        updater.start()
+        register.assert_called_once_with(hass, updater._on_notifications_updated)
+        asyncio.run(updater.stop())
+
+    unsub.assert_called_once_with()
 
 
 # ---------------------------------------------------------------------------
