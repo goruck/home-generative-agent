@@ -484,7 +484,7 @@ async def test_index_tools_does_not_schedule_a_write_onto_a_closed_pool() -> Non
     ):
         await entity._async_index_tools(MagicMock(), rd)
 
-    entity.hass.async_create_task.assert_not_called()
+    entity.hass.async_create_background_task.assert_not_called()
     assert rd.tool_indexing_in_progress is False
     assert rd.tool_index_failed is False
 
@@ -768,9 +768,14 @@ def _index_entity() -> Any:
     """Build a bare entity: _async_index_tools only touches self.hass."""
     entity = HGAConversationEntity.__new__(HGAConversationEntity)
     entity.hass = MagicMock()
-    # Close coroutines handed to async_create_task so un-run background
-    # indexing never triggers "coroutine was never awaited" warnings.
+    # Close coroutines handed to the task factories so un-run background
+    # indexing never triggers "coroutine was never awaited" warnings. The
+    # index write is a background task, so bootstrap does not wait on it
+    # (#811); a plain task must not be used for it.
     entity.hass.async_create_task = MagicMock(
+        side_effect=lambda coro, **_kw: coro.close()
+    )
+    entity.hass.async_create_background_task = MagicMock(
         side_effect=lambda coro, **_kw: coro.close()
     )
     return entity
@@ -831,7 +836,7 @@ async def test_index_tools_fast_path_all_live_keys_hashed() -> None:
 
     provider_mock.assert_not_called()
     local_mock.assert_not_called()
-    entity.hass.async_create_task.assert_not_called()
+    entity.hass.async_create_background_task.assert_not_called()
     assert rd.tool_indexing_in_progress is False
 
 
@@ -859,7 +864,7 @@ async def test_index_tools_delta_missing_key_indexes_inline() -> None:
     # would leave the key unindexed and re-fire discovery every turn).
     provider_mock.assert_not_called()
     gather_mock.assert_awaited_once()
-    entity.hass.async_create_task.assert_not_called()
+    entity.hass.async_create_background_task.assert_not_called()
     assert "assist::HassStartTimer" in rd.tool_content_hashes
     assert rd.tool_index_ready is True
     assert rd.tool_indexing_in_progress is False
@@ -941,7 +946,7 @@ async def test_index_tools_ready_without_llm_api_is_noop() -> None:
         await entity._async_index_tools(MagicMock(), rd)
 
     provider_mock.assert_not_called()
-    entity.hass.async_create_task.assert_not_called()
+    entity.hass.async_create_background_task.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1012,7 +1017,8 @@ async def test_index_tools_startup_path_still_backgrounds() -> None:
     ):
         await entity._async_index_tools(MagicMock(), rd)
 
-    entity.hass.async_create_task.assert_called_once()
+    entity.hass.async_create_background_task.assert_called_once()
+    entity.hass.async_create_task.assert_not_called()
     # The background task was not executed, so hashes are still pending.
     assert rd.tool_content_hashes == {}
     # Eviction is wired into the full discovery pass, and sees what it found.
@@ -1037,7 +1043,7 @@ async def test_index_tools_no_changes_resets_in_progress() -> None:
 
     assert rd.tool_index_ready is True
     assert rd.tool_indexing_in_progress is False
-    entity.hass.async_create_task.assert_not_called()
+    entity.hass.async_create_background_task.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1064,7 +1070,7 @@ async def test_index_tools_delta_without_new_writes_resets_in_progress() -> None
     queue_mock.assert_called_once()
     assert rd.tool_index_ready is True
     assert rd.tool_indexing_in_progress is False
-    entity.hass.async_create_task.assert_not_called()
+    entity.hass.async_create_background_task.assert_not_called()
 
 
 def test_per_turn_call_site_passes_llm_api() -> None:
