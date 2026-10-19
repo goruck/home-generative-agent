@@ -759,7 +759,7 @@ class SentinelEngine:
         """
         return {
             "owed_change_alerts": {
-                kind: len(findings)
+                kind: owed_alerts.owed_count(kind, findings)
                 for kind, findings in self._suppression.state.owed_change_alerts.items()
             }
         }
@@ -898,6 +898,7 @@ class SentinelEngine:
         *,
         explain_enabled: bool,
         trigger_source: str,
+        failed: frozenset[str] = frozenset(),
     ) -> list[str]:
         """
         Send the owed change alerts once they can go out.
@@ -919,7 +920,7 @@ class SentinelEngine:
             return []
         # At level 0 too: a rule that runs while Sentinel is passive is not
         # idle, and its alerts must not expire when the level is raised.
-        await self._expire_idle_owed(ran, snapshot, now)
+        await self._expire_idle_owed(ran | failed, snapshot, now)
         if not owed or self._is_passive():
             return []
         inventory_keys: list[str] = []
@@ -949,67 +950,92 @@ class SentinelEngine:
         return inventory_keys
 
     async def _expire_idle_owed(
-        self, ran: set[str], snapshot: FullStateSnapshot, now: datetime
+        self, alive: set[str], snapshot: FullStateSnapshot, now: datetime
     ) -> None:
         """
-        Note the owed kinds whose rule ran; drop those idle too long (#802).
+        Count the days owed kinds' rules did not run; drop those idle too long.
 
         An owed alert is told once its rule runs. One whose rule stops for
         good (network checks turned off, the integration removed) would stay
-        saved without end and come back months later: it is logged once after
-        ``OWED_IDLE_WARN_DAYS`` and dropped after ``OWED_IDLE_EXPIRE_DAYS``,
-        audited as ``owed_expired``.
+        saved without end and come back months later (#802). Each day
+        Sentinel runs without a kind's rule counts once; after
+        ``OWED_IDLE_WARN_DAYS`` a warning is logged, after
+        ``OWED_IDLE_EXPIRE_DAYS`` the kind is dropped and audited as
+        ``owed_expired``. ``alive`` holds the rules that ran or raised: a
+        broken rule is not a removed one.
         """
         state = self._suppression.state
         owed = state.owed_change_alerts
         today = dt_util.as_utc(now).date().isoformat()
         changed = False
+        expired: list[AnomalyFinding] = []
         for kind in list(owed):
-            if kind in ran:
-                self._owed_idle_warned.discard(kind)
-                if state.owed_rule_ran.get(kind) != today:
-                    state.owed_rule_ran[kind] = today
+            try:
+                if kind in alive:
+                    self._owed_idle_warned.discard(kind)
+                    if state.owed_rule_idle.pop(kind, None) is not None:
+                        changed = True
+                    continue
+                idle = state.owed_rule_idle.get(kind) or {}
+                days = idle.get("days")
+                days = days if isinstance(days, int) and days > 0 else 0
+                if idle.get("last") != today:
+                    days += 1
+                    state.owed_rule_idle[kind] = {"days": days, "last": today}
                     changed = True
-                continue
-            members = owed_alerts.read_members(owed[kind])
-            idle = now - owed_alerts.idle_since(state.owed_rule_ran.get(kind), members)
-            if idle >= timedelta(days=owed_alerts.OWED_IDLE_EXPIRE_DAYS):
-                LOGGER.warning(
-                    "Dropping %d owed Sentinel %s alerts: the rule has not run "
-                    "for %d days.",
-                    len(members),
-                    kind,
-                    idle.days,
-                )
-                if members:
-                    await _append_finding_audit(
-                        self._audit_store,
-                        snapshot,
-                        owed_alerts.replay(kind, members),
-                        None,
-                        SUPPRESSION_REASON_OWED_EXPIRED,
+                members = owed_alerts.read_members(owed[kind])
+                if days >= owed_alerts.OWED_IDLE_EXPIRE_DAYS:
+                    LOGGER.warning(
+                        "Dropping %d owed Sentinel %s alerts: the rule has not "
+                        "run on %d days Sentinel ran.",
+                        len(members),
+                        kind,
+                        days,
                     )
-                del owed[kind]
-                self._owed_idle_warned.discard(kind)
-                changed = True
-            elif (
-                idle >= timedelta(days=owed_alerts.OWED_IDLE_WARN_DAYS)
-                and kind not in self._owed_idle_warned
-            ):
-                self._owed_idle_warned.add(kind)
+                    if members:
+                        expired.append(owed_alerts.replay(kind, members))
+                    del owed[kind]
+                    state.owed_rule_idle.pop(kind, None)
+                    self._owed_idle_warned.discard(kind)
+                    changed = True
+                elif (
+                    days >= owed_alerts.OWED_IDLE_WARN_DAYS
+                    and kind not in self._owed_idle_warned
+                ):
+                    self._owed_idle_warned.add(kind)
+                    LOGGER.warning(
+                        "Sentinel holds %d owed %s alerts, but the rule has not "
+                        "run on %d days Sentinel ran; they are dropped after %d.",
+                        len(members),
+                        kind,
+                        days,
+                        owed_alerts.OWED_IDLE_EXPIRE_DAYS,
+                    )
+            except (ValueError, TypeError, KeyError, AttributeError):
+                # Saved state that cannot be read must not stop Sentinel on
+                # every run after it: drop that kind and go on.
                 LOGGER.warning(
-                    "Sentinel holds %d owed %s alerts, but the rule has not run "
-                    "for %d days; they are dropped after %d days.",
-                    len(members),
-                    kind,
-                    idle.days,
-                    owed_alerts.OWED_IDLE_EXPIRE_DAYS,
+                    "Dropping owed Sentinel %s alerts that could not be read.", kind
                 )
-        for kind in [k for k in state.owed_rule_ran if k not in owed]:
-            del state.owed_rule_ran[kind]
+                owed.pop(kind, None)
+                state.owed_rule_idle.pop(kind, None)
+                changed = True
+        for kind in [k for k in state.owed_rule_idle if k not in owed]:
+            del state.owed_rule_idle[kind]
             changed = True
-        if changed:
-            await self._suppression.async_save()
+        if not changed:
+            return
+        await self._suppression.async_save()
+        # Audited once the drop is saved, so a failed save cannot audit the
+        # same alerts again on the next run.
+        for finding in expired:
+            await _append_finding_audit(
+                self._audit_store,
+                snapshot,
+                finding,
+                None,
+                SUPPRESSION_REASON_OWED_EXPIRED,
+            )
 
     async def _send_owed_kind(  # noqa: PLR0913
         self,
@@ -2114,6 +2140,7 @@ class SentinelEngine:
             cooldown_entity,
             explain_enabled=explain_enabled,
             trigger_source=trigger_source,
+            failed=frozenset(evaluation.failed_rules),
         )
 
         # A replay told a held posture change that a live one still reports

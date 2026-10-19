@@ -758,6 +758,19 @@ validation.
 
 ---
 
+### An `owed_expired` audit record can be evicted as soon as it is written
+
+**What:** When an owed change kind expires (#802), `SentinelEngine._expire_idle_owed` audits the dropped alerts with reason `owed_expired`. The audit store keeps user-facing (`not_suppressed`) records and evicts suppressed ones first (`audit/store.py`), so in a store already full of delivered alerts the new `owed_expired` record is the only evictable one and goes at once. The WARNING log line still records the drop, but the item-level record does not survive.
+
+**Why:** Found by Codex in the review of #802. Rare: it needs a store at capacity with only `not_suppressed` records, and an owed kind idle for 30 days.
+
+**How to apply:** Treat `owed_expired` as protected from eviction like `not_suppressed` (it is a one-time record of alerts the user never saw), or keep a small reserved slot for it. Pin it with a test at capacity.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
 ### A Sentinel batch held at unload is never sent but is audited as delivered
 
 **What:** `SentinelNotifier.async_notify` (`sentinel/notifier.py`) holds non-high findings past the rate limit in `_held_batch` and returns True, so the engine audits them `not_suppressed`. `stop()` cancels the batch timer without flushing, so findings held when the entry unloads or reloads are never pushed, yet they stay counted in the daily digest and the health sensor's notification KPIs, and are protected from eviction. A batch summary that does go out also carries no per-finding action buttons.

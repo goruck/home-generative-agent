@@ -478,12 +478,65 @@ def test_a_replay_lists_every_described_item_across_members() -> None:
 
 
 def test_an_alert_owed_before_labels_keeps_its_summary() -> None:
-    """Without a description for every item, the stored summary is used."""
+    """An untouched alert owed before #802 is told by its stored summary."""
     members = [_labelled_clients("k1"), _clients("k2", minute=5)]
     sent = owed.replay("network_unknown_device_joined", members)
     summary = sent.evidence["summary"]
-    assert "New clients: k1. New clients: k2." in summary
+    assert "New device on the network: Phone k1. New clients: k2." in summary
+    assert "not described" not in summary
+
+
+def test_a_trimmed_alert_owed_before_labels_is_counted_not_named() -> None:
+    """Its stored summary would name a told device: the rest is only counted."""
+    rest = owed.without(_clients("k1", "k2"), {"client_keys": {"k1"}})
+    assert rest is not None
+    assert "summary" not in rest.evidence
+    summary = owed.replay("network_unknown_device_joined", [rest]).evidence["summary"]
+    assert "k1" not in summary
+    assert "1 more device seen are not described here." in summary
+
+
+def test_an_overflow_only_replay_names_no_told_device() -> None:
+    """Only absorbed items left, without labels: counted, never the old text."""
+    member = replace(
+        _labelled_clients("k1"),
+        evidence={
+            **_labelled_clients("k1").evidence,
+            "client_keys": ["k1", "late"],
+            "owed_not_listed": ["late"],
+        },
+    )
+    rest = owed.without(member, {"client_keys": {"k1"}})
+    assert rest is not None
+    summary = owed.replay("network_unknown_device_joined", [rest]).evidence["summary"]
     assert "Phone k1" not in summary
+    assert "1 more device seen are not described here." in summary
+
+
+def test_a_replay_says_what_raised_the_severity() -> None:
+    member = replace(
+        _labelled_clients("k1"),
+        evidence={
+            **_labelled_clients("k1").evidence,
+            "seen_when": "while nobody was home",
+        },
+    )
+    sent = owed.replay("network_unknown_device_joined", [member])
+    assert "At least one joined while nobody was home." in sent.evidence["summary"]
+    assert "seen_when" not in sent.evidence
+
+
+def test_a_replay_summary_drops_control_characters() -> None:
+    member = replace(
+        _labelled_clients("k1"),
+        evidence={
+            **_labelled_clients("k1").evidence,
+            owed.ITEM_LABELS: {"k1": "Phone\u202ek1"},
+        },
+    )
+    sent = owed.replay("network_unknown_device_joined", [member])
+    assert "\u202e" not in sent.evidence["summary"]
+    assert "Phonek1" in sent.evidence["summary"]
 
 
 def test_an_account_replay_names_what_is_left_without_labels() -> None:
@@ -535,11 +588,18 @@ def test_absorbed_items_bring_their_maps() -> None:
     owed.record(store, _labelled_clients("late", minute=60))
     latest = owed.read_members(store["network_unknown_device_joined"])[-1]
     assert latest.evidence[owed.ITEM_ENTITIES]["late"] == "device_tracker.late"
-    assert "device_tracker.late" in latest.triggering_entities
+    # Not a triggering entity: its cooldown must not hold back the whole kind.
+    assert "device_tracker.late" not in latest.triggering_entities
+    # Described when told, since its rule gave a description.
+    summary = owed.replay(
+        "network_unknown_device_joined",
+        owed.read_members(store["network_unknown_device_joined"]),
+    ).evidence["summary"]
+    assert "not described" not in summary
 
 
-def test_idle_since_reads_the_saved_day_or_the_first_sighting() -> None:
-    member = _clients("k1")
-    assert owed.idle_since("2026-10-01", [member]) == datetime(2026, 10, 1, tzinfo=UTC)
-    assert owed.idle_since(None, [member]) == member.detected_at
-    assert owed.idle_since("not a day", [member]) == member.detected_at
+def test_the_owed_count_is_items_for_item_kinds() -> None:
+    stored = [_clients("k1", "k2").as_dict(), _clients("k2", "k3", minute=5).as_dict()]
+    assert owed.owed_count("network_unknown_device_joined", stored) == 3
+    posture = [_finding("network_public_ip_changed", {"public_ip_key": "c"}).as_dict()]
+    assert owed.owed_count("network_public_ip_changed", posture) == 1

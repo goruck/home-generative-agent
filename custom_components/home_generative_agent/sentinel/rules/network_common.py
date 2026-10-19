@@ -144,6 +144,14 @@ PROTOCOL_LABELS: dict[str, str] = {
 # Longest list of names spelled out in one summary before "and N more".
 MAX_LISTED_ITEMS = 10
 
+# Display evidence an item rule (new devices, new clients) adds so that an
+# owed alert told later names, cools down and excludes each item on its own
+# (#802, see sentinel/owed.py): how each item is described, the entity each is
+# tracked by, and the circumstance that raised the severity, if any.
+ITEM_LABELS_KEY = "item_labels"
+ITEM_ENTITIES_KEY = "item_entities"
+SEEN_WHEN_KEY = "seen_when"
+
 
 def listed(names: Sequence[str], limit: int = MAX_LISTED_ITEMS) -> str:
     """Join *names*, capping the list with an "and N more" tail."""
@@ -237,7 +245,7 @@ def plural(count: int, singular: str, plural_form: str | None = None) -> str:
     return f"{count} {noun(count, singular, plural_form)}"
 
 
-def _printable(text: str) -> str:
+def printable(text: str) -> str:
     """Drop control and format characters (bidi overrides, zero-width joiners)."""
     return "".join(ch for ch in text if unicodedata.category(ch)[0] != "C")
 
@@ -269,7 +277,7 @@ def make_finding(  # noqa: PLR0913
     if any("." in action for action in actions):
         msg = f"{rule_id}: suggested actions must not contain '.'"
         raise ValueError(msg)
-    full_evidence = {**evidence, **(display or {}), "summary": _printable(summary)}
+    full_evidence = {**evidence, **(display or {}), "summary": printable(summary)}
     return AnomalyFinding(
         anomaly_id=build_anomaly_id(rule_id, entities, hashable_evidence(evidence)),
         type=rule_id,

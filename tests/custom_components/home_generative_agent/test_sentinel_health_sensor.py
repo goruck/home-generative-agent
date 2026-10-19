@@ -694,3 +694,19 @@ async def test_proposals_approved_24h_boundary_just_outside_not_counted() -> Non
     await sensor._async_refresh()
 
     assert sensor._attrs["discovery_proposals_approved_24h"] == 0
+
+
+@pytest.mark.asyncio
+async def test_refresh_shows_owed_change_alerts() -> None:
+    """What Sentinel still owes is on the sensor, by kind (#802)."""
+    sensor = _make_sensor(sentinel_enabled=True, records=[])
+    engine = cast("MagicMock", sensor._sentinel)
+    engine.autonomy_status.return_value = {"autonomy_level": 1}
+    engine.owed_status.return_value = {
+        "owed_change_alerts": {"radio_new_device_joined": 2}
+    }
+    _mock_async_write_ha_state(sensor)
+
+    await sensor._async_refresh()
+
+    assert sensor._attrs["owed_change_alerts"] == {"radio_new_device_joined": 2}

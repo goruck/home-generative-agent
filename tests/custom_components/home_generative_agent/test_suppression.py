@@ -519,3 +519,21 @@ def test_a_device_cooldown_with_no_device_cools_the_type() -> None:
     register_device_cooldown(state, finding, dt_util.utcnow())
     assert "network_router_update_pending" in state.last_by_type
     assert state.last_by_entity == {}
+
+
+def test_owed_rule_idle_round_trips_and_drops_bad_values() -> None:
+    """The per-kind idle days (#802) load and save; a bad entry is dropped."""
+    state = SuppressionState.from_dict(
+        {
+            "owed_rule_idle": {
+                "radio_new_device_joined": {"days": 3, "last": "2026-10-01"},
+                "bad": 5,
+            }
+        }
+    )
+    assert state.owed_rule_idle == {
+        "radio_new_device_joined": {"days": 3, "last": "2026-10-01"}
+    }
+    restored = SuppressionState.from_dict(state.as_dict())
+    assert restored.owed_rule_idle == state.owed_rule_idle
+    assert SuppressionState.from_dict({}).owed_rule_idle == {}

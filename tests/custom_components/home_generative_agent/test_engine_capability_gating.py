@@ -2242,66 +2242,133 @@ def _owed_clients(*keys: str) -> AnomalyFinding:
 async def test_an_owed_kind_whose_rule_stops_running_expires(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Logged once after a week idle, dropped and audited after 30 days (#802)."""
+    """Warned after 7 idle days Sentinel ran, dropped and audited after 30 (#802)."""
     engine, _ = _engine(monkeypatch, _snapshot())
     state = cast("Any", engine)._suppression.state
-    state.owed_change_alerts["network_unknown_device_joined"] = [
-        _owed_clients("k1").as_dict()
-    ]
-    state.owed_rule_ran["network_unknown_device_joined"] = "2026-09-07"
+    kind = "network_unknown_device_joined"
+    state.owed_change_alerts[kind] = [_owed_clients("k1").as_dict()]
     expire = cast("Any", engine)._expire_idle_owed
 
-    await expire(set(), _snapshot(), NOW + timedelta(days=8))
-    await expire(set(), _snapshot(), NOW + timedelta(days=9))
-    warned = [r for r in caplog.records if "dropped after 30 days" in r.message]
+    for day in range(29):
+        # Two runs a day count once.
+        await expire(set(), _snapshot(), NOW + timedelta(days=day))
+        await expire(set(), _snapshot(), NOW + timedelta(days=day, hours=1))
+    warned = [r for r in caplog.records if "they are dropped after 30" in r.message]
     assert len(warned) == 1
-    assert "network_unknown_device_joined" in state.owed_change_alerts
+    assert state.owed_rule_idle[kind]["days"] == 29
+    assert kind in state.owed_change_alerts
 
-    await expire(set(), _snapshot(), NOW + timedelta(days=31))
+    await expire(set(), _snapshot(), NOW + timedelta(days=29))
     assert state.owed_change_alerts == {}
-    assert state.owed_rule_ran == {}
+    assert state.owed_rule_idle == {}
     audit = cast("DummyAudit", cast("Any", engine)._audit_store)
     assert audit.calls[-1]["suppression_reason_code"] == "owed_expired"
     assert audit.calls[-1]["finding"].evidence["client_keys"] == ["k1"]
-    assert any("Dropping 1 owed Sentinel" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio
-async def test_an_owed_kind_whose_rule_runs_never_expires(
+async def test_only_days_sentinel_ran_count_as_idle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A run moves the kind's day forward, so held alerts do not age out."""
+    """A shutdown, clock jump or legacy alert cannot expire anything at once."""
     engine, _ = _engine(monkeypatch, _snapshot())
     state = cast("Any", engine)._suppression.state
-    state.owed_change_alerts["network_unknown_device_joined"] = [
-        _owed_clients("k1").as_dict()
-    ]
-    state.owed_rule_ran["network_unknown_device_joined"] = "2026-08-01"
+    kind = "network_unknown_device_joined"
+    # Owed by a build before #802: no idle record, first seen long ago.
+    state.owed_change_alerts[kind] = [_owed_clients("k1").as_dict()]
 
-    later = NOW + timedelta(days=40)
     await cast("Any", engine)._expire_idle_owed(
-        {"network_unknown_device_joined"}, _snapshot(), later
+        set(), _snapshot(), NOW + timedelta(days=90)
     )
 
-    assert "network_unknown_device_joined" in state.owed_change_alerts
-    assert state.owed_rule_ran == {
-        "network_unknown_device_joined": later.date().isoformat()
-    }
+    assert kind in state.owed_change_alerts
+    assert state.owed_rule_idle[kind]["days"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_rule_that_runs_is_not_idle(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A run resets the count; idle again later is counted and warned afresh."""
+    engine, _ = _engine(monkeypatch, _snapshot())
+    state = cast("Any", engine)._suppression.state
+    kind = "network_unknown_device_joined"
+    state.owed_change_alerts[kind] = [_owed_clients("k1").as_dict()]
+    state.owed_rule_idle[kind] = {"days": 8, "last": "2026-09-06"}
+    expire = cast("Any", engine)._expire_idle_owed
+    await expire(set(), _snapshot(), NOW)
+    assert any("they are dropped after 30" in r.message for r in caplog.records)
+    caplog.clear()
+
+    await expire({kind}, _snapshot(), NOW + timedelta(days=1))
+    assert state.owed_rule_idle == {}
+    assert kind in state.owed_change_alerts
+
+    for day in range(2, 9):
+        await expire(set(), _snapshot(), NOW + timedelta(days=day))
+    assert state.owed_rule_idle[kind]["days"] == 7
+    assert any("they are dropped after 30" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_rule_that_raised_is_not_idle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken rule is not a removed one: its owed alerts do not age out."""
+    engine, _ = _engine(monkeypatch, _snapshot())
+    state = cast("Any", engine)._suppression.state
+    kind = "network_unknown_device_joined"
+    state.owed_change_alerts[kind] = [_owed_clients("k1").as_dict()]
+    state.owed_rule_idle[kind] = {"days": 29, "last": "2026-09-06"}
+
+    await cast("Any", engine)._send_owed_changes(
+        [],
+        {},
+        set(),
+        _snapshot(),
+        NOW,
+        timedelta(0),
+        timedelta(0),
+        explain_enabled=False,
+        trigger_source="poll",
+        failed=frozenset({kind}),
+    )
+
+    assert state.owed_rule_idle == {}
+    assert kind in state.owed_change_alerts
+
+
+@pytest.mark.asyncio
+async def test_unreadable_idle_state_drops_the_kind_not_sentinel(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Saved state that cannot be read drops its kind instead of the run loop."""
+    engine, _ = _engine(monkeypatch, _snapshot())
+    state = cast("Any", engine)._suppression.state
+    kind = "network_unknown_device_joined"
+    state.owed_change_alerts[kind] = [_owed_clients("k1").as_dict()]
+    state.owed_rule_idle[kind] = ["not", "a", "dict"]
+
+    await cast("Any", engine)._expire_idle_owed(set(), _snapshot(), NOW)
+
+    assert state.owed_change_alerts == {}
+    assert state.owed_rule_idle == {}
+    assert any("could not be read" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio
 async def test_a_rule_running_at_level_zero_is_not_idle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """At level 0 the day is still kept, so raising the level expires nothing."""
+    """At level 0 the rule still counts as running, so nothing ages out."""
     engine, _notifier, _section = await _radio_engine(monkeypatch)
+    state = cast("Any", engine)._suppression.state
+    state.owed_rule_idle["radio_new_device_joined"] = {"days": 3, "last": "2026-09-01"}
+
     await engine._timed_run()
 
-    state = cast("Any", engine)._suppression.state
     assert list(_owed(engine)) == ["radio_new_device_joined"]
-    assert state.owed_rule_ran["radio_new_device_joined"] == (
-        datetime.now(UTC).date().isoformat()
-    )
+    assert state.owed_rule_idle == {}
     assert engine.owed_status() == {
         "owed_change_alerts": {"radio_new_device_joined": 1}
     }
@@ -2346,4 +2413,40 @@ async def test_an_exclusion_added_since_drops_only_that_device(
     assert sent.triggering_entities == ["device_tracker.k2"]
     assert "Phone k1" not in sent.evidence["summary"]
     assert "New device on the network: Phone k2." in sent.evidence["summary"]
+    assert state.owed_change_alerts == {}
+
+
+@pytest.mark.asyncio
+async def test_an_owed_alert_with_every_device_excluded_is_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, _ = _engine(
+        monkeypatch,
+        _snapshot(),
+        options={
+            "sentinel_rule_entity_exclusions": {
+                "network_unknown_device_joined": ["device_tracker.*"]
+            }
+        },
+    )
+    state = cast("Any", engine)._suppression.state
+    state.owed_change_alerts["network_unknown_device_joined"] = [
+        _owed_clients("k1", "k2").as_dict()
+    ]
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+
+    await cast("Any", engine)._send_owed_kind(
+        "network_unknown_device_joined",
+        [],
+        {},
+        _snapshot(),
+        NOW,
+        timedelta(0),
+        timedelta(0),
+        explain_enabled=False,
+        trigger_source="poll",
+        inventory_keys=[],
+    )
+
+    assert notifier.calls == []
     assert state.owed_change_alerts == {}

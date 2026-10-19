@@ -125,10 +125,11 @@ class SuppressionState:
     # the key, where a version bump would load this file read-only there
     # (forcing level 0).
     owed_change_alerts: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
-    # Kind of owed alert -> the day (ISO date, UTC) its rule last ran while
-    # alerts of it were owed: one whose rule stops running is dropped in time
-    # rather than kept for good (#802). Optional and additive, like the above.
-    owed_rule_ran: dict[str, str] = field(default_factory=dict)
+    # Kind of owed alert whose rule is not running -> {"days": the days
+    # Sentinel ran without it, "last": the last such day (ISO date, UTC)}, so
+    # one whose rule stops for good is dropped in time rather than kept
+    # forever (#802). Optional and additive, like the above.
+    owed_rule_idle: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SuppressionState:
@@ -154,10 +155,10 @@ class SuppressionState:
                 for kind, findings in _mapping(data.get("owed_change_alerts")).items()
                 if isinstance(findings, list)
             },
-            owed_rule_ran={
-                str(kind): str(day)
-                for kind, day in _mapping(data.get("owed_rule_ran")).items()
-                if isinstance(day, str)
+            owed_rule_idle={
+                str(kind): dict(idle)
+                for kind, idle in _mapping(data.get("owed_rule_idle")).items()
+                if isinstance(idle, dict)
             },
         )
 
@@ -177,7 +178,9 @@ class SuppressionState:
                 kind: [dict(f) for f in findings]
                 for kind, findings in self.owed_change_alerts.items()
             },
-            "owed_rule_ran": dict(self.owed_rule_ran),
+            "owed_rule_idle": {
+                kind: dict(idle) for kind, idle in self.owed_rule_idle.items()
+            },
         }
 
 
