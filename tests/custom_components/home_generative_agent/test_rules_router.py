@@ -168,6 +168,10 @@ def test_severity_by_occupancy_night_and_known_random_address() -> None:
     night = _only(rule.evaluate(_snapshot([_client("a")], ["a"], is_night=True)))
     assert night.severity == "high"
     assert "at night" in night.evidence["summary"]
+    # What raised it, kept for an owed replay (#802).
+    assert home.evidence["seen_when"] == ""
+    assert away.evidence["seen_when"] == "while nobody was home"
+    assert night.evidence["seen_when"] == "at night"
     rotated = _client("a", mac_randomized=True, hostname_trusted=True)
     low = _only(rule.evaluate(_snapshot([rotated], ["a"], anyone_home=False)))
     assert low.severity == "low"

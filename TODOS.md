@@ -758,13 +758,13 @@ validation.
 
 ---
 
-### An `owed_expired` audit record can be evicted as soon as it is written
+### A trimmed owed alert keeps the severity of the items told meanwhile
 
-**What:** When an owed change kind expires (#802), `SentinelEngine._expire_idle_owed` audits the dropped alerts with reason `owed_expired`. The audit store keeps user-facing (`not_suppressed`) records and evicts suppressed ones first (`audit/store.py`), so in a store already full of delivered alerts the new `owed_expired` record is the only evictable one and goes at once. The WARNING log line still records the drop, but the item-level record does not survive.
+**What:** `owed.without()`/`only()` (`sentinel/owed.py`) take told, trusted or excluded items out of an owed change alert but keep its severity. A radio alert that was high because a security device joined while nobody was home is replayed for the remaining, non-security devices still as high; the network client rule's "low" (every client a known randomized address) can likewise only be raised by merging, never lowered by trimming.
 
-**Why:** Found by Codex in the review of #802. Rare: it needs a store at capacity with only `not_suppressed` records, and an owed kind idle for 30 days.
+**Why:** Predates #802 (since #801's `without()`); the review of #802 found it reachable through more paths (per-item exclusions, `only()`). A high replay can bypass quiet-hours handling.
 
-**How to apply:** Treat `owed_expired` as protected from eviction like `not_suppressed` (it is a one-time record of alerts the user never saw), or keep a small reserved slot for it. Pin it with a test at capacity.
+**How to apply:** Keep a per-item severity input on the owed finding (for radio, `security_device_ids` filtered in `_restricted`; for clients, `randomized_known`) and recompute severity in `_restricted` the way the rules do, or cap a trimmed member at the highest severity its remaining items would earn. Pin it with a test that trusts the security device and checks the replay's severity.
 
 **Effort:** S
 **Priority:** P3

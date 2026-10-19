@@ -58,9 +58,6 @@ SUPPRESSION_REASON_AUTONOMY_PASSIVE = "autonomy_passive"
 # The notifier dropped the push as a repeat of the same anomaly within its own
 # cooldown, so this finding did not reach the user (the earlier push did).
 SUPPRESSION_REASON_NOTIFIER_DUPLICATE = "notifier_duplicate"
-# An owed change alert dropped because its rule had not run for a long time
-# (network checks turned off, the integration removed): audited once (#802).
-SUPPRESSION_REASON_OWED_EXPIRED = "owed_expired"
 PENDING_PROMPT_DEFAULT_TTL = timedelta(hours=4)
 
 # Finding types considered presence-sensitive.  These are suppressed when a
@@ -127,8 +124,8 @@ class SuppressionState:
     owed_change_alerts: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     # Kind of owed alert whose rule is not running -> {"days": the days
     # Sentinel ran without it, "last": the last such day (ISO date, UTC)}, so
-    # one whose rule stops for good is dropped in time rather than kept
-    # forever (#802). Optional and additive, like the above.
+    # an alert waiting on a rule that stopped is visible (#802). Optional and
+    # additive, like the above.
     owed_rule_idle: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
