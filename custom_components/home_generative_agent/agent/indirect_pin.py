@@ -290,9 +290,15 @@ class StoredActionCheck:
 
     def _read_entity(self, entity_id: str, service: str | None) -> bool:  # noqa: PLR0911
         members = with_members(self.hass, {entity_id}) - {entity_id}
-        if (wrapped := self._wrapped_switch(entity_id)) is not None:
-            members.add(wrapped)
         if any(self.entity(member, service) for member in sorted(members)):
+            return True
+        # A switch_as_x wrapper's switch gets its own service, not the
+        # wrapper's (closing a cover turns its relay on or off), so it is
+        # followed with none: every action a template switch has counts, and
+        # the relay rules are left to the call on the wrapper.
+        if (wrapped := self._wrapped_switch(entity_id)) is not None and self.entity(
+            wrapped, None
+        ):
             return True
         domain = entity_id.split(".", 1)[0]
         # The call reaching the entity is matched against the rules first: a
