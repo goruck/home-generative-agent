@@ -177,6 +177,8 @@ class CriticalAutomationCall:
     service: str
     entity_ids: tuple[str, ...]
     reason: str
+    # Held only because what the step does cannot be read ahead.
+    unverifiable: bool = False
 
     def describe(self) -> str:
         """Return a short, safe description of the call."""
@@ -187,7 +189,9 @@ class CriticalAutomationCall:
 
 def _unverifiable(service: str, reason: str) -> CriticalAutomationCall:
     """Build a finding for a step whose real effect cannot be determined."""
-    return CriticalAutomationCall(service=service, entity_ids=(), reason=reason)
+    return CriticalAutomationCall(
+        service=service, entity_ids=(), reason=reason, unverifiable=True
+    )
 
 
 def _is_template(value: Any) -> bool:
@@ -697,15 +701,19 @@ def iter_service_calls(
     """
     Yield ``(domain, service, step)`` for each call ``actions`` makes.
 
-    A service call with a plain ``domain.service`` name, and a device action
-    as its ``(domain, type)``: HA's switch, light, button and similar device
-    actions call the service of that name. A templated service, and a walk
+    A service call with a plain ``domain.service`` name, a device action as
+    its ``(domain, type)`` (HA's switch, light, button and similar device
+    actions call the service of that name), and a ``scene:`` step as the
+    ``scene.turn_on`` it runs. A templated service, and a walk
     too deep to follow, are reported by ``find_critical_automation_calls``
     rather than here, so callers screening further use both; ``strict``
     raises ``TooDeepError`` for a caller that has no such second screen.
     """
     try:
         for step, action_type in _walk_steps(actions):
+            if action_type == cv.SCRIPT_ACTION_ACTIVATE_SCENE:
+                yield "scene", "turn_on", {"entity_id": step.get("scene")}
+                continue
             if action_type == cv.SCRIPT_ACTION_DEVICE_AUTOMATION:
                 domain = str(step.get("domain") or "").lower()
                 kind = str(step.get("type") or "").lower()
