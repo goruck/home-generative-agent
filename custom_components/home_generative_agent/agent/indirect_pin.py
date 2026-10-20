@@ -44,7 +44,9 @@ from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.core import State
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import intent
 from homeassistant.helpers.group import get_entity_ids
+from slugify import slugify
 
 from .automation_pin import (
     DATA_CONTAINER_KEYS,
@@ -106,6 +108,11 @@ _INLINE_STATE_KEYS = ("entities", "snapshot_entities")
 # Tool arguments that name the call rather than carry its fields.
 _CALL_KEYS = frozenset({"domain", "service", "action", "entity_ids"})
 
+# The tool HA gives each intent script is `intent_script__<name>` (#779).
+_INTENT_SCRIPT = "intent_script"
+_SCRIPT_INTENT_HANDLER = "ScriptIntentHandler"
+# An intent script tool whose intent script is gone.
+_MISSING = object()
 # A group can contain a group.
 _MAX_DEPTH = 5
 # Entities one check follows through stored actions and group members before
@@ -184,6 +191,84 @@ def bare_script_tool_entity_id(
         object_id = object_id[1:]
     entity_id = f"{SCRIPT_DOMAIN}.{object_id}"
     return entity_id if states.get(entity_id) is not None else None
+
+
+def intent_script_handlers(hass: HomeAssistant | None, tool_name: str) -> list[Any]:
+    """
+    Return every intent script a tool may run (#779).
+
+    Home Assistant 2026.9 and later name an intent script's tool
+    ``intent_script__<slug>``; 2026.8 named it by the slug alone. A merged
+    API prefixes its own namespace, and an intent script may take over a
+    built-in intent (``HassTurnOn``), whose tool then runs it. So the tool
+    name and each of its ``__``-suffixes are compared with every intent
+    script's name and its slug, and all that match are returned: HA picks
+    one by the exposed platforms, which the gate cannot see, so each one
+    counts. A ``intent_script__`` tool matching none returns ``[_MISSING]``.
+    """
+    parts = tool_name.split(TOOL_NAMESPACE_SEP)
+    namespaced = len(parts) >= _SCRIPT_TOOL_PARTS and parts[-2] == _INTENT_SCRIPT
+    if not _has_entities(hass):
+        return [_MISSING] if namespaced else []
+    try:
+        handlers = [
+            handler
+            for handler in intent.async_get(cast("HomeAssistant", hass))
+            if type(handler).__name__ == _SCRIPT_INTENT_HANDLER
+        ]
+    except Exception:
+        LOGGER.exception("Could not read the intent scripts")
+        return [_MISSING] if namespaced else []
+    suffixes = {TOOL_NAMESPACE_SEP.join(parts[index:]) for index in range(len(parts))}
+    found = [
+        handler
+        for handler in handlers
+        if {
+            str(getattr(handler, "intent_type", "")),
+            slugify(
+                str(getattr(handler, "intent_type", "")), separator="_", lowercase=False
+            ),
+        }
+        & suffixes
+    ]
+    if not found and namespaced:
+        return [_MISSING]
+    return found
+
+
+def intent_scripts_are_critical(
+    hass: HomeAssistant | None,
+    tool_name: str,
+    rules: Sequence[Mapping[str, str]],
+) -> bool:
+    """Return True if an intent script the tool may run does a critical action."""
+    return any(
+        _intent_script_is_critical(hass, handler, rules)
+        for handler in intent_script_handlers(hass, tool_name)
+    )
+
+
+def _intent_script_is_critical(
+    hass: HomeAssistant | None,
+    handler: Any,
+    rules: Sequence[Mapping[str, str]],
+) -> bool:
+    """Return True if an intent script's action could do a critical action."""
+    if handler is _MISSING or hass is None:
+        return True  # an intent script the gate cannot find: hold it
+    config = getattr(handler, "config", None)
+    if not isinstance(config, dict):
+        return True
+    action = config.get("action")
+    if action is None:
+        return False  # speech only
+    sequence = getattr(action, "sequence", None)
+    if not isinstance(sequence, list):
+        LOGGER.debug("Cannot read the action of intent %s; holding it", handler)
+        return True
+    if find_critical_automation_calls({"actions": sequence}, rules):
+        return True
+    return _has_entities(hass) and any(StoredActionCheck(hass, rules).calls(sequence))
 
 
 def script_rule_matches(

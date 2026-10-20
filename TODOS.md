@@ -758,6 +758,19 @@ validation.
 
 ---
 
+### An intent script named like another tool holds that tool
+
+**What:** `intent_script_handlers` (`agent/indirect_pin.py`) compares every `__`-suffix of a tool name with every intent script's name and slug, so an intent script named like an action (`turn_on`) whose own action is critical holds every `<domain>__turn_on` tool call too.
+
+**Why:** Found in review 3 of #779. It only over-holds (never lets a call through), and needs an intent script with an action's name. Suffix matching is what catches an intent script taking over a built-in intent's tool and the pre-2026.9 bare names, which cannot be told from an MCP tool by name alone.
+
+**How to apply:** Limit matching to the whole name, the last segment after a known API prefix, and `intent_script__`/`intent__`-style prefixes; keep the takeover and 2026.8 cases' tests passing.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
 ### The relay under a template cover that is not loaded is not held
 
 **What:** `read_template_drives` (`agent/rule_entities.py`) reads only loaded template covers and locks, so while the Template integration has not loaded (startup, a reload, a config error) the relay a template garage cover drives gets no rule copy, and a direct call on it is not held. The template cover itself stays held. A `switch_as_x` wrapper is read from its config entry whether loaded or not.

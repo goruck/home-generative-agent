@@ -40,14 +40,21 @@ from .helpers import (
     INTENT_NAME_ALL,
     SET_POSITION_INTENT,
     STOP_MOVING_INTENT,
+    TOOL_NAMESPACE_SEP,
     base_tool_name,
     intent_service_calls,
+    is_actuating_intent,
+    is_device_intent,
     is_on_off_intent,
     minimal_payload_for_domain,
     normalize_intent_for_lock,
     sanitize_tool_text,
 )
-from .indirect_pin import bare_script_tool_entity_id, script_tool_entity_id
+from .indirect_pin import (
+    bare_script_tool_entity_id,
+    intent_script_handlers,
+    script_tool_entity_id,
+)
 from .rule_entities import relay_wrappers_reached
 
 LOGGER = logging.getLogger(__name__)
@@ -157,6 +164,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "action_turn_off": "turn off {target}",
         "action_set_position": "set {target} to {position}%",
         "action_press": "press {target}",
+        "action_intent_script": "run the voice command {target}",
         "action_stop": "stop {target}",
         "action_service": "{service} {target}",
         "action_automation": "add the automation {target}",
@@ -280,6 +288,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "action_turn_off": "vypnout {target}",
         "action_set_position": "nastavit {target} na {position} %",
         "action_press": "stisknout {target}",
+        "action_intent_script": "spustit hlasový příkaz {target}",
         "action_stop": "zastavit {target}",
         "action_service": "{service} {target}",
         "action_automation": "přidat automatizaci {target}",
@@ -544,6 +553,52 @@ def _describe_automation(hass: HomeAssistant | None, action: Mapping[str, Any]) 
     return pin_msg(hass, "action_automation_runs", action=text, calls=shown)
 
 
+def _intent_script_line(
+    hass: HomeAssistant | None, tool_name: str, tool_args: Mapping[str, Any]
+) -> str | None:
+    """
+    Name the intent script a tool runs, with everything the model passed (#779).
+
+    Only for a tool an intent script owns: its own ``intent_script__`` tool,
+    or one named by it (an intent script taking over HassTurnOn) that is not
+    a script's tool and names no service of its own. Every intent script
+    that may be behind it is named. Every argument is shown, since Home
+    Assistant hands each to the intent script, and one of them may pick the
+    device.
+    """
+    handlers = [h for h in intent_script_handlers(hass, tool_name) if h]
+    if not handlers or script_tool_entity_id(tool_name) is not None:
+        return None
+    # A tool another API offers under the same name is a service tool when
+    # it names a service. `domain` is an intent slot, and the lock
+    # normalizer adds `service` to an on/off intent, so neither makes an
+    # intent's own tool a service call.
+    owned = (
+        TOOL_NAMESPACE_SEP + "intent_script" + TOOL_NAMESPACE_SEP
+        in TOOL_NAMESPACE_SEP + tool_name
+        or is_actuating_intent(tool_name)
+        or is_device_intent(tool_name)
+    )
+    if not owned and tool_args.get("service"):
+        return None
+    names = sorted(
+        {str(getattr(h, "intent_type", "") or "") for h in handlers} - {""}
+    ) or [base_tool_name(tool_name)]
+    line = pin_msg(
+        hass,
+        "action_intent_script",
+        target=" / ".join(
+            _named(hass, _one_line(name, _ACTION_TARGET_MAX_LEN)) for name in names
+        ),
+    )
+    slots = [
+        f"{key}: {_one_line(str(value), _ACTION_TARGET_MAX_LEN)}"
+        for key, value in sorted(tool_args.items())
+        if value not in (None, "", [], {})
+    ]
+    return f"{line} ({', '.join(slots)})" if slots else line
+
+
 def describe_pending_action(
     hass: HomeAssistant | None, action: Mapping[str, Any]
 ) -> str:
@@ -633,6 +688,8 @@ def _describe_line(  # noqa: PLR0911
 
     raw_args = action.get("tool_args")
     tool_args: dict[str, Any] = dict(raw_args) if isinstance(raw_args, Mapping) else {}
+    if (line := _intent_script_line(hass, tool_name, tool_args)) is not None:
+        return line
     if (script_id := script_tool_entity_id(tool_name)) is not None:
         return _script_line(hass, script_id)
     # A tool named like a script (HA before 2026.9 named script tools so) is
