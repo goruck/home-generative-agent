@@ -47,7 +47,11 @@ from .helpers import (
     normalize_intent_for_lock,
     sanitize_tool_text,
 )
-from .indirect_pin import bare_script_tool_entity_id, script_tool_entity_id
+from .indirect_pin import (
+    bare_script_tool_entity_id,
+    intent_script_handler,
+    script_tool_entity_id,
+)
 from .rule_entities import relay_wrappers_reached
 
 LOGGER = logging.getLogger(__name__)
@@ -157,6 +161,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "action_turn_off": "turn off {target}",
         "action_set_position": "set {target} to {position}%",
         "action_press": "press {target}",
+        "action_intent_script": "run the voice command {target}",
         "action_stop": "stop {target}",
         "action_service": "{service} {target}",
         "action_automation": "add the automation {target}",
@@ -280,6 +285,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "action_turn_off": "vypnout {target}",
         "action_set_position": "nastavit {target} na {position} %",
         "action_press": "stisknout {target}",
+        "action_intent_script": "spustit hlasový příkaz {target}",
         "action_stop": "zastavit {target}",
         "action_service": "{service} {target}",
         "action_automation": "přidat automatizaci {target}",
@@ -633,6 +639,13 @@ def _describe_line(  # noqa: PLR0911
 
     raw_args = action.get("tool_args")
     tool_args: dict[str, Any] = dict(raw_args) if isinstance(raw_args, Mapping) else {}
+    if (handler := intent_script_handler(hass, tool_name)) is not None:
+        intent_name = str(getattr(handler, "intent_type", "") or tool_name)
+        return pin_msg(
+            hass,
+            "action_intent_script",
+            target=_named(hass, _one_line(intent_name, _ACTION_TARGET_MAX_LEN)),
+        )
     if (script_id := script_tool_entity_id(tool_name)) is not None:
         return _script_line(hass, script_id)
     # A tool named like a script (HA before 2026.9 named script tools so) is

@@ -134,6 +134,8 @@ from .indirect_pin import (
     StoredActionCheck,
     bare_script_tool_entity_id,
     call_target_domains,
+    intent_script_handler,
+    intent_script_is_critical,
     runs_critical_action,
     script_rule_matches,
     script_tool_entity_id,
@@ -3527,6 +3529,10 @@ def _is_critical_action(  # noqa: PLR0911, PLR0912
             for state in states
         ):
             return True
+
+    # An intent script's tool names no domain or service either (#779).
+    if (handler := intent_script_handler(hass, tool_name)) is not None:
+        return intent_script_is_critical(hass, handler, critical_actions)
 
     # A script's own tool names no domain or service; what it runs decides.
     if (script_id := script_tool_entity_id(tool_name)) is not None:
