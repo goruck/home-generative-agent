@@ -127,6 +127,7 @@ from .helpers import (
     tool_call_data,
 )
 from .indirect_pin import stored_action_calls
+from .on_off_direction import with_action_performed
 from .pin_messages import describe_pending_action, pin_msg
 from .rule_entities import expand_critical_rules
 
@@ -1370,7 +1371,9 @@ async def _execute_pending_action(
         # A tool that reports failure in its payload (success: false, a
         # warning) did not act, the same as the normal path reads it. Inside
         # the try: after the claim, even reading the reply must not raise.
-        content, status = parse_tool_response(response.data, tool_args)
+        # What was done, so the reply cannot say the opposite (#797).
+        data = with_action_performed(tool_name, response.data)
+        content, status = parse_tool_response(data, tool_args)
     except (HomeAssistantError, vol.Invalid) as err:
         failure = repr(err)
     except Exception as err:
@@ -1389,7 +1392,7 @@ async def _execute_pending_action(
                 {
                     "status": "completed",
                     "action_id": resolved_action_id,
-                    "result": response.data,
+                    "result": data,
                 },
                 default=str,
             ), None

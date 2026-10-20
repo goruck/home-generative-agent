@@ -21,6 +21,7 @@ from typing import (
 
 import psycopg
 import voluptuous as vol
+from homeassistant.core import State as HaState
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import llm
 from homeassistant.util import dt as dt_util
@@ -141,6 +142,12 @@ from .indirect_pin import (
     script_tool_entity_id,
     service_runs_critical_action,
     stored_actions_are_critical,
+)
+from .on_off_direction import (
+    is_bare_yes,
+    target_entity_ids,
+    with_action_performed,
+    wrong_direction_refusal,
 )
 from .pin_messages import describe_pending_action, pin_msg
 from .rule_entities import expand_critical_rules
@@ -535,7 +542,9 @@ async def _run_ha_tool(
     except (HomeAssistantError, vol.Invalid) as err:
         return _make_tool_error(repr(err), tool_name, tool_call.get("id") or "")
 
-    content_str, status = parse_tool_response(response.data, prepared_args)
+    content_str, status = parse_tool_response(
+        with_action_performed(tool_name, response.data), prepared_args
+    )
     if response.error:
         status = "error"
     return ToolMessage(
@@ -575,6 +584,22 @@ def _prepare_tool_args(
     redirect = _route_alarm_intent_to_tool(tool_name, tool_args, ctx.hass, tool_call)
     if redirect:
         return redirect, tool_args
+
+    # The other half of HassTurnOn/HassTurnOff from what was asked (#797):
+    # refused before the PIN check, so it is never queued for a PIN.
+    state = getattr(ctx, "state", None)
+    messages = state.get("messages", []) if isinstance(state, dict) else []
+    refusal = wrong_direction_refusal(
+        tool_name,
+        tool_args,
+        _on_off_request_text(messages),
+        known=_known_target(ctx.hass, tool_args),
+    )
+    if refusal:
+        LOGGER.info("Refused %s: %s", tool_name, refusal)
+        return _make_tool_error(
+            refusal, tool_name, tool_call.get("id") or ""
+        ), tool_args
 
     critical_guard = _critical_action_guard(
         tool_name=tool_name,
@@ -1083,6 +1108,62 @@ def _offer_text(messages: Sequence[BaseMessage]) -> str:
         if isinstance(msg, AIMessage) and (text := _message_text(msg).strip()):
             sentences = [s for s in _SENTENCE_END_RE.split(text) if s.strip()]
             return " ".join(sentences[-2:])
+    return ""
+
+
+def _known_target(
+    hass: HomeAssistant | None, tool_args: Mapping[str, Any]
+) -> tuple[set[str], set[str]]:
+    """
+    Return the domains and friendly names HA knows for a call's target (#797).
+
+    An entity id gives its friendly name ("light.ceiling" is "Open Plan
+    Lights", whose "open" is then a name), and a friendly name with no
+    domain gives the domains of the entities called that.
+    """
+    domains: set[str] = set()
+    names: set[str] = set()
+    states = getattr(hass, "states", None)
+    if states is None:
+        return domains, names
+    ids, others = target_entity_ids(tool_args)
+    for entity_id in ids:
+        state = states.get(entity_id)
+        if isinstance(state, HaState):
+            names.add(str(state.attributes.get("friendly_name") or ""))
+    wanted = {name.casefold() for name in others}
+    if wanted and not tool_args.get("domain"):
+        for state in states.async_all():
+            if not isinstance(state, HaState):
+                continue
+            friendly = str(state.attributes.get("friendly_name") or "").casefold()
+            if friendly in wanted:
+                domains.add(state.domain)
+    return domains, names
+
+
+def _on_off_request_text(messages: Sequence[BaseMessage]) -> str:
+    """
+    Return the words a HassTurnOn/HassTurnOff call is checked against (#797).
+
+    The user's latest message; for a short "Yes", the end of the agent's
+    offer ("I can open the shade. Would that help?"). Only a command reads
+    there, so a state it gives ("The shade is closed.") does not.
+    """
+    for index in range(len(messages) - 1, -1, -1):
+        if not isinstance(messages[index], HumanMessage):
+            continue
+        text = _message_text(messages[index])[:_MAX_INTENT_SCAN_CHARS]
+        # "Please shut it" gives its own command; only a bare "Yes" takes
+        # the offer's.
+        if not is_bare_yes(text):
+            return text
+        for msg in reversed(messages[:index]):
+            if isinstance(msg, AIMessage) and (offer := _message_text(msg).strip()):
+                sentences = [s for s in _SENTENCE_END_RE.split(offer) if s.strip()]
+                # The last two: "I can open the shade. Would that help?"
+                return " ".join(sentences[-2:])
+        return ""
     return ""
 
 
