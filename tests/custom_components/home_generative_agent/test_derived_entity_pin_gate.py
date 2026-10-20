@@ -13,10 +13,14 @@ and which entities subscribe to a state change.
 from __future__ import annotations
 
 import logging
+from functools import partial
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.entity import Entity
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -281,3 +285,145 @@ async def test_a_switch_as_x_wrapper(hass: HomeAssistant) -> None:
     await _setup(hass, wrapper)
     assert hass.states.get(wrapper) is not None
     assert _held(hass, "switch.relay")
+
+
+async def test_a_bayesian_template_observation(hass: HomeAssistant) -> None:
+    """Template observations subscribe through a template tracker, not the entity."""
+    await _setup(
+        hass,
+        "binary_sensor.someone_waiting",
+        binary_sensor=[
+            {
+                "platform": "bayesian",
+                "name": "Someone Waiting",
+                "prior": 0.2,
+                "probability_threshold": 0.5,
+                "observations": [
+                    {
+                        "platform": "template",
+                        "value_template": "{{ is_state('input_boolean.let_in', 'on') }}",
+                        "prob_given_true": 0.9,
+                        "prob_given_false": 0.1,
+                    }
+                ],
+            }
+        ],
+    )
+    assert hass.states.get("binary_sensor.someone_waiting") is not None
+    assert _held(hass, "input_boolean.let_in")
+
+
+@pytest.mark.parametrize("length", [7, 14])
+async def test_a_long_chain_of_templates_is_held(
+    hass: HomeAssistant, length: int
+) -> None:
+    """Followed to its end; past the depth bound, held rather than passed."""
+    sensors = [
+        {
+            "name": f"Step {index}",
+            "state": (
+                "{{ is_state('input_boolean.let_in', 'on') }}"
+                if index == 0
+                else f"{{{{ states('sensor.step_{index - 1}') }}}}"
+            ),
+        }
+        for index in range(length)
+    ]
+    await _setup(hass, f"sensor.step_{length - 1}", template=[{"sensor": sensors}])
+    assert hass.states.get(f"sensor.step_{length - 1}") is not None
+    assert _held(hass, "input_boolean.let_in")
+
+
+async def test_an_error_reading_what_follows_holds_the_change(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unexpected shape in HA's tracking holds the call, not fails the turn."""
+    await _setup(hass, "sensor.indoor")
+
+    def _broken(*_args: Any) -> set[str]:
+        msg = "unexpected shape"
+        raise TypeError(msg)
+
+    monkeypatch.setattr(template_actions.DerivedEntities, "of", _broken)
+    assert _held(hass, "input_boolean.gate")
+
+
+async def test_a_new_tracker_may_join_a_zone(hass: HomeAssistant) -> None:
+    """`device_tracker.see` can create a tracker inside a zone no list names yet."""
+    hass.states.async_set("zone.home", "0", {"persons": []})
+    await _setup(hass, "zone.home")
+    args = {"domain": "device_tracker", "service": "see", "dev_id": "brand_new"}
+    assert _is_critical_action(args, RULES, "mcp__call_service", hass)
+
+
+class _Template:
+    def __init__(self, text: str) -> None:
+        self.template = text
+
+
+class _Owner(Entity):
+    def __init__(self, entity_id: str) -> None:
+        self.entity_id = entity_id
+
+    def handle(self, *_args: Any) -> None:
+        """Stand in for a state listener."""
+
+
+def test_every_entity_a_callback_reaches_counts() -> None:
+    """A partial's argument, a closure over two entities, a coordinator's listener."""
+    owner, other = _Owner("sensor.owner"), _Owner("sensor.aaa_other")
+
+    def handler(_event: Any, entity: Any) -> None:
+        """Stand in."""
+        assert entity is not None
+
+    def make() -> Any:
+        another, me = other, owner
+
+        def listener(_event: Any) -> None:
+            assert another is not None
+            assert me is not None
+
+        return listener
+
+    coordinator = SimpleNamespace(_listeners={1: (owner.handle, None)})
+    assert template_actions._job_entities(partial(handler, entity=owner)) == {
+        "sensor.owner"
+    }
+    assert template_actions._job_entities(make()) == {
+        "sensor.owner",
+        "sensor.aaa_other",
+    }
+    assert template_actions._job_entities(coordinator.__dict__["_listeners"]) == {
+        "sensor.owner"
+    }
+    # A template tracker's job leading to the coordinator.
+    assert template_actions._job_entities(SimpleNamespace(_job=coordinator)) == {
+        "sensor.owner"
+    }
+
+
+def test_a_template_not_rendered_yet_is_read_from_its_text() -> None:
+    """Before its first render, what its text names; with a pending render, its domains."""
+    template = _Template("{{ is_state('input_boolean.let_in', 'on') }}")
+    waiting = SimpleNamespace(
+        _template_result_info=None, _template_attrs={template: []}
+    )
+    derived = template_actions.DerivedEntities.__new__(template_actions.DerivedEntities)
+    derived.hass = MagicMock()
+    derived.by_entity, derived.by_domain, derived.every = {}, {}, set()
+    derived._triggered, derived._trigger_index = [], None
+    derived._read_template("binary_sensor.waiting", waiting)
+    domain_text = _Template("{{ states.input_boolean | list | count }}")
+    pending = SimpleNamespace(
+        _template_result_info=SimpleNamespace(listeners={"entities": set()}),
+        _template_attrs={domain_text: []},
+    )
+    derived._read_template("sensor.count", pending)
+    registry = MagicMock()
+    registry.async_get.return_value = None
+    with patch.object(template_actions.er, "async_get", return_value=registry):
+        assert derived.of("input_boolean.let_in") == {
+            "binary_sensor.waiting",
+            "sensor.count",
+        }

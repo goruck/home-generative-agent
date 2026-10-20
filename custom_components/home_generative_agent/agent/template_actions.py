@@ -52,6 +52,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from functools import partial
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
@@ -119,6 +120,9 @@ _INLINE_STATE_KEYS = ("entities", "snapshot_entities")
 # Scripts and template entities a template entity's actions reach, and the
 # members of a group, are followed this deep.
 MAX_FOLLOW_DEPTH = 5
+# Entities following one another (a template of a helper of a template...)
+# are followed this many steps; one still followed past it is held.
+_MAX_FOLLOWING_DEPTH = 10
 # A group lists its members in `entity_id`; MQTT and ZHA groups in
 # `group_entities`.
 _MEMBER_ATTRIBUTES = ("entity_id", "group_entities")
@@ -427,18 +431,22 @@ class StoredActionReader:
         A group's state follows its members', so turning on a light changes
         the light group it is in too (#814); a template sensor or a helper
         computed from it changes too (#820). None when an automation cannot
-        be read: the change is then held.
+        be read, when what follows the entity cannot be read, or when it goes
+        deeper than ``_MAX_FOLLOWING_DEPTH``: the change is then held.
         """
         entity_id = entity_id.lower()
         if entity_id in self._started:
             return self._started[entity_id]
         self._started[entity_id] = []  # a group holding itself adds nothing
         found = self._find_started_by(entity_id)
-        if found is not None and depth < MAX_FOLLOW_DEPTH:
-            if self._derived is None:
-                self._derived = DerivedEntities(self.hass)
-            following = self._groups_holding(entity_id) | self._derived.of(entity_id)
-            for parent in sorted(following - {entity_id}):
+        following = self._following(entity_id) if found is not None else set()
+        if following is None:
+            found = None
+        elif following and depth >= _MAX_FOLLOWING_DEPTH:
+            LOGGER.debug("%s is followed too deep to read; holding it", entity_id)
+            found = None
+        if found is not None and following:
+            for parent in sorted(following):
                 parents = self.started_by(parent, depth + 1)
                 if parents is None:
                     found = None
@@ -446,6 +454,22 @@ class StoredActionReader:
                 found += [r for r in parents if r not in found]
         self._started[entity_id] = found
         return found
+
+    def _following(self, entity_id: str) -> set[str] | None:
+        """Return the entities whose state follows this one's, or None."""
+        try:
+            if self._derived is None:
+                self._derived = DerivedEntities(self.hass)
+            derived = self._derived.of(entity_id)
+        except Exception:
+            # Hold rather than fail the turn or pass: an unexpected shape in
+            # what Home Assistant tracks.
+            LOGGER.exception(
+                "Critical Action PIN: cannot read what follows %s; holding it",
+                entity_id,
+            )
+            return None
+        return (self._groups_holding(entity_id) | derived) - {entity_id}
 
     def mqtt_reactors(self) -> list[Reactor] | None:
         """
@@ -627,42 +651,68 @@ class DerivedEntities:
                         entity_id
                     )
                     continue
-                listeners = self._listeners(entity)
-                if listeners is None:
-                    _warn_once(f"what template entity {entity_id} reads")
-                    self.every.add(entity_id)
-                    continue
-                if listeners.get(_ALL_LISTENER):
-                    self.every.add(entity_id)
-                for source in listeners.get(_ENTITIES_LISTENER) or ():
-                    self.by_entity.setdefault(str(source).lower(), set()).add(entity_id)
-                for domain in listeners.get(_DOMAINS_LISTENER) or ():
-                    self.by_domain.setdefault(str(domain).lower(), set()).add(entity_id)
+                self._read_template(entity_id, entity)
         for coordinator, entity_ids in blocks.values():
             config = coordinator.config
             raw = next((config[key] for key in _TRIGGER_KEYS if key in config), [])
             triggers = raw if isinstance(raw, list) else [raw]
-            reactor = Reactor(
-                name=None,
-                triggers=[_compile_trigger(t) for t in triggers],
-                sequence=[],
-                variables="\n".join(
+            self._add_triggered(
+                [_compile_trigger(t) for t in triggers],
+                entity_ids,
+                "\n".join(
                     text for key in _VARIABLE_KEYS for text in _texts(config.get(key))
                 ),
             )
-            self._triggered.append((reactor, entity_ids))
+
+    def _read_template(self, entity_id: str, entity: Any) -> None:
+        """
+        Follow a template entity from what it reads.
+
+        HA's live listeners, plus what its text reads generically: while a
+        rate-limited render is pending, HA drops the domain and all-states
+        listeners from its summary. Before it first renders, or when the
+        listeners cannot be read, its text alone: every entity or domain it
+        names.
+        """
+        texts = _template_texts(entity)
+        listeners = self._listeners(entity)
+        if listeners is None or (not listeners and texts):
+            if not texts:
+                _warn_once(f"what template entity {entity_id} reads")
+                self.every.add(entity_id)
+                return
+            self._add_triggered(
+                [_compile_trigger({"trigger": "template", "value_template": texts})],
+                {entity_id},
+            )
+            return
+        reads_all, domains = _template_domains([texts.lower()])
+        if listeners.get(_ALL_LISTENER) or reads_all:
+            self.every.add(entity_id)
+        for source in listeners.get(_ENTITIES_LISTENER) or ():
+            self.by_entity.setdefault(str(source).lower(), set()).add(entity_id)
+        for domain in {*(listeners.get(_DOMAINS_LISTENER) or ()), *domains}:
+            self.by_domain.setdefault(str(domain).lower(), set()).add(entity_id)
+
+    def _add_triggered(
+        self, triggers: list[_Trigger], entity_ids: set[str], variables: str = ""
+    ) -> None:
+        self._triggered.append(
+            (
+                Reactor(name=None, triggers=triggers, sequence=[], variables=variables),
+                entity_ids,
+            )
+        )
 
     @staticmethod
     def _listeners(entity: Any) -> dict[str, Any] | None:
-        """Return what a template entity re-renders on, or None if unreadable."""
-        info = getattr(entity, "_template_result_info", None)
-        if info is None:
-            # Not set up yet (or no templates): it renders nothing yet.
-            return {} if hasattr(entity, "_template_result_info") else None
-        try:
-            listeners = info.listeners
-        except Exception:  # noqa: BLE001
+        """Return what a template entity re-renders on, {} before it renders."""
+        if not hasattr(entity, "_template_result_info"):
             return None
+        info = entity._template_result_info  # noqa: SLF001
+        if info is None:
+            return {}  # not rendered yet
+        listeners = info.listeners
         return listeners if isinstance(listeners, dict) else None
 
     def _read_subscriptions(self) -> None:
@@ -677,36 +727,85 @@ class DerivedEntities:
         if not isinstance(callbacks, dict):
             _warn_once("Home Assistant's state-change subscriptions")
             return
+        owners: dict[int, set[str]] = {}
         for source, jobs in list(callbacks.items()):
             for job in list(jobs):
-                owner = _job_entity(getattr(job, "target", None))
-                if owner is not None:
-                    self.by_entity.setdefault(str(source).lower(), set()).add(owner)
+                found = owners.get(id(job))
+                if found is None:
+                    found = owners[id(job)] = _job_entities(job)
+                if found:
+                    self.by_entity.setdefault(str(source).lower(), set()).update(found)
 
 
-def _job_entity(target: Any) -> str | None:
+def _template_texts(entity: Any) -> str:
+    """Return a template entity's templates as text, or "" if unreadable."""
+    attrs = getattr(entity, "_template_attrs", None)
+    if not isinstance(attrs, dict):
+        return ""
+    return "\n".join(
+        text
+        for template in attrs
+        if isinstance(text := getattr(template, "template", None), str)
+    )
+
+
+# How far `_job_entities` looks from a state-change callback, and where:
+# a HassJob's target, a template tracker's job, a filtered tracker's action,
+# a coordinator's listeners.
+_OWNER_SEARCH_DEPTH = 5
+_OWNER_ATTRIBUTES = ("target", "_job", "job", "_action", "action", "_listeners")
+
+
+def _job_entities(start: Any) -> set[str]:
     """
-    Return the entity a state-change callback belongs to, if it is one's.
+    Return the entities a state-change callback updates.
 
-    A bound method of the entity, a partial of one, or a function defined in
-    one of its methods (whose closure holds the entity).
+    Searched from the callback through what it is bound to or closes over
+    (a bound method, a partial's function and arguments, a function defined
+    in an entity's method), a template tracker's job and a coordinator's
+    listeners, a few steps deep. Every entity reached counts: one too many
+    only follows more.
     """
-    candidates: list[Any] = []
-    for func in (target, getattr(target, "func", None)):
-        if func is None:
+    found: set[str] = set()
+    seen: set[int] = set()
+    pending: list[tuple[Any, int]] = [(start, 0)]
+    while pending:
+        node, depth = pending.pop()
+        if node is None or id(node) in seen or isinstance(node, (str, bytes, int)):
             continue
-        candidates.append(getattr(func, "__self__", None))
-        candidates.extend(
-            cell.cell_contents
-            for cell in getattr(func, "__closure__", None) or ()
-            if _cell_filled(cell)
-        )
-    for candidate in candidates:
-        if isinstance(candidate, Entity):
-            entity_id = getattr(candidate, "entity_id", None)
+        seen.add(id(node))
+        if isinstance(node, Entity):
+            entity_id = getattr(node, "entity_id", None)
             if isinstance(entity_id, str) and entity_id:
-                return entity_id.lower()
-    return None
+                found.add(entity_id.lower())
+            continue
+        if depth >= _OWNER_SEARCH_DEPTH or type(node).__name__ == "HomeAssistant":
+            continue
+        pending.extend((child, depth + 1) for child in _owner_links(node))
+    return found
+
+
+def _owner_links(node: Any) -> list[Any]:
+    """Return what a callback, job or tracker leads to."""
+    links: list[Any] = []
+    if isinstance(node, (list, tuple, set, frozenset)):
+        return list(node)
+    if isinstance(node, dict):
+        return list(node.values())
+    if isinstance(node, partial):
+        return [node.func, *node.args, *node.keywords.values()]
+    links.append(getattr(node, "__self__", None))
+    links.extend(
+        cell.cell_contents
+        for cell in getattr(node, "__closure__", None) or ()
+        if _cell_filled(cell)
+    )
+    for attribute in _OWNER_ATTRIBUTES:
+        try:
+            links.append(getattr(node, attribute, None))
+        except Exception:  # noqa: BLE001, S112
+            continue
+    return links
 
 
 def _cell_filled(cell: Any) -> bool:
