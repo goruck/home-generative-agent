@@ -49,15 +49,14 @@ is enabled: disabling it does not disconnect the relay.
 
 A template cover or lock is the same kind of wrapper when its actions drive
 other entities (#780): a template garage cover whose ``open_cover`` switches
-``switch.garage_relay``. Every entity its actions call a service on by entity
-id or registry id (a cover's every movement, a lock's unlocking and opening),
-the members of a group among them, and what a script or template entity
-among them drives in turn (including ``script.<key>``), is held for every
-call, like the relay under a switch_as_x cover. That can hold more than the
-relay: a garage cover whose open action also turns on the garage light holds
-the light too. Only a loaded template entity is read; targets its actions
-cannot name (an area, a template) are not followed, though the template
-entity itself stays held.
+``switch.garage_relay``. Every entity its actions target (a cover's every
+movement, a lock's unlocking and opening), read as ``template_actions``
+reads a call's targets, is held for every call, like the relay under a
+switch_as_x cover; a script or template entity among them is followed into
+its own actions for the relay-like entities it drives. That can hold more
+than the relay: a garage cover whose open action also turns on the garage
+light holds the light too. Only a loaded template entity is read; templated
+targets are not followed, though the template entity itself stays held.
 
 ``expand_critical_rules`` adds, for each such entity, a copy of the rule that
 matches that entity id exactly (``CRITICAL_RULE_EXACT_ENTITY``). Every screen

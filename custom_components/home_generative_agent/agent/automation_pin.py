@@ -163,8 +163,11 @@ _ENTITY_ID_WILDCARD = "all"
 _ENTITY_ID_NONE = "none"
 
 
-class _TooDeepError(Exception):
+class TooDeepError(Exception):
     """Raised when the step walk exceeds ``_MAX_STEP_DEPTH``."""
+
+
+_TooDeepError = TooDeepError
 
 
 @dataclass(frozen=True)
@@ -689,7 +692,7 @@ def _screen_step(
 
 
 def iter_service_calls(
-    actions: Any,
+    actions: Any, *, strict: bool = False
 ) -> Iterator[tuple[str, str, Mapping[str, Any]]]:
     """
     Yield ``(domain, service, step)`` for each call ``actions`` makes.
@@ -698,7 +701,8 @@ def iter_service_calls(
     as its ``(domain, type)``: HA's switch, light, button and similar device
     actions call the service of that name. A templated service, and a walk
     too deep to follow, are reported by ``find_critical_automation_calls``
-    rather than here, so callers screening further use both.
+    rather than here, so callers screening further use both; ``strict``
+    raises ``TooDeepError`` for a caller that has no such second screen.
     """
     try:
         for step, action_type in _walk_steps(actions):
@@ -714,6 +718,8 @@ def iter_service_calls(
             if domain and not templated:
                 yield domain, service, step
     except _TooDeepError:
+        if strict:
+            raise
         return
 
 

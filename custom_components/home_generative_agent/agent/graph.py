@@ -92,7 +92,6 @@ from .automation_targets import AUTOMATION_REFUSAL_PREFIX
 from .helpers import (
     ALARM_DOMAIN,
     CONFIRM_TOOL_NAME,
-    DEVICE_SETTING_INTENTS,
     INTENT_NAME_ALL,
     PIN_REFUSAL_ENDS_TURN,
     active_llm_api_ids,
@@ -105,6 +104,7 @@ from .helpers import (
     intent_target_states,
     is_actuating_intent,
     is_actuation_tool,
+    is_device_intent,
     is_on_off_intent,
     is_tool_excluded,
     langchain_tool_parameters_json,
@@ -3514,7 +3514,7 @@ def _is_critical_action(  # noqa: PLR0911
     # opens or closes a cover, #770), so check each call HA will make.
     if is_actuating_intent(tool_name):
         return _intent_is_critical(tool_args, critical_actions, tool_name, hass)
-    if base_tool_name(tool_name) in DEVICE_SETTING_INTENTS and hass is not None:
+    if is_device_intent(tool_name) and hass is not None:
         # Setting a template light's level runs its own action scripts (#780).
         states = intent_target_states(hass, tool_name, tool_args)
         if states is None or any(
