@@ -19,6 +19,7 @@ from custom_components.home_generative_agent.agent.tools import (
 # without adding it here (and without it existing in the English template).
 _DUMMY_KWARGS: dict[str, Any] = {
     "reason": "reason",
+    "automations": "automations",
     "calls": "calls",
     "min_len": 4,
     "max_len": 10,

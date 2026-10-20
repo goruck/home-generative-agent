@@ -7,6 +7,12 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+## [3.44.7] - 2026-10-20
+
+### Fixed
+
+- **A change the agent makes that starts an automation which unlocks or opens something now asks for the Critical Action PIN** ([#814](https://github.com/goruck/home-generative-agent/issues/814)). Turning on an input boolean, a switch or a light, running a script or scene, or (through a service tool) marking a phone home or publishing to MQTT can start an automation you wrote, and the PIN check looked only at the call: turning on an input boolean whose automation unlocked the front door ran with no PIN. Each entity a call changes, and any group holding it, is now checked against the automations that may react to it (by its id, or through a trigger that cannot be tied to entities ahead, such as a `state_changed` event), and the call is held when one of them would unlock or open something. The PIN prompt names that automation. Your own automations are held only for what can be read as protected (including a scene, script or automation they run), so one that fires an event or calls a REST command does not make a light ask for the PIN; disabled automations' triggers, and waits in scripts or automations that are not running, do not count. Automations started by other events (a phone notification's button, a remote) or watching other entities are not counted; automations on entities computed from the changed one, such as a template sensor, are not yet followed ([#820](https://github.com/goruck/home-generative-agent/issues/820)).
+
 ## [3.44.6] - 2026-10-20
 
 ### Fixed
