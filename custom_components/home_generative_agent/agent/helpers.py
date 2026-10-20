@@ -1729,6 +1729,92 @@ def intent_service_calls(
     """
     if hass is None or not is_actuating_intent(tool_name):
         return None
+    states = intent_target_states(hass, tool_name, tool_args)
+    if states is None:
+        return None
+    return [
+        call
+        for state in states
+        for call in _intent_calls(tool_name, state.domain, state.entity_id)
+    ]
+
+
+# Intents that only read, list or time things: the gate leaves them alone.
+# Every other intent that is not an on/off or cover intent is a device
+# intent: a template entity behind one runs action scripts of its own, which
+# the gate opens (#780). An intent Home Assistant adds later is checked, not
+# passed.
+READ_ONLY_INTENTS = frozenset(
+    {
+        "HassGetState",
+        "HassGetWeather",
+        "HassGetCurrentDate",
+        "HassGetCurrentTime",
+        "HassClimateGetTemperature",
+        "HassNevermind",
+        "HassRespond",
+        "HassBroadcast",
+        "HassStartTimer",
+        "HassCancelTimer",
+        "HassCancelAllTimers",
+        "HassIncreaseTimer",
+        "HassDecreaseTimer",
+        "HassPauseTimer",
+        "HassUnpauseTimer",
+        "HassTimerStatus",
+        "HassListAddItem",
+        "HassListCompleteItem",
+        "HassListRemoveItem",
+        "HassShoppingListAddItem",
+        "HassShoppingListCompleteItem",
+        "HassShoppingListLastItems",
+    }
+)
+# The domain Home Assistant's handler limits each device intent to, so a
+# call naming no device ("set brightness to 50%") is matched against those
+# devices, as HA will act on them.
+_DEVICE_INTENT_DOMAINS: dict[str, str] = {
+    "HassLightSet": "light",
+    "HassFanSetSpeed": "fan",
+    "HassClimateSetTemperature": "climate",
+    "HassVacuumStart": "vacuum",
+    "HassVacuumReturnToBase": "vacuum",
+    "HassVacuumCleanArea": "vacuum",
+    "HassSetVolume": "media_player",
+    "HassSetVolumeRelative": "media_player",
+    "HassMediaPause": "media_player",
+    "HassMediaUnpause": "media_player",
+    "HassMediaNext": "media_player",
+    "HassMediaPrevious": "media_player",
+    "HassMediaPlayerMute": "media_player",
+    "HassMediaPlayerUnmute": "media_player",
+    "HassMediaSearchAndPlay": "media_player",
+    "HassLawnMowerStartMowing": "lawn_mower",
+    "HassLawnMowerDock": "lawn_mower",
+    "HassHumidifierSetpoint": "humidifier",
+    "HassHumidifierMode": "humidifier",
+}
+
+
+def is_device_intent(tool_name: str) -> bool:
+    """Return True for an intent that acts on devices, beyond on/off and covers."""
+    base = base_tool_name(tool_name)
+    return (
+        base.startswith("Hass")
+        and base not in READ_ONLY_INTENTS
+        and not is_actuating_intent(tool_name)
+    )
+
+
+def intent_target_states(
+    hass: HomeAssistant, tool_name: str, tool_args: Mapping[str, Any]
+) -> list[State] | None:
+    """
+    Return the states an intent's targets match, as HA's matcher finds them.
+
+    None when the gate cannot tell (a slot it cannot read, a matcher that
+    raised); empty when nothing matches or the call names no target.
+    """
     payload = minimal_payload_for_domain(dict(tool_args))
     try:
         name = _slot_text(payload.get("name"))
@@ -1738,6 +1824,11 @@ def intent_service_calls(
         device_classes = _text_list(payload.get("device_class"))
     except _UnclassifiableSlotError:
         return None
+    if not is_actuating_intent(tool_name) and not domains:
+        domain = _DEVICE_INTENT_DOMAINS.get(base_tool_name(tool_name))
+        if domain is None and not (name or area or floor):
+            return None  # an intent the gate does not know, aimed at no device
+        domains = [domain] if domain else []
     if name == INTENT_NAME_ALL:
         # HA's own comparison: exact, so " all " stays a name it looks up.
         name = None
@@ -1762,11 +1853,7 @@ def intent_service_calls(
         return None
     if not result.is_match:
         return []
-    return [
-        call
-        for state in result.states
-        for call in _intent_calls(tool_name, state.domain, state.entity_id)
-    ]
+    return list(result.states)
 
 
 def declared_intent_service_calls(

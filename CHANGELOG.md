@@ -7,6 +7,12 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+## [3.44.5] - 2026-10-20
+
+### Fixed
+
+- **Template switches, lights and buttons, and buttons that start automations, now ask for the Critical Action PIN when they open or unlock something** ([#780](https://github.com/goruck/home-generative-agent/issues/780)). A template switch runs its own `turn_on` action, a template button its press action and a template light the action for what it is asked (a brightness runs `set_level`), and a button press starts the automations that react to it. The PIN check matched only the call the agent made, so turning on a template switch, setting a template light, or pressing a button whose action or automation opened the garage door ran with no PIN, by voice, through a service tool, from a scene or script the agent ran, or in an automation it wrote. Those actions are now checked the way a script's steps are: a template button that opens the garage door asks for the PIN, one that turns on a light does not, and one whose actions cannot be read is held. A script a template switch runs is opened rather than held, so a template TV switch running a harmless script does not ask for the PIN. A group holding such an entity, or a light made from it with **Change device type of a switch**, is checked through it, and a call aimed at an area, device or label is checked against the entities there. A button press also checks scripts and automations waiting for it and trigger-based template blocks, and a template alarm panel, which has no code of its own to enforce, is checked by what its arm and disarm actions do. A template garage cover or template lock built on a relay now also holds calls on the relay, as a `switch_as_x` cover has since 3.44.4, and on anything else its actions drive.
+
 ## [3.44.4] - 2026-10-18
 
 ### Fixed

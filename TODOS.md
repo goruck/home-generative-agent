@@ -758,6 +758,19 @@ validation.
 
 ---
 
+### The relay under a template cover that is not loaded is not held
+
+**What:** `read_template_drives` (`agent/rule_entities.py`) reads only loaded template covers and locks, so while the Template integration has not loaded (startup, a reload, a config error) the relay a template garage cover drives gets no rule copy, and a direct call on it is not held. The template cover itself stays held. A `switch_as_x` wrapper is read from its config entry whether loaded or not.
+
+**Why:** Found in review 2 of #780. A UI-made template cover keeps its actions in its config entry options, which could be read the same way; a YAML one cannot be read until it loads.
+
+**How to apply:** Read `template` config entries' options for cover/lock `open`/`unlock` actions when the entity is not loaded, or hold every switch call while a registered template cover or lock is not loaded.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
 ### A Sentinel batch held at unload is never sent but is audited as delivered
 
 **What:** `SentinelNotifier.async_notify` (`sentinel/notifier.py`) holds non-high findings past the rate limit in `_held_batch` and returns True, so the engine audits them `not_suppressed`. `stop()` cancels the batch timer without flushing, so findings held when the entry unloads or reloads are never pushed, yet they stay counted in the daily digest and the health sensor's notification KPIs, and are protected from eviction. A batch summary that does go out also carries no per-finding action buttons.
