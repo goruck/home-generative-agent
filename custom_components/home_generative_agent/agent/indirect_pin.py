@@ -193,20 +193,23 @@ def bare_script_tool_entity_id(
     return entity_id if states.get(entity_id) is not None else None
 
 
-def intent_script_handler(hass: HomeAssistant | None, tool_name: str) -> Any:
+def intent_script_handlers(hass: HomeAssistant | None, tool_name: str) -> list[Any]:
     """
-    Return the intent script a tool runs, or None if it is not one (#779).
+    Return every intent script a tool may run (#779).
 
-    Home Assistant 2026.9 and later name each intent script's tool
-    ``intent_script__<name>`` (the name slugified, as HA does), under any
-    merged API's prefix; before, the tool was named by the intent itself. A
-    namespaced tool whose intent script cannot be found returns ``_MISSING``.
+    Home Assistant 2026.9 and later name an intent script's tool
+    ``intent_script__<slug>``; 2026.8 named it by the slug alone. A merged
+    API prefixes its own namespace, and an intent script may take over a
+    built-in intent (``HassTurnOn``), whose tool then runs it. So the tool
+    name and each of its ``__``-suffixes are compared with every intent
+    script's name and its slug, and all that match are returned: HA picks
+    one by the exposed platforms, which the gate cannot see, so each one
+    counts. A ``intent_script__`` tool matching none returns ``[_MISSING]``.
     """
     parts = tool_name.split(TOOL_NAMESPACE_SEP)
-    name = parts[-1]
     namespaced = len(parts) >= _SCRIPT_TOOL_PARTS and parts[-2] == _INTENT_SCRIPT
     if not _has_entities(hass):
-        return _MISSING if namespaced else None
+        return [_MISSING] if namespaced else []
     try:
         handlers = [
             handler
@@ -215,17 +218,37 @@ def intent_script_handler(hass: HomeAssistant | None, tool_name: str) -> Any:
         ]
     except Exception:
         LOGGER.exception("Could not read the intent scripts")
-        return _MISSING if namespaced else None
-    for handler in handlers:
-        intent_type = str(getattr(handler, "intent_type", ""))
-        if (
-            namespaced and slugify(intent_type, separator="_", lowercase=False) == name
-        ) or (not namespaced and intent_type == name):
-            return handler
-    return _MISSING if namespaced else None
+        return [_MISSING] if namespaced else []
+    suffixes = {TOOL_NAMESPACE_SEP.join(parts[index:]) for index in range(len(parts))}
+    found = [
+        handler
+        for handler in handlers
+        if {
+            str(getattr(handler, "intent_type", "")),
+            slugify(
+                str(getattr(handler, "intent_type", "")), separator="_", lowercase=False
+            ),
+        }
+        & suffixes
+    ]
+    if not found and namespaced:
+        return [_MISSING]
+    return found
 
 
-def intent_script_is_critical(
+def intent_scripts_are_critical(
+    hass: HomeAssistant | None,
+    tool_name: str,
+    rules: Sequence[Mapping[str, str]],
+) -> bool:
+    """Return True if an intent script the tool may run does a critical action."""
+    return any(
+        _intent_script_is_critical(hass, handler, rules)
+        for handler in intent_script_handlers(hass, tool_name)
+    )
+
+
+def _intent_script_is_critical(
     hass: HomeAssistant | None,
     handler: Any,
     rules: Sequence[Mapping[str, str]],

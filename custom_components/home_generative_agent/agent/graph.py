@@ -134,8 +134,8 @@ from .indirect_pin import (
     StoredActionCheck,
     bare_script_tool_entity_id,
     call_target_domains,
-    intent_script_handler,
-    intent_script_is_critical,
+    intent_script_handlers,
+    intent_scripts_are_critical,
     runs_critical_action,
     script_rule_matches,
     script_tool_entity_id,
@@ -551,7 +551,9 @@ def _prepare_tool_args(
     """Normalize, guard, and sanitize arguments before calling HA."""
     tool_args = normalize_intent_for_alarm(tool_name, tool_args, ctx.hass)
     tool_args = normalize_intent_for_lock(tool_name, tool_args, ctx.hass)
-    if _is_live_context_tool(tool_name):
+    if _is_live_context_tool(tool_name) and not intent_script_handlers(
+        ctx.hass, tool_name
+    ):
         # Read-only, and HA's schema is name/domain/area only. The lock
         # rewriting below exists for lock/unlock commands; applied to a state
         # query it added service/entity_id keys HA rejects (ExtraKeysInvalid),
@@ -3514,6 +3516,12 @@ def _is_critical_action(  # noqa: PLR0911, PLR0912
         except IndexError:
             domain = ""
 
+    # An intent script's tool names no domain or service, and one may take
+    # over a built-in intent's tool; what it runs is checked first, and only
+    # ever adds a hold (#779).
+    if intent_scripts_are_critical(hass, tool_name, critical_actions):
+        return True
+
     # An intent carries no service: HA picks it per matched entity (on/off
     # opens or closes a cover, #770), so check each call HA will make.
     if is_actuating_intent(tool_name):
@@ -3529,10 +3537,6 @@ def _is_critical_action(  # noqa: PLR0911, PLR0912
             for state in states
         ):
             return True
-
-    # An intent script's tool names no domain or service either (#779).
-    if (handler := intent_script_handler(hass, tool_name)) is not None:
-        return intent_script_is_critical(hass, handler, critical_actions)
 
     # A script's own tool names no domain or service; what it runs decides.
     if (script_id := script_tool_entity_id(tool_name)) is not None:

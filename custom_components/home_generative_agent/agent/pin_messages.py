@@ -49,7 +49,7 @@ from .helpers import (
 )
 from .indirect_pin import (
     bare_script_tool_entity_id,
-    intent_script_handler,
+    intent_script_handlers,
     script_tool_entity_id,
 )
 from .rule_entities import relay_wrappers_reached
@@ -550,6 +550,10 @@ def _describe_automation(hass: HomeAssistant | None, action: Mapping[str, Any]) 
     return pin_msg(hass, "action_automation_runs", action=text, calls=shown)
 
 
+# The slots an intent script's tool takes that name what it acts on.
+_INTENT_SLOT_KEYS = ("name", "area", "floor")
+
+
 def describe_pending_action(
     hass: HomeAssistant | None, action: Mapping[str, Any]
 ) -> str:
@@ -639,13 +643,20 @@ def _describe_line(  # noqa: PLR0911
 
     raw_args = action.get("tool_args")
     tool_args: dict[str, Any] = dict(raw_args) if isinstance(raw_args, Mapping) else {}
-    if (handler := intent_script_handler(hass, tool_name)) is not None:
-        intent_name = str(getattr(handler, "intent_type", "") or tool_name)
-        return pin_msg(
+    if handlers := intent_script_handlers(hass, tool_name):
+        intent_name = str(getattr(handlers[0], "intent_type", "") or tool_name)
+        line = pin_msg(
             hass,
             "action_intent_script",
             target=_named(hass, _one_line(intent_name, _ACTION_TARGET_MAX_LEN)),
         )
+        # What the model filled in may pick the device: show it.
+        slots = [
+            _one_line(str(tool_args[key]), _ACTION_TARGET_MAX_LEN)
+            for key in _INTENT_SLOT_KEYS
+            if tool_args.get(key)
+        ]
+        return f"{line} ({', '.join(slots)})" if slots else line
     if (script_id := script_tool_entity_id(tool_name)) is not None:
         return _script_line(hass, script_id)
     # A tool named like a script (HA before 2026.9 named script tools so) is

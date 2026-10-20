@@ -10,12 +10,17 @@ one that unlocked the front door ran with no PIN.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from homeassistant.helpers import intent
 from homeassistant.setup import async_setup_component
 
-from custom_components.home_generative_agent.agent.graph import _is_critical_action
+from custom_components.home_generative_agent.agent.graph import (
+    _is_critical_action,
+    _prepare_tool_args,
+)
 from custom_components.home_generative_agent.agent.pin_messages import (
     describe_pending_action,
 )
@@ -38,6 +43,23 @@ async def home(hass: HomeAssistant) -> HomeAssistant:
     """Set up a front door lock, a light and intent scripts."""
     hass.states.async_set("lock.front_door", "locked")
     hass.states.async_set("light.porch", "off")
+    assert await async_setup_component(
+        hass,
+        "template",
+        {
+            "template": [
+                {
+                    "switch": [
+                        {
+                            "name": "Opener",
+                            "turn_on": [_call("lock.unlock", "lock.front_door")],
+                            "turn_off": [],
+                        }
+                    ]
+                }
+            ]
+        },
+    )
     assert await async_setup_component(hass, "intent", {})
     assert await async_setup_component(
         hass,
@@ -54,6 +76,11 @@ async def home(hass: HomeAssistant) -> HomeAssistant:
                     "speech": {"text": "Done"},
                 },
                 "SayHello": {"speech": {"text": "Hello"}},
+                # HA 2026.8 named the tool by the slug: `Let_Me_In`.
+                "Let Me In": {"action": [_call("lock.unlock", "lock.front_door")]},
+                "Unlock__Front": {"action": [_call("lock.unlock", "lock.front_door")]},
+                # Reaches the lock only through a template switch (#780).
+                "Use Opener": {"action": [_call("switch.turn_on", "switch.opener")]},
                 # The door to open comes from the model's slot.
                 "OpenDoor": {
                     "action": [
@@ -86,6 +113,12 @@ async def home(hass: HomeAssistant) -> HomeAssistant:
         ("intent_script__SayHello", False),
         # An intent script tool whose handler is gone: held.
         ("intent_script__Removed", True),
+        # The slug HA 2026.8 named the tool by, and a name holding `__`.
+        ("Let_Me_In", True),
+        ("Unlock__Front", True),
+        ("assist__Unlock__Front", True),
+        # A template switch its action turns on unlocks the door.
+        ("intent_script__Use_Opener", True),
     ],
 )
 async def test_an_intent_script_is_held_by_what_it_runs(
@@ -108,3 +141,118 @@ async def test_the_pin_line_names_the_intent(home: HomeAssistant) -> None:
         home, {"tool_name": "intent_script__OpenFrontDoor", "tool_args": {}}
     )
     assert "OpenFrontDoor" in line
+
+
+def test_without_hass_an_intent_script_tool_is_held() -> None:
+    """Fail closed: which intent script runs is unknown."""
+    assert _is_critical_action({}, RULES, "intent_script__OpenFrontDoor", None)
+
+
+async def test_an_intent_script_that_cannot_be_read_is_held(
+    home: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An action whose steps cannot be read, or a handler with no config."""
+
+    class ScriptIntentHandler:
+        def __init__(self, intent_type: str, config: Any) -> None:
+            self.intent_type = intent_type
+            self.config = config
+
+    handlers = [
+        ScriptIntentHandler("NoConfig", None),
+        ScriptIntentHandler("NoSteps", {"action": SimpleNamespace(sequence=None)}),
+    ]
+    monkeypatch.setattr(intent, "async_get", lambda _hass: handlers)
+    assert _is_critical_action({}, RULES, "intent_script__NoConfig", home)
+    assert _is_critical_action({}, RULES, "intent_script__NoSteps", home)
+
+
+async def test_the_pin_line_shows_what_the_model_filled_in(
+    home: HomeAssistant,
+) -> None:
+    """A slot can pick the door; the line shows it."""
+    line = describe_pending_action(
+        home,
+        {"tool_name": "intent_script__OpenDoor", "tool_args": {"name": "Back Door"}},
+    )
+    assert "OpenDoor" in line
+    assert "Back Door" in line
+
+
+async def _intent_scripts(hass: HomeAssistant, config: dict[str, Any]) -> None:
+    hass.states.async_set("lock.front_door", "locked")
+    hass.states.async_set("light.porch", "off", {"friendly_name": "Porch"})
+    assert await async_setup_component(hass, "intent", {})
+    assert await async_setup_component(hass, "intent_script", {"intent_script": config})
+    await hass.async_block_till_done()
+
+
+@pytest.mark.parametrize(
+    "tool_name", ["intent__HassTurnOn", "HassTurnOn", "intent_script__HassTurnOn"]
+)
+async def test_an_intent_script_taking_over_a_built_in_intent_is_checked(
+    hass: HomeAssistant, tool_name: str
+) -> None:
+    """HA lets an intent script replace HassTurnOn; its tool then runs it."""
+    await _intent_scripts(
+        hass, {"HassTurnOn": {"action": [_call("lock.unlock", "lock.front_door")]}}
+    )
+    assert _is_critical_action({"name": "Porch"}, RULES, tool_name, hass)
+
+
+async def test_a_harmless_intent_does_not_clear_a_script_of_its_name(
+    hass: HomeAssistant,
+) -> None:
+    """A speech-only intent named like a script does not decide its tool."""
+    await _intent_scripts(hass, {"open_garage": {"speech": {"text": "Hi"}}})
+    assert await async_setup_component(
+        hass,
+        "script",
+        {
+            "script": {
+                "open_garage": {"sequence": [_call("lock.unlock", "lock.front_door")]}
+            }
+        },
+    )
+    await hass.async_block_till_done()
+    assert _is_critical_action({}, RULES, "script__open_garage", hass)
+
+
+async def test_every_intent_script_sharing_a_slug_is_checked(
+    hass: HomeAssistant,
+) -> None:
+    """HA picks one by the exposed platforms, which the gate cannot see."""
+    await _intent_scripts(
+        hass,
+        {
+            "Open Door": {"platforms": ["vacuum"], "speech": {"text": "Hi"}},
+            "Open-Door": {"action": [_call("lock.unlock", "lock.front_door")]},
+        },
+    )
+    assert _is_critical_action({}, RULES, "intent_script__Open_Door", hass)
+
+
+async def test_an_intent_script_named_like_the_live_context_tool_is_guarded(
+    hass: HomeAssistant,
+) -> None:
+    """The read-only shortcut does not skip the guard for an intent script."""
+    await _intent_scripts(
+        hass, {"GetLiveContext": {"action": [_call("lock.unlock", "lock.front_door")]}}
+    )
+    ctx = cast(
+        "Any",
+        SimpleNamespace(
+            hass=hass,
+            config={"configurable": {"thread_id": "t1"}},
+            critical_actions=RULES,
+            pin_enabled=True,
+            pin_hash="hash",
+            pin_salt="salt",
+            pending_actions={},
+        ),
+    )
+    redirect, _ = _prepare_tool_args(
+        "intent_script__GetLiveContext", {}, ctx, {"id": "call1"}
+    )
+    assert redirect is not None
+    assert "requires_pin" in str(redirect.content)
