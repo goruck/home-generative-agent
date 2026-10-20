@@ -425,35 +425,50 @@ class StoredActionReader:
             LOGGER.debug("Cannot read the actions of %s; holding it", entity_id)
         return own
 
-    def started_by(self, entity_id: str, depth: int = 0) -> list[Reactor] | None:
+    def started_by(self, entity_id: str) -> list[Reactor] | None:
         """
         Return what may react to a change to the entity, or to one following it.
 
         A group's state follows its members', so turning on a light changes
         the light group it is in too (#814); a template sensor or a helper
-        computed from it changes too (#820). None when an automation cannot
-        be read, when what follows the entity cannot be read, or when it goes
-        deeper than ``_MAX_FOLLOWING_DEPTH``: the change is then held.
+        computed from it changes too (#820). Everything the change reaches is
+        read breadth first, so entities following one another in a loop are
+        each one step away. None when an automation cannot be read, when what
+        follows an entity cannot be read, or when an entity is reached only
+        past ``_MAX_FOLLOWING_DEPTH`` steps: the change is then held.
         """
         entity_id = entity_id.lower()
         if entity_id in self._started:
             return self._started[entity_id]
-        self._started[entity_id] = []  # a group holding itself adds nothing
-        found = self._find_started_by(entity_id)
-        following = self._following(entity_id) if found is not None else set()
-        if following is None:
-            found = None
-        elif following and depth >= _MAX_FOLLOWING_DEPTH:
-            LOGGER.debug("%s is followed too deep to read; holding it", entity_id)
-            found = None
-        if found is not None and following:
-            for parent in sorted(following):
-                parents = self.started_by(parent, depth + 1)
-                if parents is None:
-                    found = None
-                    break
-                found += [r for r in parents if r not in found]
-        self._started[entity_id] = found
+        result = self._reached_reactors(entity_id)
+        self._started[entity_id] = result
+        return result
+
+    def _reached_reactors(self, entity_id: str) -> list[Reactor] | None:
+        steps = {entity_id: 0}
+        frontier = [entity_id]
+        while frontier:
+            next_frontier: list[str] = []
+            for current in frontier:
+                following = self._following(current)
+                if following is None:
+                    return None
+                new = sorted(following - steps.keys())
+                if new and steps[current] >= _MAX_FOLLOWING_DEPTH:
+                    LOGGER.debug(
+                        "%s is followed too deep to read; holding it", entity_id
+                    )
+                    return None
+                for reached in new:
+                    steps[reached] = steps[current] + 1
+                next_frontier.extend(new)
+            frontier = next_frontier
+        found: list[Reactor] = []
+        for reached in steps:
+            reactors = self._find_started_by(reached)
+            if reactors is None:
+                return None
+            found += [reactor for reactor in reactors if reactor not in found]
         return found
 
     def _following(self, entity_id: str) -> set[str] | None:
@@ -815,16 +830,27 @@ class DerivedEntities:
 
 
 def _bus_state_listeners(hass: HomeAssistant) -> list[Any]:
-    """Return the jobs listening to every state change on the bus."""
+    """
+    Return the jobs listening to every state change on the bus.
+
+    One with an event filter is left out: it hears only the changes its
+    filter passes (the Assist agent hears entities added and removed), and
+    a template reading every state listens unfiltered.
+    """
     listeners = getattr(getattr(hass, "bus", None), "_listeners", None)
     if not isinstance(listeners, dict):
         _warn_once("Home Assistant's event bus listeners")
         return []
-    jobs = listeners.get("state_changed") or []
-    return [
-        entry[0] if isinstance(entry, tuple) and entry else entry
-        for entry in list(jobs)
-    ]
+    jobs: list[Any] = []
+    for entry in list(listeners.get("state_changed") or []):
+        if isinstance(entry, tuple):
+            # (job, event filter, ...): a filtered one hears only some changes.
+            job, event_filter = [*entry, None, None][:2]
+            if job is not None and event_filter is None:
+                jobs.append(job)
+        else:
+            jobs.append(entry)
+    return jobs
 
 
 def _template_texts(entity: Any) -> str:
@@ -846,9 +872,25 @@ _IMPORTS_TEMPLATE = re.compile(r"\{%-?\s*(?:from|import|include)\b")
 _OWNER_SEARCH_DEPTH = 8
 _OWNER_SEARCH_BUDGET = 50_000
 _CONTAINERS = (dict, list, tuple, set, frozenset, str, bytes)
-# The owners of each state-change job, kept across checks: a job's owner does
-# not change. Pruned to the jobs still subscribed at each read.
-_JOB_OWNERS: dict[int, tuple[Any, frozenset[str]]] = {}
+# The entities each state-change job updates, kept across checks: a job's
+# closure and bound object do not change. Entity objects, not ids, so a
+# renamed entity is read by its new id. Not kept: a search cut short, or one
+# through a coordinator, whose listeners change (its sensors are added after
+# it subscribes). Replaced by the jobs still subscribed at each read.
+_JOB_OWNERS: dict[int, tuple[Any, tuple[Entity, ...]]] = {}
+
+
+class OwnerSearchExceededError(Exception):
+    """Raised when a check would read more than ``_OWNER_SEARCH_BUDGET``."""
+
+
+@dataclass
+class _Found:
+    """What a search from one object reached, and whether it can be kept."""
+
+    entities: frozenset[Entity] = frozenset()
+    complete: bool = True
+    volatile: bool = False
 
 
 class _OwnerSearch:
@@ -867,65 +909,82 @@ class _OwnerSearch:
       stats, proximity) to the callbacks of its listeners.
 
     Every entity reached counts. An object that cannot be read is skipped
-    with a warning, rather than holding every call.
+    with a warning; a read over the budget raises, and the change is held.
     """
 
     def __init__(self) -> None:
-        self._memo: dict[int, frozenset[str]] = {}
+        self._memo: dict[int, _Found] = {}
         self._visited = 0
-        self._jobs: dict[int, tuple[Any, frozenset[str]]] = {}
+        self._jobs: dict[int, tuple[Any, tuple[Entity, ...]]] = {}
 
     def owners(self, job: Any) -> set[str]:
         cached = _JOB_OWNERS.get(id(job))
         if cached is not None and cached[0] is job:
-            found = cached[1]
+            entities: tuple[Entity, ...] = cached[1]
+            self._jobs[id(job)] = cached
         else:
             found = self._search(job, 0, set())
-        self._jobs[id(job)] = (job, found)
-        return set(found)
+            entities = tuple(found.entities)
+            if found.complete and not found.volatile:
+                self._jobs[id(job)] = (job, entities)
+        return {
+            entity_id.lower()
+            for entity in entities
+            if isinstance(entity_id := getattr(entity, "entity_id", None), str)
+            and entity_id
+        }
 
     def finish(self) -> None:
         """Keep the owners of the jobs seen in this read, for the next."""
         _JOB_OWNERS.clear()
         _JOB_OWNERS.update(self._jobs)
 
-    def _search(self, node: Any, depth: int, path: set[int]) -> frozenset[str]:
-        if node is None or isinstance(node, _CONTAINERS) or id(node) in path:
-            return frozenset()
-        if id(node) in self._memo:
-            return self._memo[id(node)]
+    def _search(self, node: Any, depth: int, path: set[int]) -> _Found:  # noqa: PLR0911
+        if node is None or isinstance(node, _CONTAINERS):
+            return _Found()
+        if id(node) in path:
+            return _Found(complete=False)  # a loop: the caller decides
+        if (memo := self._memo.get(id(node))) is not None:
+            return memo
         self._visited += 1
         if self._visited > _OWNER_SEARCH_BUDGET:
-            _warn_once("all of Home Assistant's state-change subscriptions in time")
-            return frozenset()
+            raise OwnerSearchExceededError
         if isinstance(node, Entity):
-            entity_id = getattr(node, "entity_id", None)
-            owner = frozenset(
-                [entity_id.lower()] if isinstance(entity_id, str) and entity_id else []
-            )
-            self._memo[id(node)] = owner
-            return owner
-        if depth >= _OWNER_SEARCH_DEPTH or type(node).__name__ == "HomeAssistant":
-            return frozenset()
+            found = _Found(entities=frozenset([node]))
+            self._memo[id(node)] = found
+            return found
+        if type(node).__name__ == "HomeAssistant":
+            return _Found()
+        if depth >= _OWNER_SEARCH_DEPTH:
+            return _Found(complete=False)
         try:
-            links = _owner_links(node)
+            links, coordinator = _owner_links(node)
         except Exception:  # noqa: BLE001
             _warn_once(f"a state-change callback ({type(node).__name__})")
-            links = []
-        found: set[str] = set()
+            links, coordinator = [], False
+        entities: set[Entity] = set()
+        complete, volatile = True, coordinator
         path.add(id(node))
         for link in links:
-            found |= self._search(link, depth + 1, path)
+            found = self._search(link, depth + 1, path)
+            entities |= found.entities
+            complete = complete and found.complete
+            volatile = volatile or found.volatile
         path.discard(id(node))
-        result = frozenset(found)
-        self._memo[id(node)] = result
+        result = _Found(frozenset(entities), complete, volatile)
+        if complete:
+            self._memo[id(node)] = result
         return result
 
 
-def _owner_links(node: Any) -> list[Any]:
-    """Return the objects a callback, job or tracker hands state changes to."""
+def _owner_links(node: Any) -> tuple[list[Any], bool]:
+    """
+    Return what a callback, job or tracker hands state changes to.
+
+    And whether it is a coordinator, whose listeners change.
+    """
     if isinstance(node, partial):
-        return [node.func, *node.args, *node.keywords.values()]
+        return [node.func, *node.args, *node.keywords.values()], False
     links: list[Any] = [getattr(node, "__self__", None)]
     links.extend(
         cell.cell_contents
@@ -940,7 +999,8 @@ def _owner_links(node: Any) -> list[Any]:
             entry[0] if isinstance(entry, tuple) and entry else entry
             for entry in listeners.values()
         )
-    return links
+        return links, True
+    return links, False
 
 
 def _cell_filled(cell: Any) -> bool:

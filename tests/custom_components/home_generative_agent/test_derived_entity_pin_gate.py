@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-from homeassistant.core import HassJob
+from homeassistant.core import HassJob, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.event import async_track_state_change_event
@@ -364,6 +364,11 @@ class _Template:
         self.template = text
 
 
+@callback
+def _never(_data: Any) -> bool:
+    return False
+
+
 class _Coordinator:
     def __init__(self, listeners: dict[int, Any]) -> None:
         self._listeners = listeners
@@ -542,3 +547,83 @@ async def test_many_subscriptions_are_read_quickly(hass: HomeAssistant) -> None:
         timings.append(time.perf_counter() - started)
     # gstack-timing-ok: a cost bound on the event loop, not a race.
     assert max(timings) < 1.5, timings
+
+
+async def test_a_search_over_budget_holds_and_is_not_kept(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Running out of budget asks for the PIN, and the next check reads again."""
+    await _setup(
+        hass,
+        "binary_sensor.level_high",
+        binary_sensor=[
+            {
+                "platform": "threshold",
+                "name": "Level High",
+                "entity_id": "input_number.level",
+                "upper": 5,
+            }
+        ],
+    )
+    monkeypatch.setattr(template_actions, "_JOB_OWNERS", {})
+    monkeypatch.setattr(template_actions, "_OWNER_SEARCH_BUDGET", 0)
+    assert _held(hass, "input_boolean.gate")
+    monkeypatch.setattr(template_actions, "_OWNER_SEARCH_BUDGET", 50_000)
+    assert not _held(hass, "input_boolean.gate")
+    assert _held(hass, "input_number.level", "set_value")
+
+
+def test_a_coordinators_owners_are_read_again_each_time() -> None:
+    """Its sensors are added after it subscribes, and may be renamed."""
+    template_actions._JOB_OWNERS.clear()
+    coordinator = _Coordinator({})
+    job = HassJob(coordinator.on_state_change)
+    search = template_actions._OwnerSearch()
+    assert search.owners(job) == set()
+    search.finish()
+    owner = _Owner("sensor.distance")
+    coordinator._listeners[1] = (owner.handle, None)
+    assert template_actions._OwnerSearch().owners(job) == {"sensor.distance"}
+
+
+def test_a_renamed_entity_is_read_by_its_new_id() -> None:
+    """The cache keeps the entity, not its id."""
+    template_actions._JOB_OWNERS.clear()
+    owner = _Owner("sensor.old_name")
+    job = HassJob(owner.handle)
+    search = template_actions._OwnerSearch()
+    assert search.owners(job) == {"sensor.old_name"}
+    search.finish()
+    owner.entity_id = "sensor.new_name"
+    assert template_actions._OwnerSearch().owners(job) == {"sensor.new_name"}
+
+
+async def test_templates_following_each_other_do_not_hold_a_light(
+    hass: HomeAssistant,
+) -> None:
+    """Twelve templates each reading every state: a loop, not a deep chain."""
+    sensors = [
+        {"name": f"Count {index}", "state": "{{ states | count }}"}
+        for index in range(12)
+    ]
+    hass.states.async_set("light.porch", "off")
+    assert await async_setup_component(
+        hass, "template", {"template": [{"sensor": sensors}]}
+    )
+    await hass.async_block_till_done()
+    assert not _held(hass, "light.porch")
+
+
+async def test_a_filtered_bus_listener_does_not_follow_everything(
+    hass: HomeAssistant,
+) -> None:
+    """The Assist agent hears only entities added and removed."""
+    owner = _Owner("conversation.home_assistant")
+    hass.bus.async_listen("state_changed", owner.handle, event_filter=_never)
+    unfiltered = _Owner("sensor.everything")
+    hass.bus.async_listen("state_changed", unfiltered.handle)
+    jobs = template_actions._bus_state_listeners(hass)
+    search = template_actions._OwnerSearch()
+    owners = set().union(*(search.owners(job) for job in jobs))
+    assert "sensor.everything" in owners
+    assert "conversation.home_assistant" not in owners
