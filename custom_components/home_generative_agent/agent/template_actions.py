@@ -1,7 +1,7 @@
 """
-Read the actions an entity runs when the agent acts on it (#780).
+Read the actions an entity runs when the agent acts on it (#780, #814).
 
-Some entities run stored actions of their own, which no rule names:
+Acting on an entity can run stored actions no rule names:
 
 * **A template entity** (from the Template integration) runs action scripts.
   For a template switch, button, lock and cover, Home Assistant keys each
@@ -12,21 +12,24 @@ Some entities run stored actions of their own, which no rule names:
   them. Any other template entity picks its script from the call's data (a
   template light's ``turn_on`` with a brightness runs ``set_level``; a fan's
   runs ``set_percentage`` too), so every script it has counts.
-* **A button or an input button** starts what reacts to its press: an
+* **Any entity whose state the call changes** (an input boolean turned on, a
+  switch, a button pressed) starts what reacts to that change: an
   automation, a trigger-based template block with ``actions:``, and a script
   or automation waiting for it (``wait_for_trigger`` or ``wait_template``),
-  which the press resumes. One counts when a trigger or wait names the
-  button, by entity id or registry id (or through the automation's
+  which the change resumes. One counts when a trigger or wait names the
+  entity, by entity id or registry id (or through the automation's
   variables), or cannot be tied to entities ahead: a ``state_changed`` or
-  ``call_service`` event trigger (one filtered in its conditions can react
-  to the press), an event trigger whose type is templated or missing, a
-  template reading states generically (``states.input_button``,
+  ``call_service`` event trigger (one filtered in its conditions can react),
+  an event trigger whose type is templated or missing, a template reading
+  states generically (``states.<its domain>``, ``states | ...``,
   ``expand(...)``, ``area_entities(...)``), a templated entity, target or
   event filter, an area, device, label or floor target, or a device trigger
-  for buttons or for the button's own device. Its actions are what the
-  press runs. A template naming other entities (``states('sensor.x')``),
-  another event type (a ZHA or mobile notification event) or another
-  device's trigger (a remote) cannot react to a press and does not count.
+  for the entity's domain or its own device. Its actions are what the
+  change runs. A trigger's ``to:``/``from:`` is not read: turning a switch
+  off counts if turning it on would start the automation. A template naming
+  other entities (``states('sensor.x')``), another event type (a ZHA or
+  mobile notification event) or another device's trigger (a remote) cannot
+  react and does not count.
 
 A call's targets are read the way Home Assistant reads them: the step, its
 ``target`` and its data blocks are merged, registry ids are resolved, an
@@ -76,11 +79,14 @@ _WAIT_KEY = "wait_for_trigger"
 _WAIT_TEMPLATE_KEY = "wait_template"
 _VARIABLE_KEYS = ("variables", "trigger_variables")
 _TEMPLATE_DOMAIN = TEMPLATE_PLATFORM
-# A template reading states without naming one entity: `states.input_button`,
-# `states | ...`, `expand(...)`, `area_entities(...)` and the like.
-_GENERIC_STATES = re.compile(
-    r"\bstates\b(?!\s*\()(?!\.[a-z0-9_]+\.[a-z0-9_]+)"
-    r"|\b(?:expand|area_entities|label_entities|device_entities"
+# A template reading states without naming one entity (see
+# `_reads_states_generically`): `states` alone or `states.<domain>`, not
+# `states(...)` or `states.<domain>.<object>`; and the entity-list helpers.
+_STATES_ACCESS = re.compile(
+    r"\bstates\b(?:\s*\.\s*([a-z0-9_]+)(?:\.([a-z0-9_]+))?)?(?!\s*[(.a-z0-9_])"
+)
+_ENTITY_LISTS = re.compile(
+    r"\b(?:expand|area_entities|label_entities|device_entities"
     r"|floor_entities|integration_entities)\s*\("
 )
 # The events a button press can fire: its state change, and the service call.
@@ -134,12 +140,14 @@ def is_template_entity(hass: HomeAssistant, entity_id: str) -> bool:
     )
 
 
-def runs_stored_actions(hass: HomeAssistant, entity_id: str) -> bool:
-    """Return True for a template entity, a button or an input button."""
-    entity_id = entity_id.lower()
-    if entity_id.split(".", 1)[0] in PRESS_DOMAINS:
-        return True
-    return is_template_entity(hass, entity_id)
+def runs_stored_actions(hass: HomeAssistant, entity_id: str) -> bool:  # noqa: ARG001
+    """
+    Return True for an entity acting on which may run stored actions.
+
+    Every entity whose state a call changes may start automations (#814); a
+    template entity runs its own action scripts too.
+    """
+    return True
 
 
 def action_scripts(entity: Any, entity_id: str) -> dict[str, Any] | None:
@@ -203,14 +211,12 @@ class StoredActionReader:
         """
         entity_id = entity_id.lower()
         domain = entity_id.split(".", 1)[0]
-        sequences: list[Any] = []
-        if domain in PRESS_DOMAINS:
-            started = self.started_by(entity_id)
-            if started is None:
-                return None
-            sequences.extend(started)
-            if not is_template_entity(self.hass, entity_id):
-                return sequences
+        started = self.started_by(entity_id)
+        if started is None:
+            return None
+        sequences: list[Any] = list(started)
+        if not is_template_entity(self.hass, entity_id):
+            return sequences
         entity = _loaded_entity(self.hass, entity_id)
         scripts = action_scripts(entity, entity_id) if entity is not None else None
         if scripts is None:
@@ -228,7 +234,7 @@ class StoredActionReader:
         return sequences + own
 
     def started_by(self, entity_id: str) -> list[Any] | None:
-        """Return the actions of each automation that may react to a press."""
+        """Return the actions of each automation that may react to the entity."""
         if entity_id not in self._started:
             self._started[entity_id] = self._find_started_by(entity_id)
         return self._started[entity_id]
@@ -252,6 +258,7 @@ class StoredActionReader:
                 _trigger_may_react(
                     trigger,
                     names,
+                    domain=entity_id.split(".", 1)[0],
                     device_id=device_id,
                     named_by_variable=named_by_variable,
                 )
@@ -385,10 +392,28 @@ def _names_in(texts: Iterable[str], names: Iterable[str]) -> bool:
     return any(pattern.search(text) for text in texts for pattern in patterns)
 
 
+def _reads_states_generically(text: str, domain: str) -> bool:
+    """
+    Return True if a template reads states without naming one entity.
+
+    ``states.<domain>`` counts for that domain only; ``states | ...``,
+    ``states[...]``, ``expand(...)`` and the ``*_entities(...)`` helpers count
+    for every entity. ``states('x.y')`` and ``states.x.y`` name one entity.
+    """
+    if _ENTITY_LISTS.search(text):
+        return True
+    for match in _STATES_ACCESS.finditer(text):
+        accessed_domain, object_id = match.group(1), match.group(2)
+        if accessed_domain is None or (object_id is None and accessed_domain == domain):
+            return True
+    return False
+
+
 def _trigger_may_react(  # noqa: PLR0911
     trigger: Any,
     names: Iterable[str],
     *,
+    domain: str,
     device_id: str | None = None,
     named_by_variable: bool = False,
 ) -> bool:
@@ -411,7 +436,7 @@ def _trigger_may_react(  # noqa: PLR0911
         types = list(_texts(trigger.get("event_type")))
         return not types or _templated(types) or bool(_PRESS_EVENTS & set(types))
     if platform == "template":
-        return any(_GENERIC_STATES.search(text) for text in texts)
+        return any(_reads_states_generically(text, domain) for text in texts)
     if _templated(_texts({key: trigger.get(key) for key in _WATCHED_KEYS})):
         return True  # a templated entity, target or event filter
     target = trigger.get("target")
@@ -422,9 +447,10 @@ def _trigger_may_react(  # noqa: PLR0911
         return True
     if platform == "device" and not trigger.get("entity_id"):
         # A device trigger names its device, not the entity: it may be the
-        # button's, or any button's. A remote's trigger is not a press.
-        domain = str(trigger.get("domain") or "").lower()
-        return domain in PRESS_DOMAINS or (
+        # entity's own, or one of its domain. A remote's trigger is not a
+        # change the agent makes to a light.
+        trigger_domain = str(trigger.get("domain") or "").lower()
+        return trigger_domain == domain or (
             device_id is not None and trigger.get("device_id") == device_id
         )
     return False
@@ -432,15 +458,15 @@ def _trigger_may_react(  # noqa: PLR0911
 
 def entities_of(hass: HomeAssistant, domain: str) -> list[str]:
     """
-    Return the entity ids of a domain that run stored actions.
+    Return the entity ids of a domain a call aimed at `all` may act on.
 
-    Template entities registered but not loaded count while the Template
-    integration has not loaded: one that loads later runs its actions, so the
-    caller holds them as unreadable.
+    Every entity of the domain may start automations (#814). Template
+    entities registered but not loaded count while the Template integration
+    has not loaded: one that loads later runs its actions, so the caller
+    holds them as unreadable.
     """
-    if domain in PRESS_DOMAINS:
-        return [state.entity_id for state in hass.states.async_all(domain)]
-    found = {
+    found = {state.entity_id.lower() for state in hass.states.async_all(domain)}
+    found |= {
         str(entity.entity_id).lower()
         for entity in template_entities(hass, domain)
         if getattr(entity, "entity_id", None)

@@ -229,7 +229,9 @@ async def home(hass: HomeAssistant) -> HomeAssistant:
                 },
                 {
                     "alias": "Porch on motion",
-                    "triggers": [{"trigger": "state", "entity_id": "light.porch"}],
+                    "triggers": [
+                        {"trigger": "state", "entity_id": "binary_sensor.porch_motion"}
+                    ],
                     "actions": [_call("lock.unlock", "lock.front_door")],
                 },
             ]
@@ -811,8 +813,10 @@ async def test_how_a_press_reads_each_automation(
 @pytest.mark.parametrize(
     ("trigger", "held"),
     [
-        # A device trigger without an entity may be the button's device.
-        ({"trigger": "device", "device_id": "abc", "domain": "button"}, True),
+        # A device trigger without an entity, in the entity's own domain.
+        ({"trigger": "device", "device_id": "abc", "domain": "input_button"}, True),
+        # Another domain's device trigger is not this entity's change.
+        ({"trigger": "device", "device_id": "abc", "domain": "button"}, False),
         (
             {
                 "trigger": "device",
