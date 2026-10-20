@@ -462,7 +462,9 @@ class StoredActionCheck:
         sequences = self.reader.own_sequences(entity_id, service)
         if sequences is None:
             return True
-        return any(self.steps(sequence, lenient=lenient) for sequence in sequences)
+        # A template entity's own actions are read strictly, as since #780,
+        # however it is reached: they are not an automation the user wrote.
+        return any(self.steps(sequence) for sequence in sequences)
 
     def reactors_critical(self, entity_id: str) -> bool:
         """
@@ -507,18 +509,22 @@ class StoredActionCheck:
         """
         if domain == _MQTT_DOMAIN:
             reactors = self.reader.mqtt_reactors()
-            if reactors is None or self._any_critical(reactors, lenient=True):
+            if reactors is None:
                 return True
-            mqtt_entities = sorted(
-                entry.entity_id
-                for entry in er.async_get(self.hass).entities.values()
-                if entry.platform == _MQTT_DOMAIN and entry.disabled_by is None
-            )
-            return any(
+            mqtt_entities = self.reader.mqtt_entities()
+            if any(
                 _entity_is_guarded(e.split(".", 1)[0], e, self.rules)
-                or self.entity(e, None, lenient=lenient)
                 for e in mqtt_entities
-            )
+            ):
+                return True
+            # What watches an MQTT entity, gathered first so a home with
+            # thousands of them is read once, not held by the entity bound.
+            for entity_id in mqtt_entities:
+                watching = self.reader.started_by(entity_id)
+                if watching is None:
+                    return True
+                reactors += [r for r in watching if r not in reactors]
+            return self._any_critical(reactors, lenient=True)
         fields: dict[str, Any] = {}
         for key in ("data", "data_template", "service_data"):
             block = step.get(key)

@@ -810,3 +810,119 @@ async def test_the_pin_line_names_a_waiting_script_by_its_name(
     with collect_started_automations() as started:
         assert _held(bare, "fan.ceiling")
     assert started == ["Arrive"]
+
+
+_TEMPLATED_UNLOCK = {
+    "action": "{{ 'lock' }}.unlock",
+    "target": {"entity_id": "lock.front_door"},
+}
+
+
+async def _template_entities(hass: HomeAssistant) -> None:
+    assert await async_setup_component(
+        hass,
+        "template",
+        {
+            "template": [
+                {
+                    "button": [{"name": "Tpl Press", "press": [_TEMPLATED_UNLOCK]}],
+                    "switch": [
+                        {
+                            "name": "Tpl Sw",
+                            "turn_on": [_TEMPLATED_UNLOCK],
+                            "turn_off": [],
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    await hass.async_block_till_done()
+
+
+@pytest.mark.parametrize(
+    "step",
+    [
+        _call("button.press", "button.tpl_press"),
+        _call("switch.turn_on", "switch.tpl_sw"),
+    ],
+)
+async def test_a_template_entity_a_reacting_automation_acts_on_stays_strict(
+    bare: HomeAssistant, monkeypatch: pytest.MonkeyPatch, step: dict[str, Any]
+) -> None:
+    """Its own actions are not the user's automation: unreadable ones hold (#780)."""
+    await _template_entities(bare)
+    _set(
+        bare,
+        monkeypatch,
+        _automation([{"trigger": "state", "entity_id": "fan.ceiling"}], [step]),
+    )
+    assert _held(bare, "fan.ceiling")
+
+
+async def test_a_disabled_automation_still_running_still_waits(
+    bare: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Turned off without stopping it, its run still waits on the fan."""
+    wait = [
+        {"wait_for_trigger": [{"trigger": "state", "entity_id": "fan.ceiling"}]},
+        *_unlock(),
+    ]
+    bare.states.async_set("automation.probe", "off", {"current": 1})
+    _set(bare, monkeypatch, _automation([{"trigger": "time", "at": "07:00:00"}], wait))
+    assert _held(bare, "fan.ceiling")
+
+
+async def test_a_person_arriving_joins_an_empty_zone(
+    bare: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The zone lists only the people already in it."""
+    bare.states.async_set("zone.home", "0", {"persons": []})
+    _set(
+        bare,
+        monkeypatch,
+        _automation([{"trigger": "state", "entity_id": "zone.home"}]),
+    )
+    args = {"domain": "device_tracker", "service": "see", "dev_id": "phone"}
+    assert _is_critical_action(args, RULES, "mcp__call_service", bare)
+
+
+async def test_an_mqtt_publish_is_checked_against_call_service_events(
+    bare: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A publish fires `call_service` for the mqtt domain."""
+    trigger = {
+        "trigger": "event",
+        "event_type": "call_service",
+        "event_data": {"domain": "mqtt", "service": "publish"},
+    }
+    _set(bare, monkeypatch, _automation([trigger]))
+    args = {"domain": "mqtt", "service": "publish", "topic": "x/y"}
+    assert _is_critical_action(args, RULES, "mcp__call_service", bare)
+
+
+async def test_an_mqtt_publish_in_a_large_mqtt_home_is_not_held(
+    bare: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2100 harmless MQTT sensors do not trip the followed-entity bound."""
+    _set(bare, monkeypatch)
+    registry = er.async_get(bare)
+    for index in range(2100):
+        registry.async_get_or_create("sensor", "mqtt", f"s{index}")
+    args = {"domain": "mqtt", "service": "publish", "topic": "x/y"}
+    assert not _is_critical_action(args, RULES, "mcp__call_service", bare)
+
+
+async def test_an_mqtt_publish_sees_mqtt_entities_with_no_registry_entry(
+    bare: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A YAML MQTT lock with no unique id is loaded but not registered."""
+    _set(bare, monkeypatch)
+    platform = SimpleNamespace(entities={"lock.yaml_door": object()})
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.agent.template_actions."
+        "async_get_platforms",
+        lambda _hass, name: [platform] if name == "mqtt" else [],
+    )
+    args = {"domain": "mqtt", "service": "publish", "topic": "door/set"}
+    assert _is_critical_action(args, RULES, "mcp__call_service", bare)

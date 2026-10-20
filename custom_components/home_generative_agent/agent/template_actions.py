@@ -54,6 +54,7 @@ from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.entity_platform import async_get_platforms
 from homeassistant.helpers.target import (
     TargetSelection,
     async_extract_referenced_entity_ids,
@@ -452,9 +453,29 @@ class StoredActionReader:
             for reactor in reactors
             if any(
                 _MQTT_DOMAIN in (trigger.platform, trigger.device_domain)
+                # The `call_service` event the publish fires.
+                or trigger.always
+                or trigger.all_domains
+                or _MQTT_DOMAIN in trigger.domains
                 for trigger in reactor.triggers
             )
         ]
+
+    def mqtt_entities(self) -> list[str]:
+        """
+        Return the MQTT entities a publish may set or command.
+
+        Registered ones, and loaded ones with no registry entry (YAML
+        without a unique id).
+        """
+        found = {
+            entry.entity_id
+            for entry in er.async_get(self.hass).entities.values()
+            if entry.platform == _MQTT_DOMAIN and entry.disabled_by is None
+        }
+        for platform in async_get_platforms(self.hass, _MQTT_DOMAIN):
+            found |= {str(entity_id).lower() for entity_id in platform.entities}
+        return sorted(found)
 
     def automation_sequence(self, entity_id: str) -> list[Any] | None:
         """Return the steps `automation.trigger` runs, or None if unreadable."""
@@ -499,6 +520,10 @@ class StoredActionReader:
                             parents.setdefault(str(member).lower(), set()).add(
                                 state.entity_id
                             )
+            # A zone lists only the people in it: one arriving joins it.
+            zones = {state.entity_id for state in self.hass.states.async_all("zone")}
+            for person in self.hass.states.async_entity_ids("person"):
+                parents.setdefault(person, set()).update(zones)
             self._parents = parents
         return self._parents.get(entity_id, set())
 
@@ -522,18 +547,21 @@ def _read_reactors(hass: HomeAssistant) -> list[Reactor] | None:
             continue  # an automation that failed to set up does not run
         entity_id = str(getattr(automation, "entity_id", "") or "")
         state = hass.states.get(entity_id) if entity_id else None
-        if state is not None and state.state == "off":
-            continue  # a disabled automation neither triggers nor waits
+        disabled = state is not None and state.state == "off"
+        waiting = _may_be_running(state, "current")
+        if disabled and not waiting:
+            continue  # neither triggers nor waits
         config = getattr(automation, "raw_config", None)
         # The validated triggers, after blueprint substitution; the raw
-        # config only where they are not kept.
+        # config only where they are not kept. A disabled automation does
+        # not trigger, but one turned off without stopping it still waits.
         triggers = getattr(automation, "_trigger_config", None)
         read = _reactor(
             _friendly_name(state) or entity_id or "an automation",
             config,
             getattr(script, "sequence", None),
-            triggers if isinstance(triggers, list) else None,
-            waiting=_may_be_running(state, "current"),
+            [] if disabled else triggers if isinstance(triggers, list) else None,
+            waiting=waiting,
         )
         if read is None:
             LOGGER.warning(

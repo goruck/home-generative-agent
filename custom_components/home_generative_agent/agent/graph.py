@@ -3730,7 +3730,7 @@ def _intent_is_critical(  # noqa: PLR0911
                     call.domain == SCRIPT_DOMAIN
                     and script_rule_matches(hass, call.entity_id, critical_actions)
                 )
-                or runs_critical_action(hass, call.entity_id, critical_actions)
+                or runs_critical_action(hass, call.entity_id, critical_actions, check)
             )
         ):
             return True
