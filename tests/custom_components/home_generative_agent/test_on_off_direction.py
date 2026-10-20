@@ -56,11 +56,20 @@ from custom_components.home_generative_agent.core.utils import hash_pin
         ("The garage door is open and I'm leaving", None),
         ("the blinds are open, it is too bright", None),
         ("kill the open plan lights", None),
+        # Incidental words are not a second command.
+        ("Open the lower shades", "on"),
+        ("Open all shades before I start work", "on"),
+        ("I can open the shade. Would that help?", "on"),
         # Both directions, another action, long, none, another language.
         ("close the shade, it is open", "off"),
         ("turn off the light and open the blinds", None),
         ("Close the shade and start the coffee maker", None),
         ("stop the open garage script", None),
+        # Both on and off, or a "turn" not read: not checked.
+        ("turn the light on the porch off", None),
+        ("turn the router off and on again", None),
+        ("turn the tv on and the lights off", None),
+        ("Close the shade and turn the downstairs living room ceiling fan on", None),
         ("set the shade to 40 percent", None),
         ("Open " + "x " * 200, None),
         ("otev\u0159i \u017ealuzie", None),
@@ -74,14 +83,15 @@ def test_the_direction_a_request_asks_for(text: str, expected: str | None) -> No
 
 
 _COVER = {"name": "Study Shade", "domain": ["cover"]}
+_SHADES = {"name": "All Shades", "domain": ["cover"]}
 
 
 @pytest.mark.parametrize(
     ("tool", "args", "text", "refused"),
     [
         # The field cases.
-        ("intent__HassTurnOff", {"name": "All Shades"}, "Open All Shades", True),
-        ("intent__HassTurnOn", {"name": "All Shades"}, "Open All Shades", False),
+        ("intent__HassTurnOff", _SHADES, "Open All Shades", True),
+        ("intent__HassTurnOn", _SHADES, "Open All Shades", False),
         ("intent__HassTurnOn", _COVER, "close the shade", True),
         ("HassTurnOff", {"name": "Front Door"}, "lock the front door", True),
         ("HassTurnOn", {"name": "Front Door"}, "unlock the front door", True),
@@ -96,9 +106,36 @@ _COVER = {"name": "Study Shade", "domain": ["cover"]}
             "run the close garage script",
             False,
         ),
-        ("HassTurnOn", {"name": "Close Garage"}, "close garage", False),
-        ("HassTurnOff", {"name": "Open Plan Lights"}, "open plan lights off", False),
+        ("HassTurnOn", {"name": "script.close_garage"}, "close garage", False),
+        (
+            "HassTurnOff",
+            {"name": "Open Plan Lights", "domain": ["light"]},
+            "kill the open plan lights",
+            False,
+        ),
+        (
+            "HassTurnOff",
+            {"area": "Open Plan", "domain": ["light"]},
+            "open plan lights off",
+            False,
+        ),
         ("HassTurnOn", {"name": "Lock Up", "domain": "scene"}, "lock up", False),
+        # A name is taken out, not a reason to skip the check.
+        (
+            "HassTurnOff",
+            {"name": "Front Door Lock", "domain": ["lock"]},
+            "Lock the front door lock",
+            True,
+        ),
+        ("HassTurnOff", {"name": "lock.front_door"}, "Lock the front door", True),
+        # Opening a lock unlocks it; open/close need a known non-lock target.
+        (
+            "HassTurnOff",
+            {"name": "Front Door", "domain": ["lock"]},
+            "Open the front door lock",
+            False,
+        ),
+        ("HassTurnOff", {"name": "All Shades"}, "Open All Shades", False),
     ],
 )
 def test_a_call_against_the_request_is_refused(
@@ -108,9 +145,7 @@ def test_a_call_against_the_request_is_refused(
 
 
 def test_the_refusal_names_the_right_tool() -> None:
-    refusal = wrong_direction_refusal(
-        "intent__HassTurnOff", {"name": "All Shades"}, "Open All Shades"
-    )
+    refusal = wrong_direction_refusal("intent__HassTurnOff", _SHADES, "Open All Shades")
     assert refusal is not None
     assert "intent__HassTurnOn" in refusal
     assert "'Open'" in refusal

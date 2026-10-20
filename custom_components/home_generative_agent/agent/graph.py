@@ -1106,10 +1106,9 @@ def _on_off_request_text(messages: Sequence[BaseMessage]) -> str:
     """
     Return the words a HassTurnOn/HassTurnOff call is checked against (#797).
 
-    The user's latest message; for a short "Yes", the question the agent
-    asked ("Would you like me to open the study shade?") rather than the
-    reply as a whole, whose first sentence often states the opposite ("The
-    shade is closed.").
+    The user's latest message; for a short "Yes", the end of the agent's
+    offer ("I can open the shade. Would that help?"). Only a command reads
+    there, so a state it gives ("The shade is closed.") does not.
     """
     for index in range(len(messages) - 1, -1, -1):
         if not isinstance(messages[index], HumanMessage):
@@ -1124,9 +1123,8 @@ def _on_off_request_text(messages: Sequence[BaseMessage]) -> str:
         for msg in reversed(messages[:index]):
             if isinstance(msg, AIMessage) and (offer := _message_text(msg).strip()):
                 sentences = [s for s in _SENTENCE_END_RE.split(offer) if s.strip()]
-                questions = [s for s in sentences if s.rstrip().endswith("?")]
-                # Every question: "Want me to open it? Is that okay?"
-                return " ".join(questions) if questions else sentences[-1]
+                # The last two: "I can open the shade. Would that help?"
+                return " ".join(sentences[-2:])
         return ""
     return ""
 
