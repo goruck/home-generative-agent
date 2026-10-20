@@ -92,6 +92,7 @@ from .automation_targets import AUTOMATION_REFUSAL_PREFIX
 from .helpers import (
     ALARM_DOMAIN,
     CONFIRM_TOOL_NAME,
+    DEVICE_SETTING_INTENTS,
     INTENT_NAME_ALL,
     PIN_REFUSAL_ENDS_TURN,
     active_llm_api_ids,
@@ -101,6 +102,7 @@ from .helpers import (
     entity_domain,
     format_tool,
     intent_service_calls,
+    intent_target_states,
     is_actuating_intent,
     is_actuation_tool,
     is_on_off_intent,
@@ -3479,7 +3481,7 @@ def _coerce_entity_ids(args: dict[str, Any]) -> list[str]:
     return entity_ids
 
 
-def _is_critical_action(
+def _is_critical_action(  # noqa: PLR0911
     tool_args: dict[str, Any],
     critical_actions: list[dict[str, str]],
     tool_name: str,
@@ -3512,6 +3514,14 @@ def _is_critical_action(
     # opens or closes a cover, #770), so check each call HA will make.
     if is_actuating_intent(tool_name):
         return _intent_is_critical(tool_args, critical_actions, tool_name, hass)
+    if base_tool_name(tool_name) in DEVICE_SETTING_INTENTS and hass is not None:
+        # Setting a template light's level runs its own action scripts (#780).
+        states = intent_target_states(hass, tool_name, tool_args)
+        if states is None or any(
+            stored_actions_are_critical(hass, state.entity_id, None, critical_actions)
+            for state in states
+        ):
+            return True
 
     # A script's own tool names no domain or service; what it runs decides.
     if (script_id := script_tool_entity_id(tool_name)) is not None:

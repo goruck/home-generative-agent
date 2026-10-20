@@ -50,9 +50,12 @@ is enabled: disabling it does not disconnect the relay.
 A template cover or lock is the same kind of wrapper when its actions drive
 other entities (#780): a template garage cover whose ``open_cover`` switches
 ``switch.garage_relay``. Every entity its actions call a service on by entity
-id (a cover's every movement, a lock's unlocking and opening), and the steps
-of a script among them, is held for every call, like the relay under a
-switch_as_x cover. Only a loaded template entity is read; targets its actions
+id or registry id (a cover's every movement, a lock's unlocking and opening),
+the members of a group among them, and what a script or template entity
+among them drives in turn (including ``script.<key>``), is held for every
+call, like the relay under a switch_as_x cover. That can hold more than the
+relay: a garage cover whose open action also turns on the garage light holds
+the light too. Only a loaded template entity is read; targets its actions
 cannot name (an area, a template) are not followed, though the template
 entity itself stays held.
 
@@ -97,7 +100,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
 from .helpers import CRITICAL_RULE_EXACT_ENTITY
-from .template_actions import driven_entities, template_entities
+from .template_actions import action_scripts, driven_entities, template_entities
 
 LOGGER = logging.getLogger(__name__)
 
@@ -193,15 +196,17 @@ def read_template_drives(hass: HomeAssistant) -> dict[str, set[str]]:
     """
     Return every template cover or lock -> the entities its actions drive.
 
-    See the module docstring. An entity that cannot be read is logged and
-    skipped: the template entity itself is still held by the rules.
+    See the module docstring. An entity whose actions cannot be read is
+    logged and skipped: the template entity itself is still held by the rules.
     """
     drives: dict[str, set[str]] = {}
     for domain, keys in _TEMPLATE_DRIVING_ACTIONS.items():
         for entity in template_entities(hass, domain):
             entity_id = str(getattr(entity, "entity_id", "") or "").lower()
-            scripts = getattr(entity, "_action_scripts", None)
-            if not entity_id or not isinstance(scripts, dict):
+            if not entity_id:
+                continue
+            scripts = action_scripts(entity, entity_id)
+            if scripts is None:
                 continue
             try:
                 driven = driven_entities(

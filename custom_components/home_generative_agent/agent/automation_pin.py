@@ -692,14 +692,22 @@ def iter_service_calls(
     actions: Any,
 ) -> Iterator[tuple[str, str, Mapping[str, Any]]]:
     """
-    Yield ``(domain, service, step)`` for each service call in ``actions``.
+    Yield ``(domain, service, step)`` for each call ``actions`` makes.
 
-    Only calls with a plain ``domain.service`` name; a templated one, and a
-    walk too deep to follow, are reported by ``find_critical_automation_calls``
+    A service call with a plain ``domain.service`` name, and a device action
+    as its ``(domain, type)``: HA's switch, light, button and similar device
+    actions call the service of that name. A templated service, and a walk
+    too deep to follow, are reported by ``find_critical_automation_calls``
     rather than here, so callers screening further use both.
     """
     try:
         for step, action_type in _walk_steps(actions):
+            if action_type == cv.SCRIPT_ACTION_DEVICE_AUTOMATION:
+                domain = str(step.get("domain") or "").lower()
+                kind = str(step.get("type") or "").lower()
+                if domain and kind:
+                    yield domain, kind, step
+                continue
             if action_type != cv.SCRIPT_ACTION_CALL_SERVICE:
                 continue
             domain, service, templated = _service_name(step)

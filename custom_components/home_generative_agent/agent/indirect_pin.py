@@ -55,10 +55,15 @@ from .automation_pin import (
     step_targets,
 )
 from .helpers import TOOL_NAMESPACE_SEP, matches_critical_rule, rule_entity_matches
-from .template_actions import runs_stored_actions, stored_action_sequences
+from .template_actions import (
+    call_targets,
+    entities_of,
+    runs_stored_actions,
+    stored_action_sequences,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Iterator, Mapping, Sequence
 
     from homeassistant.core import HomeAssistant
 
@@ -100,6 +105,12 @@ _CALL_KEYS = frozenset({"domain", "service", "action", "entity_ids"})
 
 # A group can contain a group.
 _MAX_DEPTH = 5
+# Entities one check follows through stored actions and group members before
+# it holds rather than read on (#780).
+_MAX_FOLLOWED_ENTITIES = 200
+# The service a stored state reproduces on a template switch, for choosing
+# the action script it runs; any other state may run any of them.
+_INLINE_STATE_SERVICES = {"on": "turn_on", "off": "turn_off"}
 
 # The tool HA gives each script is `script__<object id>`: two parts.
 _SCRIPT_TOOL_PARTS = 2
@@ -221,9 +232,10 @@ def stored_actions_are_critical(
     """
     Return True if acting on the entity runs stored actions that are critical.
 
-    A template entity's action script for ``service`` (all of them when it has
-    none of that name), or the automations an input button starts (#780).
-    False for any other entity: its call is matched against the rules as it is.
+    See ``template_actions``: a template entity's action scripts, or the
+    automations a button press may start (#780). A group is checked through
+    its members. False for any other entity: its call is matched against the
+    rules as it is.
     """
     if not _has_entities(hass):
         return False
@@ -244,45 +256,32 @@ def _stored_actions_critical(
     rules: Sequence[Mapping[str, str]],
     seen: set[tuple[str, str | None]],
 ) -> bool:
-    if not runs_stored_actions(hass, entity_id):
-        return False
     key = (entity_id, service)
     if key in seen:
-        return False  # already being screened higher up
-    if len(seen) >= _MAX_DEPTH * _MAX_DEPTH:
-        return True  # too many entities driving each other to follow
+        return False  # already screened, or being screened higher up
+    if len(seen) >= _MAX_FOLLOWED_ENTITIES:
+        # A breadth cap on one check, not a depth: past it, hold.
+        return True
     seen.add(key)
+    members = call_targets(hass, "", "", {"entity_id": entity_id})[0] - {entity_id}
+    if any(
+        _stored_actions_critical(hass, member, service, rules, seen)
+        for member in sorted(members)
+    ):
+        return True
+    if not runs_stored_actions(hass, entity_id):
+        return False
     sequences = stored_action_sequences(hass, entity_id, service)
     if sequences is None:
         return True
     found = any(
-        _steps_are_critical(hass, sequence, rules, seen) for sequence in sequences
+        find_critical_automation_calls({"actions": sequence}, rules)
+        or any(_stored_action_calls(hass, sequence, rules, seen))
+        for sequence in sequences
     )
     if found:
         LOGGER.debug("%s runs a critical action", entity_id)
     return found
-
-
-def _steps_are_critical(
-    hass: HomeAssistant,
-    sequence: Any,
-    rules: Sequence[Mapping[str, str]],
-    seen: set[tuple[str, str | None]],
-) -> bool:
-    """Screen steps like a script's, then open what they reach by entity id."""
-    if find_critical_automation_calls({"actions": sequence}, rules):
-        return True
-    return _calls_reach_stored_actions(hass, sequence, rules, seen)
-
-
-def _calls_reach_stored_actions(
-    hass: HomeAssistant,
-    sequence: Any,
-    rules: Sequence[Mapping[str, str]],
-    seen: set[tuple[str, str | None]],
-) -> bool:
-    """Return True if a call in the steps runs critical stored actions."""
-    return bool(_stored_action_calls(hass, sequence, rules, seen, first=True))
 
 
 def stored_action_calls(
@@ -298,8 +297,8 @@ def stored_action_calls(
     """
     if not _has_entities(hass):
         return []
-    return _stored_action_calls(
-        cast("HomeAssistant", hass), sequence, rules, set(), first=False
+    return list(
+        _stored_action_calls(cast("HomeAssistant", hass), sequence, rules, set())
     )
 
 
@@ -308,25 +307,81 @@ def _stored_action_calls(
     sequence: Any,
     rules: Sequence[Mapping[str, str]],
     seen: set[tuple[str, str | None]],
-    *,
-    first: bool,
-) -> list[CriticalAutomationCall]:
-    found: list[CriticalAutomationCall] = []
+) -> Iterator[CriticalAutomationCall]:
+    """
+    Yield the calls in the steps that run critical stored actions.
+
+    A call whose targets cannot all be named (an area, a device, a label,
+    ``all``) is held when any entity of its domain runs critical stored
+    actions, since it may be among them, as a relay is (#794).
+    """
     for domain, service, step in iter_service_calls(sequence):
-        entities, _unresolved = step_targets(step)
-        for entity_id in entities:
-            if _stored_actions_critical(hass, entity_id.lower(), service, rules, seen):
-                found.append(
-                    CriticalAutomationCall(
-                        service=f"{domain}.{service}",
-                        entity_ids=(entity_id.lower(),),
-                        reason="the entity runs stored actions that perform a "
-                        "critical action",
-                    )
+        call = f"{domain}.{service}"
+        if domain == SCENE_DOMAIN and service in _SCENE_INLINE_SERVICES:
+            states, readable = _inline_states(step)
+            if not readable:
+                continue  # `find_critical_automation_calls` holds it
+            for entity_id, state in states.items():
+                if _stored_actions_critical(
+                    hass,
+                    entity_id,
+                    _INLINE_STATE_SERVICES.get(state or ""),
+                    rules,
+                    seen,
+                ):
+                    yield _stored_call(call, entity_id)
+            continue
+        entities, unresolved = call_targets(hass, domain, service, step)
+        for entity_id in sorted(entities):
+            if _stored_actions_critical(hass, entity_id, service, rules, seen):
+                yield _stored_call(call, entity_id)
+        if unresolved and (
+            domain == _GENERIC_DOMAIN
+            or any(
+                _stored_actions_critical(hass, entity_id.lower(), service, rules, seen)
+                for entity_id in entities_of(hass, domain)
+            )
+        ):
+            yield CriticalAutomationCall(
+                service=call,
+                entity_ids=(),
+                reason="its targets cannot all be named, and an entity of that "
+                "kind runs stored actions that perform a critical action",
+            )
+
+
+def _stored_call(call: str, entity_id: str) -> CriticalAutomationCall:
+    return CriticalAutomationCall(
+        service=call,
+        entity_ids=(entity_id,),
+        reason="the entity runs stored actions that perform a critical action",
+    )
+
+
+def _inline_states(step: Mapping[str, Any]) -> tuple[dict[str, str | None], bool]:
+    """Return the entity states `scene.apply` sets, and whether they are readable."""
+    fields: dict[str, Any] = {}
+    for key in DATA_CONTAINER_KEYS:
+        block = step.get(key)
+        if block is None:
+            continue
+        if not isinstance(block, dict):
+            return {}, False
+        fields.update(block)
+    states: dict[str, str | None] = {}
+    for key in _INLINE_STATE_KEYS:
+        block = fields.get(key)
+        if isinstance(block, dict):
+            for entity_id, value in block.items():
+                state = value.get("state") if isinstance(value, dict) else value
+                states[str(entity_id).lower()] = (
+                    str(state).lower() if state is not None else None
                 )
-                if first:
-                    return found
-    return found
+        elif isinstance(block, (list, tuple)):
+            states.update({str(entity_id).lower(): None for entity_id in block})
+        elif block is not None:
+            return {}, False
+    return states, True
 
 
 def service_runs_critical_action(  # noqa: PLR0911
@@ -359,7 +414,9 @@ def service_runs_critical_action(  # noqa: PLR0911
         return _targets_run_critical(hass, step, frozenset({SCRIPT_DOMAIN}), rules)
     if domain == SCENE_DOMAIN:
         if service in _SCENE_INLINE_SERVICES:
-            return _inline_states_are_critical(tool_args, rules)
+            return _inline_states_are_critical(tool_args, rules) or (
+                _stored_calls_reached(hass, step, rules)
+            )
         if service == "turn_on":
             return _targets_run_critical(hass, step, frozenset({SCENE_DOMAIN}), rules)
         return False
@@ -370,10 +427,19 @@ def service_runs_critical_action(  # noqa: PLR0911
             return True
     elif find_critical_automation_calls({"actions": [step]}, rules):
         return True
-    # A template switch or button it acts on, or an input button it presses,
-    # runs stored actions no rule names (#780).
-    return _has_entities(hass) and _calls_reach_stored_actions(
-        cast("HomeAssistant", hass), [step], rules, set()
+    # A template switch or button it acts on, or a button it presses, runs
+    # stored actions no rule names (#780).
+    return _stored_calls_reached(hass, step, rules)
+
+
+def _stored_calls_reached(
+    hass: HomeAssistant | None,
+    step: Mapping[str, Any],
+    rules: Sequence[Mapping[str, str]],
+) -> bool:
+    """Return True if the step runs critical stored actions."""
+    return _has_entities(hass) and any(
+        _stored_action_calls(cast("HomeAssistant", hass), [step], rules, set())
     )
 
 
@@ -543,7 +609,7 @@ def _script_steps_are_critical(
         )
         return True
     # A step on a template switch or an input button runs its stored actions.
-    return _calls_reach_stored_actions(hass, sequence, rules, set())
+    return any(_stored_action_calls(hass, sequence, rules, set()))
 
 
 def _scene_is_critical(

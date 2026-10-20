@@ -1729,6 +1729,45 @@ def intent_service_calls(
     """
     if hass is None or not is_actuating_intent(tool_name):
         return None
+    states = intent_target_states(hass, tool_name, tool_args)
+    if states is None:
+        return None
+    return [
+        call
+        for state in states
+        for call in _intent_calls(tool_name, state.domain, state.entity_id)
+    ]
+
+
+# Intents that set a device without an on/off or cover service the gate maps
+# (`_ON_OFF_INTENT_SERVICES`): a template entity behind one runs action
+# scripts of its own, which the gate opens (#780). Query intents are not
+# here: reading a template switch's state runs nothing.
+DEVICE_SETTING_INTENTS = frozenset(
+    {
+        "HassLightSet",
+        "HassFanSetSpeed",
+        "HassClimateSetTemperature",
+        "HassVacuumStart",
+        "HassVacuumReturnToBase",
+        "HassSetVolume",
+        "HassMediaPause",
+        "HassMediaUnpause",
+        "HassMediaNext",
+        "HassMediaPrevious",
+    }
+)
+
+
+def intent_target_states(
+    hass: HomeAssistant, tool_name: str, tool_args: Mapping[str, Any]
+) -> list[State] | None:
+    """
+    Return the states an intent's targets match, as HA's matcher finds them.
+
+    None when the gate cannot tell (a slot it cannot read, a matcher that
+    raised); empty when nothing matches or the call names no target.
+    """
     payload = minimal_payload_for_domain(dict(tool_args))
     try:
         name = _slot_text(payload.get("name"))
@@ -1762,11 +1801,7 @@ def intent_service_calls(
         return None
     if not result.is_match:
         return []
-    return [
-        call
-        for state in result.states
-        for call in _intent_calls(tool_name, state.domain, state.entity_id)
-    ]
+    return list(result.states)
 
 
 def declared_intent_service_calls(
