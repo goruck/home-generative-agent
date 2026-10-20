@@ -142,6 +142,7 @@ from .indirect_pin import (
     service_runs_critical_action,
     stored_actions_are_critical,
 )
+from .on_off_direction import with_action_performed, wrong_direction_refusal
 from .pin_messages import describe_pending_action, pin_msg
 from .rule_entities import expand_critical_rules
 from .template_actions import entities_of
@@ -535,7 +536,9 @@ async def _run_ha_tool(
     except (HomeAssistantError, vol.Invalid) as err:
         return _make_tool_error(repr(err), tool_name, tool_call.get("id") or "")
 
-    content_str, status = parse_tool_response(response.data, prepared_args)
+    content_str, status = parse_tool_response(
+        with_action_performed(tool_name, response.data), prepared_args
+    )
     if response.error:
         status = "error"
     return ToolMessage(
@@ -575,6 +578,17 @@ def _prepare_tool_args(
     redirect = _route_alarm_intent_to_tool(tool_name, tool_args, ctx.hass, tool_call)
     if redirect:
         return redirect, tool_args
+
+    # The other half of HassTurnOn/HassTurnOff from what was asked (#797):
+    # refused before the PIN check, so it is never queued for a PIN.
+    state = getattr(ctx, "state", None)
+    messages = state.get("messages", []) if isinstance(state, dict) else []
+    refusal = wrong_direction_refusal(tool_name, _on_off_request_text(messages))
+    if refusal:
+        LOGGER.info("Refused %s(%s): %s", tool_name, tool_args, refusal)
+        return _make_tool_error(
+            refusal, tool_name, tool_call.get("id") or ""
+        ), tool_args
 
     critical_guard = _critical_action_guard(
         tool_name=tool_name,
@@ -1083,6 +1097,30 @@ def _offer_text(messages: Sequence[BaseMessage]) -> str:
         if isinstance(msg, AIMessage) and (text := _message_text(msg).strip()):
             sentences = [s for s in _SENTENCE_END_RE.split(text) if s.strip()]
             return " ".join(sentences[-2:])
+    return ""
+
+
+def _on_off_request_text(messages: Sequence[BaseMessage]) -> str:
+    """
+    Return the words a HassTurnOn/HassTurnOff call is checked against (#797).
+
+    The user's latest message; for a short "Yes", the question the agent
+    asked ("Would you like me to open the study shade?") rather than the
+    reply as a whole, whose first sentence often states the opposite ("The
+    shade is closed.").
+    """
+    for index in range(len(messages) - 1, -1, -1):
+        if not isinstance(messages[index], HumanMessage):
+            continue
+        text = _message_text(messages[index])[:_MAX_INTENT_SCAN_CHARS]
+        if not _is_affirmative_follow_up(text):
+            return text
+        for msg in reversed(messages[:index]):
+            if isinstance(msg, AIMessage) and (offer := _message_text(msg).strip()):
+                sentences = [s for s in _SENTENCE_END_RE.split(offer) if s.strip()]
+                questions = [s for s in sentences if s.rstrip().endswith("?")]
+                return (questions or sentences)[-1]
+        return ""
     return ""
 
 

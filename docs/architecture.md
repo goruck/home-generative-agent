@@ -64,7 +64,7 @@ The main workflow nodes each modify shared agent state. Solid edges are uncondit
 | `summarize_and_remove_messages` | When the agent does not call a tool, trims context if messages exceed the configured max and replaces trimmed messages with a shorter summary in the system message |
 | `__end__` | Graph exit point |
 
-The agent can call HA LLM API tools including [built-in intents](https://developers.home-assistant.io/docs/intent_builtin) like `HassTurnOn` and `HassTurnOff`. Lock intents are normalized to lock/unlock services; alarm intents are routed to the `alarm_control` tool.
+The agent can call HA LLM API tools including [built-in intents](https://developers.home-assistant.io/docs/intent_builtin) like `HassTurnOn` and `HassTurnOff`. Lock intents are normalized to lock/unlock services; alarm intents are routed to the `alarm_control` tool. A `HassTurnOn`/`HassTurnOff` call that goes against the direction the request names (open or close, on or off, lock or unlock) is refused before it runs, and each of their results tells the model what was done to each entity (`action_performed`), so its reply matches ([#797](https://github.com/goruck/home-generative-agent/issues/797)).
 
 ---
 
