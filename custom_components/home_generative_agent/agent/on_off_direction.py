@@ -89,13 +89,40 @@ _LOCK_DOMAIN = "lock"
 _NAME_KEYS = ("name", "area", "floor", "entity_id")
 _SEPARATORS = re.compile(r"[-_]+")
 _ENTITY_ID = re.compile(r"[a-z0-9_]+\.[a-z0-9_]+")
-# A reply that only accepts the agent's offer, in the UI languages.
-_BARE_YES = re.compile(
-    r"^\W*(?:(?:yes|yeah|yep|yup|sure|ok|okay|alright|please|absolutely|"
-    r"definitely|go\s+ahead|do\s+it|ano|jo|jasně|да|давай|конечно|evet|tamam)"
-    r"\W*)+$",
-    re.IGNORECASE,
+# A reply that only accepts the agent's offer, in the UI languages: every
+# word one of these (a word list, not a regex, so no input backtracks).
+_YES_WORDS = frozenset(
+    {
+        "yes",
+        "yeah",
+        "yep",
+        "yup",
+        "sure",
+        "ok",
+        "okay",
+        "alright",
+        "please",
+        "absolutely",
+        "definitely",
+        "go",
+        "ahead",
+        "do",
+        "it",
+        "ano",
+        "jo",
+        "jasně",
+        "да",
+        "давай",
+        "конечно",
+        "evet",
+        "tamam",
+    }
 )
+# "go", "do" and "it" only as "go ahead" and "do it".
+_YES_PHRASE_WORDS = frozenset({"go", "ahead", "do", "it"})
+_YES_PHRASES = (("go", "ahead"), ("do", "it"))
+_WORD = re.compile(r"\w+")
+_MAX_YES_WORDS = 6
 
 # What each tool does, by domain (Home Assistant's OnOffIntentHandler).
 # The command, not its outcome: HA reports the call accepted, while a cover
@@ -118,7 +145,16 @@ def tool_direction(tool_name: str) -> str | None:
 
 def is_bare_yes(text: str) -> bool:
     """Return True for a reply that only accepts an offer ("Yes", "Sure, go ahead")."""
-    return bool(_BARE_YES.match(text.strip()))
+    words = _WORD.findall(text.lower())
+    if not words or len(words) > _MAX_YES_WORDS:
+        return False
+    rest = list(words)
+    for phrase in _YES_PHRASES:
+        for index in range(len(rest) - 1):
+            if tuple(rest[index : index + 2]) == phrase:
+                rest[index : index + 2] = ["yes"]
+                break
+    return all(w in _YES_WORDS and w not in _YES_PHRASE_WORDS for w in rest)
 
 
 def requested_direction(text: str) -> tuple[str, str] | None:

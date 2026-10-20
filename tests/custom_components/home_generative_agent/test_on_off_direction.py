@@ -11,6 +11,7 @@ model picked the wrong one, and HA's result did not say what was done.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -367,6 +368,10 @@ async def test_a_pin_confirmed_call_says_what_was_done() -> None:
         ("Please shut it", False),
         ("Yes, close it", False),
         ("Ano, zavri zaluzie", False),
+        ("Go ahead", True),
+        ("do it please", True),
+        ("go", False),
+        ("ok " + "\u0434\u0430" * 5000, False),
     ],
 )
 def test_only_a_bare_yes_takes_the_offer(text: str, *, bare: bool) -> None:
@@ -400,3 +405,10 @@ async def test_the_target_is_looked_up_in_home_assistant(
     )
 
     assert (api.calls == ["intent__HassTurnOff"]) is runs
+
+
+def test_a_long_reply_is_read_in_linear_time() -> None:
+    """CodeQL: the old regex backtracked on "ok" and many repeated words."""
+    started = time.perf_counter()
+    assert not is_bare_yes("ok " + "\u0434\u0430 " * 20000 + "!")
+    assert time.perf_counter() - started < 1.0  # gstack-timing-ok: a cost bound
