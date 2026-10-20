@@ -45,8 +45,18 @@ door whichever way it is switched, and the wrapper's invert option says
 nothing of the wiring. For a lock only the unlocking direction (on, or off
 when inverted) and ``toggle`` are held.
 The relay is read from the wrapper's config entry, whether or not the wrapper
-is enabled: disabling it does not disconnect the relay. A template cover that
-drives another device is not followed here (#780).
+is enabled: disabling it does not disconnect the relay.
+
+A template cover or lock is the same kind of wrapper when its actions drive
+other entities (#780): a template garage cover whose ``open_cover`` switches
+``switch.garage_relay``. Every entity its actions target (a cover's every
+movement, a lock's unlocking and opening), read as ``template_actions``
+reads a call's targets, is held for every call, like the relay under a
+switch_as_x cover; a script or template entity among them is followed into
+its own actions for the relay-like entities it drives. That can hold more
+than the relay: a garage cover whose open action also turns on the garage
+light holds the light too. Only a loaded template entity is read; templated
+targets are not followed, though the template entity itself stays held.
 
 ``expand_critical_rules`` adds, for each such entity, a copy of the rule that
 matches that entity id exactly (``CRITICAL_RULE_EXACT_ENTITY``). Every screen
@@ -89,6 +99,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
 from .helpers import CRITICAL_RULE_EXACT_ENTITY
+from .template_actions import action_scripts, driven_entities, template_entities
 
 LOGGER = logging.getLogger(__name__)
 
@@ -172,6 +183,50 @@ def read_switch_wrappers(hass: HomeAssistant) -> dict[str, tuple[str, bool]]:
     return wrapped
 
 
+# The action scripts of a template entity that move it the guarded way: every
+# movement of a cover, the unlocking ones of a lock.
+_TEMPLATE_DRIVING_ACTIONS: dict[str, frozenset[str] | None] = {
+    "cover": None,
+    "lock": frozenset({"unlock", "open"}),
+}
+
+
+def read_template_drives(hass: HomeAssistant) -> dict[str, set[str]]:
+    """
+    Return every template cover or lock -> the entities its actions drive.
+
+    See the module docstring. An entity whose actions cannot be read is
+    logged and skipped: the template entity itself is still held by the rules.
+    """
+    drives: dict[str, set[str]] = {}
+    for domain, keys in _TEMPLATE_DRIVING_ACTIONS.items():
+        for entity in template_entities(hass, domain):
+            entity_id = str(getattr(entity, "entity_id", "") or "").lower()
+            if not entity_id:
+                continue
+            scripts = action_scripts(entity, entity_id)
+            if scripts is None:
+                continue
+            try:
+                driven = driven_entities(
+                    hass,
+                    [
+                        getattr(script, "sequence", None)
+                        for key, script in scripts.items()
+                        if keys is None or key in keys
+                    ],
+                )
+            except Exception:
+                LOGGER.exception(
+                    "Critical Action PIN: could not read the actions of %s", entity_id
+                )
+                continue
+            driven.discard(entity_id)
+            if driven:
+                drives[entity_id] = driven
+    return drives
+
+
 # Cover device classes that say the cover is a window covering. Its name is
 # not read for the word: "French Door Blinds" is not a door. `shutter` is not
 # here, since roller garage doors are often classed so.
@@ -198,6 +253,7 @@ class _EntityIndex:
         self,
         hass: HomeAssistant,
         wrapped: dict[str, tuple[str, bool]] | None = None,
+        drives: dict[str, set[str]] | None = None,
     ) -> None:
         self._hass = hass
         registry = er.async_get(hass)
@@ -230,6 +286,11 @@ class _EntityIndex:
         self.wrappers_of: dict[str, set[str]] = {}
         for wrapper, (switch_id, _invert) in self.wrapped.items():
             self.wrappers_of.setdefault(switch_id, set()).add(wrapper)
+        # A template cover or lock -> the entities its actions drive (#780).
+        self.drives = read_template_drives(hass) if drives is None else drives
+        for wrapper, driven in self.drives.items():
+            for entity_id in driven:
+                self.wrappers_of.setdefault(entity_id, set()).add(wrapper)
 
     def climb(self, entity_ids: Iterable[str]) -> set[str]:
         """Return ``entity_ids`` and every group holding one, however deep."""
@@ -436,19 +497,27 @@ def relay_wrappers_reached(hass: HomeAssistant, targets: Iterable[str]) -> list[
     """
     wanted = {target.lower() for target in targets}
     wrapped = read_switch_wrappers(hass) if wanted else {}
-    if not wrapped:
+    drives = read_template_drives(hass) if wanted else {}
+    if not wrapped and not drives:
         return []
-    index = _EntityIndex(hass, wrapped)
-    moved: list[str] = []
-    for wrapper, (switch_id, _invert) in sorted(index.wrapped.items()):
+    index = _EntityIndex(hass, wrapped, drives)
+    relays = [
+        (wrapper, switch_id) for wrapper, (switch_id, _invert) in index.wrapped.items()
+    ] + [
+        (wrapper, entity_id)
+        for wrapper, driven in index.drives.items()
+        for entity_id in driven
+    ]
+    moved: set[str] = set()
+    for wrapper, switch_id in relays:
         if wrapper.split(".", 1)[0] not in _OPENING_SERVICES:
             continue
         # Not the fail-closed unknowns: the gate holds those, but a switch not
         # set up yet is not known to move this door, so the line does not say so.
         switches, wrappers = index.relay_reach(switch_id, wrapper, fail_closed=False)
         if wanted & (switches | wrappers):
-            moved.append(wrapper)
-    return moved
+            moved.add(wrapper)
+    return sorted(moved)
 
 
 def _switch_rules(
@@ -456,6 +525,9 @@ def _switch_rules(
 ) -> list[dict[str, str]]:
     """
     Return copies of an opening ``rule`` for the relays under its entities.
+
+    The switch under a switch_as_x wrapper, and what a template cover or lock
+    drives (#780).
 
     ``reached`` is what the rule's ``entity_match`` reaches; None for a rule
     with none, which covers every entity of its domain. A rule with no domain
@@ -498,6 +570,31 @@ def _switch_rules(
             }
             for target, relay_service in held
         )
+    for wrapper, driven in sorted(index.drives.items()):
+        domain = wrapper.split(".", 1)[0]
+        opening = _OPENING_SERVICES.get(domain)
+        if (
+            opening is None
+            or (rule_domain and rule_domain != domain)
+            or (service and service not in _MOVING_SERVICES.get(domain, opening))
+            or (reached is not None and wrapper not in reached)
+        ):
+            continue
+        # What a template wrapper's actions call is not known to be one way
+        # or the other: every call on it is held.
+        targets: set[str] = set()
+        for entity_id in sorted(driven):
+            switches, wrappers = index.relay_reach(entity_id, wrapper)
+            targets |= switches | wrappers
+        copies.extend(
+            {
+                **rule,
+                "domain": target.split(".", 1)[0],
+                "service": "",
+                CRITICAL_RULE_EXACT_ENTITY: target,
+            }
+            for target in sorted(targets)
+        )
     return copies
 
 
@@ -519,12 +616,13 @@ def expand_critical_rules(
             )
         return expanded
     wrapped = read_switch_wrappers(hass)
+    drives = read_template_drives(hass)
     if not any(rule.get("entity_match") for rule in expanded) and not any(
-        wrapper.split(".", 1)[0] in _OPENING_SERVICES for wrapper in wrapped
+        wrapper.split(".", 1)[0] in _OPENING_SERVICES for wrapper in [*wrapped, *drives]
     ):
         # Nothing for a rule with no entity_match to reach but relays.
         return expanded
-    index = _EntityIndex(hass, wrapped)
+    index = _EntityIndex(hass, wrapped, drives)
     reached: dict[tuple[str, str], set[str]] = {}
     extra: list[dict[str, str]] = []
     for rule in expanded:

@@ -758,6 +758,19 @@ validation.
 
 ---
 
+### The relay under a template cover that is not loaded is not held
+
+**What:** `read_template_drives` (`agent/rule_entities.py`) reads only loaded template covers and locks, so while the Template integration has not loaded (startup, a reload, a config error) the relay a template garage cover drives gets no rule copy, and a direct call on it is not held. The template cover itself stays held. A `switch_as_x` wrapper is read from its config entry whether loaded or not.
+
+**Why:** Found in review 2 of #780. A UI-made template cover keeps its actions in its config entry options, which could be read the same way; a YAML one cannot be read until it loads.
+
+**How to apply:** Read `template` config entries' options for cover/lock `open`/`unlock` actions when the entity is not loaded, or hold every switch call while a registered template cover or lock is not loaded.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
 ### A trimmed owed alert keeps the severity of the items told meanwhile
 
 **What:** `owed.without()`/`only()` (`sentinel/owed.py`) take told, trusted or excluded items out of an owed change alert but keep its severity. A radio alert that was high because a security device joined while nobody was home is replayed for the remaining, non-security devices still as high; the network client rule's "low" (every client a known randomized address) can likewise only be raised by merging, never lowered by trimming.

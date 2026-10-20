@@ -126,6 +126,7 @@ from .helpers import (
     sanitize_tool_text,
     tool_call_data,
 )
+from .indirect_pin import stored_action_calls
 from .pin_messages import describe_pending_action, pin_msg
 from .rule_entities import expand_critical_rules
 
@@ -851,10 +852,13 @@ def _maybe_require_pin_for_automation(
     if not policy.enabled:
         return None
 
-    critical_calls = find_critical_automation_calls(
-        validated_config,
-        expand_critical_rules(cfg.get("hass"), policy.critical_actions),
-    )
+    rules = expand_critical_rules(cfg.get("hass"), policy.critical_actions)
+    critical_calls = find_critical_automation_calls(validated_config, rules)
+    if not critical_calls:
+        # A step on a template switch or an input button runs its stored
+        # actions, which the config itself does not show (#780).
+        actions = validated_config.get("actions", validated_config.get("action"))
+        critical_calls = stored_action_calls(cfg.get("hass"), actions, rules)
     if not critical_calls:
         return None
 

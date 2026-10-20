@@ -101,8 +101,10 @@ from .helpers import (
     entity_domain,
     format_tool,
     intent_service_calls,
+    intent_target_states,
     is_actuating_intent,
     is_actuation_tool,
+    is_device_intent,
     is_on_off_intent,
     is_tool_excluded,
     langchain_tool_parameters_json,
@@ -129,15 +131,18 @@ from .indirect_pin import (
     RUN_SERVICES,
     SCENE_DOMAIN,
     SCRIPT_DOMAIN,
+    StoredActionCheck,
     bare_script_tool_entity_id,
     call_target_domains,
     runs_critical_action,
     script_rule_matches,
     script_tool_entity_id,
     service_runs_critical_action,
+    stored_actions_are_critical,
 )
 from .pin_messages import describe_pending_action, pin_msg
 from .rule_entities import expand_critical_rules
+from .template_actions import entities_of
 from .token_counter import count_tokens_cross_provider
 
 if TYPE_CHECKING:
@@ -3478,7 +3483,7 @@ def _coerce_entity_ids(args: dict[str, Any]) -> list[str]:
     return entity_ids
 
 
-def _is_critical_action(
+def _is_critical_action(  # noqa: PLR0911, PLR0912
     tool_args: dict[str, Any],
     critical_actions: list[dict[str, str]],
     tool_name: str,
@@ -3511,6 +3516,17 @@ def _is_critical_action(
     # opens or closes a cover, #770), so check each call HA will make.
     if is_actuating_intent(tool_name):
         return _intent_is_critical(tool_args, critical_actions, tool_name, hass)
+    if is_device_intent(tool_name) and hass is not None:
+        # Setting a template light's level runs its own action scripts (#780).
+        states = intent_target_states(hass, tool_name, tool_args)
+        check = StoredActionCheck(hass, critical_actions)
+        if states is None or any(
+            stored_actions_are_critical(
+                hass, state.entity_id, None, critical_actions, check
+            )
+            for state in states
+        ):
+            return True
 
     # A script's own tool names no domain or service; what it runs decides.
     if (script_id := script_tool_entity_id(tool_name)) is not None:
@@ -3530,6 +3546,12 @@ def _is_critical_action(
     alarm_only = domain_given and {str(d).lower() for d in declared} == {
         "alarm_control_panel"
     }
+    if (alarm_only or base_tool_name(tool_name) == _ALARM_TOOL) and (
+        _template_alarm_is_critical(tool_args, entities, critical_actions, hass)
+    ):
+        # A template panel runs its own arm and disarm actions, with no code of
+        # its own to enforce (#780).
+        return True
     if not service or alarm_only:
         return False
     # A list of domains is screened in each one it names.
@@ -3575,6 +3597,41 @@ def _is_critical_action(
     )
 
 
+_ALARM_TOOL = "alarm_control"
+_ALARM_DOMAIN = "alarm_control_panel"
+
+
+def _template_alarm_is_critical(
+    tool_args: dict[str, Any],
+    entities: list[str],
+    critical_actions: list[dict[str, str]],
+    hass: HomeAssistant | None,
+) -> bool:
+    """
+    Return True if a template alarm panel the call reaches runs a critical action.
+
+    The panel named by entity id, else by name; with neither, any template
+    panel, since the tool picks one.
+    """
+    if hass is None or getattr(hass, "states", None) is None:
+        return False
+    panels = [e for e in entities if e.startswith(f"{_ALARM_DOMAIN}.")]
+    name = str(tool_args.get("name") or "").strip().lower()
+    if not panels and name:
+        panels = [
+            state.entity_id
+            for state in hass.states.async_all(_ALARM_DOMAIN)
+            if str(state.attributes.get("friendly_name", "")).lower() == name
+        ]
+    if not panels:
+        panels = entities_of(hass, _ALARM_DOMAIN)
+    check = StoredActionCheck(hass, critical_actions)
+    return any(
+        stored_actions_are_critical(hass, panel, None, critical_actions, check)
+        for panel in panels
+    )
+
+
 def _script_tool_is_critical(
     entity_id: str,
     critical_actions: list[dict[str, str]],
@@ -3586,7 +3643,7 @@ def _script_tool_is_critical(
     ) or runs_critical_action(hass, entity_id, critical_actions)
 
 
-def _intent_is_critical(
+def _intent_is_critical(  # noqa: PLR0911
     tool_args: dict[str, Any],
     critical_actions: list[dict[str, str]],
     tool_name: str,
@@ -3604,8 +3661,10 @@ def _intent_is_critical(
     entity id the model gave counts: with no domain and no service the call
     would otherwise run with no PIN at all); alarm panels keep their own
     code. HassTurnOn on a script or a scene runs it, so it is opened and
-    held when what it does is critical (#775). When the matcher cannot tell
-    what HA will act on, the call is held.
+    held when what it does is critical (#775). A template entity runs its own
+    action script for the call, and pressing an input button starts the
+    automations that trigger on it; those are opened the same way (#780).
+    When the matcher cannot tell what HA will act on, the call is held.
     """
     declared = declared_intent_service_calls(tool_name, tool_args)
     if declared is None:
@@ -3627,8 +3686,15 @@ def _intent_is_critical(
             if call.domain == "lock" or (call.entity_id and not resolved)
         ]
     turns_on = base_tool_name(tool_name) == "HassTurnOn"
+    check = StoredActionCheck(hass, critical_actions) if hass is not None else None
     for call in calls:
         if call.domain == "alarm_control_panel":
+            # A real panel enforces its own code; a template panel runs its
+            # own actions (#780).
+            if call.entity_id and stored_actions_are_critical(
+                hass, call.entity_id, None, critical_actions, check
+            ):
+                return True
             continue
         if call.domain == "lock" and is_on_off_intent(tool_name):
             return True
@@ -3651,6 +3717,14 @@ def _intent_is_critical(
                     and script_rule_matches(hass, call.entity_id, critical_actions)
                 )
                 or runs_critical_action(hass, call.entity_id, critical_actions)
+            )
+        ):
+            return True
+        if (
+            call.entity_id
+            and call.domain not in (SCRIPT_DOMAIN, SCENE_DOMAIN)
+            and stored_actions_are_critical(
+                hass, call.entity_id, call.service, critical_actions, check
             )
         ):
             return True
