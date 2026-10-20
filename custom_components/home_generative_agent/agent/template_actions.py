@@ -28,7 +28,9 @@ Acting on an entity can run stored actions no rule names:
   change runs. A disabled automation does not count, and a wait counts
   only while its script or automation may be running. A group holding the
   entity changes with it, as a person does with a tracker and a zone with
-  the people in it. A trigger's ``to:``/``from:`` is not read: turning a switch
+  the people in it. An entity computed from it changes with it too:
+  a template entity reading it, a helper subscribed to it (#820, see
+  ``DerivedEntities``). A trigger's ``to:``/``from:`` is not read: turning a switch
   off counts if turning it on would start the automation. A template naming
   other entities (``states('sensor.x')``), another event type (a ZHA or
   mobile notification event) or another device's trigger (a remote) cannot
@@ -54,6 +56,8 @@ from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import event as ha_event
+from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import async_get_platforms
 from homeassistant.helpers.target import (
     TargetSelection,
@@ -387,6 +391,7 @@ class StoredActionReader:
     _index: _ReactorIndex | None = None
     _read: bool = False
     _parents: dict[str, set[str]] | None = None
+    _derived: DerivedEntities | None = None
     _started: dict[str, list[Reactor] | None] = field(default_factory=dict)
 
     def own_sequences(self, entity_id: str, service: str | None) -> list[Any] | None:
@@ -417,10 +422,11 @@ class StoredActionReader:
 
     def started_by(self, entity_id: str, depth: int = 0) -> list[Reactor] | None:
         """
-        Return what may react to a change to the entity, or to a group holding it.
+        Return what may react to a change to the entity, or to one following it.
 
         A group's state follows its members', so turning on a light changes
-        the light group it is in too (#814). None when an automation cannot
+        the light group it is in too (#814); a template sensor or a helper
+        computed from it changes too (#820). None when an automation cannot
         be read: the change is then held.
         """
         entity_id = entity_id.lower()
@@ -429,7 +435,10 @@ class StoredActionReader:
         self._started[entity_id] = []  # a group holding itself adds nothing
         found = self._find_started_by(entity_id)
         if found is not None and depth < MAX_FOLLOW_DEPTH:
-            for parent in sorted(self._groups_holding(entity_id)):
+            if self._derived is None:
+                self._derived = DerivedEntities(self.hass)
+            following = self._groups_holding(entity_id) | self._derived.of(entity_id)
+            for parent in sorted(following - {entity_id}):
                 parents = self.started_by(parent, depth + 1)
                 if parents is None:
                     found = None
@@ -495,13 +504,7 @@ class StoredActionReader:
             return None
         if self._index is None:
             self._index = _ReactorIndex.build(reactors)
-        names = [entity_id]
-        entry = er.async_get(self.hass).async_get(entity_id)
-        device_id = None
-        if entry is not None:
-            names.append(entry.id.lower())
-            device_id = entry.device_id
-        domain = entity_id.split(".", 1)[0]
+        names, domain, device_id = _change_keys(self.hass, entity_id)
         return [
             reactors[number]
             for number in sorted(self._index.find(names, domain, device_id))
@@ -532,6 +535,186 @@ class StoredActionReader:
             self._read = True
             self._reactors = _read_reactors(self.hass)
         return self._reactors
+
+
+def _change_keys(
+    hass: HomeAssistant, entity_id: str
+) -> tuple[list[str], str, str | None]:
+    """Return what a trigger may name a change by: ids, domain and device."""
+    names = [entity_id]
+    entry = er.async_get(hass).async_get(entity_id)
+    device_id = None
+    if entry is not None:
+        names.append(entry.id.lower())
+        device_id = entry.device_id
+    return names, entity_id.split(".", 1)[0], device_id
+
+
+# Where Home Assistant keeps its per-entity state-change subscriptions
+# (`helpers/event.py`); private, so read by name and warned about if gone.
+_TRACK_STATE_CHANGE_KEY = "_TRACK_STATE_CHANGE_DATA"
+_ALL_LISTENER, _ENTITIES_LISTENER, _DOMAINS_LISTENER = "all", "entities", "domains"
+_warned_unreadable: set[str] = set()
+
+
+def _warn_once(what: str) -> None:
+    if what not in _warned_unreadable:
+        _warned_unreadable.add(what)
+        LOGGER.warning(
+            "Critical Action PIN: cannot read %s; entities computed from a "
+            "change the agent makes may not be followed",
+            what,
+        )
+
+
+class DerivedEntities:
+    """
+    The entities whose state is computed from another's, as HA tracks them (#820).
+
+    Read once per check from what Home Assistant itself listens to:
+
+    * a template entity re-renders on the entities, domains or all states its
+      templates read at their last render (``TrackTemplateResultInfo``), so a
+      template that reads the helper only while another entity is on is
+      followed only then; one whose listeners cannot be read follows every
+      change;
+    * a trigger-based template entity changes when its block's triggers fire;
+    * any other entity listening to a state change through
+      ``async_track_state_change_event`` (min/max, threshold, bayesian,
+      statistics, filter, trend, derivative, integration, utility meter,
+      mold indicator, switch_as_x; YAML or UI) follows that entity.
+    """
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        """Read what Home Assistant tracks, once."""
+        self.hass = hass
+        self.by_entity: dict[str, set[str]] = {}
+        self.by_domain: dict[str, set[str]] = {}
+        self.every: set[str] = set()
+        self._triggered: list[tuple[Reactor, set[str]]] = []
+        self._trigger_index: _ReactorIndex | None = None
+        self._read_templates()
+        self._read_subscriptions()
+
+    def of(self, entity_id: str) -> set[str]:
+        """Return the entities a change to this one changes too."""
+        found = (
+            self.by_entity.get(entity_id, set())
+            | self.by_domain.get(entity_id.split(".", 1)[0], set())
+            | self.every
+        )
+        if self._triggered:
+            if self._trigger_index is None:
+                self._trigger_index = _ReactorIndex.build(
+                    [reactor for reactor, _ in self._triggered]
+                )
+            names, domain, device_id = _change_keys(self.hass, entity_id)
+            for number in self._trigger_index.find(names, domain, device_id):
+                found = found | self._triggered[number][1]
+        return found - {entity_id}
+
+    def _read_templates(self) -> None:
+        blocks: dict[int, tuple[Any, set[str]]] = {}
+        for platform in async_get_platforms(self.hass, TEMPLATE_PLATFORM):
+            for entity_id, entity in list(getattr(platform, "entities", {}).items()):
+                entity_id = str(entity_id).lower()  # noqa: PLW2901
+                coordinator = getattr(entity, "coordinator", None)
+                if coordinator is not None and isinstance(
+                    getattr(coordinator, "config", None), dict
+                ):
+                    # Trigger-based: changes when its block is triggered.
+                    blocks.setdefault(id(coordinator), (coordinator, set()))[1].add(
+                        entity_id
+                    )
+                    continue
+                listeners = self._listeners(entity)
+                if listeners is None:
+                    _warn_once(f"what template entity {entity_id} reads")
+                    self.every.add(entity_id)
+                    continue
+                if listeners.get(_ALL_LISTENER):
+                    self.every.add(entity_id)
+                for source in listeners.get(_ENTITIES_LISTENER) or ():
+                    self.by_entity.setdefault(str(source).lower(), set()).add(entity_id)
+                for domain in listeners.get(_DOMAINS_LISTENER) or ():
+                    self.by_domain.setdefault(str(domain).lower(), set()).add(entity_id)
+        for coordinator, entity_ids in blocks.values():
+            config = coordinator.config
+            raw = next((config[key] for key in _TRIGGER_KEYS if key in config), [])
+            triggers = raw if isinstance(raw, list) else [raw]
+            reactor = Reactor(
+                name=None,
+                triggers=[_compile_trigger(t) for t in triggers],
+                sequence=[],
+                variables="\n".join(
+                    text for key in _VARIABLE_KEYS for text in _texts(config.get(key))
+                ),
+            )
+            self._triggered.append((reactor, entity_ids))
+
+    @staticmethod
+    def _listeners(entity: Any) -> dict[str, Any] | None:
+        """Return what a template entity re-renders on, or None if unreadable."""
+        info = getattr(entity, "_template_result_info", None)
+        if info is None:
+            # Not set up yet (or no templates): it renders nothing yet.
+            return {} if hasattr(entity, "_template_result_info") else None
+        try:
+            listeners = info.listeners
+        except Exception:  # noqa: BLE001
+            return None
+        return listeners if isinstance(listeners, dict) else None
+
+    def _read_subscriptions(self) -> None:
+        key = getattr(ha_event, _TRACK_STATE_CHANGE_KEY, None)
+        if key is None:
+            _warn_once("Home Assistant's state-change subscriptions")
+            return
+        data = self.hass.data.get(key)
+        if data is None:
+            return  # nothing subscribes to a state change
+        callbacks = getattr(data, "callbacks", None)
+        if not isinstance(callbacks, dict):
+            _warn_once("Home Assistant's state-change subscriptions")
+            return
+        for source, jobs in list(callbacks.items()):
+            for job in list(jobs):
+                owner = _job_entity(getattr(job, "target", None))
+                if owner is not None:
+                    self.by_entity.setdefault(str(source).lower(), set()).add(owner)
+
+
+def _job_entity(target: Any) -> str | None:
+    """
+    Return the entity a state-change callback belongs to, if it is one's.
+
+    A bound method of the entity, a partial of one, or a function defined in
+    one of its methods (whose closure holds the entity).
+    """
+    candidates: list[Any] = []
+    for func in (target, getattr(target, "func", None)):
+        if func is None:
+            continue
+        candidates.append(getattr(func, "__self__", None))
+        candidates.extend(
+            cell.cell_contents
+            for cell in getattr(func, "__closure__", None) or ()
+            if _cell_filled(cell)
+        )
+    for candidate in candidates:
+        if isinstance(candidate, Entity):
+            entity_id = getattr(candidate, "entity_id", None)
+            if isinstance(entity_id, str) and entity_id:
+                return entity_id.lower()
+    return None
+
+
+def _cell_filled(cell: Any) -> bool:
+    try:
+        cell.cell_contents  # noqa: B018
+    except ValueError:
+        return False
+    return True
 
 
 def _read_reactors(hass: HomeAssistant) -> list[Reactor] | None:
