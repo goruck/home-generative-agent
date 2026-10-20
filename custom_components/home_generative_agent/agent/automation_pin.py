@@ -44,7 +44,9 @@ Everything else is reported:
 **What this cannot see.** The screen has no ``hass``, so it cannot resolve a
 registry ID, expand a group or an area, or learn that a given ``switch.x`` is a
 template switch whose ``turn_on`` runs a stored script. That is why an
-unresolvable generic-domain target is gated rather than reasoned about. It also
+unresolvable generic-domain target is gated rather than reasoned about. A
+template entity or input button named by entity id is opened afterwards by
+``indirect_pin.stored_action_calls``, which has ``hass`` (#780). It also
 matches on service names, so a *transport* service that reaches a lock without
 naming the lock domain — ``mqtt.publish`` to a lock command topic is the
 realistic one — is invisible to it, as is any raw protocol write that addresses
@@ -684,6 +686,27 @@ def _screen_step(
             "the automation contains a step this integration cannot classify",
         )
     ]
+
+
+def iter_service_calls(
+    actions: Any,
+) -> Iterator[tuple[str, str, Mapping[str, Any]]]:
+    """
+    Yield ``(domain, service, step)`` for each service call in ``actions``.
+
+    Only calls with a plain ``domain.service`` name; a templated one, and a
+    walk too deep to follow, are reported by ``find_critical_automation_calls``
+    rather than here, so callers screening further use both.
+    """
+    try:
+        for step, action_type in _walk_steps(actions):
+            if action_type != cv.SCRIPT_ACTION_CALL_SERVICE:
+                continue
+            domain, service, templated = _service_name(step)
+            if domain and not templated:
+                yield domain, service, step
+    except _TooDeepError:
+        return
 
 
 def find_critical_automation_calls(

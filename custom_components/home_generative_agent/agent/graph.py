@@ -135,6 +135,7 @@ from .indirect_pin import (
     script_rule_matches,
     script_tool_entity_id,
     service_runs_critical_action,
+    stored_actions_are_critical,
 )
 from .pin_messages import describe_pending_action, pin_msg
 from .rule_entities import expand_critical_rules
@@ -3586,7 +3587,7 @@ def _script_tool_is_critical(
     ) or runs_critical_action(hass, entity_id, critical_actions)
 
 
-def _intent_is_critical(
+def _intent_is_critical(  # noqa: PLR0911
     tool_args: dict[str, Any],
     critical_actions: list[dict[str, str]],
     tool_name: str,
@@ -3604,8 +3605,10 @@ def _intent_is_critical(
     entity id the model gave counts: with no domain and no service the call
     would otherwise run with no PIN at all); alarm panels keep their own
     code. HassTurnOn on a script or a scene runs it, so it is opened and
-    held when what it does is critical (#775). When the matcher cannot tell
-    what HA will act on, the call is held.
+    held when what it does is critical (#775). A template entity runs its own
+    action script for the call, and pressing an input button starts the
+    automations that trigger on it; those are opened the same way (#780).
+    When the matcher cannot tell what HA will act on, the call is held.
     """
     declared = declared_intent_service_calls(tool_name, tool_args)
     if declared is None:
@@ -3651,6 +3654,14 @@ def _intent_is_critical(
                     and script_rule_matches(hass, call.entity_id, critical_actions)
                 )
                 or runs_critical_action(hass, call.entity_id, critical_actions)
+            )
+        ):
+            return True
+        if (
+            call.entity_id
+            and call.domain not in (SCRIPT_DOMAIN, SCENE_DOMAIN)
+            and stored_actions_are_critical(
+                hass, call.entity_id, call.service, critical_actions
             )
         ):
             return True
