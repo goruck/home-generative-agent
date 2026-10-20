@@ -21,6 +21,7 @@ from typing import (
 
 import psycopg
 import voluptuous as vol
+from homeassistant.core import State as HaState
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import llm
 from homeassistant.util import dt as dt_util
@@ -142,7 +143,12 @@ from .indirect_pin import (
     service_runs_critical_action,
     stored_actions_are_critical,
 )
-from .on_off_direction import with_action_performed, wrong_direction_refusal
+from .on_off_direction import (
+    is_bare_yes,
+    target_entity_ids,
+    with_action_performed,
+    wrong_direction_refusal,
+)
 from .pin_messages import describe_pending_action, pin_msg
 from .rule_entities import expand_critical_rules
 from .template_actions import entities_of
@@ -584,7 +590,10 @@ def _prepare_tool_args(
     state = getattr(ctx, "state", None)
     messages = state.get("messages", []) if isinstance(state, dict) else []
     refusal = wrong_direction_refusal(
-        tool_name, tool_args, _on_off_request_text(messages)
+        tool_name,
+        tool_args,
+        _on_off_request_text(messages),
+        known=_known_target(ctx.hass, tool_args),
     )
     if refusal:
         LOGGER.info("Refused %s: %s", tool_name, refusal)
@@ -1102,6 +1111,37 @@ def _offer_text(messages: Sequence[BaseMessage]) -> str:
     return ""
 
 
+def _known_target(
+    hass: HomeAssistant | None, tool_args: Mapping[str, Any]
+) -> tuple[set[str], set[str]]:
+    """
+    Return the domains and friendly names HA knows for a call's target (#797).
+
+    An entity id gives its friendly name ("light.ceiling" is "Open Plan
+    Lights", whose "open" is then a name), and a friendly name with no
+    domain gives the domains of the entities called that.
+    """
+    domains: set[str] = set()
+    names: set[str] = set()
+    states = getattr(hass, "states", None)
+    if states is None:
+        return domains, names
+    ids, others = target_entity_ids(tool_args)
+    for entity_id in ids:
+        state = states.get(entity_id)
+        if isinstance(state, HaState):
+            names.add(str(state.attributes.get("friendly_name") or ""))
+    wanted = {name.casefold() for name in others}
+    if wanted and not tool_args.get("domain"):
+        for state in states.async_all():
+            if not isinstance(state, HaState):
+                continue
+            friendly = str(state.attributes.get("friendly_name") or "").casefold()
+            if friendly in wanted:
+                domains.add(state.domain)
+    return domains, names
+
+
 def _on_off_request_text(messages: Sequence[BaseMessage]) -> str:
     """
     Return the words a HassTurnOn/HassTurnOff call is checked against (#797).
@@ -1114,11 +1154,9 @@ def _on_off_request_text(messages: Sequence[BaseMessage]) -> str:
         if not isinstance(messages[index], HumanMessage):
             continue
         text = _message_text(messages[index])[:_MAX_INTENT_SCAN_CHARS]
-        # "Please close it" gives its own command; only a bare "Yes" takes
+        # "Please shut it" gives its own command; only a bare "Yes" takes
         # the offer's.
-        if not _is_affirmative_follow_up(text) or re.search(
-            ACTUATION_KEYWORDS_REGEX, text
-        ):
+        if not is_bare_yes(text):
             return text
         for msg in reversed(messages[:index]):
             if isinstance(msg, AIMessage) and (offer := _message_text(msg).strip()):

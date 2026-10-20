@@ -20,6 +20,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from custom_components.home_generative_agent.agent import graph
 from custom_components.home_generative_agent.agent.helpers import PinReply
 from custom_components.home_generative_agent.agent.on_off_direction import (
+    is_bare_yes,
     requested_direction,
     with_action_performed,
     wrong_direction_refusal,
@@ -65,6 +66,15 @@ from custom_components.home_generative_agent.core.utils import hash_pin
         ("turn off the light and open the blinds", None),
         ("Close the shade and start the coffee maker", None),
         ("stop the open garage script", None),
+        # A second commanding phrase: the command may be another target's.
+        ("Lights off and open the blinds", None),
+        ("Open the shades and kill the kitchen lights", None),
+        ("Close the blinds and lights on please", None),
+        ("Open the curtains and the TV off", None),
+        ("The garage is just open, kill the lamp", None),
+        ("I can open the shades. Would you also like the lights off?", None),
+        ("Open plan lights off", None),
+        ("Yes, close it", "off"),
         # Both on and off, or a "turn" not read: not checked.
         ("turn the light on the porch off", None),
         ("turn the router off and on again", None),
@@ -136,6 +146,8 @@ _SHADES = {"name": "All Shades", "domain": ["cover"]}
             False,
         ),
         ("HassTurnOff", {"name": "All Shades"}, "Open All Shades", False),
+        # A name that is a command word stays: "Lock the lock".
+        ("HassTurnOff", {"name": "Lock", "domain": ["lock"]}, "Lock the lock", True),
     ],
 )
 def test_a_call_against_the_request_is_refused(
@@ -266,6 +278,15 @@ _OFFER = [
             "intent__HassTurnOff",
             False,
         ),
+        # A correction is its own command, not a "Yes" to the offer.
+        (
+            [
+                AIMessage("Would you like me to open the study shade?"),
+                HumanMessage("Please shut it"),
+            ],
+            "intent__HassTurnOff",
+            True,
+        ),
         # A state, not a command.
         (
             [HumanMessage("The study shade is open and I'm leaving")],
@@ -334,3 +355,48 @@ async def test_a_pin_confirmed_call_says_what_was_done() -> None:
 
     assert reply["status"] == "completed"
     assert reply["result"]["action_performed"] == ["unlock command sent to Front Door"]
+
+
+@pytest.mark.parametrize(
+    ("text", "bare"),
+    [
+        ("Yes", True),
+        ("Sure, go ahead!", True),
+        ("ok please", True),
+        ("Ano", True),
+        ("Please shut it", False),
+        ("Yes, close it", False),
+        ("Ano, zavri zaluzie", False),
+    ],
+)
+def test_only_a_bare_yes_takes_the_offer(text: str, *, bare: bool) -> None:
+    assert is_bare_yes(text) is bare
+
+
+def _hass_ctx(hass: Any, api: _FakeAPI, text: str) -> graph.ToolExecutionContext:
+    ctx = _ctx(api, HumanMessage(text))
+    ctx.hass = hass
+    return ctx
+
+
+@pytest.mark.parametrize(
+    ("args", "text", "runs"),
+    [
+        # No domain in the call: HA's states give it.
+        ({"name": "All Shades"}, "Open All Shades", False),
+        # An entity id: its friendly name is a name, not a command.
+        ({"name": "light.ceiling", "domain": ["light"]}, "Open Plan Lights off", True),
+    ],
+)
+async def test_the_target_is_looked_up_in_home_assistant(
+    hass: Any, args: dict[str, Any], text: str, *, runs: bool
+) -> None:
+    hass.states.async_set("cover.all_shades", "open", {"friendly_name": "All Shades"})
+    hass.states.async_set("light.ceiling", "on", {"friendly_name": "Open Plan Lights"})
+    api = _FakeAPI(_ha_result(("All Shades", "cover.all_shades")))
+
+    await graph._run_ha_tool(
+        "intent__HassTurnOff", dict(args), _hass_ctx(hass, api, text), {"id": "c1"}
+    )
+
+    assert (api.calls == ["intent__HassTurnOff"]) is runs
