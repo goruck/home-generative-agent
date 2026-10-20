@@ -45,15 +45,26 @@ from custom_components.home_generative_agent.core.utils import hash_pin
         ("lock the front door", "on"),
         ("unlock the front door", "off"),
         ("press the doorbell button", "on"),
-        # Both directions, a negation, none, or another language: not read.
-        ("close the shade, it is open", None),
+        ("Please close it.", "off"),
+        ("Can you open the blinds?", "on"),
+        ("Would you like me to open the study shade?", "on"),
+        ("Should I close the garage?", "off"),
+        ("OK, close the shade", "off"),
+        ("Open the shades, I can\u2019t see anything", "on"),
+        ("Why didn't you open the shades? Open them now", "on"),
+        # A direction word that is a state or a name is not a command.
+        ("The garage door is open and I'm leaving", None),
+        ("the blinds are open, it is too bright", None),
+        ("kill the open plan lights", None),
+        # Both directions, another action, long, none, another language.
+        ("close the shade, it is open", "off"),
         ("turn off the light and open the blinds", None),
-        ("don't open the garage", None),
-        ("do not turn off the TV", None),
+        ("Close the shade and start the coffee maker", None),
+        ("stop the open garage script", None),
         ("set the shade to 40 percent", None),
-        ("otevři žaluzie", None),
+        ("Open " + "x " * 200, None),
+        ("otev\u0159i \u017ealuzie", None),
         ("", None),
-        # "turned" is a state, not a request.
         ("the light was turned on by someone", None),
     ],
 )
@@ -62,29 +73,44 @@ def test_the_direction_a_request_asks_for(text: str, expected: str | None) -> No
     assert (found[0] if found else None) == expected
 
 
+_COVER = {"name": "Study Shade", "domain": ["cover"]}
+
+
 @pytest.mark.parametrize(
-    ("tool", "text", "refused"),
+    ("tool", "args", "text", "refused"),
     [
         # The field cases.
-        ("intent__HassTurnOff", "Open All Shades", True),
-        ("intent__HassTurnOn", "Open All Shades", False),
-        ("intent__HassTurnOn", "close the shade", True),
-        ("HassTurnOff", "lock the front door", True),
-        ("HassTurnOn", "unlock the front door", True),
-        ("HassTurnOff", "unlock the front door", False),
+        ("intent__HassTurnOff", {"name": "All Shades"}, "Open All Shades", True),
+        ("intent__HassTurnOn", {"name": "All Shades"}, "Open All Shades", False),
+        ("intent__HassTurnOn", _COVER, "close the shade", True),
+        ("HassTurnOff", {"name": "Front Door"}, "lock the front door", True),
+        ("HassTurnOn", {"name": "Front Door"}, "unlock the front door", True),
+        ("HassTurnOff", {"name": "Front Door"}, "unlock the front door", False),
         # Not an on/off tool, or nothing to read.
-        ("intent__HassSetPosition", "open the shade", False),
-        ("intent__HassTurnOff", "set the shade to 40 percent", False),
+        ("intent__HassSetPosition", _COVER, "open the shade", False),
+        ("intent__HassTurnOff", _COVER, "set the shade to 40 percent", False),
+        # A script or scene is run, not turned; a name holding a direction.
+        (
+            "HassTurnOn",
+            {"name": "Close Garage", "domain": ["script"]},
+            "run the close garage script",
+            False,
+        ),
+        ("HassTurnOn", {"name": "Close Garage"}, "close garage", False),
+        ("HassTurnOff", {"name": "Open Plan Lights"}, "open plan lights off", False),
+        ("HassTurnOn", {"name": "Lock Up", "domain": "scene"}, "lock up", False),
     ],
 )
 def test_a_call_against_the_request_is_refused(
-    tool: str, text: str, *, refused: bool
+    tool: str, args: dict[str, Any], text: str, *, refused: bool
 ) -> None:
-    assert (wrong_direction_refusal(tool, text) is not None) is refused
+    assert (wrong_direction_refusal(tool, args, text) is not None) is refused
 
 
 def test_the_refusal_names_the_right_tool() -> None:
-    refusal = wrong_direction_refusal("intent__HassTurnOff", "Open All Shades")
+    refusal = wrong_direction_refusal(
+        "intent__HassTurnOff", {"name": "All Shades"}, "Open All Shades"
+    )
     assert refusal is not None
     assert "intent__HassTurnOn" in refusal
     assert "'Open'" in refusal
@@ -108,12 +134,16 @@ def _ha_result(*targets: tuple[str, str]) -> dict[str, Any]:
 @pytest.mark.parametrize(
     ("tool", "entity_id", "done"),
     [
-        ("intent__HassTurnOff", "cover.study_shade", "closed Study Shade"),
-        ("intent__HassTurnOn", "cover.study_shade", "opened Study Shade"),
-        ("HassTurnOff", "lock.study_shade", "unlocked Study Shade"),
-        ("HassTurnOn", "valve.study_shade", "opened Study Shade"),
-        ("HassTurnOn", "light.study_shade", "turned on Study Shade"),
-        ("HassTurnOn", "button.study_shade", "pressed Study Shade"),
+        (
+            "intent__HassTurnOff",
+            "cover.study_shade",
+            "close command sent to Study Shade",
+        ),
+        ("intent__HassTurnOn", "cover.study_shade", "open command sent to Study Shade"),
+        ("HassTurnOff", "lock.study_shade", "unlock command sent to Study Shade"),
+        ("HassTurnOn", "valve.study_shade", "open command sent to Study Shade"),
+        ("HassTurnOn", "light.study_shade", "turn on command sent to Study Shade"),
+        ("HassTurnOn", "button.study_shade", "press command sent to Study Shade"),
     ],
 )
 def test_the_result_says_what_was_done(tool: str, entity_id: str, done: str) -> None:
@@ -182,6 +212,31 @@ _OFFER = [
         ),
         # Nothing to read: it runs.
         ([HumanMessage("Zavři žaluzie")], "intent__HassTurnOn", True),
+        # "Please close it" gives its own command, not the earlier offer's.
+        (
+            [
+                HumanMessage("open the study shade"),
+                AIMessage("Should I also open the other shades?"),
+                HumanMessage("Please close it."),
+            ],
+            "intent__HassTurnOff",
+            True,
+        ),
+        # Every question of the offer is read.
+        (
+            [
+                AIMessage("Would you like me to open the shade? Is that okay?"),
+                HumanMessage("Yes"),
+            ],
+            "intent__HassTurnOff",
+            False,
+        ),
+        # A state, not a command.
+        (
+            [HumanMessage("The study shade is open and I'm leaving")],
+            "intent__HassTurnOff",
+            True,
+        ),
     ],
 )
 async def test_a_call_against_the_request_does_not_run(
@@ -209,7 +264,7 @@ async def test_the_model_is_told_what_was_done() -> None:
     )
 
     assert json.loads(cast("str", message.content))["action_performed"] == [
-        "closed Study Shade"
+        "close command sent to Study Shade"
     ]
 
 
@@ -243,4 +298,4 @@ async def test_a_pin_confirmed_call_says_what_was_done() -> None:
     reply = json.loads(await confirm("aid", "1234", config=config, store=None))
 
     assert reply["status"] == "completed"
-    assert reply["result"]["action_performed"] == ["unlocked Front Door"]
+    assert reply["result"]["action_performed"] == ["unlock command sent to Front Door"]

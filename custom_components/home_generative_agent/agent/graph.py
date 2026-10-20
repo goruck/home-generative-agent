@@ -583,9 +583,11 @@ def _prepare_tool_args(
     # refused before the PIN check, so it is never queued for a PIN.
     state = getattr(ctx, "state", None)
     messages = state.get("messages", []) if isinstance(state, dict) else []
-    refusal = wrong_direction_refusal(tool_name, _on_off_request_text(messages))
+    refusal = wrong_direction_refusal(
+        tool_name, tool_args, _on_off_request_text(messages)
+    )
     if refusal:
-        LOGGER.info("Refused %s(%s): %s", tool_name, tool_args, refusal)
+        LOGGER.info("Refused %s: %s", tool_name, refusal)
         return _make_tool_error(
             refusal, tool_name, tool_call.get("id") or ""
         ), tool_args
@@ -1113,13 +1115,18 @@ def _on_off_request_text(messages: Sequence[BaseMessage]) -> str:
         if not isinstance(messages[index], HumanMessage):
             continue
         text = _message_text(messages[index])[:_MAX_INTENT_SCAN_CHARS]
-        if not _is_affirmative_follow_up(text):
+        # "Please close it" gives its own command; only a bare "Yes" takes
+        # the offer's.
+        if not _is_affirmative_follow_up(text) or re.search(
+            ACTUATION_KEYWORDS_REGEX, text
+        ):
             return text
         for msg in reversed(messages[:index]):
             if isinstance(msg, AIMessage) and (offer := _message_text(msg).strip()):
                 sentences = [s for s in _SENTENCE_END_RE.split(offer) if s.strip()]
                 questions = [s for s in sentences if s.rstrip().endswith("?")]
-                return (questions or sentences)[-1]
+                # Every question: "Want me to open it? Is that okay?"
+                return " ".join(questions) if questions else sentences[-1]
         return ""
     return ""
 
