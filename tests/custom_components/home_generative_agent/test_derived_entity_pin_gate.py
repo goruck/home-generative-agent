@@ -13,14 +13,17 @@ and which entities subscribe to a state change.
 from __future__ import annotations
 
 import logging
+import time
 from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from homeassistant.core import HassJob
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import Entity
+from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -361,6 +364,17 @@ class _Template:
         self.template = text
 
 
+class _Coordinator:
+    def __init__(self, listeners: dict[int, Any]) -> None:
+        self._listeners = listeners
+
+    def on_state_change(self, *_args: Any) -> None:
+        """Stand in."""
+
+    def async_update_listeners(self) -> None:
+        """Mark it a coordinator."""
+
+
 class _Owner(Entity):
     def __init__(self, entity_id: str) -> None:
         self.entity_id = entity_id
@@ -369,7 +383,11 @@ class _Owner(Entity):
         """Stand in for a state listener."""
 
 
-def test_every_entity_a_callback_reaches_counts() -> None:
+def _owners(target: Any) -> set[str]:
+    return template_actions._OwnerSearch().owners(target)
+
+
+def test_every_entity_a_callback_updates_counts() -> None:
     """A partial's argument, a closure over two entities, a coordinator's listener."""
     owner, other = _Owner("sensor.owner"), _Owner("sensor.aaa_other")
 
@@ -386,21 +404,45 @@ def test_every_entity_a_callback_reaches_counts() -> None:
 
         return listener
 
-    coordinator = SimpleNamespace(_listeners={1: (owner.handle, None)})
-    assert template_actions._job_entities(partial(handler, entity=owner)) == {
-        "sensor.owner"
-    }
-    assert template_actions._job_entities(make()) == {
-        "sensor.owner",
-        "sensor.aaa_other",
-    }
-    assert template_actions._job_entities(coordinator.__dict__["_listeners"]) == {
-        "sensor.owner"
-    }
-    # A template tracker's job leading to the coordinator.
-    assert template_actions._job_entities(SimpleNamespace(_job=coordinator)) == {
-        "sensor.owner"
-    }
+    assert _owners(partial(handler, entity=owner)) == {"sensor.owner"}
+    assert _owners(make()) == {"sensor.owner", "sensor.aaa_other"}
+
+
+def test_a_coordinators_listeners_are_reached_through_a_job() -> None:
+    """HassJob -> coordinator method -> its listeners -> the entity (history stats)."""
+    owner = _Owner("sensor.history")
+    coordinator = _Coordinator({1: (owner.handle, None)})
+    job = HassJob(coordinator.on_state_change)
+    assert _owners(job) == {"sensor.history"}
+
+
+def test_a_shared_container_is_not_walked() -> None:
+    """A closure over an integration's dict of entities does not follow them all."""
+    shared = {"entities": [_Owner(f"sensor.s{index}") for index in range(50)]}
+    owner = _Owner("sensor.mine")
+
+    def make() -> Any:
+        data, me = shared, owner
+
+        def listener(_event: Any) -> None:
+            assert data is not None
+            assert me is not None
+
+        return listener
+
+    assert _owners(make()) == {"sensor.mine"}
+
+
+def test_an_unreadable_callback_is_skipped_with_a_warning(caplog: Any) -> None:
+    """One odd callback does not hold every call."""
+
+    class _Proxy:
+        def __getattr__(self, name: str) -> Any:
+            raise KeyError(name)
+
+    with caplog.at_level(logging.WARNING):
+        assert _owners(_Proxy()) == set()
+    assert "state-change callback" in caplog.text
 
 
 def test_a_template_not_rendered_yet_is_read_from_its_text() -> None:
@@ -427,3 +469,76 @@ def test_a_template_not_rendered_yet_is_read_from_its_text() -> None:
             "binary_sensor.waiting",
             "sensor.count",
         }
+
+
+# Its rate-limited render is still pending at teardown: that is the window
+# this covers.
+@pytest.mark.parametrize("expected_lingering_timers", [True])
+async def test_a_bayesian_reading_every_state(hass: HomeAssistant) -> None:
+    """A template observation over all states listens on the bus, not by entity."""
+    await _setup(
+        hass,
+        "binary_sensor.anyone_on",
+        binary_sensor=[
+            {
+                "platform": "bayesian",
+                "name": "Anyone On",
+                "prior": 0.2,
+                "probability_threshold": 0.5,
+                "observations": [
+                    {
+                        "platform": "template",
+                        "value_template": (
+                            "{{ states | selectattr('state', 'eq', 'on') | list"
+                            " | count > 0 }}"
+                        ),
+                        "prob_given_true": 0.9,
+                        "prob_given_false": 0.1,
+                    }
+                ],
+            }
+        ],
+    )
+    assert hass.states.get("binary_sensor.anyone_on") is not None
+    assert _held(hass, "input_boolean.let_in")
+
+
+def test_a_template_importing_a_macro_reads_everything() -> None:
+    """A domain read inside an imported macro is not in the outer text."""
+    macro = _Template("{% from 'gate.jinja' import allowed %}{{ allowed() }}")
+    entity = SimpleNamespace(
+        _template_result_info=SimpleNamespace(listeners={"entities": set()}),
+        _template_attrs={macro: []},
+    )
+    derived = template_actions.DerivedEntities.__new__(template_actions.DerivedEntities)
+    derived.hass = MagicMock()
+    derived.by_entity, derived.by_domain, derived.every = {}, {}, set()
+    derived._triggered, derived._trigger_index = [], None
+    derived._read_template("sensor.gate", entity)
+    assert derived.every == {"sensor.gate"}
+
+
+async def test_many_subscriptions_are_read_quickly(hass: HomeAssistant) -> None:
+    """5000 entities subscribed to changes: a check stays well under a second."""
+    await _setup(hass, "sensor.indoor")
+    owners = [_Owner(f"sensor.follower_{index}") for index in range(5000)]
+    shared = {"owners": owners}
+    for index, owner in enumerate(owners):
+
+        def make(me: _Owner = owner) -> Any:
+            data = shared
+
+            def listener(_event: Any) -> None:
+                assert data is not None
+                assert me is not None
+
+            return listener
+
+        async_track_state_change_event(hass, [f"sensor.source_{index}"], make())
+    timings = []
+    for _ in range(2):
+        started = time.perf_counter()
+        assert not _held(hass, "input_boolean.gate")
+        timings.append(time.perf_counter() - started)
+    # gstack-timing-ok: a cost bound on the event loop, not a race.
+    assert max(timings) < 1.5, timings
