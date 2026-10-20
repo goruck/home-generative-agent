@@ -16,11 +16,15 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
 
 from custom_components.home_generative_agent.agent.graph import (
     _is_critical_action,
     _prepare_tool_args,
+)
+from custom_components.home_generative_agent.agent.indirect_pin import (
+    collect_started_automations,
 )
 from custom_components.home_generative_agent.agent.tools import (
     _maybe_require_pin_for_automation,
@@ -505,8 +509,8 @@ async def test_a_scene_an_automation_watches_is_checked(
 async def test_many_automations_and_lights_check_quickly(
     bare: HomeAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """300 automations and 100 lights: `light.turn_on all` stays well under 2 s."""
-    for index in range(100):
+    """500 automations and 400 lights: `light.turn_on all` stays well under 2 s."""
+    for index in range(400):
         bare.states.async_set(f"light.l{index}", "off")
     autos = [
         _automation(
@@ -522,7 +526,7 @@ async def test_many_automations_and_lights_check_quickly(
             [_call("light.turn_on", "light.porch")],
             entity_id=f"automation.a{index}",
         )
-        for index in range(300)
+        for index in range(500)
     ]
     _set(bare, monkeypatch, *autos)
     start = time.perf_counter()
@@ -531,3 +535,278 @@ async def test_many_automations_and_lights_check_quickly(
     elapsed = time.perf_counter() - start
     assert not held
     assert elapsed < 2.0, elapsed  # gstack-timing-ok: a cost bound, not a race
+
+
+async def _scenes(hass: HomeAssistant) -> None:
+    assert await async_setup_component(
+        hass,
+        "scene",
+        {
+            "scene": [
+                {"name": "Arrival", "entities": {"lock.front_door": "unlocked"}},
+                {"name": "Quiet", "entities": {"fan.ceiling": "off"}},
+            ]
+        },
+    )
+    await hass.async_block_till_done()
+
+
+@pytest.mark.parametrize(("scene", "held"), [("arrival", True), ("quiet", False)])
+async def test_a_scene_step_in_a_reacting_automation_is_opened(
+    bare: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+    scene: str,
+    *,
+    held: bool,
+) -> None:
+    """`- scene: scene.arrival`, where the scene unlocks the door."""
+    await _scenes(bare)
+    _set(
+        bare,
+        monkeypatch,
+        _automation(
+            [{"trigger": "state", "entity_id": "input_boolean.vac"}],
+            [{"scene": f"scene.{scene}"}],
+        ),
+    )
+    assert _held(bare, "input_boolean.vac") is held
+
+
+@pytest.mark.parametrize(("actions", "held"), [(None, True), ([], False)])
+async def test_an_automation_a_reacting_one_triggers_is_opened(
+    bare: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+    actions: list[Any] | None,
+    *,
+    held: bool,
+) -> None:
+    """`automation.trigger` runs the other automation's actions."""
+    _set(
+        bare,
+        monkeypatch,
+        _automation(
+            [{"trigger": "state", "entity_id": "input_boolean.vac"}],
+            [_call("automation.trigger", "automation.unlock")],
+        ),
+        _automation(
+            [{"trigger": "time", "at": "07:00:00"}],
+            actions,
+            entity_id="automation.unlock",
+        ),
+    )
+    assert _held(bare, "input_boolean.vac") is held
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "{{ is_state('input_boolean.va' ~ 'c', 'on') }}",
+        "{{ is_state('input_boolean.{}'.format('vac'), 'on') }}",
+        "{{ is_state('input_boolean.%s' % 'vac', 'on') }}",
+    ],
+)
+async def test_an_id_built_from_part_of_a_name_reads_its_domain(
+    bare: HomeAssistant, monkeypatch: pytest.MonkeyPatch, template: str
+) -> None:
+    """Part of the object id in the literal still names the domain."""
+    _set(
+        bare,
+        monkeypatch,
+        _automation([{"trigger": "template", "value_template": template}]),
+    )
+    assert _held(bare, "input_boolean.vac")
+    assert not _held(bare, "fan.ceiling")
+
+
+async def test_a_blueprint_automation_waiting_for_the_change_is_held(
+    bare: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its wait is only in the validated steps, not the raw config."""
+    sequence = [
+        {"wait_for_trigger": [{"trigger": "state", "entity_id": "input_boolean.vac"}]},
+        *_unlock(),
+    ]
+    auto = SimpleNamespace(
+        entity_id="automation.bp",
+        raw_config={"use_blueprint": {"path": "x.yaml", "input": {}}},
+        _trigger_config=[{"trigger": "time", "at": "07:00:00"}],
+        action_script=SimpleNamespace(sequence=sequence),
+    )
+    _set(bare, monkeypatch, auto)
+    assert _held(bare, "input_boolean.vac")
+
+
+async def test_an_mqtt_publish_is_checked_against_mqtt_device_triggers(
+    bare: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A button on an MQTT device starts its automation from a topic too."""
+    trigger = {
+        "trigger": "device",
+        "domain": "mqtt",
+        "device_id": "remote",
+        "type": "button_short_press",
+        "subtype": "button_1",
+    }
+    _set(bare, monkeypatch, _automation([trigger]))
+    args = {"domain": "mqtt", "service": "publish", "topic": "remote/action"}
+    assert _is_critical_action(args, RULES, "mcp__call_service", bare)
+
+
+async def test_an_mqtt_publish_is_held_by_a_guarded_mqtt_entity(
+    bare: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A publish can command an MQTT lock: its topic is not matched."""
+    _set(bare, monkeypatch)
+    args = {"domain": "mqtt", "service": "publish", "topic": "door/set"}
+    assert not _is_critical_action(args, RULES, "mcp__call_service", bare)
+    er.async_get(bare).async_get_or_create("lock", "mqtt", "door")
+    assert _is_critical_action(args, RULES, "mcp__call_service", bare)
+
+
+async def test_a_script_a_reacting_automation_runs_is_read_leniently(
+    bare: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A REST call factored into a script does not hold the fan either."""
+    assert await async_setup_component(
+        bare,
+        "script",
+        {"script": {"ping": {"sequence": [{"action": "rest_command.ping"}]}}},
+    )
+    await bare.async_block_till_done()
+    _set(
+        bare,
+        monkeypatch,
+        _automation(
+            [{"trigger": "state", "entity_id": "fan.ceiling"}],
+            [{"action": "script.ping"}],
+        ),
+    )
+    assert not _held(bare, "fan.ceiling")
+
+
+async def test_a_press_still_reads_its_automations_strictly(
+    bare: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As since #780: what a pressed button starts and cannot be read holds."""
+    bare.states.async_set("input_button.go", "unknown", {"friendly_name": "Go"})
+    _set(
+        bare,
+        monkeypatch,
+        _automation(
+            [{"trigger": "state", "entity_id": "input_button.go"}],
+            [{"event": "go"}],
+        ),
+    )
+    assert _is_critical_action({"name": "Go"}, RULES, "intent__HassTurnOn", bare)
+
+
+@pytest.mark.parametrize(("state", "held"), [("off", False), ("on", True)])
+async def test_a_disabled_automation_does_not_hold(
+    bare: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    *,
+    held: bool,
+) -> None:
+    """A disabled automation's triggers do not fire."""
+    bare.states.async_set("automation.probe", state)
+    _set(
+        bare,
+        monkeypatch,
+        _automation([{"trigger": "state", "entity_id": "fan.ceiling"}]),
+    )
+    assert _held(bare, "fan.ceiling") is held
+
+
+@pytest.mark.parametrize(
+    ("automation_state", "script_state", "held"),
+    [
+        (("on", {"current": 0}), "off", False),
+        (("on", {"current": 1}), "off", True),
+        (("on", {"current": 0}), "on", True),
+    ],
+)
+async def test_a_wait_counts_only_while_a_run_may_wait(
+    bare: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+    automation_state: tuple[str, dict[str, Any]],
+    script_state: str,
+    *,
+    held: bool,
+) -> None:
+    """An idle 'wait for the fan, then unlock' does not hold the fan."""
+    wait = [
+        {"wait_for_trigger": [{"trigger": "state", "entity_id": "fan.ceiling"}]},
+        *_unlock(),
+    ]
+    bare.states.async_set("automation.probe", *automation_state)
+    _set(
+        bare,
+        monkeypatch,
+        _automation([{"trigger": "time", "at": "07:00:00"}], wait),
+    )
+    bare.states.async_set("script.arrive", script_state)
+    script = SimpleNamespace(
+        entity_id="script.arrive",
+        raw_config={"sequence": wait} if script_state == "on" else {"sequence": []},
+        script=SimpleNamespace(sequence=wait if script_state == "on" else []),
+    )
+    monkeypatch.setitem(bare.data, "script", SimpleNamespace(entities=[script]))
+    assert _held(bare, "fan.ceiling") is held
+
+
+async def test_a_person_arriving_changes_the_zone(
+    bare: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """'Unlock when the first person gets home' watches `zone.home`."""
+    bare.states.async_set("zone.home", "0", {"persons": ["person.me"]})
+    _set(
+        bare,
+        monkeypatch,
+        _automation([{"trigger": "state", "entity_id": "zone.home"}]),
+    )
+    args = {"domain": "device_tracker", "service": "see", "dev_id": "phone"}
+    assert _is_critical_action(args, RULES, "mcp__call_service", bare)
+
+
+async def test_a_long_chain_of_automations_holds_without_crashing(
+    bare: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each automation turning on the next helper, 160 deep."""
+    autos = [
+        _automation(
+            [{"trigger": "state", "entity_id": f"input_boolean.b{index}"}],
+            [_call("input_boolean.turn_on", f"input_boolean.b{index + 1}")],
+            entity_id=f"automation.a{index}",
+        )
+        for index in range(160)
+    ]
+    autos.append(
+        _automation(
+            [{"trigger": "state", "entity_id": "input_boolean.b160"}],
+            entity_id="automation.last",
+        )
+    )
+    _set(bare, monkeypatch, *autos)
+    assert _held(bare, "input_boolean.b0")
+
+
+async def test_the_pin_line_names_a_waiting_script_by_its_name(
+    bare: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not its entity id."""
+    _set(bare, monkeypatch)
+    wait = [
+        {"wait_for_trigger": [{"trigger": "state", "entity_id": "fan.ceiling"}]},
+        *_unlock(),
+    ]
+    bare.states.async_set("script.arrive", "on", {"friendly_name": "Arrive"})
+    script = SimpleNamespace(
+        entity_id="script.arrive",
+        raw_config={"sequence": wait},
+        script=SimpleNamespace(sequence=wait),
+    )
+    monkeypatch.setitem(bare.data, "script", SimpleNamespace(entities=[script]))
+    with collect_started_automations() as started:
+        assert _held(bare, "fan.ceiling")
+    assert started == ["Arrive"]

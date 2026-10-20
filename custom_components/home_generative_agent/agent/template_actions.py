@@ -25,7 +25,10 @@ Acting on an entity can run stored actions no rule names:
   ``expand(...)``, ``area_entities(...)``), a templated entity, target or
   event filter, an area, device, label or floor target, or a device trigger
   for the entity's domain or its own device. Its actions are what the
-  change runs. A trigger's ``to:``/``from:`` is not read: turning a switch
+  change runs. A disabled automation does not count, and a wait counts
+  only while its script or automation may be running. A group holding the
+  entity changes with it, as a person does with a tracker and a zone with
+  the people in it. A trigger's ``to:``/``from:`` is not read: turning a switch
   off counts if turning it on would start the automation. A template naming
   other entities (``states('sensor.x')``), another event type (a ZHA or
   mobile notification event) or another device's trigger (a remote) cannot
@@ -47,6 +50,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.helpers import entity_registry as er
@@ -58,7 +62,7 @@ from homeassistant.helpers.target import (
 from .automation_pin import DATA_CONTAINER_KEYS, TooDeepError, iter_service_calls
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Iterable, Mapping, Sequence
 
     from homeassistant.core import HomeAssistant
 
@@ -85,8 +89,11 @@ _TEMPLATE_DOMAIN = TEMPLATE_PLATFORM
 _STATES_ACCESS = re.compile(
     r"\bstates\b(?:\s*\.\s*([a-z0-9_]+)(?:\.([a-z0-9_]+))?)?(?!\s*[(.a-z0-9_])"
 )
-# An entity id built from parts: `'input_boolean.' ~ name` reads that domain.
-_BUILT_ID = re.compile(r"""['"]([a-z0-9_]+)\.['"]""")
+# An entity id built from parts reads that domain: `'input_boolean.' ~ name`,
+# `'input_boolean.let_' ~ 'in'`, `'input_boolean.{}'.format(name)`.
+_BUILT_ID = re.compile(r"""['"]([a-z0-9_]+)\.(?:['"]|[a-z0-9_]*(?:['"]\s*[~+]|[{%]))""")
+# A run of words joined by dots, for the names a text holds (see `_tokens`).
+_DOTTED_RUN = re.compile(r"[a-z0-9_]+(?:\.[a-z0-9_]+)*")
 _ENTITY_LISTS = re.compile(
     r"\b(?:expand|area_entities|label_entities|device_entities"
     r"|floor_entities|integration_entities)\s*\("
@@ -110,6 +117,10 @@ MAX_FOLLOW_DEPTH = 5
 # A group lists its members in `entity_id`; MQTT and ZHA groups in
 # `group_entities`.
 _MEMBER_ATTRIBUTES = ("entity_id", "group_entities")
+# Entities whose state follows others': a group's members, a person's
+# trackers, the people a zone counts (#814).
+_PARENT_ATTRIBUTES = (*_MEMBER_ATTRIBUTES, "device_trackers", "persons")
+_MQTT_DOMAIN = "mqtt"
 # Beyond the first step, what a template cover or lock drives is followed
 # only into these domains: a relay, a lock, a cover, a button, another
 # script. A script that also lights the house does not hold the lights.
@@ -190,12 +201,81 @@ class _Trigger:
 
 @dataclass
 class Reactor:
-    """An automation, waiting script or template block that may react to a change."""
+    """
+    An automation, waiting script or template block that may react to a change.
 
-    name: str
+    ``name`` is what the PIN line calls it; None for a template block.
+    """
+
+    name: str | None
     triggers: list[_Trigger]
     sequence: Any
     variables: str = ""
+
+
+@dataclass
+class _ReactorIndex:
+    """The reactors by what a change must name or be for each to react."""
+
+    always: set[int] = field(default_factory=set)
+    by_domain: dict[str, set[int]] = field(default_factory=dict)
+    by_device: dict[str, set[int]] = field(default_factory=dict)
+    by_name: dict[str, set[int]] = field(default_factory=dict)
+    by_variable: dict[str, set[int]] = field(default_factory=dict)
+
+    @classmethod
+    def build(cls, reactors: Sequence[Reactor]) -> _ReactorIndex:
+        """Index each reactor once, so a change looks up only its own."""
+        index = cls()
+        for number, reactor in enumerate(reactors):
+            for trigger in reactor.triggers:
+                index.add(number, trigger)
+            if any(trigger.templated for trigger in reactor.triggers):
+                # A template reading a variable that names the entity.
+                for name in _tokens(reactor.variables):
+                    index.by_variable.setdefault(name, set()).add(number)
+        return index
+
+    def add(self, number: int, trigger: _Trigger) -> None:
+        """Index one trigger: see the module docstring for what reacts."""
+        if trigger.always or trigger.all_domains:
+            self.always.add(number)
+            return
+        for name in _tokens(trigger.text):
+            self.by_name.setdefault(name, set()).add(number)
+        for domain in trigger.domains:
+            self.by_domain.setdefault(domain, set()).add(number)
+        if trigger.device_domain:
+            self.by_domain.setdefault(trigger.device_domain, set()).add(number)
+        if trigger.device_id:
+            self.by_device.setdefault(trigger.device_id, set()).add(number)
+
+    def find(
+        self, names: Iterable[str], domain: str, device_id: str | None
+    ) -> set[int]:
+        """Return the reactors a change to this entity may set off."""
+        found = set(self.always) | self.by_domain.get(domain, set())
+        if device_id is not None:
+            found |= self.by_device.get(device_id, set())
+        for name in names:
+            found |= self.by_name.get(name, set())
+            found |= self.by_variable.get(name, set())
+        return found
+
+
+def _tokens(text: str) -> set[str]:
+    """
+    Return every name a text may hold, as `_name_in` reads it.
+
+    Each word, and each pair of words joined by a dot: `states.light.porch`
+    holds `light.porch`, and a registry id is one word.
+    """
+    found: set[str] = set()
+    for run in _DOTTED_RUN.findall(text):
+        parts = run.split(".")
+        found.update(parts)
+        found.update(f"{a}.{b}" for a, b in pairwise(parts))
+    return found
 
 
 def _compile_trigger(trigger: Any) -> _Trigger:  # noqa: PLR0911
@@ -292,30 +372,6 @@ def _name_in(text: str, name: str) -> bool:
     return bool(re.search(rf"(?<![a-z0-9_]){re.escape(name)}(?![a-z0-9_])", text))
 
 
-def _reacts(
-    trigger: _Trigger,
-    names: Iterable[str],
-    *,
-    domain: str,
-    device_id: str | None,
-    named_by_variable: bool,
-) -> bool:
-    """Return True if a change to the entity may set the trigger off."""
-    if trigger.always:
-        return True
-    if any(_name_in(trigger.text, name) for name in names):
-        return True
-    if named_by_variable and trigger.templated:
-        return True  # a template reading a variable that names the entity
-    if trigger.all_domains or domain in trigger.domains:
-        return True
-    if trigger.device_domain is None:
-        return False
-    return trigger.device_domain == domain or (
-        device_id is not None and trigger.device_id == device_id
-    )
-
-
 @dataclass
 class StoredActionReader:
     """
@@ -327,6 +383,7 @@ class StoredActionReader:
 
     hass: HomeAssistant
     _reactors: list[Reactor] | None = None
+    _index: _ReactorIndex | None = None
     _read: bool = False
     _parents: dict[str, set[str]] | None = None
     _started: dict[str, list[Reactor] | None] = field(default_factory=dict)
@@ -381,20 +438,42 @@ class StoredActionReader:
         return found
 
     def mqtt_reactors(self) -> list[Reactor] | None:
-        """Return what an MQTT trigger starts, for an `mqtt.publish` call."""
+        """
+        Return what an `mqtt.publish` call may set off.
+
+        An MQTT trigger, and an MQTT device trigger (a button on an MQTT
+        device), react to a topic, which the gate does not match.
+        """
         reactors = self._all_reactors()
         if reactors is None:
             return None
         return [
             reactor
             for reactor in reactors
-            if any(trigger.platform == "mqtt" for trigger in reactor.triggers)
+            if any(
+                _MQTT_DOMAIN in (trigger.platform, trigger.device_domain)
+                for trigger in reactor.triggers
+            )
         ]
+
+    def automation_sequence(self, entity_id: str) -> list[Any] | None:
+        """Return the steps `automation.trigger` runs, or None if unreadable."""
+        for automation in getattr(
+            self.hass.data.get(_AUTOMATION_DOMAIN), "entities", ()
+        ):
+            if str(getattr(automation, "entity_id", "")).lower() == entity_id:
+                sequence = getattr(
+                    getattr(automation, "action_script", None), "sequence", None
+                )
+                return sequence if isinstance(sequence, list) else None
+        return None
 
     def _find_started_by(self, entity_id: str) -> list[Reactor] | None:
         reactors = self._all_reactors()
         if reactors is None:
             return None
+        if self._index is None:
+            self._index = _ReactorIndex.build(reactors)
         names = [entity_id]
         entry = er.async_get(self.hass).async_get(entity_id)
         device_id = None
@@ -403,20 +482,8 @@ class StoredActionReader:
             device_id = entry.device_id
         domain = entity_id.split(".", 1)[0]
         return [
-            reactor
-            for reactor in reactors
-            if any(
-                _reacts(
-                    trigger,
-                    names,
-                    domain=domain,
-                    device_id=device_id,
-                    named_by_variable=any(
-                        _name_in(reactor.variables, name) for name in names
-                    ),
-                )
-                for trigger in reactor.triggers
-            )
+            reactors[number]
+            for number in sorted(self._index.find(names, domain, device_id))
         ]
 
     def _groups_holding(self, entity_id: str) -> set[str]:
@@ -425,7 +492,7 @@ class StoredActionReader:
             for state in self.hass.states.async_all():
                 if state.domain in {SCRIPT_DOMAIN, SCENE_DOMAIN}:
                     continue
-                for attribute in _MEMBER_ATTRIBUTES:
+                for attribute in _PARENT_ATTRIBUTES:
                     members = state.attributes.get(attribute)
                     if isinstance(members, (list, tuple)):
                         for member in members:
@@ -453,15 +520,20 @@ def _read_reactors(hass: HomeAssistant) -> list[Reactor] | None:
         script = getattr(automation, "action_script", None)
         if script is None:
             continue  # an automation that failed to set up does not run
+        entity_id = str(getattr(automation, "entity_id", "") or "")
+        state = hass.states.get(entity_id) if entity_id else None
+        if state is not None and state.state == "off":
+            continue  # a disabled automation neither triggers nor waits
         config = getattr(automation, "raw_config", None)
         # The validated triggers, after blueprint substitution; the raw
         # config only where they are not kept.
         triggers = getattr(automation, "_trigger_config", None)
         read = _reactor(
-            str(getattr(automation, "entity_id", "") or automation),
+            _friendly_name(state) or entity_id or "an automation",
             config,
             getattr(script, "sequence", None),
             triggers if isinstance(triggers, list) else None,
+            waiting=_may_be_running(state, "current"),
         )
         if read is None:
             LOGGER.warning(
@@ -471,28 +543,10 @@ def _read_reactors(hass: HomeAssistant) -> list[Reactor] | None:
             return None
         found.append(read)
     # A script runs only when started; one waiting for the change resumes.
-    for script_entity in getattr(hass.data.get(SCRIPT_DOMAIN), "entities", ()):
-        script = getattr(script_entity, "script", None)
-        if script is None:
-            continue  # a script that failed to set up cannot run or wait
-        config = getattr(script_entity, "raw_config", None)
-        sequence = getattr(script, "sequence", None)
-        if not isinstance(config, dict) or not isinstance(sequence, list):
-            LOGGER.warning(
-                "Critical Action PIN: cannot read %s; holding changes it may wait on",
-                getattr(script_entity, "entity_id", script_entity),
-            )
-            return None
-        waits = [_compile_trigger(t) for t in _wait_triggers(config.get("sequence"))]
-        if waits:
-            found.append(
-                Reactor(
-                    name=str(getattr(script_entity, "entity_id", "") or "a script"),
-                    triggers=waits,
-                    sequence=sequence,
-                    variables="\n".join(_texts(config.get("variables"))),
-                )
-            )
+    waiting = _waiting_scripts(hass)
+    if waiting is None:
+        return None
+    found += waiting
     # A trigger-based template block with `actions:` runs them when triggered.
     coordinators = hass.data.get(_TEMPLATE_DOMAIN)
     if coordinators is not None and not isinstance(coordinators, list):
@@ -506,17 +560,74 @@ def _read_reactors(hass: HomeAssistant) -> list[Reactor] | None:
         actions = next((config[key] for key in _ACTION_KEYS if key in config), None)
         if actions is None:
             continue
-        read = _reactor("a template block", config, actions, None)
+        read = _reactor(None, config, actions, None)
         if read is None:
             return None
         found.append(read)
     return found
 
 
+def _waiting_scripts(hass: HomeAssistant) -> list[Reactor] | None:
+    """Read the running scripts' waits; None if a running one cannot be read."""
+    found: list[Reactor] = []
+    for script_entity in getattr(hass.data.get(SCRIPT_DOMAIN), "entities", ()):
+        script = getattr(script_entity, "script", None)
+        if script is None:
+            continue  # a script that failed to set up cannot run or wait
+        entity_id = str(getattr(script_entity, "entity_id", "") or "")
+        state = hass.states.get(entity_id) if entity_id else None
+        if state is not None and state.state == "off":
+            continue  # not running: nothing waits
+        config = getattr(script_entity, "raw_config", None)
+        sequence = getattr(script, "sequence", None)
+        if not isinstance(config, dict) or not isinstance(sequence, list):
+            LOGGER.warning(
+                "Critical Action PIN: cannot read %s; holding changes it may wait on",
+                entity_id or script_entity,
+            )
+            return None
+        waits = [
+            _compile_trigger(t)
+            for t in _wait_triggers([config.get("sequence"), sequence])
+        ]
+        if waits:
+            found.append(
+                Reactor(
+                    name=_friendly_name(state) or entity_id or "a script",
+                    triggers=waits,
+                    sequence=sequence,
+                    variables="\n".join(_texts(config.get("variables"))),
+                )
+            )
+    return found
+
+
+def _friendly_name(state: Any) -> str | None:
+    name = state.attributes.get("friendly_name") if state is not None else None
+    return name if isinstance(name, str) and name else None
+
+
+def _may_be_running(state: Any, runs_attribute: str) -> bool:
+    """Return False only for an automation known to have no run waiting."""
+    runs = state.attributes.get(runs_attribute) if state is not None else None
+    return not (isinstance(runs, int) and runs == 0)
+
+
 def _reactor(
-    name: str, config: Any, sequence: Any, triggers: list[Any] | None
+    name: str | None,
+    config: Any,
+    sequence: Any,
+    triggers: list[Any] | None,
+    *,
+    waiting: bool = True,
 ) -> Reactor | None:
-    """Read an automation or template block's triggers, waits and actions."""
+    """
+    Read an automation or template block's triggers, waits and actions.
+
+    Its waits count while a run may be waiting; they are read from the
+    validated steps (a blueprint's raw config holds only its inputs) and the
+    raw ones.
+    """
     if not isinstance(config, dict) or not isinstance(sequence, list):
         return None
     if triggers is None:
@@ -524,11 +635,12 @@ def _reactor(
         triggers = raw if isinstance(raw, list) else [raw]
     actions = next((config[key] for key in _ACTION_KEYS if key in config), [])
     alias = config.get("alias")
+    waits = _wait_triggers([actions, sequence]) if waiting else ()
     return Reactor(
         name=str(alias) if isinstance(alias, str) and alias else name,
         triggers=[
             *(_compile_trigger(t) for t in triggers),
-            *(_compile_trigger(t) for t in _wait_triggers(actions)),
+            *(_compile_trigger(t) for t in waits),
         ],
         sequence=sequence,
         variables="\n".join(

@@ -61,6 +61,7 @@ from .automation_pin import (
 from .helpers import TOOL_NAMESPACE_SEP, matches_critical_rule, rule_entity_matches
 from .rule_entities import read_switch_wrappers
 from .template_actions import (
+    PRESS_DOMAINS,
     Reactor,
     StoredActionReader,
     call_targets,
@@ -123,6 +124,11 @@ _MAX_FOLLOWED_ENTITIES = 2000
 # Changes that name no entity: they mark a tracker home, or set off MQTT
 # triggers (#814).
 _ENTITYLESS_CHANGES = frozenset({("device_tracker", "see"), ("mqtt", "publish")})
+_MQTT_DOMAIN = "mqtt"
+_AUTOMATION_DOMAIN = "automation"
+# Entities followed one inside another (a change starting an automation whose
+# step changes the next entity) before a check holds rather than read deeper.
+_MAX_CHAIN = 25
 # The automations a check finds would perform a critical action, for the PIN
 # line (see `collect_started_automations`).
 _STARTED: ContextVar[list[str] | None] = ContextVar("hga_pin_started", default=None)
@@ -309,21 +315,27 @@ def runs_critical_action(
     hass: HomeAssistant | None,
     entity_id: str,
     rules: Sequence[Mapping[str, str]],
+    check: StoredActionCheck | None = None,
 ) -> bool:
-    """Return True if running this script or scene could do a critical action."""
+    """
+    Return True if running this script or scene could do a critical action.
+
+    Pass one ``check`` for several scripts or scenes, so the automations are
+    read once.
+    """
     if hass is None:
         return True
     entity_id = entity_id.lower()
     domain = entity_id.split(".", 1)[0]
+    if check is None and _has_entities(hass):
+        check = StoredActionCheck(hass, rules)
     # Running it changes its state, which an automation may watch (#814).
-    if _has_entities(hass) and StoredActionCheck(hass, rules).reactors_critical(
-        entity_id
-    ):
+    if check is not None and check.reactors_critical(entity_id):
         return True
     if domain == SCRIPT_DOMAIN:
-        return _script_steps_are_critical(hass, entity_id, rules)
+        return _script_steps_are_critical(hass, entity_id, rules, check)
     if domain == SCENE_DOMAIN:
-        return _scene_is_critical(hass, entity_id, rules)
+        return _scene_is_critical(hass, entity_id, rules, check=check)
     return False
 
 
@@ -368,34 +380,50 @@ class StoredActionCheck:
         self.hass = hass
         self.rules = rules
         self.reader = StoredActionReader(hass)
-        self._entities: dict[tuple[str, str | None], bool | None] = {}
+        self._entities: dict[tuple[str, str | None, bool], bool | None] = {}
         self._steps: dict[tuple[int, bool], bool] = {}
         self._wrapped: dict[str, tuple[str, bool]] | None = None
+        self._chain = 0
 
-    def entity(self, entity_id: str, service: str | None) -> bool:
-        """Return True if acting on the entity runs critical stored actions."""
-        key = (entity_id, service)
+    def entity(
+        self, entity_id: str, service: str | None, *, lenient: bool = False
+    ) -> bool:
+        """
+        Return True if acting on the entity runs critical stored actions.
+
+        ``lenient`` reads what it runs the way a reacting automation is read
+        (see ``reactors_critical``): it is reached from one.
+        """
+        key = (entity_id, service, lenient)
         if key in self._entities:
             return bool(self._entities[key])
-        if len(self._entities) >= _MAX_FOLLOWED_ENTITIES:
+        if len(self._entities) >= _MAX_FOLLOWED_ENTITIES or self._chain >= _MAX_CHAIN:
             return True  # a safety bound: past it, hold rather than read on
         self._entities[key] = None
-        result = self._read_entity(entity_id, service)
+        self._chain += 1
+        try:
+            result = self._read_entity(entity_id, service, lenient=lenient)
+        finally:
+            self._chain -= 1
         self._entities[key] = result
         if result:
             LOGGER.debug("%s runs a critical action", entity_id)
         return result
 
-    def _read_entity(self, entity_id: str, service: str | None) -> bool:  # noqa: PLR0911
+    def _read_entity(  # noqa: PLR0911
+        self, entity_id: str, service: str | None, *, lenient: bool
+    ) -> bool:
         members = with_members(self.hass, {entity_id}) - {entity_id}
-        if any(self.entity(member, service) for member in sorted(members)):
+        if any(
+            self.entity(member, service, lenient=lenient) for member in sorted(members)
+        ):
             return True
         # A switch_as_x wrapper's switch gets its own service, not the
         # wrapper's (closing a cover turns its relay on or off), so it is
         # followed with none: every action a template switch has counts, and
         # the relay rules are left to the call on the wrapper.
         if (wrapped := self._wrapped_switch(entity_id)) is not None and self.entity(
-            wrapped, None
+            wrapped, None, lenient=lenient
         ):
             return True
         domain = entity_id.split(".", 1)[0]
@@ -411,11 +439,16 @@ class StoredActionCheck:
         # An automation the change may start (#814).
         if self.reactors_critical(entity_id):
             return True
+        if domain == _AUTOMATION_DOMAIN and service == "trigger":
+            # `automation.trigger` runs its actions, as a reacting
+            # automation may (#814).
+            sequence = self.reader.automation_sequence(entity_id)
+            return sequence is None or self.steps(sequence, lenient=lenient)
         if domain == SCRIPT_DOMAIN:
             if service in _SCRIPT_SERVICES_THAT_DO_NOT_RUN:
                 return False
             return script_rule_matches(self.hass, entity_id, self.rules) or (
-                self._script_steps(entity_id)
+                self._script_steps(entity_id, lenient=lenient)
             )
         if domain == SCENE_DOMAIN:
             return matches_critical_rule(
@@ -423,11 +456,13 @@ class StoredActionCheck:
                 service="turn_on",
                 entity_ids=[entity_id],
                 critical_actions=self.rules,
-            ) or _scene_is_critical(self.hass, entity_id, self.rules, check=self)
+            ) or _scene_is_critical(
+                self.hass, entity_id, self.rules, check=self, lenient=lenient
+            )
         sequences = self.reader.own_sequences(entity_id, service)
         if sequences is None:
             return True
-        return any(self.steps(sequence) for sequence in sequences)
+        return any(self.steps(sequence, lenient=lenient) for sequence in sequences)
 
     def reactors_critical(self, entity_id: str) -> bool:
         """
@@ -435,32 +470,55 @@ class StoredActionCheck:
 
         Read leniently: the automations are the user's own, so a step that
         cannot be read ahead (an event it fires, a templated service, a REST
-        call) does not hold the change; what can be read as protected does.
+        call) does not hold the change; what can be read as protected does,
+        down through the scripts and scenes they run. A button press is read
+        strictly, as since #780: a press exists to start them.
         """
         reactors = self.reader.started_by(entity_id)
         if reactors is None:
             return True
-        return self._any_critical(reactors)
+        return self._any_critical(
+            reactors, lenient=entity_id.split(".", 1)[0] not in PRESS_DOMAINS
+        )
 
-    def _any_critical(self, reactors: Sequence[Reactor]) -> bool:
+    def _any_critical(self, reactors: Sequence[Reactor], *, lenient: bool) -> bool:
         for reactor in reactors:
-            if self.steps(reactor.sequence, lenient=True):
+            if self.steps(reactor.sequence, lenient=lenient):
                 started = _STARTED.get()
-                if started is not None and reactor.name not in started:
+                if (
+                    started is not None
+                    and reactor.name is not None
+                    and reactor.name not in started
+                ):
                     started.append(reactor.name)
                 return True
         return False
 
-    def _entityless_change_critical(self, domain: str, step: Mapping[str, Any]) -> bool:
+    def _entityless_change_critical(
+        self, domain: str, step: Mapping[str, Any], *, lenient: bool
+    ) -> bool:
         """
         Return True if a change naming no entity may start a critical automation.
 
         ``device_tracker.see`` marks a tracker (and the people it tracks) home or
-        away; ``mqtt.publish`` sets off MQTT triggers.
+        away. ``mqtt.publish`` sets off MQTT triggers, and can set the state of
+        an MQTT entity or send it a command: the topic is not matched, so any
+        MQTT entity a rule guards or an automation watches counts.
         """
-        if domain == "mqtt":
+        if domain == _MQTT_DOMAIN:
             reactors = self.reader.mqtt_reactors()
-            return reactors is None or self._any_critical(reactors)
+            if reactors is None or self._any_critical(reactors, lenient=True):
+                return True
+            mqtt_entities = sorted(
+                entry.entity_id
+                for entry in er.async_get(self.hass).entities.values()
+                if entry.platform == _MQTT_DOMAIN and entry.disabled_by is None
+            )
+            return any(
+                _entity_is_guarded(e.split(".", 1)[0], e, self.rules)
+                or self.entity(e, None, lenient=lenient)
+                for e in mqtt_entities
+            )
         fields: dict[str, Any] = {}
         for key in ("data", "data_template", "service_data"):
             block = step.get(key)
@@ -485,17 +543,18 @@ class StoredActionCheck:
                 state.entity_id for state in self.hass.states.async_all("person")
             }
         return any(
-            self.entity(entity_id, None) for entity_id in sorted(trackers | people)
+            self.entity(entity_id, None, lenient=lenient)
+            for entity_id in sorted(trackers | people)
         )
 
-    def _script_steps(self, entity_id: str) -> bool:
+    def _script_steps(self, entity_id: str, *, lenient: bool) -> bool:
         component = self.hass.data.get(_SCRIPT_COMPONENT_KEY)
         entity = component.get_entity(entity_id) if component is not None else None
         sequence = getattr(getattr(entity, "script", None), "sequence", None)
         if not isinstance(sequence, list):
             LOGGER.debug("Cannot read the steps of %s; holding it", entity_id)
             return True
-        return self.steps(sequence)
+        return self.steps(sequence, lenient=lenient)
 
     def _wrappers_in(self, domain: str) -> list[str]:
         """Return the switch_as_x wrappers in a domain."""
@@ -542,9 +601,11 @@ class StoredActionCheck:
                     and (call_targets(self.hass, domain, service, step)[1])
                 ):
                     return True  # which script, scene or button is unknown
-        return any(self.calls(sequence))
+        return any(self.calls(sequence, lenient=lenient))
 
-    def calls(self, sequence: Any) -> Iterator[CriticalAutomationCall]:
+    def calls(
+        self, sequence: Any, *, lenient: bool = False
+    ) -> Iterator[CriticalAutomationCall]:
         """
         Yield the calls in the steps that run critical stored actions.
 
@@ -556,7 +617,7 @@ class StoredActionCheck:
             call = f"{domain}.{service}"
             if (domain, service) in _ENTITYLESS_CHANGES:
                 # A change that names no entity (#814).
-                if self._entityless_change_critical(domain, step):
+                if self._entityless_change_critical(domain, step, lenient=lenient):
                     yield CriticalAutomationCall(
                         service=call,
                         entity_ids=(),
@@ -571,17 +632,21 @@ class StoredActionCheck:
                 for entity_id, state in states.items():
                     if entity_id.split(".", 1)[0] in (SCRIPT_DOMAIN, SCENE_DOMAIN):
                         continue  # HA cannot reproduce a script's or scene's state
-                    if self.entity(entity_id, _INLINE_STATE_SERVICES.get(state or "")):
+                    if self.entity(
+                        entity_id,
+                        _INLINE_STATE_SERVICES.get(state or ""),
+                        lenient=lenient,
+                    ):
                         yield _stored_call(call, entity_id)
                 continue
             entities, unresolved = call_targets(self.hass, domain, service, step)
             for entity_id in sorted(entities):
-                if self.entity(entity_id, service):
+                if self.entity(entity_id, service, lenient=lenient):
                     yield _stored_call(call, entity_id)
             if unresolved and (
                 domain == _GENERIC_DOMAIN
                 or any(
-                    self.entity(entity_id.lower(), service)
+                    self.entity(entity_id.lower(), service, lenient=lenient)
                     for entity_id in (
                         *entities_of(self.hass, domain),
                         *self._wrappers_in(domain),
@@ -782,8 +847,13 @@ def _targets_run_critical(
         {"actions": [{"action": step["action"], "entity_id": others}]}, rules
     ):
         return True
+    check = (
+        StoredActionCheck(cast("HomeAssistant", hass), rules)
+        if _has_entities(hass)
+        else None
+    )
     return any(
-        _opened_is_critical(hass, entity_id, rules)
+        _opened_is_critical(hass, entity_id, rules, check)
         for entity_id in entities
         if entity_id.split(".", 1)[0] in opened
     )
@@ -793,6 +863,7 @@ def _opened_is_critical(
     hass: HomeAssistant | None,
     entity_id: str,
     rules: Sequence[Mapping[str, str]],
+    check: StoredActionCheck | None = None,
 ) -> bool:
     """Return True if a rule names running it, or what it does is critical."""
     if entity_id.split(".", 1)[0] == SCRIPT_DOMAIN:
@@ -804,7 +875,7 @@ def _opened_is_critical(
             entity_ids=[entity_id],
             critical_actions=rules,
         )
-    return named or runs_critical_action(hass, entity_id, rules)
+    return named or runs_critical_action(hass, entity_id, rules, check)
 
 
 def _inline_states_are_critical(
@@ -841,7 +912,10 @@ def _script_for_key(hass: HomeAssistant | None, key: str) -> str:
 
 
 def _script_steps_are_critical(
-    hass: HomeAssistant, entity_id: str, rules: Sequence[Mapping[str, str]]
+    hass: HomeAssistant,
+    entity_id: str,
+    rules: Sequence[Mapping[str, str]],
+    check: StoredActionCheck | None = None,
 ) -> bool:
     component = hass.data.get(_SCRIPT_COMPONENT_KEY)
     entity = component.get_entity(entity_id) if component is not None else None
@@ -856,7 +930,7 @@ def _script_steps_are_critical(
         )
         return True
     # A step on a template switch or an input button runs its stored actions.
-    return any(StoredActionCheck(hass, rules).calls(sequence))
+    return any((check or StoredActionCheck(hass, rules)).calls(sequence))
 
 
 def _scene_is_critical(
@@ -865,6 +939,7 @@ def _scene_is_critical(
     rules: Sequence[Mapping[str, str]],
     *,
     check: StoredActionCheck | None = None,
+    lenient: bool = False,
 ) -> bool:
     platform = hass.data.get(_HA_SCENE_PLATFORM_KEY)
     entity = platform.entities.get(entity_id) if platform is not None else None
@@ -877,7 +952,9 @@ def _scene_is_critical(
     seen: set[str] = set()
     check = check or StoredActionCheck(hass, rules)
     return any(
-        _state_is_critical(hass, state, rules, depth=0, seen=seen, check=check)
+        _state_is_critical(
+            hass, state, rules, depth=0, seen=seen, check=check, lenient=lenient
+        )
         for state in states.values()
     )
 
@@ -906,6 +983,7 @@ def _state_is_critical(  # noqa: PLR0911, PLR0913
     depth: int,
     seen: set[str],
     check: StoredActionCheck,
+    lenient: bool = False,
 ) -> bool:
     """Return True if reproducing one scene state could do a critical action."""
     entity_id = state.entity_id.lower()
@@ -928,6 +1006,7 @@ def _state_is_critical(  # noqa: PLR0911, PLR0913
                 depth=depth + 1,
                 seen=seen,
                 check=check,
+                lenient=lenient,
             )
             for member in get_entity_ids(hass, entity_id)
         )
@@ -946,7 +1025,7 @@ def _state_is_critical(  # noqa: PLR0911, PLR0913
     # that names no one service, any of them may run (#780).
     if domain in (SCRIPT_DOMAIN, SCENE_DOMAIN):
         return False  # HA cannot reproduce a script's or a scene's state
-    return check.entity(entity_id, service)
+    return check.entity(entity_id, service, lenient=lenient)
 
 
 def _reproduce_service(hass: HomeAssistant, domain: str, state: State) -> str | None:
