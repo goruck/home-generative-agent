@@ -7,6 +7,12 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+## [3.44.6] - 2026-10-20
+
+### Fixed
+
+- **Intent scripts that unlock or open something now ask for the Critical Action PIN** ([#779](https://github.com/goruck/home-generative-agent/issues/779)). Home Assistant gives the agent a tool for each intent script, and the PIN check never looked at what it ran, so an intent script whose action unlocked the front door or opened the garage ran with no PIN when the agent called it. Its action is now checked the way a script's steps are: one that unlocks a door asks for the PIN, one that turns on a light does not, and one whose target the model fills in, or whose action cannot be read, is held.
+
 ## [3.44.5] - 2026-10-20
 
 ### Fixed
