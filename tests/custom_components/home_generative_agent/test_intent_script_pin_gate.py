@@ -335,3 +335,53 @@ async def test_a_harmless_intent_named_get_live_context_keeps_the_shortcut(
     )
     assert redirect is None
     assert "entity_id" not in args
+
+
+@pytest.mark.parametrize(
+    "tool_args",
+    [
+        {"name": "Front Door", "domain": ["lock"]},
+        {"name": "Porch", "domain": ["light"]},
+    ],
+)
+async def test_a_taken_over_intent_is_described_by_its_intent_script(
+    hass: HomeAssistant, tool_args: dict[str, Any]
+) -> None:
+    """A `domain` slot does not turn the line back into HassTurnOn's."""
+    await _intent_scripts(
+        hass, {"HassTurnOn": {"action": [_call("lock.unlock", "lock.back_door")]}}
+    )
+    action = {"tool_name": "intent__HassTurnOn", "tool_args": tool_args}
+    assert _is_critical_action(tool_args, RULES, "intent__HassTurnOn", hass)
+    line = describe_pending_action(hass, action)
+    assert "voice command" in line
+    assert "HassTurnOn" in line
+
+
+async def test_the_live_context_shortcut_uses_the_expanded_rules(
+    hass: HomeAssistant,
+) -> None:
+    """A garage cover held only by its device class is still held."""
+    hass.states.async_set(
+        "cover.bay", "closed", {"device_class": "garage", "supported_features": 3}
+    )
+    await _intent_scripts(
+        hass, {"GetLiveContext": {"action": [_call("cover.open_cover", "cover.bay")]}}
+    )
+    ctx = cast(
+        "Any",
+        SimpleNamespace(
+            hass=hass,
+            config={"configurable": {"thread_id": "t1"}},
+            critical_actions=RULES,
+            pin_enabled=True,
+            pin_hash="hash",
+            pin_salt="salt",
+            pending_actions={},
+        ),
+    )
+    redirect, _ = _prepare_tool_args(
+        "intent_script__GetLiveContext", {}, ctx, {"id": "call1"}
+    )
+    assert redirect is not None
+    assert "requires_pin" in str(redirect.content)

@@ -40,8 +40,11 @@ from .helpers import (
     INTENT_NAME_ALL,
     SET_POSITION_INTENT,
     STOP_MOVING_INTENT,
+    TOOL_NAMESPACE_SEP,
     base_tool_name,
     intent_service_calls,
+    is_actuating_intent,
+    is_device_intent,
     is_on_off_intent,
     minimal_payload_for_domain,
     normalize_intent_for_lock,
@@ -566,7 +569,17 @@ def _intent_script_line(
     handlers = [h for h in intent_script_handlers(hass, tool_name) if h]
     if not handlers or script_tool_entity_id(tool_name) is not None:
         return None
-    if tool_args.get("domain") or tool_args.get("service"):
+    # A tool another API offers under the same name is a service tool when
+    # it names a service. `domain` is an intent slot, and the lock
+    # normalizer adds `service` to an on/off intent, so neither makes an
+    # intent's own tool a service call.
+    owned = (
+        TOOL_NAMESPACE_SEP + "intent_script" + TOOL_NAMESPACE_SEP
+        in TOOL_NAMESPACE_SEP + tool_name
+        or is_actuating_intent(tool_name)
+        or is_device_intent(tool_name)
+    )
+    if not owned and tool_args.get("service"):
         return None
     names = sorted(
         {str(getattr(h, "intent_type", "") or "") for h in handlers} - {""}
