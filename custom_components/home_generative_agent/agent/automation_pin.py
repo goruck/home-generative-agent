@@ -177,6 +177,8 @@ class CriticalAutomationCall:
     service: str
     entity_ids: tuple[str, ...]
     reason: str
+    # Held only because what the step does cannot be read ahead.
+    unverifiable: bool = False
 
     def describe(self) -> str:
         """Return a short, safe description of the call."""
@@ -187,7 +189,9 @@ class CriticalAutomationCall:
 
 def _unverifiable(service: str, reason: str) -> CriticalAutomationCall:
     """Build a finding for a step whose real effect cannot be determined."""
-    return CriticalAutomationCall(service=service, entity_ids=(), reason=reason)
+    return CriticalAutomationCall(
+        service=service, entity_ids=(), reason=reason, unverifiable=True
+    )
 
 
 def _is_template(value: Any) -> bool:

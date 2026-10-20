@@ -40,6 +40,8 @@ from __future__ import annotations
 
 import logging
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.core import State
@@ -59,11 +61,11 @@ from .automation_pin import (
 from .helpers import TOOL_NAMESPACE_SEP, matches_critical_rule, rule_entity_matches
 from .rule_entities import read_switch_wrappers
 from .template_actions import (
+    Reactor,
     StoredActionReader,
     call_targets,
     entities_of,
     inline_states,
-    runs_stored_actions,
     with_members,
 )
 
@@ -118,6 +120,12 @@ _MAX_DEPTH = 5
 # Entities one check follows through stored actions and group members before
 # it holds rather than read on (#780).
 _MAX_FOLLOWED_ENTITIES = 2000
+# Changes that name no entity: they mark a tracker home, or set off MQTT
+# triggers (#814).
+_ENTITYLESS_CHANGES = frozenset({("device_tracker", "see"), ("mqtt", "publish")})
+# The automations a check finds would perform a critical action, for the PIN
+# line (see `collect_started_automations`).
+_STARTED: ContextVar[list[str] | None] = ContextVar("hga_pin_started", default=None)
 # What a template entity's actions run is opened rather than held when it is
 # one of these (#780); anything else that runs stored config is held.
 _OPENED_DOMAINS = frozenset({SCRIPT_DOMAIN, SCENE_DOMAIN, "button", "input_button"})
@@ -307,6 +315,11 @@ def runs_critical_action(
         return True
     entity_id = entity_id.lower()
     domain = entity_id.split(".", 1)[0]
+    # Running it changes its state, which an automation may watch (#814).
+    if _has_entities(hass) and StoredActionCheck(hass, rules).reactors_critical(
+        entity_id
+    ):
+        return True
     if domain == SCRIPT_DOMAIN:
         return _script_steps_are_critical(hass, entity_id, rules)
     if domain == SCENE_DOMAIN:
@@ -356,7 +369,7 @@ class StoredActionCheck:
         self.rules = rules
         self.reader = StoredActionReader(hass)
         self._entities: dict[tuple[str, str | None], bool | None] = {}
-        self._steps: dict[int, bool] = {}
+        self._steps: dict[tuple[int, bool], bool] = {}
         self._wrapped: dict[str, tuple[str, bool]] | None = None
 
     def entity(self, entity_id: str, service: str | None) -> bool:
@@ -395,6 +408,9 @@ class StoredActionCheck:
             critical_actions=self.rules,
         ):
             return True
+        # An automation the change may start (#814).
+        if self.reactors_critical(entity_id):
+            return True
         if domain == SCRIPT_DOMAIN:
             if service in _SCRIPT_SERVICES_THAT_DO_NOT_RUN:
                 return False
@@ -408,12 +424,69 @@ class StoredActionCheck:
                 entity_ids=[entity_id],
                 critical_actions=self.rules,
             ) or _scene_is_critical(self.hass, entity_id, self.rules, check=self)
-        if not runs_stored_actions(self.hass, entity_id):
-            return False
-        sequences = self.reader.sequences(entity_id, service)
+        sequences = self.reader.own_sequences(entity_id, service)
         if sequences is None:
             return True
         return any(self.steps(sequence) for sequence in sequences)
+
+    def reactors_critical(self, entity_id: str) -> bool:
+        """
+        Return True if what a change to the entity may start does a critical action.
+
+        Read leniently: the automations are the user's own, so a step that
+        cannot be read ahead (an event it fires, a templated service, a REST
+        call) does not hold the change; what can be read as protected does.
+        """
+        reactors = self.reader.started_by(entity_id)
+        if reactors is None:
+            return True
+        return self._any_critical(reactors)
+
+    def _any_critical(self, reactors: Sequence[Reactor]) -> bool:
+        for reactor in reactors:
+            if self.steps(reactor.sequence, lenient=True):
+                started = _STARTED.get()
+                if started is not None and reactor.name not in started:
+                    started.append(reactor.name)
+                return True
+        return False
+
+    def _entityless_change_critical(self, domain: str, step: Mapping[str, Any]) -> bool:
+        """
+        Return True if a change naming no entity may start a critical automation.
+
+        ``device_tracker.see`` marks a tracker (and the people it tracks) home or
+        away; ``mqtt.publish`` sets off MQTT triggers.
+        """
+        if domain == "mqtt":
+            reactors = self.reader.mqtt_reactors()
+            return reactors is None or self._any_critical(reactors)
+        fields: dict[str, Any] = {}
+        for key in ("data", "data_template", "service_data"):
+            block = step.get(key)
+            if isinstance(block, dict):
+                fields.update(block)
+        dev_id = fields.get("dev_id")
+        if isinstance(dev_id, str) and dev_id and "{" not in dev_id:
+            trackers = {f"device_tracker.{dev_id.lower()}"}
+        else:
+            trackers = {
+                state.entity_id
+                for state in self.hass.states.async_all("device_tracker")
+            }
+        people = {
+            state.entity_id
+            for state in self.hass.states.async_all("person")
+            if trackers
+            & {str(t).lower() for t in state.attributes.get("device_trackers") or []}
+        }
+        if not isinstance(dev_id, str) or not dev_id:
+            people |= {
+                state.entity_id for state in self.hass.states.async_all("person")
+            }
+        return any(
+            self.entity(entity_id, None) for entity_id in sorted(trackers | people)
+        )
 
     def _script_steps(self, entity_id: str) -> bool:
         component = self.hass.data.get(_SCRIPT_COMPONENT_KEY)
@@ -437,7 +510,7 @@ class StoredActionCheck:
         found = self._wrapped.get(entity_id)
         return found[0] if found else None
 
-    def steps(self, sequence: Any) -> bool:
+    def steps(self, sequence: Any, *, lenient: bool = False) -> bool:
         """
         Return True if the steps do or reach a critical action.
 
@@ -446,21 +519,23 @@ class StoredActionCheck:
         runs `script.tv_on` asks for the PIN only if that script does
         something that would be held.
         """
-        key = id(sequence)
+        key = (id(sequence), lenient)
         if key not in self._steps:
             self._steps[key] = False  # a cycle back to these steps adds nothing
-            self._steps[key] = self._read_steps(sequence)
+            self._steps[key] = self._read_steps(sequence, lenient=lenient)
         return self._steps[key]
 
-    def _read_steps(self, sequence: Any) -> bool:
+    def _read_steps(self, sequence: Any, *, lenient: bool) -> bool:
         found = find_critical_automation_calls({"actions": sequence}, self.rules)
+        if lenient:
+            found = [call for call in found if not call.unverifiable]
         if any(
             "." not in call.service
             or call.service.split(".", 1)[0] not in _OPENED_DOMAINS
             for call in found
         ):
             return True
-        if found:
+        if found and not lenient:
             for domain, service, step in iter_service_calls(sequence):
                 if (
                     domain in _OPENED_DOMAINS
@@ -479,6 +554,16 @@ class StoredActionCheck:
         """
         for domain, service, step in iter_service_calls(sequence):
             call = f"{domain}.{service}"
+            if (domain, service) in _ENTITYLESS_CHANGES:
+                # A change that names no entity (#814).
+                if self._entityless_change_critical(domain, step):
+                    yield CriticalAutomationCall(
+                        service=call,
+                        entity_ids=(),
+                        reason="it may start an automation that performs a "
+                        "critical action",
+                    )
+                continue
             if domain == SCENE_DOMAIN and service in _SCENE_INLINE_SERVICES:
                 states, readable = inline_states(step)
                 if not readable:
@@ -509,6 +594,17 @@ class StoredActionCheck:
                     reason="its targets cannot all be named, and an entity of "
                     "that kind runs stored actions that perform a critical action",
                 )
+
+
+@contextmanager
+def collect_started_automations() -> Iterator[list[str]]:
+    """Collect the automations the checks in this block find a change would start."""
+    names: list[str] = []
+    token = _STARTED.set(names)
+    try:
+        yield names
+    finally:
+        _STARTED.reset(token)
 
 
 def stored_action_calls(

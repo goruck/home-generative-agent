@@ -134,6 +134,7 @@ from .indirect_pin import (
     StoredActionCheck,
     bare_script_tool_entity_id,
     call_target_domains,
+    collect_started_automations,
     intent_scripts_are_critical,
     runs_critical_action,
     script_rule_matches,
@@ -469,7 +470,9 @@ def _critical_action_guard(
     # Extend entity_match rules to device classes, names and groups (#773,
     # see rule_entities).
     rules = expand_critical_rules(ctx.hass, ctx.critical_actions)
-    if not _is_critical_action(tool_args, rules, tool_name, ctx.hass):
+    with collect_started_automations() as started:
+        critical = _is_critical_action(tool_args, rules, tool_name, ctx.hass)
+    if not critical:
         return None
     if not ctx.pin_hash or not ctx.pin_salt:
         LOGGER.warning(
@@ -488,6 +491,8 @@ def _critical_action_guard(
         "user": configurable.get("user_id"),
         "thread_id": configurable.get("thread_id"),
         "turn_id": pin_reply.turn_id if pin_reply is not None else None,
+        # The automations the change would start, for the PIN line (#814).
+        "starts": list(started),
     }
     action_id = register_pending_action(ctx.pending_actions, action)
     if action_id is None:

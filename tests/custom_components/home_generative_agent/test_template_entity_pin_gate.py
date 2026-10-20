@@ -1200,11 +1200,9 @@ async def test_a_press_starts_template_blocks(
 
 def test_a_name_matches_whole_entity_ids_only() -> None:
     """`input_button.door` is not named by `input_button.doorbell`."""
-    assert not template_actions._names_in(
-        ["input_button.doorbell"], ["input_button.door"]
-    )
-    assert template_actions._names_in(
-        ["{{ is_state('input_button.door', 'x') }}"], ["input_button.door"]
+    assert not template_actions._name_in("input_button.doorbell", "input_button.door")
+    assert template_actions._name_in(
+        "{{ is_state('input_button.door', 'x') }}", "input_button.door"
     )
 
 

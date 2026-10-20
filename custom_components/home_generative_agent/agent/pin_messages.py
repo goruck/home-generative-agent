@@ -165,6 +165,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "action_set_position": "set {target} to {position}%",
         "action_press": "press {target}",
         "action_intent_script": "run the voice command {target}",
+        "action_starts_automation": "starts the automation {automations}",
         "action_stop": "stop {target}",
         "action_service": "{service} {target}",
         "action_automation": "add the automation {target}",
@@ -289,6 +290,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "action_set_position": "nastavit {target} na {position} %",
         "action_press": "stisknout {target}",
         "action_intent_script": "spustit hlasový příkaz {target}",
+        "action_starts_automation": "spustí automatizaci {automations}",
         "action_stop": "zastavit {target}",
         "action_service": "{service} {target}",
         "action_automation": "přidat automatizaci {target}",
@@ -610,6 +612,21 @@ def describe_pending_action(
     ("(controls Garage Door)"), so the user knows what the PIN allows.
     """
     line = _describe_line(hass, action)
+    starts = [str(name) for name in action.get("starts") or [] if name]
+    if starts:
+        # The call is held for an automation it would start (#814): say so,
+        # or "turn on Let In" reads as harmless.
+        line = (
+            f"{line} ("
+            + pin_msg(
+                hass,
+                "action_starts_automation",
+                automations=", ".join(
+                    f'"{_one_line(name, _ACTION_TARGET_MAX_LEN)}"' for name in starts
+                ),
+            )
+            + ")"
+        )
     if hass is None or str(action.get("tool_name") or "") == "add_automation":
         return line
     try:
