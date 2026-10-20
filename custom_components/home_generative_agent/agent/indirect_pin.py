@@ -295,6 +295,15 @@ class StoredActionCheck:
         if any(self.entity(member, service) for member in sorted(members)):
             return True
         domain = entity_id.split(".", 1)[0]
+        # The call reaching the entity is matched against the rules first: a
+        # rule naming a button a template switch presses still holds it.
+        if service is not None and matches_critical_rule(
+            domain=domain,
+            service=service,
+            entity_ids=[entity_id],
+            critical_actions=self.rules,
+        ):
+            return True
         if domain == SCRIPT_DOMAIN:
             if service in _SCRIPT_SERVICES_THAT_DO_NOT_RUN:
                 return False

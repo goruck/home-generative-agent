@@ -100,6 +100,14 @@ async def home(hass: HomeAssistant) -> HomeAssistant:
                             "turn_off": [],
                         },
                         {
+                            # Presses a button a rule of the user's names.
+                            "name": "Door Presser",
+                            "turn_on": [
+                                _call("button.press", "button.open_garage_button")
+                            ],
+                            "turn_off": [],
+                        },
+                        {
                             # A REST command cannot be read: held.
                             "name": "Webhook",
                             "turn_on": [{"action": "rest_command.ping"}],
@@ -1292,3 +1300,18 @@ async def test_a_template_entry_left_over_from_removed_config_is_ignored(
     )
     args = {"domain": "fan", "service": "turn_on", "entity_id": "all"}
     assert not _is_critical_action(args, RULES, "mcp__call_service", home)
+
+
+async def test_a_rule_naming_a_button_a_template_switch_presses_holds_it(
+    home: HomeAssistant,
+) -> None:
+    """Opening the press does not drop a rule that names the button itself."""
+    args = {
+        "domain": "switch",
+        "service": "turn_on",
+        "entity_id": "switch.door_presser",
+    }
+    rule = {"domain": "button", "service": "press", "entity_match": "open_garage"}
+    other = {"domain": "button", "service": "press", "entity_match": "chime"}
+    assert _is_critical_action(args, [rule], "mcp__call_service", home)
+    assert not _is_critical_action(args, [other], "mcp__call_service", home)
