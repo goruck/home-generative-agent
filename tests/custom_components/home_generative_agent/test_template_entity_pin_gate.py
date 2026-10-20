@@ -23,7 +23,11 @@ from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.home_generative_agent.agent import graph as graph_module
-from custom_components.home_generative_agent.agent import indirect_pin, rule_entities
+from custom_components.home_generative_agent.agent import (
+    indirect_pin,
+    rule_entities,
+    template_actions,
+)
 from custom_components.home_generative_agent.agent.graph import _is_critical_action
 from custom_components.home_generative_agent.agent.rule_entities import (
     expand_critical_rules,
@@ -82,6 +86,24 @@ async def home(hass: HomeAssistant) -> HomeAssistant:
                             "name": "Porch Switch",
                             "turn_on": [_call("light.turn_on", "light.porch")],
                             "turn_off": [_call("light.turn_off", "light.porch")],
+                        },
+                        {
+                            # A TV switch running a harmless script.
+                            "name": "TV",
+                            "turn_on": [{"action": "script.porch_on"}],
+                            "turn_off": [],
+                        },
+                        {
+                            # One running the garage script.
+                            "name": "Garage Script Switch",
+                            "turn_on": [_call("script.turn_on", "script.flip_opener")],
+                            "turn_off": [],
+                        },
+                        {
+                            # A REST command cannot be read: held.
+                            "name": "Webhook",
+                            "turn_on": [{"action": "rest_command.ping"}],
+                            "turn_off": [],
                         },
                         {
                             # Two switches turning each other on; one opens.
@@ -217,6 +239,10 @@ async def home(hass: HomeAssistant) -> HomeAssistant:
                 "pulse_shed": {
                     "alias": "Pulse Shed",
                     "sequence": [_call("switch.turn_on", "switch.shed_relay")],
+                },
+                "porch_on": {
+                    "alias": "Porch On",
+                    "sequence": [_call("light.turn_on", "light.porch")],
                 },
                 "flip_porch": {
                     "alias": "Flip Porch",
@@ -1005,3 +1031,264 @@ async def test_a_light_wrapping_a_template_switch_is_opened(
     )
     args = {"domain": "light", "service": "turn_on", "entity_id": "light.opener_light"}
     assert _is_critical_action(args, RULES, "mcp__call_service", home)
+
+
+@pytest.mark.parametrize(
+    ("name", "critical"),
+    [
+        # A script a template switch runs is opened, not held wholesale.
+        ("TV", False),
+        ("Garage Script Switch", True),
+        # A REST command runs configuration that cannot be read.
+        ("Webhook", True),
+    ],
+)
+async def test_what_a_template_switch_runs_is_opened(
+    home: HomeAssistant, name: str, *, critical: bool
+) -> None:
+    """'Turn on the TV' does not ask for the PIN when the TV script is harmless."""
+    assert (
+        _is_critical_action({"name": name}, RULES, "intent__HassTurnOn", home)
+        is critical
+    )
+
+
+@pytest.mark.parametrize(
+    ("trigger", "variables", "held"),
+    [
+        # A template naming another entity cannot react to a press.
+        (
+            {
+                "trigger": "template",
+                "value_template": "{{ states('person.me') == 'home' }}",
+            },
+            {},
+            False,
+        ),
+        # Reading a group or an area's entities can.
+        (
+            {
+                "trigger": "template",
+                "value_template": "{{ expand('group.buttons') | count > 0 }}",
+            },
+            {},
+            True,
+        ),
+        # A template reading a variable that names the button.
+        (
+            {"trigger": "template", "value_template": "{{ is_state(btn, 'x') }}"},
+            {"trigger_variables": {"btn": "input_button.plain"}},
+            True,
+        ),
+        # A remote's device trigger is not a press.
+        (
+            {
+                "trigger": "device",
+                "device_id": "remote",
+                "domain": "zha",
+                "type": "remote_button_short_press",
+            },
+            {},
+            False,
+        ),
+    ],
+)
+async def test_which_templates_and_devices_react_to_a_press(
+    home: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+    trigger: dict[str, Any],
+    variables: dict[str, Any],
+    *,
+    held: bool,
+) -> None:
+    """Generic templates and variables count; other entities and remotes do not."""
+    automation = SimpleNamespace(
+        raw_config={"triggers": [trigger], **variables},
+        action_script=SimpleNamespace(
+            sequence=[_call("lock.unlock", "lock.front_door")]
+        ),
+    )
+    monkeypatch.setitem(home.data, "automation", SimpleNamespace(entities=[automation]))
+    assert (
+        _is_critical_action({"name": "Plain"}, RULES, "intent__HassTurnOn", home)
+        is held
+    )
+
+
+async def test_a_press_resumes_a_wait_template(
+    home: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An automation waiting on the button's state continues into the unlock."""
+    automation = SimpleNamespace(
+        raw_config={
+            "triggers": [{"trigger": "time", "at": "07:00:00"}],
+            "actions": [
+                {"wait_template": "{{ states('input_button.plain') != before }}"},
+                _call("lock.unlock", "lock.front_door"),
+            ],
+        },
+        action_script=SimpleNamespace(
+            sequence=[_call("lock.unlock", "lock.front_door")]
+        ),
+    )
+    monkeypatch.setitem(home.data, "automation", SimpleNamespace(entities=[automation]))
+    assert _is_critical_action({"name": "Plain"}, RULES, "intent__HassTurnOn", home)
+
+
+async def test_a_press_resumes_a_waiting_script(
+    home: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """'Wait for the confirm button, then unlock' run by a script."""
+    sequence = [
+        {"wait_for_trigger": [{"trigger": "state", "entity_id": "input_button.plain"}]},
+        _call("lock.unlock", "lock.front_door"),
+    ]
+    script = SimpleNamespace(
+        raw_config={"sequence": sequence}, script=SimpleNamespace(sequence=sequence)
+    )
+    monkeypatch.setitem(home.data, "script", SimpleNamespace(entities=[script]))
+    assert _is_critical_action({"name": "Plain"}, RULES, "intent__HassTurnOn", home)
+
+
+@pytest.mark.parametrize(
+    ("blocks", "held"),
+    [
+        # A trigger-based template block runs its actions when triggered.
+        (
+            [
+                SimpleNamespace(
+                    config={
+                        "triggers": [
+                            {"trigger": "state", "entity_id": "input_button.plain"}
+                        ],
+                        "actions": [_call("lock.unlock", "lock.front_door")],
+                    }
+                )
+            ],
+            True,
+        ),
+        # One that cannot be read holds the press.
+        ("not a list", True),
+    ],
+)
+async def test_a_press_starts_template_blocks(
+    home: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+    blocks: Any,
+    *,
+    held: bool,
+) -> None:
+    """Template blocks with `actions:` react to a press like automations."""
+    monkeypatch.setitem(home.data, "template", blocks)
+    assert (
+        _is_critical_action({"name": "Plain"}, RULES, "intent__HassTurnOn", home)
+        is held
+    )
+
+
+def test_a_name_matches_whole_entity_ids_only() -> None:
+    """`input_button.door` is not named by `input_button.doorbell`."""
+    assert not template_actions._names_in(
+        ["input_button.doorbell"], ["input_button.door"]
+    )
+    assert template_actions._names_in(
+        ["{{ is_state('input_button.door', 'x') }}"], ["input_button.door"]
+    )
+
+
+async def test_a_template_alarm_panel_s_disarm_is_opened(hass: HomeAssistant) -> None:
+    """A template panel enforces no code of its own; its actions are checked."""
+    hass.states.async_set("lock.front_door", "locked")
+    assert await async_setup_component(
+        hass,
+        "template",
+        {
+            "template": [
+                {
+                    "alarm_control_panel": [
+                        {
+                            "name": "House",
+                            "code_arm_required": False,
+                            "code_format": "no_code",
+                            "disarm": [_call("lock.unlock", "lock.front_door")],
+                            "arm_away": [],
+                        }
+                    ]
+                }
+            ]
+        },
+    )
+    await hass.async_block_till_done()
+    args = {"entity_id": "alarm_control_panel.house", "state": "disarm"}
+    assert _is_critical_action(args, RULES, "alarm_control", hass)
+    assert _is_critical_action({"name": "House"}, RULES, "alarm_control", hass)
+
+
+async def test_a_relay_set_by_a_stored_scene_is_held(hass: HomeAssistant) -> None:
+    """A template cover opening with `scene.turn_on` drives what the scene sets."""
+    hass.states.async_set("switch.shed_relay", "off")
+    assert await async_setup_component(
+        hass,
+        "scene",
+        {"scene": [{"name": "Open Shed", "entities": {"switch.shed_relay": "on"}}]},
+    )
+    await _template_cover(hass, _call("scene.turn_on", "scene.open_shed"))
+    rules = expand_critical_rules(hass, RULES)
+    args = {"domain": "switch", "service": "turn_on", "entity_id": "switch.shed_relay"}
+    assert _is_critical_action(args, rules, "mcp__call_service", hass)
+
+
+async def test_a_relay_pulsed_by_a_pressed_button_is_held(hass: HomeAssistant) -> None:
+    """A template cover pressing a button whose automation pulses the relay."""
+    hass.states.async_set("switch.pulse_relay", "off")
+    assert await async_setup_component(
+        hass, "input_button", {"input_button": {"pulse": {"name": "Pulse"}}}
+    )
+    assert await async_setup_component(
+        hass,
+        "automation",
+        {
+            "automation": [
+                {
+                    "alias": "Pulse relay",
+                    "triggers": [
+                        {"trigger": "state", "entity_id": "input_button.pulse"}
+                    ],
+                    "actions": [_call("switch.turn_on", "switch.pulse_relay")],
+                }
+            ]
+        },
+    )
+    await _template_cover(hass, _call("input_button.press", "input_button.pulse"))
+    rules = expand_critical_rules(hass, RULES)
+    args = {"domain": "switch", "service": "turn_on", "entity_id": "switch.pulse_relay"}
+    assert _is_critical_action(args, rules, "mcp__call_service", hass)
+
+
+async def test_all_reaches_a_wrapped_template_switch(home: HomeAssistant) -> None:
+    """`fan.turn_on all` reaches a fan made from the template opener."""
+    entry = MockConfigEntry(
+        domain="switch_as_x",
+        options={"entity_id": "switch.garage_opener", "invert": False},
+    )
+    entry.add_to_hass(home)
+    er.async_get(home).async_get_or_create(
+        "fan",
+        "switch_as_x",
+        "opener_fan",
+        suggested_object_id="opener_fan",
+        config_entry=entry,
+    )
+    args = {"domain": "fan", "service": "turn_on", "entity_id": "all"}
+    assert _is_critical_action(args, RULES, "mcp__call_service", home)
+
+
+async def test_a_template_entry_left_over_from_removed_config_is_ignored(
+    home: HomeAssistant,
+) -> None:
+    """Once the Template integration has loaded, an unloaded entry cannot run."""
+    er.async_get(home).async_get_or_create(
+        "fan", "template", "gone", suggested_object_id="gone"
+    )
+    args = {"domain": "fan", "service": "turn_on", "entity_id": "all"}
+    assert not _is_critical_action(args, RULES, "mcp__call_service", home)

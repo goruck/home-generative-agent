@@ -12,16 +12,21 @@ Some entities run stored actions of their own, which no rule names:
   them. Any other template entity picks its script from the call's data (a
   template light's ``turn_on`` with a brightness runs ``set_level``; a fan's
   runs ``set_percentage`` too), so every script it has counts.
-* **A button or an input button** starts the automations that react to its
-  press, and resumes one waiting for it (``wait_for_trigger``). An automation
-  counts when a trigger names the button, by entity id or registry id, or
-  when it cannot be tied to entities ahead: a ``state_changed`` or
+* **A button or an input button** starts what reacts to its press: an
+  automation, a trigger-based template block with ``actions:``, and a script
+  or automation waiting for it (``wait_for_trigger`` or ``wait_template``),
+  which the press resumes. One counts when a trigger or wait names the
+  button, by entity id or registry id (or through the automation's
+  variables), or cannot be tied to entities ahead: a ``state_changed`` or
   ``call_service`` event trigger (one filtered in its conditions can react
   to the press), an event trigger whose type is templated or missing, a
-  template trigger reading states generically, a templated entity, target or
-  event filter, or an area, device, label or floor target. Its actions are
-  what the press runs. Other event types (a ZHA or mobile notification
-  event) cannot come from a press and do not count.
+  template reading states generically (``states.input_button``,
+  ``expand(...)``, ``area_entities(...)``), a templated entity, target or
+  event filter, an area, device, label or floor target, or a device trigger
+  for buttons or for the button's own device. Its actions are what the
+  press runs. A template naming other entities (``states('sensor.x')``),
+  another event type (a ZHA or mobile notification event) or another
+  device's trigger (a remote) cannot react to a press and does not count.
 
 A call's targets are read the way Home Assistant reads them: the step, its
 ``target`` and its data blocks are merged, registry ids are resolved, an
@@ -68,6 +73,16 @@ _TRIGGER_KEYS = ("triggers", "trigger")
 _ACTION_KEYS = ("actions", "action")
 _TRIGGER_PLATFORM_KEYS = ("trigger", "platform")
 _WAIT_KEY = "wait_for_trigger"
+_WAIT_TEMPLATE_KEY = "wait_template"
+_VARIABLE_KEYS = ("variables", "trigger_variables")
+_TEMPLATE_DOMAIN = TEMPLATE_PLATFORM
+# A template reading states without naming one entity: `states.input_button`,
+# `states | ...`, `expand(...)`, `area_entities(...)` and the like.
+_GENERIC_STATES = re.compile(
+    r"\bstates\b(?!\s*\()(?!\.[a-z0-9_]+\.[a-z0-9_]+)"
+    r"|\b(?:expand|area_entities|label_entities|device_entities"
+    r"|floor_entities|integration_entities)\s*\("
+)
 # The events a button press can fire: its state change, and the service call.
 _PRESS_EVENTS = frozenset({"state_changed", "call_service"})
 # Trigger fields that name what the trigger watches.
@@ -160,6 +175,7 @@ class _Automation:
     triggers: list[Any]
     waits: list[Any]
     sequence: Any
+    variables: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -223,14 +239,26 @@ class StoredActionReader:
             return None
         names = [entity_id]
         entry = er.async_get(self.hass).async_get(entity_id)
+        device_id = None
         if entry is not None:
             names.append(entry.id.lower())
-        return [
-            automation.sequence
-            for automation in automations
-            if any(_trigger_may_react(t, names) for t in automation.triggers)
-            or any(_trigger_may_react(t, names) for t in automation.waits)
-        ]
+            device_id = entry.device_id
+        found: list[Any] = []
+        for automation in automations:
+            # A template reading one of the automation's variables that names
+            # the button reads the button.
+            named_by_variable = _names_in(automation.variables, names)
+            if any(
+                _trigger_may_react(
+                    trigger,
+                    names,
+                    device_id=device_id,
+                    named_by_variable=named_by_variable,
+                )
+                for trigger in (*automation.triggers, *automation.waits)
+            ):
+                found.append(automation.sequence)
+        return found
 
     def _all_automations(self) -> list[_Automation] | None:
         if not self._read:
@@ -240,32 +268,75 @@ class StoredActionReader:
 
 
 def _read_automations(hass: HomeAssistant) -> list[_Automation] | None:
-    """Read every automation's triggers, waits and actions; None if one can't be."""
-    component = hass.data.get(_AUTOMATION_DOMAIN)
-    if component is None:
-        return []
+    """
+    Read what can react to a press: automations, scripts and template blocks.
+
+    None if one cannot be read: a press is then held.
+    """
     found: list[_Automation] = []
-    for automation in getattr(component, "entities", ()):
+    for automation in getattr(hass.data.get(_AUTOMATION_DOMAIN), "entities", ()):
         script = getattr(automation, "action_script", None)
         if script is None:
             continue  # an automation that failed to set up does not run
-        config = getattr(automation, "raw_config", None)
-        sequence = getattr(script, "sequence", None)
-        if not isinstance(config, dict) or not isinstance(sequence, list):
+        read = _reactor(
+            getattr(automation, "raw_config", None),
+            getattr(script, "sequence", None),
+        )
+        if read is None:
             LOGGER.debug("Cannot read %s; holding presses", automation)
             return None
-        triggers = next((config[key] for key in _TRIGGER_KEYS if key in config), [])
-        if not isinstance(triggers, list):
-            triggers = [triggers]
-        actions = next((config[key] for key in _ACTION_KEYS if key in config), [])
-        found.append(
-            _Automation(
-                triggers=triggers,
-                waits=list(_wait_triggers(actions)),
-                sequence=sequence,
+        found.append(read)
+    # A script runs only when started; one waiting for the press resumes.
+    for script_entity in getattr(hass.data.get(SCRIPT_DOMAIN), "entities", ()):
+        config = getattr(script_entity, "raw_config", None)
+        sequence = getattr(getattr(script_entity, "script", None), "sequence", None)
+        if not isinstance(config, dict) or not isinstance(sequence, list):
+            LOGGER.debug("Cannot read %s; holding presses", script_entity)
+            return None
+        waits = list(_wait_triggers(config.get("sequence")))
+        if waits:
+            found.append(
+                _Automation(
+                    triggers=[],
+                    waits=waits,
+                    sequence=sequence,
+                    variables=list(_texts(config.get("variables"))),
+                )
             )
-        )
+    # A trigger-based template block with `actions:` runs them when triggered.
+    coordinators = hass.data.get(_TEMPLATE_DOMAIN)
+    if coordinators is not None and not isinstance(coordinators, list):
+        LOGGER.debug("Cannot read the template blocks; holding presses")
+        return None
+    for coordinator in coordinators or ():
+        config = getattr(coordinator, "config", None)
+        if not isinstance(config, dict):
+            LOGGER.debug("Cannot read a template block; holding presses")
+            return None
+        actions = next((config[key] for key in _ACTION_KEYS if key in config), None)
+        if actions is None:
+            continue
+        read = _reactor(config, actions)
+        if read is None:
+            return None
+        found.append(read)
     return found
+
+
+def _reactor(config: Any, sequence: Any) -> _Automation | None:
+    """Read an automation or template block's triggers, waits and actions."""
+    if not isinstance(config, dict) or not isinstance(sequence, list):
+        return None
+    triggers = next((config[key] for key in _TRIGGER_KEYS if key in config), [])
+    if not isinstance(triggers, list):
+        triggers = [triggers]
+    actions = next((config[key] for key in _ACTION_KEYS if key in config), [])
+    return _Automation(
+        triggers=triggers,
+        waits=list(_wait_triggers(actions)),
+        sequence=sequence,
+        variables=[text for key in _VARIABLE_KEYS for text in _texts(config.get(key))],
+    )
 
 
 def _wait_triggers(node: Any) -> Iterable[Any]:
@@ -274,6 +345,9 @@ def _wait_triggers(node: Any) -> Iterable[Any]:
         for key, value in node.items():
             if key == _WAIT_KEY:
                 yield from value if isinstance(value, list) else [value]
+            elif key == _WAIT_TEMPLATE_KEY:
+                # Waits like a template trigger on the same text.
+                yield {"trigger": "template", "value_template": value}
             else:
                 yield from _wait_triggers(value)
     elif isinstance(node, (list, tuple)):
@@ -303,13 +377,30 @@ def _templated(texts: Iterable[str]) -> bool:
     return any("{{" in text or "{%" in text for text in texts)
 
 
-def _trigger_may_react(trigger: Any, names: Iterable[str]) -> bool:  # noqa: PLR0911
+def _names_in(texts: Iterable[str], names: Iterable[str]) -> bool:
+    """Return True if a text names one of the entities (not a longer id)."""
+    patterns = [
+        re.compile(rf"(?<![a-z0-9_]){re.escape(name)}(?![a-z0-9_])") for name in names
+    ]
+    return any(pattern.search(text) for text in texts for pattern in patterns)
+
+
+def _trigger_may_react(  # noqa: PLR0911
+    trigger: Any,
+    names: Iterable[str],
+    *,
+    device_id: str | None = None,
+    named_by_variable: bool = False,
+) -> bool:
     """Return True if the trigger names the entity or cannot be tied down."""
     if not isinstance(trigger, dict):
         return True
     names = list(names)
-    if any(name in text for text in _texts(trigger) for name in names):
+    texts = list(_texts(trigger))
+    if _names_in(texts, names):
         return True
+    if named_by_variable and _templated(texts):
+        return True  # a template reading a variable that names the entity
     platform = next(
         (trigger[key] for key in _TRIGGER_PLATFORM_KEYS if key in trigger), None
     )
@@ -320,10 +411,7 @@ def _trigger_may_react(trigger: Any, names: Iterable[str]) -> bool:  # noqa: PLR
         types = list(_texts(trigger.get("event_type")))
         return not types or _templated(types) or bool(_PRESS_EVENTS & set(types))
     if platform == "template":
-        # A template reading states generically (`states.input_button`,
-        # `states | ...`) can react to any press; one naming other entities
-        # cannot.
-        return any("states" in text for text in _texts(trigger))
+        return any(_GENERIC_STATES.search(text) for text in texts)
     if _templated(_texts({key: trigger.get(key) for key in _WATCHED_KEYS})):
         return True  # a templated entity, target or event filter
     target = trigger.get("target")
@@ -332,17 +420,23 @@ def _trigger_may_react(trigger: Any, names: Iterable[str]) -> bool:  # noqa: PLR
         or any(target.get(key) for key in _TARGET_KEYS_NOT_ENTITIES)
     ):
         return True
-    # A device trigger names its device, not the entity, when it has no
-    # entity_id: it may be the button's.
-    return platform == "device" and not trigger.get("entity_id")
+    if platform == "device" and not trigger.get("entity_id"):
+        # A device trigger names its device, not the entity: it may be the
+        # button's, or any button's. A remote's trigger is not a press.
+        domain = str(trigger.get("domain") or "").lower()
+        return domain in PRESS_DOMAINS or (
+            device_id is not None and trigger.get("device_id") == device_id
+        )
+    return False
 
 
 def entities_of(hass: HomeAssistant, domain: str) -> list[str]:
     """
     Return the entity ids of a domain that run stored actions.
 
-    Template entities registered but not loaded count: one that loads later
-    runs its actions, so the caller holds them as unreadable.
+    Template entities registered but not loaded count while the Template
+    integration has not loaded: one that loads later runs its actions, so the
+    caller holds them as unreadable.
     """
     if domain in PRESS_DOMAINS:
         return [state.entity_id for state in hass.states.async_all(domain)]
@@ -351,13 +445,17 @@ def entities_of(hass: HomeAssistant, domain: str) -> list[str]:
         for entity in template_entities(hass, domain)
         if getattr(entity, "entity_id", None)
     }
-    found |= {
-        entry.entity_id
-        for entry in er.async_get(hass).entities.values()
-        if entry.domain == domain
-        and entry.platform == TEMPLATE_PLATFORM
-        and entry.disabled_by is None
-    }
+    if TEMPLATE_PLATFORM not in hass.config.components:
+        # Before the Template integration has loaded, each registered entity
+        # may still load and run its actions. Once it has, one still not
+        # loaded is left over from removed config and cannot run.
+        found |= {
+            entry.entity_id
+            for entry in er.async_get(hass).entities.values()
+            if entry.domain == domain
+            and entry.platform == TEMPLATE_PLATFORM
+            and entry.disabled_by is None
+        }
     return sorted(found)
 
 
@@ -522,6 +620,7 @@ def driven_entities(hass: HomeAssistant, sequences: Iterable[Any]) -> set[str]:
     """
     found: set[str] = set()
     followed: set[str] = set()
+    reader = StoredActionReader(hass)
     pending: list[tuple[Any, int]] = [(sequence, 0) for sequence in sequences]
     while pending:
         sequence, depth = pending.pop()
@@ -542,10 +641,33 @@ def driven_entities(hass: HomeAssistant, sequences: Iterable[Any]) -> set[str]:
                 continue
             for entity_id in sorted(entities - followed):
                 followed.add(entity_id)
+                if entity_id.startswith(f"{SCENE_DOMAIN}."):
+                    found |= {
+                        e
+                        for e in _scene_entities(hass, entity_id)
+                        if e.split(".", 1)[0] in _RELAY_DOMAINS
+                    }
+                    continue
+                if entity_id.split(".", 1)[0] in PRESS_DOMAINS:
+                    # A press starts automations; what they switch is driven.
+                    pending.extend(
+                        (nested, depth + 1)
+                        for nested in reader.started_by(entity_id) or []
+                    )
                 pending.extend(
                     (nested, depth + 1) for nested in _own_sequences(hass, entity_id)
                 )
     return found
+
+
+def _scene_entities(hass: HomeAssistant, entity_id: str) -> set[str]:
+    """Return the entities a scene from Home Assistant's own config sets."""
+    platform = hass.data.get("homeassistant_scene")
+    entity = getattr(platform, "entities", {}).get(entity_id) if platform else None
+    states = getattr(getattr(entity, "scene_config", None), "states", None)
+    if not isinstance(states, dict):
+        return set()
+    return with_members(hass, {str(key).lower() for key in states})
 
 
 def _own_sequences(hass: HomeAssistant, entity_id: str) -> list[Any]:

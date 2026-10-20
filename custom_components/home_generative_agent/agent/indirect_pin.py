@@ -111,6 +111,9 @@ _MAX_DEPTH = 5
 # Entities one check follows through stored actions and group members before
 # it holds rather than read on (#780).
 _MAX_FOLLOWED_ENTITIES = 2000
+# What a template entity's actions run is opened rather than held when it is
+# one of these (#780); anything else that runs stored config is held.
+_OPENED_DOMAINS = frozenset({SCRIPT_DOMAIN, SCENE_DOMAIN, "button", "input_button"})
 # The service a stored state reproduces on a template switch, for choosing
 # the action script it runs; any other state may run any of them.
 _INLINE_STATE_SERVICES = {"on": "turn_on", "off": "turn_off"}
@@ -231,6 +234,7 @@ def stored_actions_are_critical(
     entity_id: str,
     service: str | None,
     rules: Sequence[Mapping[str, str]],
+    check: StoredActionCheck | None = None,
 ) -> bool:
     """
     Return True if acting on the entity runs stored actions that are critical.
@@ -239,10 +243,11 @@ def stored_actions_are_critical(
     automations a button press may start (#780). A group is checked through
     its members, and a switch_as_x wrapper through the switch it wraps. False
     for any other entity: its call is matched against the rules as it is.
+    Pass one ``check`` to every entity of one call, so each is read once.
     """
     if not _has_entities(hass):
         return False
-    walk = _Walk(cast("HomeAssistant", hass), rules)
+    walk = check or StoredActionCheck(cast("HomeAssistant", hass), rules)
     return walk.entity(entity_id.lower(), service)
 
 
@@ -251,7 +256,7 @@ def _has_entities(hass: HomeAssistant | None) -> bool:
     return getattr(hass, "data", None) is not None
 
 
-class _Walk:
+class StoredActionCheck:
     """
     One check through stored actions: each entity and step list read once.
 
@@ -261,6 +266,7 @@ class _Walk:
     """
 
     def __init__(self, hass: HomeAssistant, rules: Sequence[Mapping[str, str]]) -> None:
+        """Start a check of stored actions against ``rules``."""
         self.hass = hass
         self.rules = rules
         self.reader = StoredActionReader(hass)
@@ -282,18 +288,47 @@ class _Walk:
             LOGGER.debug("%s runs a critical action", entity_id)
         return result
 
-    def _read_entity(self, entity_id: str, service: str | None) -> bool:
+    def _read_entity(self, entity_id: str, service: str | None) -> bool:  # noqa: PLR0911
         members = with_members(self.hass, {entity_id}) - {entity_id}
         if (wrapped := self._wrapped_switch(entity_id)) is not None:
             members.add(wrapped)
         if any(self.entity(member, service) for member in sorted(members)):
             return True
+        domain = entity_id.split(".", 1)[0]
+        if domain == SCRIPT_DOMAIN:
+            if service in _SCRIPT_SERVICES_THAT_DO_NOT_RUN:
+                return False
+            return script_rule_matches(self.hass, entity_id, self.rules) or (
+                self._script_steps(entity_id)
+            )
+        if domain == SCENE_DOMAIN:
+            return matches_critical_rule(
+                domain=SCENE_DOMAIN,
+                service="turn_on",
+                entity_ids=[entity_id],
+                critical_actions=self.rules,
+            ) or _scene_is_critical(self.hass, entity_id, self.rules, check=self)
         if not runs_stored_actions(self.hass, entity_id):
             return False
         sequences = self.reader.sequences(entity_id, service)
         if sequences is None:
             return True
         return any(self.steps(sequence) for sequence in sequences)
+
+    def _script_steps(self, entity_id: str) -> bool:
+        component = self.hass.data.get(_SCRIPT_COMPONENT_KEY)
+        entity = component.get_entity(entity_id) if component is not None else None
+        sequence = getattr(getattr(entity, "script", None), "sequence", None)
+        if not isinstance(sequence, list):
+            LOGGER.debug("Cannot read the steps of %s; holding it", entity_id)
+            return True
+        return self.steps(sequence)
+
+    def _wrappers_in(self, domain: str) -> list[str]:
+        """Return the switch_as_x wrappers in a domain."""
+        if self._wrapped is None:
+            self._wrapped = read_switch_wrappers(self.hass)
+        return sorted(w for w in self._wrapped if w.split(".", 1)[0] == domain)
 
     def _wrapped_switch(self, entity_id: str) -> str | None:
         """Return the switch a switch_as_x wrapper drives, if it is one."""
@@ -303,14 +338,36 @@ class _Walk:
         return found[0] if found else None
 
     def steps(self, sequence: Any) -> bool:
-        """Return True if the steps do or reach a critical action."""
+        """
+        Return True if the steps do or reach a critical action.
+
+        A script, scene or button the steps run is opened rather than held,
+        when its target can be named: a template TV switch whose `turn_on`
+        runs `script.tv_on` asks for the PIN only if that script does
+        something that would be held.
+        """
         key = id(sequence)
         if key not in self._steps:
             self._steps[key] = False  # a cycle back to these steps adds nothing
-            self._steps[key] = bool(
-                find_critical_automation_calls({"actions": sequence}, self.rules)
-            ) or any(self.calls(sequence))
+            self._steps[key] = self._read_steps(sequence)
         return self._steps[key]
+
+    def _read_steps(self, sequence: Any) -> bool:
+        found = find_critical_automation_calls({"actions": sequence}, self.rules)
+        if any(
+            "." not in call.service
+            or call.service.split(".", 1)[0] not in _OPENED_DOMAINS
+            for call in found
+        ):
+            return True
+        if found:
+            for domain, service, step in iter_service_calls(sequence):
+                if (
+                    domain in _OPENED_DOMAINS
+                    and (call_targets(self.hass, domain, service, step)[1])
+                ):
+                    return True  # which script, scene or button is unknown
+        return any(self.calls(sequence))
 
     def calls(self, sequence: Any) -> Iterator[CriticalAutomationCall]:
         """
@@ -327,6 +384,8 @@ class _Walk:
                 if not readable:
                     continue  # `find_critical_automation_calls` holds it
                 for entity_id, state in states.items():
+                    if entity_id.split(".", 1)[0] in (SCRIPT_DOMAIN, SCENE_DOMAIN):
+                        continue  # HA cannot reproduce a script's or scene's state
                     if self.entity(entity_id, _INLINE_STATE_SERVICES.get(state or "")):
                         yield _stored_call(call, entity_id)
                 continue
@@ -338,7 +397,10 @@ class _Walk:
                 domain == _GENERIC_DOMAIN
                 or any(
                     self.entity(entity_id.lower(), service)
-                    for entity_id in entities_of(self.hass, domain)
+                    for entity_id in (
+                        *entities_of(self.hass, domain),
+                        *self._wrappers_in(domain),
+                    )
                 )
             ):
                 yield CriticalAutomationCall(
@@ -362,7 +424,7 @@ def stored_action_calls(
     """
     if not _has_entities(hass):
         return []
-    return list(_Walk(cast("HomeAssistant", hass), rules).calls(sequence))
+    return list(StoredActionCheck(cast("HomeAssistant", hass), rules).calls(sequence))
 
 
 def _stored_call(call: str, entity_id: str) -> CriticalAutomationCall:
@@ -428,7 +490,7 @@ def _stored_calls_reached(
 ) -> bool:
     """Return True if the step runs critical stored actions."""
     return _has_entities(hass) and any(
-        _Walk(cast("HomeAssistant", hass), rules).calls([step])
+        StoredActionCheck(cast("HomeAssistant", hass), rules).calls([step])
     )
 
 
@@ -598,11 +660,15 @@ def _script_steps_are_critical(
         )
         return True
     # A step on a template switch or an input button runs its stored actions.
-    return any(_Walk(hass, rules).calls(sequence))
+    return any(StoredActionCheck(hass, rules).calls(sequence))
 
 
 def _scene_is_critical(
-    hass: HomeAssistant, entity_id: str, rules: Sequence[Mapping[str, str]]
+    hass: HomeAssistant,
+    entity_id: str,
+    rules: Sequence[Mapping[str, str]],
+    *,
+    check: StoredActionCheck | None = None,
 ) -> bool:
     platform = hass.data.get(_HA_SCENE_PLATFORM_KEY)
     entity = platform.entities.get(entity_id) if platform is not None else None
@@ -613,8 +679,9 @@ def _scene_is_critical(
         LOGGER.debug("Cannot read the states %s sets; holding it", entity_id)
         return True
     seen: set[str] = set()
+    check = check or StoredActionCheck(hass, rules)
     return any(
-        _state_is_critical(hass, state, rules, depth=0, seen=seen)
+        _state_is_critical(hass, state, rules, depth=0, seen=seen, check=check)
         for state in states.values()
     )
 
@@ -635,13 +702,14 @@ def _scene_platform(hass: HomeAssistant, entity_id: str) -> str | None:
     return entry.platform if entry is not None else None
 
 
-def _state_is_critical(
+def _state_is_critical(  # noqa: PLR0911, PLR0913
     hass: HomeAssistant,
     state: State,
     rules: Sequence[Mapping[str, str]],
     *,
     depth: int,
     seen: set[str],
+    check: StoredActionCheck,
 ) -> bool:
     """Return True if reproducing one scene state could do a critical action."""
     entity_id = state.entity_id.lower()
@@ -663,6 +731,7 @@ def _state_is_critical(
                 rules,
                 depth=depth + 1,
                 seen=seen,
+                check=check,
             )
             for member in get_entity_ids(hass, entity_id)
         )
@@ -679,7 +748,9 @@ def _state_is_critical(
         return True
     # A template switch set on or off runs that action script; with a state
     # that names no one service, any of them may run (#780).
-    return _Walk(hass, rules).entity(entity_id, service)
+    if domain in (SCRIPT_DOMAIN, SCENE_DOMAIN):
+        return False  # HA cannot reproduce a script's or a scene's state
+    return check.entity(entity_id, service)
 
 
 def _reproduce_service(hass: HomeAssistant, domain: str, state: State) -> str | None:

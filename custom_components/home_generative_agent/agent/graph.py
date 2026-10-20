@@ -131,6 +131,7 @@ from .indirect_pin import (
     RUN_SERVICES,
     SCENE_DOMAIN,
     SCRIPT_DOMAIN,
+    StoredActionCheck,
     bare_script_tool_entity_id,
     call_target_domains,
     runs_critical_action,
@@ -141,6 +142,7 @@ from .indirect_pin import (
 )
 from .pin_messages import describe_pending_action, pin_msg
 from .rule_entities import expand_critical_rules
+from .template_actions import entities_of
 from .token_counter import count_tokens_cross_provider
 
 if TYPE_CHECKING:
@@ -3481,7 +3483,7 @@ def _coerce_entity_ids(args: dict[str, Any]) -> list[str]:
     return entity_ids
 
 
-def _is_critical_action(  # noqa: PLR0911
+def _is_critical_action(  # noqa: PLR0911, PLR0912
     tool_args: dict[str, Any],
     critical_actions: list[dict[str, str]],
     tool_name: str,
@@ -3517,8 +3519,11 @@ def _is_critical_action(  # noqa: PLR0911
     if is_device_intent(tool_name) and hass is not None:
         # Setting a template light's level runs its own action scripts (#780).
         states = intent_target_states(hass, tool_name, tool_args)
+        check = StoredActionCheck(hass, critical_actions)
         if states is None or any(
-            stored_actions_are_critical(hass, state.entity_id, None, critical_actions)
+            stored_actions_are_critical(
+                hass, state.entity_id, None, critical_actions, check
+            )
             for state in states
         ):
             return True
@@ -3541,6 +3546,12 @@ def _is_critical_action(  # noqa: PLR0911
     alarm_only = domain_given and {str(d).lower() for d in declared} == {
         "alarm_control_panel"
     }
+    if (alarm_only or base_tool_name(tool_name) == _ALARM_TOOL) and (
+        _template_alarm_is_critical(tool_args, entities, critical_actions, hass)
+    ):
+        # A template panel runs its own arm and disarm actions, with no code of
+        # its own to enforce (#780).
+        return True
     if not service or alarm_only:
         return False
     # A list of domains is screened in each one it names.
@@ -3583,6 +3594,41 @@ def _is_critical_action(  # noqa: PLR0911
     return any(
         service_runs_critical_action(hass, action, tool_args, critical_actions)
         for action in actions
+    )
+
+
+_ALARM_TOOL = "alarm_control"
+_ALARM_DOMAIN = "alarm_control_panel"
+
+
+def _template_alarm_is_critical(
+    tool_args: dict[str, Any],
+    entities: list[str],
+    critical_actions: list[dict[str, str]],
+    hass: HomeAssistant | None,
+) -> bool:
+    """
+    Return True if a template alarm panel the call reaches runs a critical action.
+
+    The panel named by entity id, else by name; with neither, any template
+    panel, since the tool picks one.
+    """
+    if hass is None or getattr(hass, "states", None) is None:
+        return False
+    panels = [e for e in entities if e.startswith(f"{_ALARM_DOMAIN}.")]
+    name = str(tool_args.get("name") or "").strip().lower()
+    if not panels and name:
+        panels = [
+            state.entity_id
+            for state in hass.states.async_all(_ALARM_DOMAIN)
+            if str(state.attributes.get("friendly_name", "")).lower() == name
+        ]
+    if not panels:
+        panels = entities_of(hass, _ALARM_DOMAIN)
+    check = StoredActionCheck(hass, critical_actions)
+    return any(
+        stored_actions_are_critical(hass, panel, None, critical_actions, check)
+        for panel in panels
     )
 
 
@@ -3640,8 +3686,15 @@ def _intent_is_critical(  # noqa: PLR0911
             if call.domain == "lock" or (call.entity_id and not resolved)
         ]
     turns_on = base_tool_name(tool_name) == "HassTurnOn"
+    check = StoredActionCheck(hass, critical_actions) if hass is not None else None
     for call in calls:
         if call.domain == "alarm_control_panel":
+            # A real panel enforces its own code; a template panel runs its
+            # own actions (#780).
+            if call.entity_id and stored_actions_are_critical(
+                hass, call.entity_id, None, critical_actions, check
+            ):
+                return True
             continue
         if call.domain == "lock" and is_on_off_intent(tool_name):
             return True
@@ -3671,7 +3724,7 @@ def _intent_is_critical(  # noqa: PLR0911
             call.entity_id
             and call.domain not in (SCRIPT_DOMAIN, SCENE_DOMAIN)
             and stored_actions_are_critical(
-                hass, call.entity_id, call.service, critical_actions
+                hass, call.entity_id, call.service, critical_actions, check
             )
         ):
             return True

@@ -1764,6 +1764,7 @@ READ_ONLY_INTENTS = frozenset(
         "HassTimerStatus",
         "HassListAddItem",
         "HassListCompleteItem",
+        "HassListRemoveItem",
         "HassShoppingListAddItem",
         "HassShoppingListCompleteItem",
         "HassShoppingListLastItems",
