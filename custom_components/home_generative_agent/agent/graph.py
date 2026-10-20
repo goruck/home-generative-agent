@@ -134,7 +134,6 @@ from .indirect_pin import (
     StoredActionCheck,
     bare_script_tool_entity_id,
     call_target_domains,
-    intent_script_handlers,
     intent_scripts_are_critical,
     runs_critical_action,
     script_rule_matches,
@@ -551,8 +550,8 @@ def _prepare_tool_args(
     """Normalize, guard, and sanitize arguments before calling HA."""
     tool_args = normalize_intent_for_alarm(tool_name, tool_args, ctx.hass)
     tool_args = normalize_intent_for_lock(tool_name, tool_args, ctx.hass)
-    if _is_live_context_tool(tool_name) and not intent_script_handlers(
-        ctx.hass, tool_name
+    if _is_live_context_tool(tool_name) and not intent_scripts_are_critical(
+        ctx.hass, tool_name, ctx.critical_actions
     ):
         # Read-only, and HA's schema is name/domain/area only. The lock
         # rewriting below exists for lock/unlock commands; applied to a state

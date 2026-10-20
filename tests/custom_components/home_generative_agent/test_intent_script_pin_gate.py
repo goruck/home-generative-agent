@@ -256,3 +256,82 @@ async def test_an_intent_script_named_like_the_live_context_tool_is_guarded(
     )
     assert redirect is not None
     assert "requires_pin" in str(redirect.content)
+
+
+async def test_the_pin_line_shows_every_argument_the_intent_script_gets(
+    home: HomeAssistant,
+) -> None:
+    """HA hands every slot to the intent script; a hidden one may pick the door."""
+    line = describe_pending_action(
+        home,
+        {
+            "tool_name": "intent_script__OpenDoor",
+            "tool_args": {"name": "Front Door", "door": "lock.back_door"},
+        },
+    )
+    assert "lock.back_door" in line
+
+
+async def test_a_service_tool_named_like_an_intent_keeps_its_own_line(
+    hass: HomeAssistant,
+) -> None:
+    """A harmless intent named `unlock` does not rename an unlock call."""
+    await _intent_scripts(hass, {"unlock": {"speech": {"text": "Hi"}}})
+    line = describe_pending_action(
+        hass,
+        {
+            "tool_name": "mcp__unlock",
+            "tool_args": {
+                "domain": "lock",
+                "service": "unlock",
+                "entity_id": "lock.front_door",
+            },
+        },
+    )
+    assert "voice command" not in line
+    assert "unlock" in line
+
+
+async def test_the_pin_line_names_every_intent_sharing_a_slug(
+    hass: HomeAssistant,
+) -> None:
+    """Which one HA runs depends on exposure: both are named."""
+    await _intent_scripts(
+        hass,
+        {
+            "Open Door": {"platforms": ["vacuum"], "speech": {"text": "Hi"}},
+            "Open-Door": {"action": [_call("lock.unlock", "lock.front_door")]},
+        },
+    )
+    line = describe_pending_action(
+        hass, {"tool_name": "intent_script__Open_Door", "tool_args": {}}
+    )
+    assert "Open Door" in line
+    assert "Open-Door" in line
+
+
+async def test_a_harmless_intent_named_get_live_context_keeps_the_shortcut(
+    hass: HomeAssistant,
+) -> None:
+    """HA's own live-context tool still skips the guard and the lock rewrite."""
+    await _intent_scripts(hass, {"GetLiveContext": {"speech": {"text": "Hi"}}})
+    ctx = cast(
+        "Any",
+        SimpleNamespace(
+            hass=hass,
+            config={"configurable": {"thread_id": "t1"}},
+            critical_actions=RULES,
+            pin_enabled=True,
+            pin_hash="hash",
+            pin_salt="salt",
+            pending_actions={},
+        ),
+    )
+    redirect, args = _prepare_tool_args(
+        "homeassistant__GetLiveContext",
+        {"name": "Front Door", "domain": ["lock"], "entity_id": "lock.front_door"},
+        ctx,
+        {"id": "call1"},
+    )
+    assert redirect is None
+    assert "entity_id" not in args

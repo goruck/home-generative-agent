@@ -550,8 +550,40 @@ def _describe_automation(hass: HomeAssistant | None, action: Mapping[str, Any]) 
     return pin_msg(hass, "action_automation_runs", action=text, calls=shown)
 
 
-# The slots an intent script's tool takes that name what it acts on.
-_INTENT_SLOT_KEYS = ("name", "area", "floor")
+def _intent_script_line(
+    hass: HomeAssistant | None, tool_name: str, tool_args: Mapping[str, Any]
+) -> str | None:
+    """
+    Name the intent script a tool runs, with everything the model passed (#779).
+
+    Only for a tool an intent script owns: its own ``intent_script__`` tool,
+    or one named by it (an intent script taking over HassTurnOn) that is not
+    a script's tool and names no service of its own. Every intent script
+    that may be behind it is named. Every argument is shown, since Home
+    Assistant hands each to the intent script, and one of them may pick the
+    device.
+    """
+    handlers = [h for h in intent_script_handlers(hass, tool_name) if h]
+    if not handlers or script_tool_entity_id(tool_name) is not None:
+        return None
+    if tool_args.get("domain") or tool_args.get("service"):
+        return None
+    names = sorted(
+        {str(getattr(h, "intent_type", "") or "") for h in handlers} - {""}
+    ) or [base_tool_name(tool_name)]
+    line = pin_msg(
+        hass,
+        "action_intent_script",
+        target=" / ".join(
+            _named(hass, _one_line(name, _ACTION_TARGET_MAX_LEN)) for name in names
+        ),
+    )
+    slots = [
+        f"{key}: {_one_line(str(value), _ACTION_TARGET_MAX_LEN)}"
+        for key, value in sorted(tool_args.items())
+        if value not in (None, "", [], {})
+    ]
+    return f"{line} ({', '.join(slots)})" if slots else line
 
 
 def describe_pending_action(
@@ -643,20 +675,8 @@ def _describe_line(  # noqa: PLR0911
 
     raw_args = action.get("tool_args")
     tool_args: dict[str, Any] = dict(raw_args) if isinstance(raw_args, Mapping) else {}
-    if handlers := intent_script_handlers(hass, tool_name):
-        intent_name = str(getattr(handlers[0], "intent_type", "") or tool_name)
-        line = pin_msg(
-            hass,
-            "action_intent_script",
-            target=_named(hass, _one_line(intent_name, _ACTION_TARGET_MAX_LEN)),
-        )
-        # What the model filled in may pick the device: show it.
-        slots = [
-            _one_line(str(tool_args[key]), _ACTION_TARGET_MAX_LEN)
-            for key in _INTENT_SLOT_KEYS
-            if tool_args.get(key)
-        ]
-        return f"{line} ({', '.join(slots)})" if slots else line
+    if (line := _intent_script_line(hass, tool_name, tool_args)) is not None:
+        return line
     if (script_id := script_tool_entity_id(tool_name)) is not None:
         return _script_line(hass, script_id)
     # A tool named like a script (HA before 2026.9 named script tools so) is
