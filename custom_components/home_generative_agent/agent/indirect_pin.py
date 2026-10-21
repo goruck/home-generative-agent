@@ -548,9 +548,12 @@ class StoredActionCheck:
             people |= {
                 state.entity_id for state in self.hass.states.async_all("person")
             }
+        # A tracker it creates is in no zone's list yet, but joins the zone
+        # it is placed in (#820): every zone may change.
+        zones = set(self.hass.states.async_entity_ids("zone"))
         return any(
             self.entity(entity_id, None, lenient=lenient)
-            for entity_id in sorted(trackers | people)
+            for entity_id in sorted(trackers | people | zones)
         )
 
     def _script_steps(self, entity_id: str, *, lenient: bool) -> bool:
