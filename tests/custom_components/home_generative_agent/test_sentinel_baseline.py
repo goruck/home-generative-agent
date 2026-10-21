@@ -1059,64 +1059,6 @@ async def test_update_baselines_skips_notification_for_already_established(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_update_baselines_fires_drift_notification_when_threshold_exceeded(
-    hass: HomeAssistant,
-) -> None:
-    """_update_baselines fires a drift notification when drift_pct >= threshold."""
-    call_log = _record_notices(hass)
-
-    # reference_value in DB is 20.0; new value is 30.0 → 50% drift
-    ref_rows = [
-        {"entity_id": "sensor.power", "reference_value": 20.0, "reference_at": None}
-    ]
-    count_row = {"sample_count": 1}
-
-    mock_cursor = MagicMock()
-    call_count = 0
-
-    async def _execute(sql: str, params: Any) -> None:
-        pass
-
-    async def _fetchall() -> list[Any]:
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            return ref_rows
-        return []
-
-    async def _fetchone() -> dict[str, Any] | None:
-        return count_row
-
-    mock_cursor.execute = _execute
-    mock_cursor.fetchall = _fetchall
-    mock_cursor.fetchone = _fetchone
-    mock_cursor.__aenter__ = AsyncMock(return_value=mock_cursor)
-    mock_cursor.__aexit__ = AsyncMock(return_value=False)
-
-    mock_conn = MagicMock()
-    mock_conn.cursor = MagicMock(return_value=mock_cursor)
-    mock_conn.commit = AsyncMock()
-    mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
-    mock_conn.__aexit__ = AsyncMock(return_value=False)
-
-    mock_pool = MagicMock()
-    mock_pool.connection = MagicMock(return_value=mock_conn)
-
-    options = {CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT: 30.0}
-    updater = SentinelBaselineUpdater(hass, mock_pool, options)
-    updater._established = {"sensor.power"}  # already established
-
-    snapshot = _snapshot([_entity("sensor.power", "30.0")])
-    await updater._update_baselines(snapshot)
-
-    drift_notifications = [
-        data for _, data in call_log if "Drift" in str(data["title"])
-    ]
-    assert len(drift_notifications) == 1
-    assert "sensor.power" in drift_notifications[0]["message"]
-
-
 def _record_notices(hass: HomeAssistant) -> list[tuple[str, dict[str, Any]]]:
     """Record each notice Home Assistant creates or updates, as ("create", data)."""
     calls: list[tuple[str, dict[str, Any]]] = []
@@ -1215,33 +1157,6 @@ async def test_single_establishment_keeps_the_one_line_notice(
     )
 
 
-@pytest.mark.asyncio
-async def test_drift_in_one_cycle_posts_one_summary_notice(hass: HomeAssistant) -> None:
-    """Entities that drift in the same cycle share one notice (#791)."""
-    ids = [f"sensor.power_{i}" for i in range(3)]
-    ref_rows = [
-        {"entity_id": eid, "reference_value": 20.0, "reference_at": None} for eid in ids
-    ]
-    updater, calls = _notice_updater(
-        hass, ref_rows, 1, {CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT: 30.0}
-    )
-    updater._established = set(ids)
-
-    await updater._update_baselines(_snapshot([_entity(e, "30.0") for e in ids]))
-
-    assert len(calls) == 1
-    data = calls[0][1]
-    assert data["notification_id"] == "hga_baseline_drift"
-    assert data["message"].startswith(
-        "Baseline drift detected for 3 entities (references updated):"
-    )
-    assert all(
-        f"- {eid}: was 20.00, now 30.00 (50.0% change)" in data["message"]
-        for eid in ids
-    )
-    assert "more" not in data["message"]
-
-
 def _listed(message: str) -> list[str]:
     """Return a summary notice's list lines."""
     return [line for line in message.splitlines() if line.startswith("- ")]
@@ -1292,14 +1207,16 @@ async def test_summary_notice_lists_friendly_names_on_one_line(
 
 
 @pytest.mark.asyncio
-async def test_establishment_and_drift_in_one_cycle_post_two_notices(
-    hass: HomeAssistant,
-) -> None:
-    """A cycle with both kinds posts each under its own id."""
-    ref_rows = [{"entity_id": "sensor.old", "reference_value": 20.0}]
+async def test_a_moved_baseline_posts_no_drift_notice(hass: HomeAssistant) -> None:
+    """
+    There is no drift notice: only the establishment is told (#807).
+
+    The drift notice never fired and was removed; a reference stored by an
+    older version is neither read nor written.
+    """
     updater, calls = _notice_updater(
         hass,
-        ref_rows,
+        [],
         20,
         {
             CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20,
@@ -1307,15 +1224,25 @@ async def test_establishment_and_drift_in_one_cycle_post_two_notices(
         },
     )
     updater._established = {"sensor.old"}
+    executed: list[str] = []
+    cursor = cast("Any", updater._pool).connection().cursor()
+    original = cursor.execute
+
+    async def _spy(sql: str, params: Any = None) -> None:
+        executed.append(sql)
+        await original(sql, params)
+
+    cursor.execute = _spy
 
     await updater._update_baselines(
-        _snapshot([_entity("sensor.old", "30.0"), _entity("sensor.new", "5.0")])
+        _snapshot([_entity("sensor.old", "300.0"), _entity("sensor.new", "5.0")])
     )
 
-    assert sorted(data["notification_id"] for _, data in calls) == [
-        "hga_baseline_drift",
-        "hga_baseline_established",
+    assert [data["notification_id"] for _, data in calls] == [
+        "hga_baseline_established"
     ]
+    assert executed
+    assert not [sql for sql in executed if "reference_" in sql]
 
 
 @pytest.mark.asyncio
@@ -1347,40 +1274,12 @@ async def test_dismissing_a_notice_starts_it_afresh(hass: HomeAssistant) -> None
     await updater._update_baselines(
         _snapshot([_entity("sensor.a", "1.0"), _entity("sensor.b", "1.0")])
     )
-    notices = _baseline_notices(hass)
-    notices.drift["sensor.x"] = ("X", 2.0, 1.0, 100.0)
-
     persistent_notification.async_dismiss(hass, "hga_baseline_established")
     await updater._update_baselines(_snapshot([_entity("sensor.c", "3.0")]))
 
     assert calls[-1][1]["message"] == (
         "Baseline established for sensor.c: normal \u2248 3.00."
     )
-    # Dismissing one kind leaves the other's entries alone.
-    assert "sensor.x" in notices.drift
-
-
-@pytest.mark.asyncio
-async def test_dismissing_the_drift_notice_clears_only_drift(
-    hass: HomeAssistant,
-) -> None:
-    """The drift notice's dismissal clears drift entries, not establishments."""
-    ref_rows = [{"entity_id": "sensor.p", "reference_value": 20.0}]
-    updater, calls = _notice_updater(
-        hass, ref_rows, 1, {CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT: 30.0}
-    )
-    updater._established = {"sensor.p"}
-    notices = _baseline_notices(hass)
-    notices.established["sensor.a"] = ("A", 1.0)
-    notices.drift["sensor.old"] = ("Old", 2.0, 1.0, 100.0)
-    updater._post_drift(notices)
-
-    persistent_notification.async_dismiss(hass, "hga_baseline_drift")
-
-    assert notices.drift == {}
-    assert "sensor.a" in notices.established
-    await updater._update_baselines(_snapshot([_entity("sensor.p", "30.0")]))
-    assert calls[-1][1]["message"].startswith("Baseline drift detected for sensor.p:")
 
 
 @pytest.mark.asyncio
@@ -1399,7 +1298,6 @@ async def test_other_notice_updates_keep_entries(
     """Only a removal of the notice itself clears what it tells."""
     notices = _baseline_notices(hass)
     notices.established["sensor.a"] = ("A", 1.0)
-    notices.drift["sensor.b"] = ("B", 2.0, 1.0, 100.0)
 
     async_dispatcher_send(
         hass,
@@ -1409,43 +1307,6 @@ async def test_other_notice_updates_keep_entries(
     )
 
     assert "sensor.a" in notices.established
-    assert "sensor.b" in notices.drift
-
-
-@pytest.mark.asyncio
-async def test_drift_notice_adds_across_cycles_keeping_latest_per_entity(
-    hass: HomeAssistant,
-) -> None:
-    """A later drift adds to the notice; an entity drifting again shows its latest."""
-    updater, calls = _notice_updater(
-        hass,
-        [{"entity_id": "sensor.a", "reference_value": 20.0}],
-        1,
-        {CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT: 30.0},
-    )
-    updater._established = {"sensor.a", "sensor.b"}
-    await updater._update_baselines(_snapshot([_entity("sensor.a", "30.0")]))
-
-    second, _ = _notice_updater(
-        hass,
-        [
-            {"entity_id": "sensor.a", "reference_value": 30.0},
-            {"entity_id": "sensor.b", "reference_value": 10.0},
-        ],
-        1,
-        {CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT: 30.0},
-    )
-    second._established = {"sensor.a", "sensor.b"}
-    await second._update_baselines(
-        _snapshot([_entity("sensor.a", "60.0"), _entity("sensor.b", "20.0")])
-    )
-
-    message = calls[-1][1]["message"]
-    assert message.startswith("Baseline drift detected for 2 entities")
-    assert _listed(message) == [
-        "- sensor.a: was 30.00, now 60.00 (100.0% change)",
-        "- sensor.b: was 10.00, now 20.00 (100.0% change)",
-    ]
 
 
 @pytest.mark.asyncio
@@ -1540,26 +1401,6 @@ async def test_reset_drops_the_baseline_from_its_notice(
 
 
 @pytest.mark.asyncio
-async def test_reset_drops_the_baseline_from_the_drift_notice(
-    hass: HomeAssistant,
-) -> None:
-    """A reset clears the drift notice too, leaving the established one alone."""
-    updater, _ = _notice_updater(hass, [], 20, {})
-    notices = _baseline_notices(hass)
-    notices.established["sensor.b"] = ("B", 2.0)
-    notices.drift["sensor.a"] = ("A", 2.0, 1.0, 100.0)
-    updater._post_established(notices)
-    updater._post_drift(notices)
-
-    assert await updater.async_reset_baseline("sensor.a") != -1
-
-    assert notices.drift == {}
-    notifications = persistent_notification._async_get_or_create_notifications(hass)
-    assert "hga_baseline_drift" not in notifications
-    assert "hga_baseline_established" in notifications
-
-
-@pytest.mark.asyncio
 async def test_reset_during_a_write_is_not_told(hass: HomeAssistant) -> None:
     """An entity reset between the commit and the notice is left off it."""
     updater, calls = _notice_updater(hass, [], 20, {})
@@ -1569,8 +1410,6 @@ async def test_reset_during_a_write_is_not_told(hass: HomeAssistant) -> None:
         _snapshot([_entity("sensor.a", "1.0"), _entity("sensor.b", "2.0")]),
         {"sensor.a": 1.0, "sensor.b": 2.0},
         ["sensor.a", "sensor.b"],
-        {},
-        30.0,
     )
 
     assert list(_baseline_notices(hass).established) == ["sensor.b"]
@@ -3001,7 +2840,7 @@ async def test_update_baselines_skips_non_finite_states() -> None:
 
 def test_upsert_sql_self_heals_poisoned_value() -> None:
     """
-    Both upserts restart the EMA when the stored value is NaN/inf.
+    The upsert restarts the EMA when the stored value is NaN/inf.
 
     A poisoned row written before ingestion guarded non-finite states would
     otherwise propagate through the EMA forever (NaN blends into every
@@ -3011,14 +2850,13 @@ def test_upsert_sql_self_heals_poisoned_value() -> None:
         baseline as bl,
     )
 
-    for sql in (bl._UPSERT_SQL, bl._UPSERT_WITH_REF_SQL):
-        assert "'NaN'::float8" in sql
-        assert "'Infinity'::float8" in sql
-        assert "THEN EXCLUDED.value" in sql
+    sql = bl._UPSERT_SQL
+    assert "'NaN'::float8" in sql
+    assert "'Infinity'::float8" in sql
+    assert "THEN EXCLUDED.value" in sql
     # Parameter order/count must be unchanged — call sites pass the same
     # tuples as before the self-heal CASE arms were added.
     assert bl._UPSERT_SQL.count("%s") == 8
-    assert bl._UPSERT_WITH_REF_SQL.count("%s") == 10
 
 
 @pytest.mark.asyncio
