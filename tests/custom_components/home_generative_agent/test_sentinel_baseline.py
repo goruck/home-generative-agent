@@ -495,7 +495,7 @@ async def test_update_baselines_upserts_two_rows_per_numeric_entity() -> None:
             upsert_params.append(params)
 
     mock_cursor.execute = _fake_execute
-    mock_cursor.fetchall = AsyncMock(return_value=[])  # _FETCH_REFS_SQL returns no refs
+    mock_cursor.fetchall = AsyncMock(return_value=[])
     mock_cursor.fetchone = AsyncMock(return_value=None)  # sample_count check
     mock_cursor.__aenter__ = AsyncMock(return_value=mock_cursor)
     mock_cursor.__aexit__ = AsyncMock(return_value=False)
@@ -1077,22 +1077,15 @@ def _record_notices(hass: HomeAssistant) -> list[tuple[str, dict[str, Any]]]:
 
 def _notice_updater(
     hass: HomeAssistant,
-    ref_rows: list[dict[str, Any]],
     sample_count: int,
     options: dict[str, Any],
 ) -> tuple[SentinelBaselineUpdater, list[tuple[str, dict[str, Any]]]]:
     """Return an updater on a mocked pool and real hass, and its notices."""
     calls = _record_notices(hass)
-    fetchall_calls = 0
-
-    async def _fetchall() -> list[Any]:
-        nonlocal fetchall_calls
-        fetchall_calls += 1
-        return ref_rows if fetchall_calls == 1 else []
 
     mock_cursor = MagicMock()
     mock_cursor.execute = AsyncMock()
-    mock_cursor.fetchall = _fetchall
+    mock_cursor.fetchall = AsyncMock(return_value=[])
     mock_cursor.fetchone = AsyncMock(return_value={"sample_count": sample_count})
     mock_cursor.__aenter__ = AsyncMock(return_value=mock_cursor)
     mock_cursor.__aexit__ = AsyncMock(return_value=False)
@@ -1114,9 +1107,7 @@ async def test_establishment_in_one_cycle_posts_one_summary_notice(
     hass: HomeAssistant,
 ) -> None:
     """Entities established in the same cycle share one notice (#791)."""
-    updater, calls = _notice_updater(
-        hass, [], 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20}
-    )
+    updater, calls = _notice_updater(hass, 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20})
     updater._established = set()
     entities = [_entity(f"sensor.temp_{i:02d}", "22.0") for i in range(12)]
 
@@ -1141,9 +1132,7 @@ async def test_single_establishment_keeps_the_one_line_notice(
     hass: HomeAssistant,
 ) -> None:
     """One entity established is told in the old one-line wording."""
-    updater, calls = _notice_updater(
-        hass, [], 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20}
-    )
+    updater, calls = _notice_updater(hass, 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20})
     updater._established = set()
     entity = _entity("sensor.temperature", "22.0")
     entity["friendly_name"] = "Hall Temperature"
@@ -1168,9 +1157,7 @@ async def test_summary_notice_cap_boundary(
     hass: HomeAssistant, count: int, tail: str | None
 ) -> None:
     """A notice names up to 10 entities and counts the rest."""
-    updater, calls = _notice_updater(
-        hass, [], 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20}
-    )
+    updater, calls = _notice_updater(hass, 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20})
     updater._established = set()
     entities = [_entity(f"sensor.t_{i:02d}", "22.0") for i in range(count)]
 
@@ -1189,9 +1176,7 @@ async def test_summary_notice_lists_friendly_names_on_one_line(
     hass: HomeAssistant,
 ) -> None:
     """The list names entities by friendly name, with line breaks collapsed."""
-    updater, calls = _notice_updater(
-        hass, [], 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20}
-    )
+    updater, calls = _notice_updater(hass, 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20})
     updater._established = set()
     hall = _entity("sensor.a", "1.0")
     hall["friendly_name"] = "Hall Temp"
@@ -1211,12 +1196,11 @@ async def test_a_moved_baseline_posts_no_drift_notice(hass: HomeAssistant) -> No
     """
     There is no drift notice: only the establishment is told (#807).
 
-    The drift notice never fired and was removed; a reference stored by an
-    older version is neither read nor written.
+    The drift notice never fired and was removed; the reference columns are
+    neither read nor written.
     """
     updater, calls = _notice_updater(
         hass,
-        [],
         20,
         {
             CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20,
@@ -1248,9 +1232,7 @@ async def test_a_moved_baseline_posts_no_drift_notice(hass: HomeAssistant) -> No
 @pytest.mark.asyncio
 async def test_later_cycle_adds_to_an_undismissed_notice(hass: HomeAssistant) -> None:
     """A later cycle adds its entities instead of overwriting the notice (#791)."""
-    updater, calls = _notice_updater(
-        hass, [], 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20}
-    )
+    updater, calls = _notice_updater(hass, 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20})
     updater._established = set()
     first = [_entity(f"sensor.first_{i}", "1.0") for i in range(3)]
     await updater._update_baselines(_snapshot(first))
@@ -1267,9 +1249,7 @@ async def test_later_cycle_adds_to_an_undismissed_notice(hass: HomeAssistant) ->
 @pytest.mark.asyncio
 async def test_dismissing_a_notice_starts_it_afresh(hass: HomeAssistant) -> None:
     """Once a notice is dismissed, the next one tells only what came after."""
-    updater, calls = _notice_updater(
-        hass, [], 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20}
-    )
+    updater, calls = _notice_updater(hass, 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20})
     updater._established = set()
     await updater._update_baselines(
         _snapshot([_entity("sensor.a", "1.0"), _entity("sensor.b", "1.0")])
@@ -1312,14 +1292,14 @@ async def test_other_notice_updates_keep_entries(
 @pytest.mark.asyncio
 async def test_reload_keeps_an_unread_notice(hass: HomeAssistant) -> None:
     """A new updater after a reload adds to the notice the old one posted."""
-    old, calls = _notice_updater(hass, [], 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20})
+    old, calls = _notice_updater(hass, 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20})
     old._established = set()
     await old._update_baselines(
         _snapshot([_entity(f"sensor.before_{i}", "1.0") for i in range(3)])
     )
     await old.stop()
 
-    new, _ = _notice_updater(hass, [], 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20})
+    new, _ = _notice_updater(hass, 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20})
     new._established = {f"sensor.before_{i}" for i in range(3)}
     await new._update_baselines(_snapshot([_entity("sensor.after", "2.0")]))
 
@@ -1335,7 +1315,7 @@ async def test_failed_post_keeps_entries_and_logs(
     hass: HomeAssistant, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A notice that cannot be posted is kept for the next cycle and logged."""
-    updater, _ = _notice_updater(hass, [], 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20})
+    updater, _ = _notice_updater(hass, 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20})
     updater._established = set()
     with patch.object(
         persistent_notification, "async_create", side_effect=RuntimeError("down")
@@ -1351,9 +1331,7 @@ async def test_bad_snapshot_does_not_stop_the_cycle(
     hass: HomeAssistant, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A notice that fails to build is logged; the saved baselines stand."""
-    updater, calls = _notice_updater(
-        hass, [], 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20}
-    )
+    updater, calls = _notice_updater(hass, 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20})
     updater._established = set()
     snapshot = _snapshot([_entity("sensor.a", "1.0")])
 
@@ -1380,9 +1358,7 @@ async def test_reset_drops_the_baseline_from_its_notice(
     dismissed: bool,  # noqa: FBT001
 ) -> None:
     """A reset baseline leaves the notice; an emptied notice is dismissed."""
-    updater, calls = _notice_updater(
-        hass, [], 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20}
-    )
+    updater, calls = _notice_updater(hass, 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20})
     updater._established = set()
     await updater._update_baselines(
         _snapshot([_entity("sensor.a", "1.0"), _entity("sensor.b", "2.0")])
@@ -1403,7 +1379,7 @@ async def test_reset_drops_the_baseline_from_its_notice(
 @pytest.mark.asyncio
 async def test_reset_during_a_write_is_not_told(hass: HomeAssistant) -> None:
     """An entity reset between the commit and the notice is left off it."""
-    updater, calls = _notice_updater(hass, [], 20, {})
+    updater, calls = _notice_updater(hass, 20, {})
     updater._established = {"sensor.b"}
 
     updater._tell_notices(
@@ -1423,9 +1399,7 @@ async def test_failed_write_posts_no_notice(
     hass: HomeAssistant, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A write that fails to commit announces nothing."""
-    updater, calls = _notice_updater(
-        hass, [], 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20}
-    )
+    updater, calls = _notice_updater(hass, 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20})
     updater._established = set()
     pool = cast("MagicMock", updater._pool)
     pool.connection.return_value.commit.side_effect = OSError("db down")

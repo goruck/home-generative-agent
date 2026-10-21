@@ -286,7 +286,7 @@ When an entity's baseline is established (it reaches `sentinel_baseline_min_samp
 | `sentinel_baseline_freshness_threshold_seconds` | `3600` | Age after which a baseline is considered stale |
 | `sentinel_baseline_min_samples` | `20` | Minimum samples before a global baseline is usable |
 | `sentinel_baseline_max_samples` | `500` | Rolling window size; older samples discarded when reached |
-| `sentinel_baseline_drift_threshold_pct` | `30.0` | Default percent deviation that triggers a finding |
+| `sentinel_baseline_drift_threshold_pct` | `30.0` | Percent deviation from the day-of-week baseline that triggers a `time_of_day_anomaly` finding when weekly patterns are on; otherwise each finding's own `threshold_pct` (default `50.0`) applies |
 | `sentinel_baseline_weekly_patterns` | `false` | Enable per-(day-of-week, hour) baselines for `time_of_day_anomaly` |
 | `sentinel_baseline_dow_min_samples` | `4` | Observations per DOW-hour slot before blend weight reaches 1.0 |
 | `sentinel_baseline_sustained_minutes` | `45` | Minutes a cyclical-load entity (fridge, freezer, compressor) must remain anomalous before a notification fires. Set to `0` to disable the gate. |

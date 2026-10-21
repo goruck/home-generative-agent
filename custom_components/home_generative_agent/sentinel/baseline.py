@@ -876,7 +876,7 @@ class SentinelBaselineUpdater:
 
     def _forget_notices(self, entity_id: str | None) -> None:
         """
-        Drop a reset baseline from the notices (every baseline when None).
+        Drop a reset baseline from the notice (every baseline when None).
 
         A notice left with nothing to tell is dismissed; one that still names
         other entities is posted again without the reset one.
