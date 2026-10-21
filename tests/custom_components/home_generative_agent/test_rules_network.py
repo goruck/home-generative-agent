@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import inspect
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
@@ -12,6 +13,7 @@ import pytest
 from custom_components.home_generative_agent.sentinel.models import (
     DISPLAY_ONLY_EVIDENCE_KEYS,
 )
+from custom_components.home_generative_agent.sentinel.notifier import _network_summary
 from custom_components.home_generative_agent.sentinel.rules.ha_addon_exposed_port import (
     HaAddonExposedPortRule,
 )
@@ -572,12 +574,6 @@ def test_security_device_unavailable_aggregates_past_threshold() -> None:
 
 def test_security_device_unavailable_finding_renders_in_czech() -> None:
     """The notifier rebuilds the sentence from the rule's own evidence keys."""
-    from types import SimpleNamespace
-
-    from custom_components.home_generative_agent.sentinel.notifier import (
-        _network_summary,
-    )
-
     snapshot = _snapshot(
         ha_security={
             "unavailable_security_devices": {"lock.front": 45, "camera.yard": 60}

@@ -445,12 +445,10 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "age_hours_many": "asi {count} hodin",
         "summary_device_minutes": "{name} ({minutes} min)",
         "summary_security_devices_one": (
-            "{count} bezpečnostní zařízení nedostupné déle než {minutes} min: "
-            "{listed}."
+            "{count} bezpečnostní zařízení nedostupné déle než {minutes} min: {listed}."
         ),
         "summary_security_devices_few": (
-            "{count} bezpečnostní zařízení nedostupná déle než {minutes} min: "
-            "{listed}."
+            "{count} bezpečnostní zařízení nedostupná déle než {minutes} min: {listed}."
         ),
         "summary_security_devices_many": (
             "{count} bezpečnostních zařízení nedostupných déle než {minutes} min: "

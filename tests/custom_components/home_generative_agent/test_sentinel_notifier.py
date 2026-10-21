@@ -4191,13 +4191,15 @@ def test_security_device_summary_is_localized(count: int, czech: str) -> None:
 def test_security_device_summary_falls_back_to_the_stored_sentence() -> None:
     """Findings persisted without the figures keep their English summary."""
     legacy = _security_device_finding(2, with_display=False)
-    assert _notifier_mod._network_summary(legacy, _l10n_hass("cs")) == (
-        legacy.evidence["summary"]
+    assert (
+        _notifier_mod._network_summary(legacy, _l10n_hass("cs"))
+        == legacy.evidence["summary"]
     )
     broken = _security_device_finding(2)
     del broken.evidence["unavailable_minutes"]["camera.c2"]
-    assert _notifier_mod._network_summary(broken, _l10n_hass("cs")) == (
-        broken.evidence["summary"]
+    assert (
+        _notifier_mod._network_summary(broken, _l10n_hass("cs"))
+        == broken.evidence["summary"]
     )
 
 
@@ -4207,8 +4209,9 @@ def test_security_device_summary_is_localized_on_every_surface() -> None:
     # Security copy never yields to model prose, in any language.
     assert _mobile_message("model prose", finding, "Czech", cs) == _CS_ONE
     assert _persistent_message("model prose", finding, cs) == _CS_ONE
-    assert _mobile_message("model prose", finding, "Czech") == (
-        finding.evidence["summary"]
+    assert (
+        _mobile_message("model prose", finding, "Czech")
+        == (finding.evidence["summary"])
     )
 
 
