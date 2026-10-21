@@ -653,8 +653,8 @@ Sentinel registers `sensor.sentinel_health`, updated after every detection run.
 | State | Meaning |
 |---|---|
 | `ok` | Sentinel enabled and running normally |
-| `degraded` | LLM calls consecutively deferred for more than 300 s (edge deployment under sustained load) |
-| `disabled` | Sentinel not configured |
+| `degraded` | LLM calls consecutively deferred for more than 300 s (edge deployment under sustained load), or a model provider stopped answering (see `stalled_model_providers`) |
+| `disabled` | Sentinel not configured (`stalled_model_providers` is still shown) |
 
 <details>
 <summary>Full attribute reference</summary>
@@ -670,6 +670,7 @@ Sentinel registers `sensor.sentinel_health`, updated after every detection run.
 | `network_capabilities` | Capability paths the last snapshot's `network` section provided (e.g. `network.ha_security.admin_user_count`) |
 | `owed_change_alerts` | Change alerts still owed (seen at autonomy level 0 or held back, not yet told), as `{kind: count}`: devices, clients or accounts for those kinds, changes for a public IP or port mappings; empty when none are owed |
 | `owed_rules_idle_days` | For an owed kind whose rule has not been running: on how many days Sentinel ran without it, as `{kind: days}`. Its alerts wait, and are told once the rule runs |
+| `stalled_model_providers` | Model providers that stopped answering (3 timeouts in a row) and are skipped until a probe gets an answer, each as `{provider, stalled_since, consecutive_timeouts, last_probe}`; empty when every provider answers. See [Provider Fallbacks](configuration.md#provider-fallbacks) |
 | `sentinel_admission_degraded` | `true` when LLM calls deferred for more than 300 s |
 | `sentinel_admission_degraded_category` | Category (`triage`, `discovery`, `explain`) that last triggered degraded, or `null` |
 | `sentinel_admission_consecutive_deferrals` | Consecutive times LLM admission was denied |

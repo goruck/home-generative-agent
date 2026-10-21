@@ -46,6 +46,7 @@ async def async_setup_entry(
                 baseline_updater=data.baseline_updater,
                 discovery_engine=data.discovery_engine,
                 proposal_store=data.proposal_store,
+                stall_tracker=data.stall_tracker,
             ),
             ToolIndexSensor(hass, entry.entry_id),
         ]

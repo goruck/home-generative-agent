@@ -76,7 +76,10 @@ from ..const import (  # noqa: TID252
     VLM_USER_PROMPT,
 )
 from ..core.conversation_helpers import _resolve_entity_id  # noqa: TID252
-from ..core.fallback import ainvoke_dropping_unsupported_params  # noqa: TID252
+from ..core.fallback import (  # noqa: TID252
+    ProviderStalledError,
+    ainvoke_dropping_unsupported_params,
+)
 from ..core.utils import extract_final, verify_pin  # noqa: TID252
 from ..sentinel.network_audit import (  # noqa: TID252
     NetworkAuditReport,
@@ -612,6 +615,11 @@ async def analyze_image(
     # an error string here would let it masquerade as a real caption.
     try:
         resp = await ainvoke_dropping_unsupported_params(vlm_model, messages)
+    except (TimeoutError, ProviderStalledError):
+        # A chain timeout or a stalled provider is the caller's to count and
+        # report (the video analyzer's timeout metric and failure log), not a
+        # caption (#828). Both are HomeAssistantErrors, so this comes first.
+        raise
     except HomeAssistantError:
         LOGGER.exception(VLM_ERROR_CAPTION)
         return VLM_ERROR_CAPTION
@@ -671,8 +679,12 @@ async def get_and_analyze_camera_image(  # noqa: D417
         return await analyze_image(
             vlm_model, image, detection_keywords, overrides=overrides
         )
-    except OllamaResponseError:
-        LOGGER.exception(VLM_ERROR_CAPTION)
+    except (OllamaResponseError, TimeoutError, ProviderStalledError) as err:
+        if isinstance(err, OllamaResponseError):
+            LOGGER.exception(VLM_ERROR_CAPTION)
+        else:
+            # A timeout or a stalled provider: the reason, without a traceback.
+            LOGGER.warning("%s %s", VLM_ERROR_CAPTION, err)
         return VLM_ERROR_CAPTION
 
 

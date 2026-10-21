@@ -19,6 +19,9 @@ from ..const import (  # noqa: TID252
 
 if TYPE_CHECKING:
     from custom_components.home_generative_agent.audit.store import AuditStore
+    from custom_components.home_generative_agent.core.provider_stall import (
+        ProviderStallTracker,
+    )
     from custom_components.home_generative_agent.sentinel.baseline import (
         SentinelBaselineUpdater,
     )
@@ -201,6 +204,7 @@ class SentinelHealthSensor(SensorEntity):
         baseline_updater: SentinelBaselineUpdater | None = None,
         discovery_engine: SentinelDiscoveryEngine | None = None,
         proposal_store: ProposalStore | None = None,
+        stall_tracker: ProviderStallTracker | None = None,
     ) -> None:
         """Initialize the sentinel health sensor."""
         self.hass = hass
@@ -210,6 +214,7 @@ class SentinelHealthSensor(SensorEntity):
         self._baseline_updater = baseline_updater
         self._discovery_engine = discovery_engine
         self._proposal_store = proposal_store
+        self._stall_tracker = stall_tracker
         self._attr_name = "Sentinel Health"
         self._attr_unique_id = f"sentinel_health::{entry_id}"
         self._attr_native_value = "ok"
@@ -237,9 +242,13 @@ class SentinelHealthSensor(SensorEntity):
         enabled = bool(
             self._options.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED)
         )
+        stalled = self._stall_tracker.status() if self._stall_tracker else []
         if not enabled:
             self._attr_native_value = "disabled"
             self._attrs.clear()
+            # A stalled provider still breaks chat and cameras with Sentinel
+            # off, so it is the one attribute kept (#828).
+            self._attrs["stalled_model_providers"] = stalled
             self.async_write_ha_state()
             return
 
@@ -329,8 +338,12 @@ class SentinelHealthSensor(SensorEntity):
             else None
         )
 
+        # Model providers that stopped answering and are being probed (#828).
+        self._attrs["stalled_model_providers"] = stalled
         self._attr_native_value = (
-            "degraded" if run_stats.get("sentinel_admission_degraded") else "ok"
+            "degraded"
+            if run_stats.get("sentinel_admission_degraded") or stalled
+            else "ok"
         )
         self.async_write_ha_state()
 

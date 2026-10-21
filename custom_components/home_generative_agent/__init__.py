@@ -272,6 +272,7 @@ from .core.provider_recheck import (
     async_schedule_provider_recheck,
     endpoint_label,
 )
+from .core.provider_stall import ProviderStallTracker
 from .core.runtime import HGAConfigEntry, HGAData
 from .core.subentry_resolver import (
     build_database_uri_from_entry,
@@ -2061,6 +2062,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
         return _alert
 
+    def _reset_breakers(provider_id: str) -> None:
+        """Make a recovered provider usable at once, whatever its timeouts opened."""
+        for breaker in (_chat_cb, _vlm_cb, _sum_cb, _emb_cb):
+            breaker.record_success(provider_id)
+
+    # One stall state per provider, shared by the chat, VLM and summarization
+    # chains: a provider that stopped answering for one is skipped by all
+    # (#828). Changes refresh sensor.sentinel_health.
+    stall_tracker = ProviderStallTracker(
+        hass,
+        entry,
+        provider_name=_provider_name,
+        on_change=lambda: async_dispatcher_send(hass, SIGNAL_SENTINEL_RUN_COMPLETE),
+        on_recovered=_reset_breakers,
+    )
+
     _chat_cb = CircuitBreaker(
         threshold=FALLBACK_CIRCUIT_BREAKER_THRESHOLD,
         window_seconds=FALLBACK_CIRCUIT_BREAKER_WINDOW_SECONDS,
@@ -3272,6 +3289,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             return
         chain.append((model, deployment, provider_id))
 
+    def _breaker_for(
+        chain: list[Any], breaker: CircuitBreaker
+    ) -> CircuitBreaker | None:
+        """
+        Return the breaker for a chain, or None for a lone provider.
+
+        A breaker only helps by skipping to another provider; on a lone one
+        it would refuse calls for its whole cooldown after the server is back.
+        """
+        return breaker if len(chain) > 1 else None
+
     def _finalize_model_chain(
         category: str,
         chain: list[tuple[Any, str, str]],
@@ -3306,7 +3334,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 )
             return unavailable_model
 
-        active_model, active_deployment, active_provider_id = chain[0]
+        _active_model, active_deployment, active_provider_id = chain[0]
         model_deployments[category] = active_deployment
         if active_provider_id != primary_provider.entry_id:
             LOGGER.warning(
@@ -3328,9 +3356,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 )
             )
 
-        if len(chain) > 1:
-            return wrapper_factory(chain)
-        return active_model
+        # A single provider is wrapped too, so a stall is detected, shown and
+        # failed fast even with no fallback to go to (#828).
+        return wrapper_factory(chain)
 
     # ----- Wrap chat / VLM / summarization with fallback chains -----
     # Primary model already carries per-feature config (model_name, temp, etc.).
@@ -3358,8 +3386,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             chat_model,
             lambda chain: FallbackChatModel(
                 chain,
-                circuit_breaker=_chat_cb,
+                circuit_breaker=_breaker_for(chain, _chat_cb),
                 alert_callback=_model_fallback_alert("chat"),
+                stall_tracker=stall_tracker,
             ),
         )
 
@@ -3384,8 +3413,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             vision_model,
             lambda chain: FallbackVLM(
                 chain,
-                circuit_breaker=_vlm_cb,
+                circuit_breaker=_breaker_for(chain, _vlm_cb),
                 alert_callback=_model_fallback_alert("vlm"),
+                stall_tracker=stall_tracker,
             ),
         )
 
@@ -3412,8 +3442,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             summarization_model,
             lambda chain: FallbackChatModel(
                 chain,
-                circuit_breaker=_sum_cb,
+                circuit_breaker=_breaker_for(chain, _sum_cb),
                 alert_callback=_model_fallback_alert("summarization"),
+                stall_tracker=stall_tracker,
             ),
         )
 
@@ -3586,6 +3617,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         auth_inventory=auth_inventory,
         network_inventory=network_inventory,
         openai_http_client=openai_http_client,
+        stall_tracker=stall_tracker,
     )
 
     # Registered once per Home Assistant run: aiohttp routes cannot be removed,

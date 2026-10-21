@@ -2439,6 +2439,34 @@ label pair ("Server URL" vs "Base URL").
 
 ## Model Providers
 
+### Stall probes skip the chat-priority gate
+
+**What:** `ProviderStallTracker._async_probe_until_answered` (`core/provider_stall.py`) sends a stalled provider a tiny request every 60 s directly, without `sentinel_admission` or registration in `_sentinel_llm_tasks` (`core/utils.py`), so foreground chat neither waits for it nor cancels it.
+
+**Why:** Codex review of the #828 fix (2026-10-21). It only matters when two provider entries share one GPU and one of them is stalled: the probe (at most 60 s, once a minute) can compete with chat on the other. The stalled server itself is not answering anyway. Gating it needs the admission helpers in `core/utils.py`, which imports `fallback.py`, which imports `provider_stall.py`, so the probe would have to receive the gate as a callback.
+
+**How to apply:** Pass an admission callable into the tracker from `__init__.py` (edge deployments only) and skip the probe round when chat is active; register the probe task so `_cancel_active_sentinel_llm_tasks` can cancel it.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
+### Embedding calls and budget-less callers are not covered by stall detection
+
+**What:** #828 gives each chat, VLM and summarization chain member a share of the caller's budget and counts its timeouts toward a stall. `FallbackEmbeddings` (`core/fallback.py`) has neither: embedding calls carry no caller budget (`generate_embeddings` in `core/utils.py` sets no timeout) and the wrapper does not consult `ProviderStallTracker`. Calls made without `model_call_budget` (the startup tool-index build, the per-turn tool-index delta, `analyze_image` called as an agent tool) also get no per-member timeout, and `ChatOllama`/`OllamaEmbeddings` are built with no httpx timeout (`_ollama_httpx_client_kwargs` in `__init__.py`), so a hung Ollama server can still hold those calls indefinitely.
+
+**Why:** Left out of the #828 fix (2026-10-21) to keep it to the paths that showed the hang in #813 (conversation, cameras, Sentinel). Embedding calls are short and rarely the first thing to hang, but a wedged server would stall memory search and tool retrieval without being marked stalled.
+
+**How to apply:** Give `generate_embeddings` and the tool-index callers a `model_call_budget`, record embedding timeouts in the shared tracker (keyed by provider id, so a stall seen by chat also skips that server's embeddings), and set a generous httpx read timeout on the Ollama clients as a backstop (well above the longest legitimate generation).
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ### Migrate to langchain-google-genai 4.x (consolidated google-genai SDK)
 
 **What:** `manifest.json` pins `langchain-google-genai==3.1.0`; 4.x is current. 4.0.0 swapped the legacy `google-ai-generativelanguage` SDK for the consolidated `google-genai` SDK, which is where new capability lands, so staying a major behind gets more expensive the longer it runs. Moved here from [#584](https://github.com/goruck/home-generative-agent/issues/584) (2026-09-24) because it is internal maintenance with no reporter or contributor attached — the issue carries the full write-up and the links.

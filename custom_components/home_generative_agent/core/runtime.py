@@ -46,6 +46,7 @@ if TYPE_CHECKING:
         SuppressionManager,
     )
 
+    from .provider_stall import ProviderStallTracker
     from .video_analyzer import VideoAnalyzer
 
 
@@ -86,6 +87,8 @@ class HGAData:
     # setup, so without an unload-time close a reload storm retains one client,
     # its connection pool, and its sockets per generation.
     openai_http_client: httpx.Client | None = None
+    # Per-provider stall state shared by the model chains (#828).
+    stall_tracker: ProviderStallTracker | None = None
     model_deployments: dict[str, str] = field(default_factory=dict)
     tool_content_hashes: dict[str, str] = field(default_factory=dict)
     tool_index_ready: bool = False

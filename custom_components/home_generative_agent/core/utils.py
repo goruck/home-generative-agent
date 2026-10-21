@@ -45,6 +45,7 @@ from .fallback import (
     ainvoke_dropping_unsupported_params,
     invoke_dropping_unsupported_params,
 )
+from .provider_stall import model_call_budget
 
 if TYPE_CHECKING:
     from collections.abc import (
@@ -470,7 +471,10 @@ async def run_sentinel_llm_call(  # noqa: PLR0913
     ):
         raise SentinelLLMDeferredError(category, "deferred; chat is active")
 
-    task = asyncio.create_task(call_factory())
+    # The task copies the budget, so a fallback chain inside it can split the
+    # time between providers (#828).
+    with model_call_budget(call_timeout_s):
+        task = asyncio.create_task(call_factory())
     _sentinel_llm_tasks.add(task)
     try:
         return await asyncio.wait_for(task, timeout=call_timeout_s)

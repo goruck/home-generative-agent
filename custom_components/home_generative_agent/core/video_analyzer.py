@@ -99,7 +99,11 @@ from .event_recording import (
     recording_url_from_state,
     thin_frames,
 )
-from .fallback import ainvoke_dropping_unsupported_params
+from .fallback import (
+    ProviderStalledError,
+    ainvoke_dropping_unsupported_params,
+    with_member_configurable,
+)
 from .notify_cooldown import (
     CooldownAction,
     CooldownWindow,
@@ -114,6 +118,7 @@ from .notify_cooldown import (
     window_after_unknown_face,
 )
 from .person_gallery import FACE_EMBEDDING_DIMS
+from .provider_stall import model_call_budget
 from .utils import (
     MOBILE_APP_SERVICE_PREFIX,
     discover_mobile_notify_service,
@@ -878,6 +883,24 @@ class _Metrics:
     )
 
 
+def _video_call_configurable(
+    model: Any, deployment: str, *, num_predict: int
+) -> dict[str, Any]:
+    """
+    Return one model's configurable values for a video caption or summary.
+
+    Caps the output length, and turns thinking off on an edge model whose
+    config has a reasoning key (set via reasoning_field() for thinking-capable
+    models): a short cap leaves no room for thinking. A model without the key
+    gets none, since some Ollama builds reject it.
+    """
+    cfg = dict(getattr(model, "config", {}).get("configurable", {}))
+    cfg["num_predict"] = num_predict
+    if is_edge_deployment(deployment) and "reasoning" in cfg:
+        cfg["reasoning"] = False
+    return cfg
+
+
 class VideoAnalyzer:
     """Analyze video from recording or motion-triggered cameras."""
 
@@ -1534,14 +1557,15 @@ class VideoAnalyzer:
                 t_model = monotonic()
                 try:
                     try:
-                        async with asyncio.timeout(_SUMMARY_TIMEOUT_SEC):
-                            summary_text: str = await self._generate_summary(
-                                frame_descriptions, sole_person
-                            )
+                        with model_call_budget(_SUMMARY_TIMEOUT_SEC):
+                            async with asyncio.timeout(_SUMMARY_TIMEOUT_SEC):
+                                summary_text: str = await self._generate_summary(
+                                    frame_descriptions, sole_person
+                                )
                     except TimeoutError as exc:
                         LOGGER.warning("[%s] Summary timed out: %s", camera_id, exc)
                         return None
-                    except ValueError as exc:
+                    except (ValueError, ProviderStalledError) as exc:
                         LOGGER.warning("[%s] Summary failed: %s", camera_id, exc)
                         return None
                 finally:
@@ -1552,14 +1576,15 @@ class VideoAnalyzer:
                 )
         else:
             try:
-                async with asyncio.timeout(_SUMMARY_TIMEOUT_SEC):
-                    summary_text = await self._generate_summary(
-                        frame_descriptions, sole_person
-                    )
+                with model_call_budget(_SUMMARY_TIMEOUT_SEC):
+                    async with asyncio.timeout(_SUMMARY_TIMEOUT_SEC):
+                        summary_text = await self._generate_summary(
+                            frame_descriptions, sole_person
+                        )
             except TimeoutError as exc:
                 LOGGER.warning("[%s] Summary timed out: %s", camera_id, exc)
                 return None
-            except ValueError as exc:
+            except (ValueError, ProviderStalledError) as exc:
                 LOGGER.warning("[%s] Summary failed: %s", camera_id, exc)
                 return None
 
@@ -2009,15 +2034,11 @@ class VideoAnalyzer:
         sum_deployment = self.entry.runtime_data.model_deployments.get(
             "summarization", "edge"
         )
-        base_sum = self.entry.runtime_data.summarization_model
-        sum_cfg = dict(getattr(base_sum, "config", {}).get("configurable", {}))
-        sum_cfg["num_predict"] = VIDEO_SUMMARY_NUM_PREDICT
-        # Only force-disable thinking when the base config carries a reasoning
-        # key (set via reasoning_field() for thinking-capable models); sending
-        # one for non-thinking models makes some Ollama builds reject the call.
-        if is_edge_deployment(sum_deployment) and "reasoning" in sum_cfg:
-            sum_cfg["reasoning"] = False
-        model = base_sum.with_config(config={"configurable": sum_cfg})
+        model = with_member_configurable(
+            self.entry.runtime_data.summarization_model,
+            partial(_video_call_configurable, num_predict=VIDEO_SUMMARY_NUM_PREDICT),
+            sum_deployment,
+        )
         summary = await ainvoke_dropping_unsupported_params(model, messages)
         LOGGER.debug("Raw video analyzer summary: %s", summary)
 
@@ -2591,6 +2612,10 @@ class VideoAnalyzer:
             LOGGER.warning("[%s] Snapshot not found: %s", camera_id, path)
         elif isinstance(exc, TimeoutError):
             LOGGER.warning("[%s] Image analysis timed out for %s", camera_id, path)
+        elif isinstance(exc, ProviderStalledError):
+            # Already reported once by the stall tracker (#828); a traceback
+            # per frame while it is stalled would only bury that warning.
+            LOGGER.debug("[%s] Skipped %s: %s", camera_id, path, exc)
         elif isinstance(exc, HomeAssistantError):
             LOGGER.error("[%s] Error analyzing %s", camera_id, path, exc_info=exc)
         else:
@@ -2608,7 +2633,7 @@ class VideoAnalyzer:
             pass
         return batch
 
-    async def _process_snapshot(  # noqa: PLR0911, PLR0912, PLR0915
+    async def _process_snapshot(  # noqa: PLR0911, PLR0915
         self, path: Path, camera_id: str, prev_text: str | None = None
     ) -> tuple[dict[str, list[str]], list[FaceHit]]:
         """
@@ -2657,16 +2682,13 @@ class VideoAnalyzer:
                     CONF_MODEL_PROVIDER_UNCONTENDED, False
                 )
                 use_gate = is_edge_deployment(vlm_deployment) and not uncontended
-                base_vlm = self.entry.runtime_data.vision_model
-                vlm_cfg = dict(getattr(base_vlm, "config", {}).get("configurable", {}))
-                vlm_cfg["num_predict"] = VIDEO_VLM_NUM_PREDICT
-                # Only force-disable thinking when the base config carries a
-                # reasoning key (set via reasoning_field() for thinking-capable
-                # models); sending one for non-thinking models makes some
-                # Ollama builds reject the call.
-                if is_edge_deployment(vlm_deployment) and "reasoning" in vlm_cfg:
-                    vlm_cfg["reasoning"] = False
-                vision_model = base_vlm.with_config(config={"configurable": vlm_cfg})
+                vision_model = with_member_configurable(
+                    self.entry.runtime_data.vision_model,
+                    partial(
+                        _video_call_configurable, num_predict=VIDEO_VLM_NUM_PREDICT
+                    ),
+                    vlm_deployment,
+                )
                 vlm_overrides = VLMPromptOverrides(
                     response_language=self.entry.runtime_data.options.get(
                         CONF_VLM_RESPONSE_LANGUAGE, RECOMMENDED_VLM_RESPONSE_LANGUAGE
@@ -2707,14 +2729,15 @@ class VideoAnalyzer:
                         )
                         t_model = monotonic()
                         try:
-                            async with asyncio.timeout(_VISION_TIMEOUT_SEC):
-                                frame_description = await analyze_image(
-                                    vision_model,
-                                    data,
-                                    None,
-                                    prev_text=prev_text,
-                                    overrides=vlm_overrides,
-                                )
+                            with model_call_budget(_VISION_TIMEOUT_SEC):
+                                async with asyncio.timeout(_VISION_TIMEOUT_SEC):
+                                    frame_description = await analyze_image(
+                                        vision_model,
+                                        data,
+                                        None,
+                                        prev_text=prev_text,
+                                        overrides=vlm_overrides,
+                                    )
                         finally:
                             sem.release()
                         LOGGER.debug(
@@ -2723,14 +2746,15 @@ class VideoAnalyzer:
                             monotonic() - t_model,
                         )
                 else:
-                    async with asyncio.timeout(_VISION_TIMEOUT_SEC):
-                        frame_description = await analyze_image(
-                            vision_model,
-                            data,
-                            None,
-                            prev_text=prev_text,
-                            overrides=vlm_overrides,
-                        )
+                    with model_call_budget(_VISION_TIMEOUT_SEC):
+                        async with asyncio.timeout(_VISION_TIMEOUT_SEC):
+                            frame_description = await analyze_image(
+                                vision_model,
+                                data,
+                                None,
+                                prev_text=prev_text,
+                                overrides=vlm_overrides,
+                            )
             except TimeoutError as exc:
                 self._m_inc(camera_id, "timeouts")
                 self._log_snapshot_error(camera_id, path, exc)

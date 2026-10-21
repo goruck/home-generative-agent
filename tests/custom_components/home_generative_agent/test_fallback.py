@@ -766,7 +766,8 @@ async def test_ainvoke_helper_passes_through_fallback_wrappers() -> None:
     provider.ainvoke.side_effect = [_bad_request_error(), _bad_request_error()]
     wrapper = FallbackChatModel(chain=[(provider, "cloud", "p1")])
 
-    with pytest.raises(HomeAssistantError, match="All LLM providers failed"):
+    # A lone provider's own error comes back unwrapped (#828).
+    with pytest.raises(openai.BadRequestError):
         await ainvoke_dropping_unsupported_params(wrapper, ["hi"])
 
     # Inner per-provider drop retried once (2 calls); the outer helper must NOT
