@@ -193,6 +193,8 @@ def _only_member(model: Any) -> Any:
     """Return the one provider in a single-provider chain (#828 wraps them too)."""
     assert isinstance(model, (FallbackChatModel, FallbackVLM))
     assert len(model.chain) == 1
+    # No breaker on a lone provider: it would only lock it out after recovery.
+    assert model.circuit_breaker is None
     return model.chain[0][0]
 
 

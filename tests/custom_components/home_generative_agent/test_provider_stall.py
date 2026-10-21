@@ -7,19 +7,23 @@ import asyncio
 from time import monotonic
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+import openai
 import pytest
 from homeassistant.exceptions import HomeAssistantError
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
 
-from custom_components.home_generative_agent.agent import graph
-from custom_components.home_generative_agent.core import provider_stall
+from custom_components.home_generative_agent.agent import graph, tools
+from custom_components.home_generative_agent.core import fallback, provider_stall
 from custom_components.home_generative_agent.core.fallback import (
     FallbackChatModel,
     FallbackVLM,
     ModelChainTimeoutError,
+    ProviderStalledError,
     is_timeout_error,
+    with_member_configurable,
 )
 from custom_components.home_generative_agent.core.provider_stall import (
     ProviderStallTracker,
@@ -68,7 +72,9 @@ async def _cancel_probe_tasks() -> Any:
     _probe_tasks.clear()
 
 
-def _tracker(changes: list[str] | None = None) -> ProviderStallTracker:
+def _tracker(
+    changes: list[str] | None = None, recovered: list[str] | None = None
+) -> ProviderStallTracker:
     """Build a tracker whose background tasks run on the test loop."""
 
     def _create(_hass: Any, coro: Any, _name: str) -> asyncio.Task[None]:
@@ -83,6 +89,7 @@ def _tracker(changes: list[str] | None = None) -> ProviderStallTracker:
         entry,  # type: ignore[arg-type]
         provider_name=lambda provider_id: f"Name of {provider_id}",
         on_change=lambda: log.append("changed"),
+        on_recovered=recovered.append if recovered is not None else None,
     )
 
 
@@ -97,7 +104,15 @@ def _chain(
 
 @pytest.fixture(autouse=True)
 def _short_conversation_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scale the conversation budget and the split/evidence floors down."""
     monkeypatch.setattr(graph, "_LLM_INVOKE_TIMEOUT_S", 2.0)
+    monkeypatch.setattr(provider_stall, "SPLIT_MIN_BUDGET_S", 0.5)
+    monkeypatch.setattr(provider_stall, "STALL_EVIDENCE_MIN_S", 0.2)
+
+
+def _real_floors(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(provider_stall, "SPLIT_MIN_BUDGET_S", 90.0)
+    monkeypatch.setattr(provider_stall, "STALL_EVIDENCE_MIN_S", 45.0)
 
 
 @pytest.mark.asyncio
@@ -199,10 +214,11 @@ async def test_the_probe_clears_the_stall_once_the_provider_answers(
     monkeypatch.setattr(provider_stall, "STALL_PROBE_INTERVAL_S", 0.05)
     monkeypatch.setattr(provider_stall, "STALL_PROBE_TIMEOUT_S", 0.1)
     changes: list[str] = []
-    tracker = _tracker(changes)
+    recovered: list[str] = []
+    tracker = _tracker(changes, recovered)
     model = _Model("primary", hang=True)
     for _ in range(provider_stall.STALL_TIMEOUT_THRESHOLD):
-        tracker.record_timeout("p0", model)
+        tracker.record_timeout("p0", lambda: model.ainvoke(_MESSAGES))
     assert tracker.is_stalled("p0")
 
     await asyncio.sleep(0.3)  # probes time out while it still hangs
@@ -218,6 +234,8 @@ async def test_the_probe_clears_the_stall_once_the_provider_answers(
     assert not tracker.is_stalled("p0")
     assert tracker.status() == []
     assert changes[0] == changes[-1] == "changed"
+    # Setup resets the circuit breakers its timeouts may have opened.
+    assert recovered == ["p0"]
 
 
 @pytest.mark.asyncio
@@ -282,3 +300,188 @@ def test_sdk_timeouts_count_as_timeouts() -> None:
     assert is_timeout_error(APITimeoutError("Request timed out."))
     assert is_timeout_error(wrapped)
     assert not is_timeout_error(ConnectionRefusedError())
+
+
+@pytest.mark.asyncio
+async def test_a_short_sentinel_budget_is_neither_split_nor_a_stall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow model missing triage's short deadline is not a hung provider."""
+    _real_floors(monkeypatch)
+    tracker = _tracker()
+    slow, fallback = _Model("primary", hang=True), _Model("fallback")
+    chain = _chain(slow, fallback, tracker=tracker)
+
+    for _ in range(provider_stall.STALL_TIMEOUT_THRESHOLD + 1):
+        with pytest.raises(TimeoutError):
+            await run_sentinel_model_call(
+                chain,
+                _MESSAGES,
+                deployment="edge",
+                category="triage",
+                admission_timeout_s=1.0,
+                call_timeout_s=0.3,
+            )
+
+    # The primary had the whole budget (no split), as before #828 ...
+    assert fallback.calls == 0
+    # ... and missing it is not stall evidence.
+    assert not tracker.is_stalled("p0")
+    assert tracker.status() == []
+
+
+@pytest.mark.asyncio
+async def test_the_alert_names_the_next_provider_actually_tried() -> None:
+    """A stalled provider is skipped in the fallback notice too."""
+    tracker = _tracker()
+    hung, stalled, fallback = (
+        _Model("p0", hang=True),
+        _Model("p1"),
+        _Model("p2"),
+    )
+    for _ in range(provider_stall.STALL_TIMEOUT_THRESHOLD):
+        tracker.record_timeout("p1", lambda: stalled.ainvoke(_MESSAGES))
+    alert = MagicMock()
+    chain = FallbackChatModel(
+        [(hung, "edge", "p0"), (stalled, "edge", "p1"), (fallback, "cloud", "p2")],
+        alert_callback=alert,
+        stall_tracker=tracker,
+    )
+
+    with model_call_budget(1.0):
+        assert (await chain.ainvoke(_MESSAGES)).content == "p2"
+
+    assert alert.call_args.kwargs["fallback_to"] == "p2"
+    assert stalled.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_a_lone_provider_raises_no_fallback_alert() -> None:
+    """With nothing to fall back to there is no 'all providers failed' alert."""
+    alert = MagicMock()
+    chain = FallbackChatModel(
+        [(_Model("p0", hang=True), "edge", "p0")], alert_callback=alert
+    )
+
+    with model_call_budget(0.5), pytest.raises(ModelChainTimeoutError):
+        await chain.ainvoke(_MESSAGES)
+
+    alert.assert_not_called()
+
+
+def _rejected_temperature() -> Exception:
+    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    body = {
+        "message": "Unsupported value: 'temperature' does not support 0.2.",
+        "type": "invalid_request_error",
+        "param": "temperature",
+        "code": "unsupported_value",
+    }
+    return openai.BadRequestError(
+        "Error code: 400",
+        response=httpx.Response(400, request=request),  # pyright: ignore[reportArgumentType]
+        body=body,
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_sampling_retry_shares_the_providers_deadline() -> None:
+    """A rebound provider that hangs still leaves the fallback time to answer."""
+    bound_p0 = AsyncMock()
+    bound_p0.ainvoke.side_effect = [_rejected_temperature(), _rejected_temperature()]
+    stripped_p0 = MagicMock()
+    stripped_p0.bind_tools.return_value = _Model("rebound", hang=True)
+    src_p0 = MagicMock()
+    src_p0.bind_tools.return_value = bound_p0
+    src_p0.with_config.return_value = stripped_p0
+    fallback_model = _Model("fallback")
+    src_p1 = MagicMock()
+    src_p1.bind_tools.return_value = fallback_model
+    chain = FallbackChatModel([(src_p0, "cloud", "p0"), (src_p1, "cloud", "p1")])
+    bound = chain.bind_tools([{"name": "t"}])
+    started = monotonic()
+
+    with model_call_budget(2.0):
+        result = await bound.ainvoke(_MESSAGES)
+
+    assert result.content == "fallback"
+    assert monotonic() - started < 2.0
+
+
+@pytest.mark.asyncio
+async def test_the_probe_drops_parameters_the_model_rejects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe goes through the same parameter drop as live calls."""
+    spy = AsyncMock(return_value=AIMessage(content="OK"))
+    monkeypatch.setattr(fallback, "ainvoke_dropping_unsupported_params", spy)
+    model = object()
+
+    await fallback._probe_call(model)()
+
+    assert spy.await_args is not None
+    assert spy.await_args.args[0] is model
+
+
+class _Configured:
+    """A model with a bound configurable section, like a LangChain binding."""
+
+    def __init__(self, configurable: dict[str, Any]) -> None:
+        self.config = {"configurable": configurable}
+
+    def with_config(self, *, config: dict[str, Any]) -> _Configured:
+        return _Configured({**self.config["configurable"], **config["configurable"]})
+
+
+def _video_cfg(model: Any, deployment: str) -> dict[str, Any]:
+    cfg = dict(model.config["configurable"])
+    cfg["num_predict"] = 128
+    if deployment == "edge" and "reasoning" in cfg:
+        cfg["reasoning"] = False
+    return cfg
+
+
+def test_member_configurable_reads_each_providers_own_settings() -> None:
+    """Video limits turn thinking off per member, not from the empty wrapper."""
+    edge = _Configured({"model": "qwen3:8b", "reasoning": True})
+    cloud = _Configured({"model": "gpt-x", "reasoning": True})
+    plain = _Configured({"model": "llava"})
+    chain = FallbackChatModel([(edge, "edge", "p0"), (cloud, "cloud", "p1")])
+
+    limited = with_member_configurable(chain, _video_cfg, "edge")
+
+    assert isinstance(limited, FallbackChatModel)
+    [(first, _, _), (second, _, _)] = limited.chain
+    assert first.config["configurable"] == {
+        "model": "qwen3:8b",
+        "reasoning": False,
+        "num_predict": 128,
+    }
+    # Each member keeps its own model; a cloud one keeps its reasoning.
+    assert second.config["configurable"]["model"] == "gpt-x"
+    assert second.config["configurable"]["reasoning"] is True
+    bare = with_member_configurable(plain, _video_cfg, "edge")
+    assert bare.config["configurable"] == {"model": "llava", "num_predict": 128}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error", [ModelChainTimeoutError("slow"), ProviderStalledError("stalled")]
+)
+async def test_analyze_image_leaves_timeouts_and_stalls_to_the_caller(
+    error: Exception,
+) -> None:
+    """Camera analysis counts these itself; they are not an error caption."""
+    model = AsyncMock()
+    model.ainvoke.side_effect = error
+
+    with pytest.raises(type(error)):
+        await tools.analyze_image(model, b"image")
+
+
+@pytest.mark.asyncio
+async def test_analyze_image_still_captions_other_errors() -> None:
+    model = AsyncMock()
+    model.ainvoke.side_effect = HomeAssistantError("bad image")
+
+    assert await tools.analyze_image(model, b"image") == tools.VLM_ERROR_CAPTION

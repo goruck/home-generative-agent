@@ -8,14 +8,19 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.exceptions import HomeAssistantError
+from langchain_core.messages import HumanMessage
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 from ..const import EMBEDDING_MODEL_DIMS  # noqa: TID252
 from .prompt_cache import adapt_system_message_for_model
-from .provider_stall import member_timeout
+from .provider_stall import (
+    budget_is_split,
+    counts_as_stall_evidence,
+    member_timeout,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from langchain_core.language_models import LanguageModelInput
     from langchain_core.messages import BaseMessage
@@ -419,6 +424,34 @@ class ModelChainTimeoutError(HomeAssistantError, TimeoutError):
     """
 
 
+class ProviderStalledError(HomeAssistantError):
+    """
+    Every usable provider in the chain is stalled; nothing was called.
+
+    Not a TimeoutError: the call failed at once, and its message names the
+    stalled provider so the user is told what is wrong (#828).
+    """
+
+
+_PROBE_PROMPT = "Reply with OK."
+
+
+def _probe_call(model: Any) -> Callable[[], Awaitable[Any]]:
+    """
+    Return the stall probe for a provider: a tiny real request.
+
+    It goes through the same sampling-param drop as live calls, so a model
+    that rejects a configured parameter can still pass its probe.
+    """
+
+    def _probe() -> Awaitable[Any]:
+        return ainvoke_dropping_unsupported_params(
+            model, [HumanMessage(content=_PROBE_PROMPT)]
+        )
+
+    return _probe
+
+
 def _chain_failed_error(kind: str, last_err: Exception | None) -> HomeAssistantError:
     """Return the error for a chain where every provider tried failed."""
     msg = f"All {kind} providers failed. Last error: {_safe_err_summary(last_err)}"
@@ -448,7 +481,7 @@ def _callable_members(
 def _stalled_chain_error(
     chain: list[tuple[Any, str, str]],
     stall_tracker: ProviderStallTracker | None,
-) -> HomeAssistantError | None:
+) -> ProviderStalledError | None:
     """
     Return the error for a chain whose only usable providers are stalled.
 
@@ -468,7 +501,7 @@ def _stalled_chain_error(
         f"Model provider {', '.join(names)} stopped answering. It is checked "
         "every minute and used again as soon as it answers."
     )
-    return HomeAssistantError(msg)
+    return ProviderStalledError(msg)
 
 
 def _budget_used_up(timeout_s: float | None) -> bool:
@@ -476,15 +509,48 @@ def _budget_used_up(timeout_s: float | None) -> bool:
     return timeout_s is not None and timeout_s <= 0
 
 
-def _record_stall_timeout(
-    stall_tracker: ProviderStallTracker | None,
-    provider_id: str,
-    model: Any,
+def _deadline(timeout_s: float | None) -> float | None:
+    """Return the loop time a member's share of the budget runs out, or None."""
+    if timeout_s is None:
+        return None
+    return asyncio.get_running_loop().time() + timeout_s
+
+
+def _handle_member_failure(  # noqa: PLR0913
+    wrapper: FallbackChatModel | FallbackVLM,
+    kind: str,
+    members: list[int],
+    pos: int,
+    timeout_s: float | None,
     err: Exception,
+    *,
+    moving_on: bool = True,
 ) -> None:
-    """Count a timeout toward the provider's stall (other errors do not)."""
-    if stall_tracker is not None and is_timeout_error(err):
-        stall_tracker.record_timeout(provider_id, model)
+    """Log and count a failed member; announce the provider tried next."""
+    i = members[pos]
+    model, _deployment, provider_id = wrapper.chain[i]
+    _log_provider_failure(kind, provider_id, i + 1, len(wrapper.chain), err)
+    if wrapper.circuit_breaker:
+        wrapper.circuit_breaker.record_failure(provider_id)
+    # Only a timeout with real time to answer is evidence of a hang: a slow
+    # model missing a short Sentinel deadline is not a stalled provider.
+    if (
+        wrapper.stall_tracker is not None
+        and is_timeout_error(err)
+        and counts_as_stall_evidence(timeout_s)
+    ):
+        wrapper.stall_tracker.record_timeout(provider_id, _probe_call(model))
+    if len(wrapper.chain) == 1 or not moving_on:
+        # Nothing is tried next (a lone provider, or an unsplit budget spent
+        # on this one); the failure is logged above and the caller reports it.
+        return
+    next_provider = wrapper.chain[members[pos + 1]] if pos + 1 < len(members) else None
+    wrapper.alert_callback(
+        provider_id,
+        err,
+        fallback_to=next_provider[2] if next_provider else None,
+        fallback_deployment=next_provider[1] if next_provider else None,
+    )
 
 
 def _record_answer(
@@ -667,13 +733,16 @@ class FallbackChatModel:
             stalled := _stalled_chain_error(self.chain, self.stall_tracker)
         ):
             raise stalled
+        split = budget_is_split()
         for pos, i in enumerate(members):
             model, _deployment, provider_id = self.chain[i]
             timeout_s = member_timeout(last=pos == len(members) - 1)
             if _budget_used_up(timeout_s):
                 break
+            # The sampling-param retry below shares this member's deadline.
+            deadline = _deadline(timeout_s)
             try:
-                async with asyncio.timeout(timeout_s):
+                async with asyncio.timeout_at(deadline):
                     result = await ainvoke_dropping_unsupported_params(
                         # Members can be different providers; shape the system
                         # message for the one actually being called.
@@ -684,30 +753,37 @@ class FallbackChatModel:
                     )
                 _raise_for_retryable_empty_response(result)
             except Exception as err:
-                rebind_result = await self._retry_with_default_sampling(
-                    i, err, input_data, config, **kwargs
-                )
+                failure: Exception = err
+                try:
+                    async with asyncio.timeout_at(deadline):
+                        rebind_result = await self._retry_with_default_sampling(
+                            i, err, input_data, config, **kwargs
+                        )
+                except TimeoutError as retry_err:
+                    rebind_result = None
+                    failure = retry_err
                 if rebind_result is not None:
                     _record_answer(
                         self.circuit_breaker, self.stall_tracker, provider_id
                     )
                     return rebind_result
-                last_err = err
-                if not _is_retryable(err):
+                last_err = failure
+                if not _is_retryable(failure):
+                    # Only the original error can be non-retryable here: a
+                    # retry that ran out of time raised a TimeoutError.
                     raise
-                _log_provider_failure(
-                    "Model call", provider_id, i + 1, len(self.chain), err
+                spent = not split and is_timeout_error(failure)
+                _handle_member_failure(
+                    self,
+                    "Model call",
+                    members,
+                    pos,
+                    timeout_s,
+                    failure,
+                    moving_on=not spent,
                 )
-                if self.circuit_breaker:
-                    self.circuit_breaker.record_failure(provider_id)
-                _record_stall_timeout(self.stall_tracker, provider_id, model, err)
-                next_provider = self.chain[i + 1] if i + 1 < len(self.chain) else None
-                self.alert_callback(
-                    provider_id,
-                    err,
-                    fallback_to=next_provider[2] if next_provider else None,
-                    fallback_deployment=next_provider[1] if next_provider else None,
-                )
+                if spent:
+                    break
                 continue
             else:
                 _record_answer(self.circuit_breaker, self.stall_tracker, provider_id)
@@ -791,6 +867,7 @@ class FallbackVLM:
             stalled := _stalled_chain_error(self.chain, self.stall_tracker)
         ):
             raise stalled
+        split = budget_is_split()
         for pos, i in enumerate(members):
             model, _deployment, provider_id = self.chain[i]
             timeout_s = member_timeout(last=pos == len(members) - 1)
@@ -805,19 +882,12 @@ class FallbackVLM:
                 last_err = err
                 if not _is_retryable(err):
                     raise
-                _log_provider_failure(
-                    "VLM call", provider_id, i + 1, len(self.chain), err
+                spent = not split and is_timeout_error(err)
+                _handle_member_failure(
+                    self, "VLM call", members, pos, timeout_s, err, moving_on=not spent
                 )
-                if self.circuit_breaker:
-                    self.circuit_breaker.record_failure(provider_id)
-                _record_stall_timeout(self.stall_tracker, provider_id, model, err)
-                next_provider = self.chain[i + 1] if i + 1 < len(self.chain) else None
-                self.alert_callback(
-                    provider_id,
-                    err,
-                    fallback_to=next_provider[2] if next_provider else None,
-                    fallback_deployment=next_provider[1] if next_provider else None,
-                )
+                if spent:
+                    break
                 continue
             else:
                 # The breaker's success was never recorded for VLM calls; the
@@ -827,6 +897,43 @@ class FallbackVLM:
 
         error = _chain_failed_error("VLM", last_err)
         raise error from last_err
+
+
+def with_member_configurable(
+    model: Any,
+    configurable_for: Callable[[Any, str], dict[str, Any]],
+    deployment: str,
+) -> Any:
+    """
+    Bind per-call configurable values, member by member for a chain.
+
+    ``configurable_for(member, member_deployment)`` returns the values for one
+    model. A chain wrapper's own ``config`` is empty, so values read from it
+    would miss each member's settings (its model name, whether it has a
+    ``reasoning`` field); this reads and binds each member's own instead.
+    A bare model uses *deployment*.
+    """
+    if isinstance(model, (FallbackChatModel, FallbackVLM)):
+        chain = [
+            (
+                member.with_config(
+                    config={"configurable": configurable_for(member, member_deployment)}
+                ),
+                member_deployment,
+                provider_id,
+            )
+            for member, member_deployment, provider_id in model.chain
+        ]
+        return type(model)(
+            chain,
+            model.circuit_breaker,
+            model.alert_callback,
+            dict(model.config),
+            model.stall_tracker,
+        )
+    return model.with_config(
+        config={"configurable": configurable_for(model, deployment)}
+    )
 
 
 class FallbackEmbeddings:

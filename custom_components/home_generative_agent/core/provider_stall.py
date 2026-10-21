@@ -19,7 +19,10 @@ Two pieces work together:
   ``STALL_PROBE_INTERVAL_S`` until it answers again.
 
 The probe is a real model request, not the setup-time health check: in #813
-the server still answered health checks while generation hung.
+the server still answered health checks while generation hung. Only a
+timeout with at least ``STALL_EVIDENCE_MIN_S`` to answer counts, and short
+budgets are not split (``SPLIT_MIN_BUDGET_S``), so a slow model that misses
+Sentinel triage's 10 s deadline is not taken for a hung one.
 """
 
 from __future__ import annotations
@@ -33,10 +36,9 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.util import dt as dt_util
-from langchain_core.messages import HumanMessage
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator
+    from collections.abc import Awaitable, Callable, Generator
     from datetime import datetime
 
     from homeassistant.config_entries import ConfigEntry
@@ -50,13 +52,19 @@ STALL_TIMEOUT_THRESHOLD = 3
 # How often a stalled provider is probed, and how long a probe may take.
 STALL_PROBE_INTERVAL_S = 60.0
 STALL_PROBE_TIMEOUT_S = 60.0
+# Budgets shorter than this are not split: the first provider gets all of it,
+# as before #828. Sentinel triage (10 s), explain (30 s), discovery and video
+# summaries (60 s) keep their whole budget for the primary; conversation turns
+# (180 s) and camera frames (90 s) are split.
+SPLIT_MIN_BUDGET_S = 90.0
+# A timeout counts toward a stall only when the provider had at least this long
+# to answer: a slow model missing a short deadline is not a hung server.
+STALL_EVIDENCE_MIN_S = 45.0
 # Time the last provider in a chain leaves unused, so its own timeout fires
 # (and is recorded) before the caller's deadline cancels the call: a tenth of
 # what is left, at most a second.
 _LAST_MEMBER_MARGIN_S = 1.0
 _LAST_MEMBER_MARGIN_FRACTION = 0.1
-
-_PROBE_PROMPT = "Reply with OK."
 
 _call_deadline: ContextVar[float | None] = ContextVar(
     "hga_model_call_deadline", default=None
@@ -82,19 +90,37 @@ def model_call_budget(seconds: float) -> Generator[None]:
         _call_deadline.reset(token)
 
 
+def budget_is_split() -> bool:
+    """
+    Return True if the current budget is shared out between providers.
+
+    With no budget, or one of at least ``SPLIT_MIN_BUDGET_S``. When it is not
+    split, the first provider has all of it, so a timeout there ends the call
+    instead of handing the next provider the leftover margin.
+    """
+    deadline = _call_deadline.get()
+    return deadline is None or deadline - monotonic() >= SPLIT_MIN_BUDGET_S
+
+
+def counts_as_stall_evidence(timeout_s: float | None) -> bool:
+    """Return True if a timeout after *timeout_s* seconds suggests a hang."""
+    return timeout_s is None or timeout_s >= STALL_EVIDENCE_MIN_S
+
+
 def member_timeout(*, last: bool) -> float | None:
     """
     Return how long one provider in a chain may take, or None for no limit.
 
     Every provider but the last gets half of what is left of the caller's
     budget, so the next one still has time; the last gets the rest, less a
-    small margin. None when the caller set no budget.
+    small margin. A budget under ``SPLIT_MIN_BUDGET_S`` is not split. None
+    when the caller set no budget.
     """
     deadline = _call_deadline.get()
     if deadline is None:
         return None
     remaining = deadline - monotonic()
-    if last:
+    if last or remaining < SPLIT_MIN_BUDGET_S:
         margin = min(_LAST_MEMBER_MARGIN_S, remaining * _LAST_MEMBER_MARGIN_FRACTION)
         return max(remaining - margin, 0.0)
     return max(remaining / 2, 0.0)
@@ -108,7 +134,7 @@ class _ProviderState:
     consecutive_timeouts: int = 0
     stalled_since: datetime | None = None
     last_probe: datetime | None = None
-    probe_model: Any = None
+    probe: Callable[[], Awaitable[Any]] | None = None
     probe_task: asyncio.Task[None] | None = None
 
 
@@ -122,12 +148,21 @@ class ProviderStallTracker:
         *,
         provider_name: Callable[[str], str],
         on_change: Callable[[], None] | None = None,
+        on_recovered: Callable[[str], None] | None = None,
     ) -> None:
-        """Initialize the tracker for one config entry."""
+        """
+        Initialize the tracker for one config entry.
+
+        *on_change* runs whenever the stalled set or a probe changes (to
+        refresh the health sensor); *on_recovered* runs with the provider id
+        when a stalled provider answers again (to reset circuit breakers that
+        its timeouts may have opened).
+        """
         self._hass = hass
         self._entry = entry
         self._provider_name = provider_name
         self._on_change = on_change
+        self._on_recovered = on_recovered
         self._states: dict[str, _ProviderState] = {}
 
     def _state(self, provider_id: str) -> _ProviderState:
@@ -151,12 +186,18 @@ class ProviderStallTracker:
         state = self._states.get(provider_id)
         return state.stalled_since if state else None
 
-    def record_timeout(self, provider_id: str, model: Any) -> None:
-        """Count a timeout; mark the provider stalled at the threshold."""
+    def record_timeout(
+        self, provider_id: str, probe: Callable[[], Awaitable[Any]]
+    ) -> None:
+        """
+        Count a timeout; mark the provider stalled at the threshold.
+
+        *probe* sends the provider a tiny request; the latest one is kept, so
+        the probe uses the model the provider was last called with.
+        """
         state = self._state(provider_id)
         state.consecutive_timeouts += 1
-        if state.probe_model is None:
-            state.probe_model = model
+        state.probe = probe
         if (
             state.stalled_since is not None
             or state.consecutive_timeouts < STALL_TIMEOUT_THRESHOLD
@@ -195,6 +236,8 @@ class ProviderStallTracker:
         task, state.probe_task = state.probe_task, None
         if task is not None and task is not asyncio.current_task():
             task.cancel()
+        if self._on_recovered is not None:
+            self._on_recovered(provider_id)
         self._changed()
 
     def status(self) -> list[dict[str, Any]]:
@@ -225,10 +268,10 @@ class ProviderStallTracker:
                 return
             state.last_probe = dt_util.utcnow()
             try:
+                if state.probe is None:
+                    return
                 async with asyncio.timeout(STALL_PROBE_TIMEOUT_S):
-                    await state.probe_model.ainvoke(
-                        [HumanMessage(content=_PROBE_PROMPT)]
-                    )
+                    await state.probe()
             except Exception as err:  # noqa: BLE001
                 # Any failure (timeout, refused connection, error reply)
                 # means it is not answering yet; the next probe tries again.
