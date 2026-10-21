@@ -52,6 +52,8 @@ from custom_components.home_generative_agent.const import (
 )
 from custom_components.home_generative_agent.core.utils import extract_final
 from custom_components.home_generative_agent.sentinel.models import (
+    RULE_NAMED_TEMPLATES,
+    SEMANTIC_KEY_SLUG_PREFIX,
     SEVERITY_RANK,
     enrolled_people,
     trust_device_ids,
@@ -957,6 +959,12 @@ def _display_type(finding: AnomalyFinding, hass: HomeAssistant | None = None) ->
         return notif_msg(hass, _KNOWN_TYPE_LABEL_KEYS[finding.type])
     template_id = str(finding.evidence.get("template_id") or "")
     if template_id in _KNOWN_TYPE_LABEL_KEYS:
+        if template_id in RULE_NAMED_TEMPLATES and not finding.type.startswith(
+            SEMANTIC_KEY_SLUG_PREFIX
+        ):
+            name = _friendly_type(finding.type, hass)
+            if name != notif_msg(hass, "type_unlabeled_rule"):
+                return name
         return notif_msg(hass, _KNOWN_TYPE_LABEL_KEYS[template_id])
     return _friendly_type(finding.type, hass)
 
@@ -1577,7 +1585,7 @@ def _security_device_summary(
             notif_msg(
                 hass,
                 "summary_device_minutes",
-                name=printable(str(names.get(entity_id, entity_id))),
+                name=printable(str(names.get(entity_id) or entity_id)),
                 minutes=int(minutes[entity_id]),
             )
             for entity_id in ids
@@ -1590,7 +1598,7 @@ def _security_device_summary(
             minutes=int(ev["threshold_minutes"]),
             listed=listed,
         )
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, OverflowError, TypeError, ValueError):
         return None
     return printable(text)
 

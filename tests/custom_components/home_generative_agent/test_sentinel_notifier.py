@@ -1945,6 +1945,42 @@ def test_display_type_low_battery_template_label() -> None:
     assert _display_type(finding, hass) == "Slabá baterie"  # type: ignore[arg-type]
 
 
+def _lambda_rule_finding(rule_id: str) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id="slug-lambda",
+        type=rule_id,
+        severity="medium",
+        confidence=0.8,
+        triggering_entities=["cover.garage_door"],
+        evidence={"template_id": "lambda"},
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+
+
+def test_display_type_custom_rule_keeps_its_own_name() -> None:
+    """A lambda rule's name is its only description; the generic label is not."""
+    finding = _lambda_rule_finding("garage_door_left_open_after_midnight")
+    assert _display_type(finding) == "Garage door left open after midnight"
+    hass = DummyHass()
+    hass.config.language = "cs"
+    assert _display_type(finding, hass) == (  # type: ignore[arg-type]
+        "Garage door left open after midnight"
+    )
+
+
+@pytest.mark.parametrize(
+    "rule_id", ["candidate_3", "v1_subject_cover_predicate_open_night_any"]
+)
+def test_display_type_unnamed_custom_rule_uses_template_label(rule_id: str) -> None:
+    """Without a usable name, a lambda rule falls back to its template label."""
+    finding = _lambda_rule_finding(rule_id)
+    assert _display_type(finding) == "Custom rule alert"
+    hass = DummyHass()
+    hass.config.language = "cs"
+    assert _display_type(finding, hass) == "Upozornění vlastního pravidla"  # type: ignore[arg-type]
+
+
 def test_display_type_bare_candidate_id_uses_template_label() -> None:
     """An approved rule named "candidate_1" shows its template label, not "1"."""
     finding = AnomalyFinding(
@@ -4200,6 +4236,21 @@ def test_security_device_summary_falls_back_to_the_stored_sentence() -> None:
     assert (
         _notifier_mod._network_summary(broken, _l10n_hass("cs"))
         == broken.evidence["summary"]
+    )
+
+
+def test_security_device_summary_survives_bad_figures() -> None:
+    """Odd persisted figures fall back or name the entity; rendering never raises."""
+    infinite = _security_device_finding(1)
+    infinite.evidence["unavailable_minutes"]["camera.c1"] = float("inf")
+    assert (
+        _notifier_mod._network_summary(infinite, _l10n_hass("cs"))
+        == (infinite.evidence["summary"])
+    )
+    nameless = _security_device_finding(1)
+    nameless.evidence["friendly_names"]["camera.c1"] = None
+    assert _notifier_mod._network_summary(nameless, _l10n_hass("en")) == (
+        "1 security device unavailable longer than 30 minutes: camera.c1 (51 min)."
     )
 
 

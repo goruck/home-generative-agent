@@ -231,6 +231,14 @@ class AnomalyFinding:
 # The evidence key naming the inventory ids a Trust device tap trusts.
 TRUST_DEVICE_IDS_KEY = "device_ids"
 
+# A custom (lambda) rule's condition is free-form, so its template label
+# ("Custom rule alert") says nothing about what fired: the rule's own name is
+# its only description, so notification and explanation labels prefer it
+# whenever it has words in it.
+RULE_NAMED_TEMPLATES: frozenset[str] = frozenset({"lambda"})
+# Rule ids slugged from a semantic key ("v1|subject=...") are not names.
+SEMANTIC_KEY_SLUG_PREFIX = "v1_subject_"
+
 # Severity order, lowest first.
 SEVERITY_RANK: dict[Severity, int] = {"low": 0, "medium": 1, "high": 2}
 

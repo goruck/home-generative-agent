@@ -518,9 +518,11 @@ def notif_plural_category(count: int) -> str:
     """
     Return ``"one"``, ``"few"`` or ``"many"`` for a whole-number *count*.
 
-    Follows the Czech cardinal rules (1 / 2-4 / everything else, with the
-    teens counting as "many"). English tables give ``few`` and ``many`` the
-    same text, so the same call site serves both languages.
+    1 is "one"; numbers ending in 2-4 are "few" except 12-14; everything
+    else is "many". For 22-24, 32-34, ... this picks the form Czech uses
+    after a spoken "dvacet dva" ("22 dny"); "dvaadvacet dní" is the other
+    accepted form. English tables give ``few`` and ``many`` the same text,
+    so the same call site serves both languages.
     """
     n = abs(int(count))
     if n == 1:

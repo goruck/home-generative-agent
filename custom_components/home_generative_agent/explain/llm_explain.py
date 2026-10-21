@@ -15,7 +15,11 @@ from custom_components.home_generative_agent.core.utils import (
     extract_final,
     run_sentinel_model_call,
 )
-from custom_components.home_generative_agent.sentinel.models import enrolled_people
+from custom_components.home_generative_agent.sentinel.models import (
+    RULE_NAMED_TEMPLATES,
+    SEMANTIC_KEY_SLUG_PREFIX,
+    enrolled_people,
+)
 from custom_components.home_generative_agent.sentinel.redaction import (
     redact_network_identifiers,
 )
@@ -205,6 +209,9 @@ _KNOWN_TYPE_LABELS = {
 }
 
 
+_UNLABELED_RULE = "Sentinel alert"
+
+
 def _display_type(finding: AnomalyFinding) -> str:
     """
     Friendly label for a finding.
@@ -218,6 +225,13 @@ def _display_type(finding: AnomalyFinding) -> str:
         return _KNOWN_TYPE_LABELS[finding.type]
     template_id = str(finding.evidence.get("template_id") or "")
     if template_id in _KNOWN_TYPE_LABELS:
+        # A custom rule's own name is its only description (see notifier).
+        if template_id in RULE_NAMED_TEMPLATES and not finding.type.startswith(
+            SEMANTIC_KEY_SLUG_PREFIX
+        ):
+            name = _friendly_type(finding.type)
+            if name != _UNLABELED_RULE:
+                return name
         return _KNOWN_TYPE_LABELS[template_id]
     return _friendly_type(finding.type)
 
@@ -233,7 +247,7 @@ def _friendly_type(anomaly_type: str) -> str:
     display = display.replace("_", " ").strip().capitalize()
     # An approved rule id like "candidate_1" leaves no words at all.
     if not any(char.isalpha() for char in display):
-        return "Sentinel alert"
+        return _UNLABELED_RULE
     return display
 
 
