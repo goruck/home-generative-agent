@@ -99,7 +99,11 @@ from .event_recording import (
     recording_url_from_state,
     thin_frames,
 )
-from .fallback import ainvoke_dropping_unsupported_params, with_member_configurable
+from .fallback import (
+    ProviderStalledError,
+    ainvoke_dropping_unsupported_params,
+    with_member_configurable,
+)
 from .notify_cooldown import (
     CooldownAction,
     CooldownWindow,
@@ -1561,7 +1565,7 @@ class VideoAnalyzer:
                     except TimeoutError as exc:
                         LOGGER.warning("[%s] Summary timed out: %s", camera_id, exc)
                         return None
-                    except ValueError as exc:
+                    except (ValueError, ProviderStalledError) as exc:
                         LOGGER.warning("[%s] Summary failed: %s", camera_id, exc)
                         return None
                 finally:
@@ -1580,7 +1584,7 @@ class VideoAnalyzer:
             except TimeoutError as exc:
                 LOGGER.warning("[%s] Summary timed out: %s", camera_id, exc)
                 return None
-            except ValueError as exc:
+            except (ValueError, ProviderStalledError) as exc:
                 LOGGER.warning("[%s] Summary failed: %s", camera_id, exc)
                 return None
 
@@ -2608,6 +2612,10 @@ class VideoAnalyzer:
             LOGGER.warning("[%s] Snapshot not found: %s", camera_id, path)
         elif isinstance(exc, TimeoutError):
             LOGGER.warning("[%s] Image analysis timed out for %s", camera_id, path)
+        elif isinstance(exc, ProviderStalledError):
+            # Already reported once by the stall tracker (#828); a traceback
+            # per frame while it is stalled would only bury that warning.
+            LOGGER.debug("[%s] Skipped %s: %s", camera_id, path, exc)
         elif isinstance(exc, HomeAssistantError):
             LOGGER.error("[%s] Error analyzing %s", camera_id, path, exc_info=exc)
         else:

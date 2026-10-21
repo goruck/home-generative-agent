@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from pathlib import Path
 from time import monotonic
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -27,12 +29,14 @@ from custom_components.home_generative_agent.core.fallback import (
 )
 from custom_components.home_generative_agent.core.provider_stall import (
     ProviderStallTracker,
+    budget_is_split,
     member_timeout,
     model_call_budget,
 )
 from custom_components.home_generative_agent.core.utils import (
     run_sentinel_model_call,
 )
+from custom_components.home_generative_agent.core.video_analyzer import VideoAnalyzer
 
 _MESSAGES: list[AnyMessage] = [HumanMessage(content="hi")]
 
@@ -112,7 +116,7 @@ def _short_conversation_budget(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _real_floors(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(provider_stall, "SPLIT_MIN_BUDGET_S", 90.0)
-    monkeypatch.setattr(provider_stall, "STALL_EVIDENCE_MIN_S", 45.0)
+    monkeypatch.setattr(provider_stall, "STALL_EVIDENCE_MIN_S", 40.0)
 
 
 @pytest.mark.asyncio
@@ -363,10 +367,12 @@ async def test_a_lone_provider_raises_no_fallback_alert() -> None:
         [(_Model("p0", hang=True), "edge", "p0")], alert_callback=alert
     )
 
-    with model_call_budget(0.5), pytest.raises(ModelChainTimeoutError):
+    with model_call_budget(0.5), pytest.raises(TimeoutError) as err:
         await chain.ainvoke(_MESSAGES)
 
     alert.assert_not_called()
+    # Its own error, unwrapped, as before every model was wrapped.
+    assert not isinstance(err.value, HomeAssistantError)
 
 
 def _rejected_temperature() -> Exception:
@@ -485,3 +491,129 @@ async def test_analyze_image_still_captions_other_errors() -> None:
     model.ainvoke.side_effect = HomeAssistantError("bad image")
 
     assert await tools.analyze_image(model, b"image") == tools.VLM_ERROR_CAPTION
+
+
+def test_a_camera_frame_budget_is_split_from_the_budget_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """90 s splits however long setup took, and each share is stall evidence."""
+    _real_floors(monkeypatch)
+    with model_call_budget(90.0):
+        assert budget_is_split()
+        share = member_timeout(last=False)
+    assert share is not None
+    assert 44.0 < share <= 45.0
+    assert provider_stall.counts_as_stall_evidence(share - 1.0)
+
+
+@pytest.mark.asyncio
+async def test_every_member_of_a_long_chain_gets_a_real_share() -> None:
+    """Two hung providers still leave the third time to answer."""
+    hung_a, hung_b, healthy = (
+        _Model("a", hang=True),
+        _Model("b", hang=True),
+        _Model("c"),
+    )
+    chain = FallbackChatModel(
+        [(hung_a, "edge", "p0"), (hung_b, "edge", "p1"), (healthy, "cloud", "p2")]
+    )
+
+    with model_call_budget(2.0):
+        result = await chain.ainvoke(_MESSAGES)
+
+    assert result.content == "c"
+
+
+class _FailsWith:
+    """A provider that raises *error* after *delay* seconds."""
+
+    def __init__(self, error: Exception, delay: float = 0.0) -> None:
+        self.error = error
+        self.delay = delay
+        self.calls = 0
+
+    async def ainvoke(self, _input: Any, _config: Any = None, **_kw: Any) -> Any:
+        self.calls += 1
+        await asyncio.sleep(self.delay)
+        raise self.error
+
+
+@pytest.mark.asyncio
+async def test_an_early_sdk_timeout_still_moves_on_in_an_unsplit_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a used-up budget stops a short call, not any timeout error."""
+    _real_floors(monkeypatch)
+    early = _FailsWith(APITimeoutError("Request timed out."))
+    fallback_model = _Model("fallback")
+    chain = FallbackChatModel([(early, "cloud", "p0"), (fallback_model, "edge", "p1")])
+
+    with model_call_budget(1.0):
+        result = await chain.ainvoke(_MESSAGES)
+
+    assert result.content == "fallback"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "delay"),
+    [
+        (APITimeoutError("Request timed out."), 0.0),  # gave up early
+        (httpx.PoolTimeout("no free connection"), 0.3),  # our own pool
+    ],
+)
+async def test_quick_or_client_side_timeouts_are_not_a_stall(
+    monkeypatch: pytest.MonkeyPatch, error: Exception, delay: float
+) -> None:
+    """Stall evidence is a long wait for the provider, not any timeout."""
+    monkeypatch.setattr(provider_stall, "STALL_EVIDENCE_MIN_S", 0.2)
+    tracker = _tracker()
+    chain = FallbackChatModel(
+        [(_FailsWith(error, delay), "edge", "p0"), (_Model("ok"), "cloud", "p1")],
+        stall_tracker=tracker,
+    )
+
+    for _ in range(provider_stall.STALL_TIMEOUT_THRESHOLD):
+        with model_call_budget(2.0):
+            await chain.ainvoke(_MESSAGES)
+
+    assert not tracker.is_stalled("p0")
+
+
+def test_a_tool_bound_member_is_probed_through_its_unbound_source() -> None:
+    """Parameters baked into a tool binding cannot be dropped by the probe."""
+    source = MagicMock()
+    source.bind_tools.return_value = _Model("bound")
+    chain = FallbackChatModel([(source, "cloud", "p0")]).bind_tools([{"name": "t"}])
+
+    assert fallback._probe_model(chain, 0) is source
+    assert fallback._probe_model(FallbackVLM([(source, "edge", "p0")]), 0) is source
+
+
+def test_member_configurable_keeps_the_sampling_rebind_sources() -> None:
+    """Cloning a tool-bound chain keeps its rebind sources, configured alike."""
+    source = _Configured({"model": "qwen3:8b", "reasoning": True})
+    source.bind_tools = lambda _tools, **_kw: _Configured(  # type: ignore[attr-defined]
+        dict(source.config["configurable"])
+    )
+    bound = FallbackChatModel([(source, "edge", "p0")]).bind_tools([{"name": "t"}])
+
+    limited = with_member_configurable(bound, _video_cfg, "edge")
+
+    assert isinstance(limited, FallbackChatModel)
+    [rebind] = limited._rebind_sources
+    assert rebind is not None
+    assert rebind[0].config["configurable"]["reasoning"] is False
+    assert rebind[1] == [{"name": "t"}]
+
+
+def test_a_stalled_provider_is_not_logged_as_an_error_per_frame(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The tracker already warned once; frames skipped while stalled stay quiet."""
+    with caplog.at_level(logging.DEBUG):
+        VideoAnalyzer._log_snapshot_error(
+            cast("VideoAnalyzer", None), "cam", Path("x.jpg"), ProviderStalledError("s")
+        )
+
+    assert [r.levelno for r in caplog.records] == [logging.DEBUG]

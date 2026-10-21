@@ -20,7 +20,7 @@ Two pieces work together:
 
 The probe is a real model request, not the setup-time health check: in #813
 the server still answered health checks while generation hung. Only a
-timeout with at least ``STALL_EVIDENCE_MIN_S`` to answer counts, and short
+timeout after waiting at least ``STALL_EVIDENCE_MIN_S`` counts, and short
 budgets are not split (``SPLIT_MIN_BUDGET_S``), so a slow model that misses
 Sentinel triage's 10 s deadline is not taken for a hung one.
 """
@@ -57,17 +57,27 @@ STALL_PROBE_TIMEOUT_S = 60.0
 # summaries (60 s) keep their whole budget for the primary; conversation turns
 # (180 s) and camera frames (90 s) are split.
 SPLIT_MIN_BUDGET_S = 90.0
-# A timeout counts toward a stall only when the provider had at least this long
-# to answer: a slow model missing a short deadline is not a hung server.
-STALL_EVIDENCE_MIN_S = 45.0
+# A timeout counts toward a stall only after the call waited at least this
+# long: a slow model missing a short deadline is not a hung server. Below a
+# camera frame's 45 s share, so a hung VLM is still caught.
+STALL_EVIDENCE_MIN_S = 40.0
 # Time the last provider in a chain leaves unused, so its own timeout fires
 # (and is recorded) before the caller's deadline cancels the call: a tenth of
 # what is left, at most a second.
 _LAST_MEMBER_MARGIN_S = 1.0
 _LAST_MEMBER_MARGIN_FRACTION = 0.1
 
-_call_deadline: ContextVar[float | None] = ContextVar(
-    "hga_model_call_deadline", default=None
+
+@dataclass(frozen=True)
+class _CallBudget:
+    """A caller's deadline, and whether its budget is shared out."""
+
+    deadline: float
+    split: bool
+
+
+_call_budget: ContextVar[_CallBudget | None] = ContextVar(
+    "hga_model_call_budget", default=None
 )
 
 
@@ -77,17 +87,21 @@ def model_call_budget(seconds: float) -> Generator[None]:
     Tell fallback chains how long the caller will wait for this model call.
 
     Use it around (or before creating the task for) a call that the caller
-    bounds with its own timeout. A nested budget never extends an outer one.
+    bounds with its own timeout. Whether the budget is split is decided here,
+    from the budget the caller set, so time spent before the chain runs never
+    changes it. A nested budget never extends an outer one.
     """
-    deadline = monotonic() + seconds
-    outer = _call_deadline.get()
-    if outer is not None:
-        deadline = min(deadline, outer)
-    token = _call_deadline.set(deadline)
+    budget = _CallBudget(
+        deadline=monotonic() + seconds, split=seconds >= SPLIT_MIN_BUDGET_S
+    )
+    outer = _call_budget.get()
+    if outer is not None and outer.deadline <= budget.deadline:
+        budget = outer
+    token = _call_budget.set(budget)
     try:
         yield
     finally:
-        _call_deadline.reset(token)
+        _call_budget.reset(token)
 
 
 def budget_is_split() -> bool:
@@ -98,13 +112,13 @@ def budget_is_split() -> bool:
     split, the first provider has all of it, so a timeout there ends the call
     instead of handing the next provider the leftover margin.
     """
-    deadline = _call_deadline.get()
-    return deadline is None or deadline - monotonic() >= SPLIT_MIN_BUDGET_S
+    budget = _call_budget.get()
+    return budget is None or budget.split
 
 
-def counts_as_stall_evidence(timeout_s: float | None) -> bool:
-    """Return True if a timeout after *timeout_s* seconds suggests a hang."""
-    return timeout_s is None or timeout_s >= STALL_EVIDENCE_MIN_S
+def counts_as_stall_evidence(waited_s: float) -> bool:
+    """Return True if a timeout after waiting *waited_s* seconds suggests a hang."""
+    return waited_s >= STALL_EVIDENCE_MIN_S
 
 
 def member_timeout(*, last: bool) -> float | None:
@@ -116,11 +130,11 @@ def member_timeout(*, last: bool) -> float | None:
     small margin. A budget under ``SPLIT_MIN_BUDGET_S`` is not split. None
     when the caller set no budget.
     """
-    deadline = _call_deadline.get()
-    if deadline is None:
+    budget = _call_budget.get()
+    if budget is None:
         return None
-    remaining = deadline - monotonic()
-    if last or remaining < SPLIT_MIN_BUDGET_S:
+    remaining = budget.deadline - monotonic()
+    if last or not budget.split:
         margin = min(_LAST_MEMBER_MARGIN_S, remaining * _LAST_MEMBER_MARGIN_FRACTION)
         return max(remaining - margin, 0.0)
     return max(remaining / 2, 0.0)
