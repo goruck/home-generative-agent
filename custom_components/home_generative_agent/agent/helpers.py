@@ -877,9 +877,9 @@ def resolve_critical_action_policy(options: Mapping[str, Any]) -> CriticalAction
         pin_salt=pin_salt,
         # Copy: the default is a module-level list handed to every config
         # entry, so an in-place edit anywhere would corrupt it process-wide.
-        # The internal exact-entity marker is never taken from stored rules.
+        # The internal per-entity keys are never taken from stored rules.
         critical_actions=[
-            {k: v for k, v in rule.items() if k != CRITICAL_RULE_EXACT_ENTITY}
+            {k: v for k, v in rule.items() if k not in INTERNAL_RULE_KEYS}
             for rule in options.get(CONF_CRITICAL_ACTIONS)
             or RECOMMENDED_CRITICAL_ACTIONS
         ],
@@ -1159,6 +1159,57 @@ def thread_has_pending_action(
 # keeps the user rule's `entity_match`, so a reader that does not know this
 # key still reads it as the rule it was copied from.
 CRITICAL_RULE_EXACT_ENTITY = "_exact_entity"
+# Also on a copy: set when its entity is hidden, so an area, device, floor or
+# label target cannot reach it (Home Assistant skips hidden entities there;
+# switch_as_x hides the relay it wraps, #804), and the entity's registry id,
+# which a device action names it by. Internal like the marker above.
+CRITICAL_RULE_HIDDEN = "_hidden"
+CRITICAL_RULE_REGISTRY_ID = "_registry_id"
+INTERNAL_RULE_KEYS = frozenset(
+    {CRITICAL_RULE_EXACT_ENTITY, CRITICAL_RULE_HIDDEN, CRITICAL_RULE_REGISTRY_ID}
+)
+
+
+@dataclass(frozen=True)
+class TargetParts:
+    """
+    What a call's targets name, for matching per-entity rule copies (#804).
+
+    ``indirect``: an area, device, floor or label, which Home Assistant
+    expands without hidden entities. ``opaque``: anything that could name
+    any entity (``all``, a template, a group, or no target at all).
+    """
+
+    entities: tuple[str, ...] = ()
+    registry_ids: frozenset[str] = frozenset()
+    indirect: bool = False
+    opaque: bool = False
+
+    def merge(self, other: TargetParts) -> TargetParts:
+        """Return the targets of both."""
+        return TargetParts(
+            entities=self.entities + other.entities,
+            registry_ids=self.registry_ids | other.registry_ids,
+            indirect=self.indirect or other.indirect,
+            opaque=self.opaque or other.opaque,
+        )
+
+    @property
+    def unresolved(self) -> bool:
+        """Return True unless every target is a named entity id."""
+        return (
+            self.indirect or self.opaque or bool(self.registry_ids) or not self.entities
+        )
+
+
+def exact_copy_reached(rule: Mapping[str, str], targets: TargetParts) -> bool:
+    """Return True if a per-entity copy's entity may be among these targets."""
+    return (
+        targets.opaque
+        or rule_entity_matches(rule, targets.entities)
+        or (rule.get(CRITICAL_RULE_REGISTRY_ID) or "").lower() in targets.registry_ids
+        or (targets.indirect and not rule.get(CRITICAL_RULE_HIDDEN))
+    )
 
 
 def rule_entity_matches(rule: Mapping[str, str], entity_ids: Sequence[str]) -> bool:
@@ -1176,13 +1227,14 @@ def rule_entity_matches(rule: Mapping[str, str], entity_ids: Sequence[str]) -> b
     return not entity_match or any(entity_match in e for e in entity_ids)
 
 
-def matches_critical_rule(
+def matches_critical_rule(  # noqa: PLR0913
     *,
     domain: str,
     service: str,
     entity_ids: Sequence[str],
     critical_actions: Iterable[Mapping[str, str]],
     unresolved_target: bool = False,
+    targets: TargetParts | None = None,
 ) -> bool:
     """
     Return True when a domain/service call matches a critical-action rule.
@@ -1194,6 +1246,8 @@ def matches_critical_rule(
     ``unresolved_target`` fails closed for ``entity_match`` rules: when a call
     targets an area, device, label, or template, the entity IDs it will hit are
     unknown at check time, so an otherwise-matching rule is treated as a match.
+    ``targets``, when given, says what the unresolved part is, so a
+    per-entity copy matches only if its entity may be among them.
     """
     domain = domain.lower()
     service = service.lower()
@@ -1206,6 +1260,13 @@ def matches_critical_rule(
         if rule_domain and rule_domain != domain:
             continue
         if rule_service and rule_service != service:
+            continue
+        if targets is not None and rule.get(CRITICAL_RULE_EXACT_ENTITY):
+            # A per-entity copy is held only when its entity may really be
+            # among the targets: by id, by registry id, or through an area,
+            # device, floor or label that does not skip it as hidden (#804).
+            if exact_copy_reached(rule, targets):
+                return True
             continue
         if not unresolved_target and not rule_entity_matches(rule, entities):
             continue

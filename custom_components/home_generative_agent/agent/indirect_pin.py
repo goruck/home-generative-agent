@@ -809,6 +809,20 @@ def _service_step(action: str, tool_args: Mapping[str, Any]) -> dict[str, Any]:
             *(named if isinstance(named, list) else [named] if named else []),
             *(plural if isinstance(plural, list) else [plural]),
         ]
+    if "device_id" in step and isinstance(step.get("target", {}), dict):
+        # At the top of a step, `device_id` makes it read as a device action
+        # (Home Assistant's own classification), so a service call aimed at a
+        # device was held as one that cannot be identified. Under `target:`
+        # it is the call's target, as Home Assistant reads it (#804).
+        target = dict(step.get("target", {}))
+        devices = step.pop("device_id")
+        if (already := target.get("device_id")) is not None:
+            devices = [
+                *(already if isinstance(already, list) else [already]),
+                *(devices if isinstance(devices, list) else [devices]),
+            ]
+        target["device_id"] = devices
+        step["target"] = target
     return step
 
 

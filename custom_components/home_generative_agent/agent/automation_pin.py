@@ -68,6 +68,8 @@ from homeassistant.helpers import config_validation as cv
 
 from .helpers import (
     CRITICAL_RULE_EXACT_ENTITY,
+    TargetParts,
+    exact_copy_reached,
     matches_critical_rule,
     rule_entity_matches,
 )
@@ -148,6 +150,9 @@ _GENERIC_DOMAIN = "homeassistant"
 # A concrete entity_id. Anything else (registry UUID, templated value) names a
 # target this module cannot resolve.
 _ENTITY_ID_RE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
+# An entity registry id (a uuid4 hex), which targets and device actions accept
+# in place of an entity id.
+_REGISTRY_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 # Entity domains that expand to *other* entities when the call runs.
 _EXPANDING_DOMAINS = frozenset({"group", "scene", "script", "automation"})
@@ -264,46 +269,44 @@ def _nested_sequences(node: Mapping[str, Any]) -> Iterator[Any]:
 
 def _collect_one_entity_id(
     value: str, keep: frozenset[str] = frozenset()
-) -> tuple[list[str], bool]:
+) -> TargetParts:
     """
-    Return ([entity_id], unresolved) for a single ``entity_id`` string.
+    Return what a single ``entity_id`` string names.
 
-    An entity of an expanding domain is unresolved unless its domain is in
+    An entity of an expanding domain is opaque unless its domain is in
     ``keep``, for a caller that opens those entities itself.
     """
     lowered = value.strip().lower()
     if not lowered or lowered == _ENTITY_ID_NONE:
-        return [], False
+        return TargetParts()
     if lowered == _ENTITY_ID_WILDCARD:
         # `entity_id: all` targets every entity in the domain.
-        return [], True
+        return TargetParts(opaque=True)
     if not _ENTITY_ID_RE.fullmatch(lowered):
         # Entity registry IDs are accepted in targets and resolved later, so
-        # the entity this really hits is unknown at write time.
-        return [], True
+        # the entity this really hits is unknown at write time; a rule copy
+        # knows its entity's registry id (#804). Anything else is opaque.
+        if _REGISTRY_ID_RE.fullmatch(lowered):
+            return TargetParts(registry_ids=frozenset({lowered}))
+        return TargetParts(opaque=True)
     if lowered.split(".", 1)[0] in _EXPANDING_DOMAINS - keep:
         # Groups and helpers fan out to entities named nowhere in this config.
-        return [], True
-    return [lowered], False
+        return TargetParts(opaque=True)
+    return TargetParts(entities=(lowered,))
 
 
-def _collect_entity_ids(
-    value: Any, keep: frozenset[str] = frozenset()
-) -> tuple[list[str], bool]:
-    """Return (entity_ids, unresolved) for an ``entity_id`` field value."""
+def _collect_entity_ids(value: Any, keep: frozenset[str] = frozenset()) -> TargetParts:
+    """Return what an ``entity_id`` field value names."""
     if value is None:
-        return [], False
+        return TargetParts()
     if isinstance(value, (list, tuple)):
-        entities: list[str] = []
-        unresolved = False
+        parts = TargetParts()
         for item in value:
-            item_entities, item_unresolved = _collect_entity_ids(item, keep)
-            entities.extend(item_entities)
-            unresolved = unresolved or item_unresolved
-        return entities, unresolved
+            parts = parts.merge(_collect_entity_ids(item, keep))
+        return parts
     if not isinstance(value, str) or _is_template(value):
         # Template or unexpected type: the real targets are unknown.
-        return [], True
+        return TargetParts(opaque=True)
     return _collect_one_entity_id(value, keep)
 
 
@@ -332,17 +335,16 @@ def _targets_include_indirection(step: Mapping[str, Any]) -> bool:
     return False
 
 
-def step_targets(
+def step_target_parts(
     step: Mapping[str, Any], keep: frozenset[str] = frozenset()
-) -> tuple[list[str], bool]:
+) -> TargetParts:
     """
-    Return (entity_ids, unresolved_target) for one step.
+    Return what one step's targets name.
 
     ``keep`` names expanding domains (`script`, `scene`) whose entities the
-    caller opens itself, so they are returned rather than counted unresolved.
+    caller opens itself, so they are returned rather than counted opaque.
     """
-    entities: list[str] = []
-    unresolved = False
+    parts = TargetParts()
 
     containers: list[Any] = [step]
     containers.extend(step[key] for key in _TARGET_CONTAINER_KEYS if key in step)
@@ -351,16 +353,41 @@ def step_targets(
         if not isinstance(container, dict) or _has_templated_key(container):
             # e.g. a fully templated `target:`, or a key HA renders into
             # `entity_id` when the step runs.
-            unresolved = True
+            parts = parts.merge(TargetParts(opaque=True))
             continue
-        found, found_unresolved = _collect_entity_ids(container.get("entity_id"), keep)
-        entities.extend(found)
-        unresolved = unresolved or found_unresolved
+        parts = parts.merge(_collect_entity_ids(container.get("entity_id"), keep))
         if any(container.get(key) for key in _NON_ENTITY_TARGET_KEYS):
-            unresolved = True
+            parts = parts.merge(TargetParts(indirect=True))
 
-    # No resolvable entity at all: fail closed for entity_match rules.
-    return entities, unresolved or not entities
+    if not (parts.entities or parts.registry_ids or parts.indirect):
+        # Nothing named at all: fail closed.
+        parts = parts.merge(TargetParts(opaque=True))
+    return parts
+
+
+def step_targets(
+    step: Mapping[str, Any], keep: frozenset[str] = frozenset()
+) -> tuple[list[str], bool]:
+    """
+    Return (entity_ids, unresolved_target) for one step.
+
+    ``unresolved_target`` is True unless every target is a named entity id
+    (see ``step_target_parts`` for what the unresolved part is).
+    """
+    parts = step_target_parts(step, keep)
+    return list(parts.entities), parts.unresolved
+
+
+def _device_action_targets(step: Mapping[str, Any]) -> TargetParts:
+    """
+    Return what a device action acts on: its ``entity_id``, not its device.
+
+    Home Assistant's toggle device actions call the service on the entity
+    the action names, usually by registry id, hidden or not; the
+    ``device_id`` only picks the integration (#804). An action naming no
+    entity is opaque.
+    """
+    return step_target_parts({"entity_id": step.get("entity_id")})
 
 
 def _service_name(step: Mapping[str, Any]) -> tuple[str, str, bool]:
@@ -390,20 +417,25 @@ def _domain_is_guarded(
     entities: Sequence[str],
     *,
     unresolved: bool,
+    targets: TargetParts | None = None,
 ) -> bool:
     """
     Return True if any critical rule could apply to these entities of a domain.
 
     A rule copy for one entity (a relay under a garage cover, #794) applies
     only to that entity: with the targets known, it does not make the whole
-    domain guarded.
+    domain guarded, and with ``targets`` given it applies only when its entity
+    may be among them (#804).
     """
     return any(
         (not (rule.get("domain") or "") or (rule.get("domain") or "").lower() == domain)
         and (
-            unresolved
-            or not rule.get(CRITICAL_RULE_EXACT_ENTITY)
-            or rule_entity_matches(rule, entities)
+            not rule.get(CRITICAL_RULE_EXACT_ENTITY)
+            or (
+                exact_copy_reached(rule, targets)
+                if targets is not None
+                else unresolved or rule_entity_matches(rule, entities)
+            )
         )
         for rule in rules
     )
@@ -443,7 +475,7 @@ def _screen_state_reproduction(
 
     found: list[CriticalAutomationCall] = []
     for candidate in candidates:
-        entities, _unresolved = _collect_entity_ids(candidate)
+        entities = list(_collect_entity_ids(candidate).entities)
         if not entities:
             found.append(unreadable)
             continue
@@ -487,13 +519,15 @@ def _screen_call_service(
     if special is not None:
         return special
 
-    entities, unresolved = step_targets(step)
+    targets = step_target_parts(step)
+    entities = list(targets.entities)
     if not matches_critical_rule(
         domain=domain,
         service=service,
         entity_ids=entities,
         critical_actions=rules,
-        unresolved_target=unresolved,
+        unresolved_target=targets.unresolved,
+        targets=targets,
     ):
         return []
     return [
@@ -621,13 +655,18 @@ def _screen_device_action(
             )
         ]
 
-    entities, unresolved = step_targets(step)
+    # Every rule but a per-entity copy still fails closed on the device (its
+    # entity is usually a registry id); a copy matches only its own entity.
+    _, unresolved = step_targets(step)
+    targets = _device_action_targets(step)
+    entities = list(targets.entities)
     if matches_critical_rule(
         domain=domain,
         service=action_kind,
         entity_ids=entities,
         critical_actions=rules,
         unresolved_target=unresolved,
+        targets=targets,
     ):
         return [
             CriticalAutomationCall(
@@ -644,7 +683,9 @@ def _screen_device_action(
     # sound when it happens to match; when it does not, any rule on the domain
     # still has to count, except a copy for one entity (#794), which counts
     # only for that entity or for targets that cannot be named.
-    if _domain_is_guarded(domain, rules, entities, unresolved=unresolved):
+    if _domain_is_guarded(
+        domain, rules, entities, unresolved=unresolved, targets=targets
+    ):
         return [
             CriticalAutomationCall(
                 service=f"{domain}.{action_kind}",
