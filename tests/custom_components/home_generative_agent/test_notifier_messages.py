@@ -5,13 +5,17 @@ from string import Formatter
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from custom_components.home_generative_agent.sentinel.notifier import (
     _KNOWN_TYPE_LABEL_KEYS,
 )
 from custom_components.home_generative_agent.sentinel.notifier_messages import (
     _DEFAULT_LANGUAGE,
     _MESSAGES,
+    notif_language,
     notif_msg,
+    notif_plural_category,
 )
 
 # One dummy value per placeholder name used anywhere in the tables. A KeyError
@@ -38,6 +42,24 @@ _DUMMY_KWARGS: dict[str, Any] = {
     "minutes": 30,
     "actions": "lock.lock",
     "targets": "Front Door",
+    "power": "about 5 W",
+    "watts": 5,
+    "threshold": "above the 60 min threshold",
+    "camera": "Front Camera",
+    "since": "8:30",
+    "entry": "Front Door",
+    "alarm": "Alarm disarmed.",
+    "date": "18. 10.",
+    "time": "7:05",
+    "cur": 1.5,
+    "unit": "W",
+    "base": 1.0,
+    "pct": 5,
+    "cta": "Check appliance.",
+    "noun": "power",
+    "name": "Washer",
+    "age": "about 3 days",
+    "listed": "Camera (30 min)",
 }
 
 
@@ -166,6 +188,31 @@ _CALL_SITE_KWARGS: dict[str, set[str]] = {
     "also_more": {"count"},
     "digest_message": {"count", "plural", "sev_summary"},
     "snooze_confirm_message": {"friendly"},
+    "body_appliance_power": {"appliance", "power", "duration", "threshold"},
+    "body_power_watts": {"watts"},
+    "body_duration_min": {"minutes"},
+    "body_threshold_min": {"minutes"},
+    "body_alarm_camera_seen_ago": {"camera", "minutes"},
+    "body_alarm_camera_seen": {"camera"},
+    "body_alarm_disarmed_since": {"since"},
+    "body_entry_alarm_since": {"since"},
+    "body_entry_open_alarm": {"entry", "alarm"},
+    "disarm_since_other_day": {"date", "time"},
+    "body_baseline_values": {"appliance", "cur", "unit", "base", "pct", "cta"},
+    "body_baseline_pct_above": {"pct"},
+    "body_baseline_pct_below": {"pct"},
+    "body_baseline_noval": {"appliance", "noun", "direction", "cta"},
+    "body_baseline_noval_pct": {"appliance", "noun", "pct", "direction", "cta"},
+    "body_stale_person": {"name", "age"},
+    "body_stale_sensor": {"name", "age"},
+    "age_days_few": {"count"},
+    "age_days_many": {"count"},
+    "age_hours_few": {"count"},
+    "age_hours_many": {"count"},
+    "summary_device_minutes": {"name", "minutes"},
+    "summary_security_devices_one": {"count", "minutes", "listed"},
+    "summary_security_devices_few": {"count", "minutes", "listed"},
+    "summary_security_devices_many": {"count", "minutes", "listed"},
 }
 
 
@@ -198,3 +245,51 @@ def test_bad_placeholder_degrades_instead_of_crashing(monkeypatch):
 def test_unknown_key_with_kwargs_is_never_formatted():
     """Data-derived ids must not be treated as format templates."""
     assert notif_msg(None, "{count}", count=9) == "{count}"
+
+
+@pytest.mark.parametrize(
+    ("count", "category"),
+    [
+        (0, "many"),
+        (1, "one"),
+        (2, "few"),
+        (4, "few"),
+        (5, "many"),
+        (11, "many"),
+        (12, "many"),
+        (14, "many"),
+        (21, "many"),
+        (22, "few"),
+        (25, "many"),
+        (101, "many"),
+        (112, "many"),
+    ],
+)
+def test_plural_category_follows_czech_cardinals(count: int, category: str) -> None:
+    """1 / 2-4 / the rest, with the teens (11-14) counting as "many"."""
+    assert notif_plural_category(count) == category
+
+
+def test_english_few_and_many_plurals_read_the_same() -> None:
+    """One call site picks the category; English only distinguishes "one"."""
+    english = _MESSAGES["en"]
+    for stem in ("age_days", "age_hours", "summary_security_devices"):
+        assert english[f"{stem}_few"] == english[f"{stem}_many"], stem
+
+
+def test_czech_plural_forms_are_distinct_where_the_grammar_needs_it() -> None:
+    czech = _MESSAGES["cs"]
+    forms = {
+        czech[f"summary_security_devices_{category}"]
+        for category in ("one", "few", "many")
+    }
+    assert len(forms) == 3
+    assert czech["age_days_few"] != czech["age_days_many"]
+    assert czech["age_hours_few"] != czech["age_hours_many"]
+
+
+def test_notif_language_resolves_base_language_and_falls_back() -> None:
+    assert notif_language(None) == "en"
+    assert notif_language(_fake_hass("cs")) == "cs"
+    assert notif_language(_fake_hass("cs-CZ")) == "cs"
+    assert notif_language(_fake_hass("de")) == "en"

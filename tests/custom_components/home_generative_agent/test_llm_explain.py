@@ -319,6 +319,34 @@ def test_display_type_low_battery_template_label() -> None:
     assert _display_type(finding) == "Low battery"
 
 
+@pytest.mark.parametrize(
+    ("rule_id", "label"),
+    [
+        (
+            "garage_door_left_open_after_midnight",
+            "Garage door left open after midnight",
+        ),
+        ("candidate_3", "Custom rule alert"),
+        ("v1_subject_cover_predicate_open_night_any", "Custom rule alert"),
+    ],
+)
+def test_display_type_custom_rule_prefers_its_own_name(
+    rule_id: str, label: str
+) -> None:
+    """The explainer names a lambda rule the same way the notifier does."""
+    finding = AnomalyFinding(
+        anomaly_id="slug-lambda",
+        type=rule_id,
+        severity="medium",
+        confidence=0.8,
+        triggering_entities=["cover.garage_door"],
+        evidence={"template_id": "lambda"},
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+    assert _display_type(finding) == label
+
+
 def test_display_type_bare_candidate_id_uses_template_label() -> None:
     """An approved rule named "candidate_1" explains by its template label."""
     finding = AnomalyFinding(

@@ -1052,7 +1052,9 @@ def test_friendly_type_strips_candidate_prefix() -> None:
     # Known types are unaffected.
     assert _friendly_type("unlocked_lock_at_night") == "Door lock left unlocked"
     # Non-candidate unknown types still work.
-    assert _friendly_type("time_of_day_anomaly") == "Time of day anomaly"
+    assert _friendly_type("some_unrecognized_type") == "Some unrecognized type"
+    # Discovery templates are curated now, not prettified from the id.
+    assert _friendly_type("time_of_day_anomaly") == "Unusual for this time of day"
 
 
 def test_friendly_type_motion_at_night_while_away() -> None:
@@ -1941,6 +1943,42 @@ def test_display_type_low_battery_template_label() -> None:
     hass = DummyHass()
     hass.config.language = "cs"
     assert _display_type(finding, hass) == "Slabá baterie"  # type: ignore[arg-type]
+
+
+def _lambda_rule_finding(rule_id: str) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id="slug-lambda",
+        type=rule_id,
+        severity="medium",
+        confidence=0.8,
+        triggering_entities=["cover.garage_door"],
+        evidence={"template_id": "lambda"},
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+
+
+def test_display_type_custom_rule_keeps_its_own_name() -> None:
+    """A lambda rule's name is its only description; the generic label is not."""
+    finding = _lambda_rule_finding("garage_door_left_open_after_midnight")
+    assert _display_type(finding) == "Garage door left open after midnight"
+    hass = DummyHass()
+    hass.config.language = "cs"
+    assert _display_type(finding, hass) == (  # type: ignore[arg-type]
+        "Garage door left open after midnight"
+    )
+
+
+@pytest.mark.parametrize(
+    "rule_id", ["candidate_3", "v1_subject_cover_predicate_open_night_any"]
+)
+def test_display_type_unnamed_custom_rule_uses_template_label(rule_id: str) -> None:
+    """Without a usable name, a lambda rule falls back to its template label."""
+    finding = _lambda_rule_finding(rule_id)
+    assert _display_type(finding) == "Custom rule alert"
+    hass = DummyHass()
+    hass.config.language = "cs"
+    assert _display_type(finding, hass) == "Upozornění vlastního pravidla"  # type: ignore[arg-type]
 
 
 def test_display_type_bare_candidate_id_uses_template_label() -> None:
@@ -3980,3 +4018,303 @@ async def test_a_change_alert_is_never_held_for_the_batch(ftype: str) -> None:
 
     assert notifier._held_batch == []
     assert len(hass.services.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Localized deterministic bodies and curated labels (follow-up to #523 / #696)
+# ---------------------------------------------------------------------------
+
+
+def _l10n_hass(language: str) -> Any:
+    hass = DummyHass()
+    hass.config.language = language
+    return hass
+
+
+def test_appliance_message_localizes_and_english_is_unchanged() -> None:
+    finding = _appliance_finding()
+    english = (
+        "Washer drew about 296 W for 633 min, above the 60 min threshold. Check it."
+    )
+    assert _appliance_power_duration_mobile_message(finding) == english
+    assert (
+        _appliance_power_duration_mobile_message(finding, _l10n_hass("en")) == english
+    )
+    assert _appliance_power_duration_mobile_message(finding, _l10n_hass("cs")) == (
+        "Washer: odběr asi 296 W, trvá 633 min (limit 60 min). Zkontrolujte spotřebič."
+    )
+
+
+def test_appliance_message_without_threshold_reads_naturally() -> None:
+    evidence = {"friendly_name": "Washer Power", "power_w": 100, "duration_min": 70}
+    finding = _appliance_finding(evidence=evidence)
+    assert _appliance_power_duration_mobile_message(finding) == (
+        "Washer drew about 100 W for 70 min, above the configured threshold. Check it."
+    )
+    assert _appliance_power_duration_mobile_message(finding, _l10n_hass("cs")) == (
+        "Washer: odběr asi 100 W, trvá 70 min (přes nastavený limit). "
+        "Zkontrolujte spotřebič."
+    )
+
+
+def test_alarm_disarmed_message_is_localized() -> None:
+    from homeassistant.util import dt as dt_util
+
+    evidence = {
+        "camera_friendly_name": "Front Camera",
+        "camera_activity_age_minutes": 4,
+    }
+    cs = _l10n_hass("cs")
+    assert _alarm_disarmed_mobile_message(_alarm_finding(evidence=evidence), cs) == (
+        "Front Camera: neznámá osoba před 4 min. Alarm je teď vypnutý. "
+        "Zapněte alarm nebo si prohlédněte kameru."
+    )
+    # An older disarm names the date. Non-English text must not depend on the
+    # platform-specific strftime flags English uses.
+    evidence["alarm_last_changed"] = "2020-01-15T07:05:00+00:00"
+    parsed = dt_util.parse_datetime("2020-01-15T07:05:00+00:00")
+    assert parsed is not None
+    local = dt_util.as_local(parsed)
+    message = _alarm_disarmed_mobile_message(_alarm_finding(evidence=evidence), cs)
+    expected_since = f"{local.day}. {local.month}. v {local.hour}:{local.minute:02d}"
+    assert f"Alarm je vypnutý od {expected_since}." in message
+
+
+def test_alarm_disarmed_message_without_camera_uses_localized_fallback() -> None:
+    finding = _alarm_finding(evidence={"alarm_last_changed": ""})
+    assert _alarm_disarmed_mobile_message(finding, _l10n_hass("cs")) == (
+        "Kamera: neznámá osoba. Alarm je teď vypnutý. "
+        "Zapněte alarm nebo si prohlédněte kameru."
+    )
+    assert _alarm_disarmed_mobile_message(finding) == (
+        "A camera saw an unrecognized person. The alarm is currently disarmed. "
+        "Arm the alarm or view the camera."
+    )
+
+
+def test_alarm_disarmed_open_entry_message_is_localized() -> None:
+    finding = AnomalyFinding(
+        anomaly_id="oe1",
+        type="candidate_1",
+        severity="medium",
+        confidence=0.8,
+        triggering_entities=["binary_sensor.front_door"],
+        evidence={
+            "template_id": "alarm_disarmed_open_entry",
+            "entry_entity_id": "binary_sensor.front_door",
+        },
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+    assert _alarm_disarmed_open_entry_mobile_message(finding) == (
+        "Front Door is open. Alarm is disarmed. Close it or snooze if expected."
+    )
+    assert _alarm_disarmed_open_entry_mobile_message(finding, _l10n_hass("cs")) == (
+        "Front Door: otevřeno. Alarm je vypnutý. "
+        "Zavřete to, nebo ztlumte upozornění, pokud je to v pořádku."
+    )
+
+
+def test_baseline_deviation_message_is_localized() -> None:
+    finding = _baseline_finding(_humidity_evidence())
+    english = _baseline_deviation_mobile_message(finding)
+    assert _baseline_deviation_mobile_message(finding, _l10n_hass("en")) == english
+    assert _baseline_deviation_mobile_message(finding, _l10n_hass("cs")) == (
+        "Playroom Attic Humidity: 65.0% oproti obvyklým 49.2% (32 % nad normálem). "
+        "Stojí za kontrolu."
+    )
+
+
+def test_baseline_deviation_message_without_values_is_localized() -> None:
+    evidence = _humidity_evidence(
+        current_value=None, baseline_value=None, deviation_direction="below"
+    )
+    finding = _baseline_finding(evidence)
+    assert _baseline_deviation_mobile_message(finding, _l10n_hass("cs")) == (
+        "Playroom Attic Humidity: hodnota 32 % pod normálem. Stojí za kontrolu."
+    )
+
+
+def test_entity_staleness_person_message_is_localized() -> None:
+    finding = _staleness_finding(age_hours=42.0)
+    assert _entity_staleness_mobile_message(finding, _l10n_hass("cs")) == (
+        "Poloha osoby Lindo St Angel se neaktualizuje už asi 1 den. "
+        "Zkontrolujte, zda je telefon zapnutý a dostupný."
+    )
+
+
+@pytest.mark.parametrize(
+    ("age_hours", "czech_age", "english_age"),
+    [
+        (1.2, "asi 1 hodinu", "about 1 hour"),
+        (2, "asi 2 hodiny", "about 2 hours"),
+        (5, "asi 5 hodin", "about 5 hours"),
+        (21, "asi 21 hodin", "about 21 hours"),
+        (23, "asi 23 hodiny", "about 23 hours"),
+        (30, "asi 1 den", "about 1 day"),
+        (100, "asi 4 dny", "about 4 days"),
+        (123, "asi 5 dní", "about 5 days"),
+        (24 * 22 + 1, "asi 22 dny", "about 22 days"),
+    ],
+)
+def test_entity_staleness_message_inflects_durations(
+    age_hours: float, czech_age: str, english_age: str
+) -> None:
+    finding = _staleness_finding(
+        entity_id="sensor.attic_temp", friendly_name="Teplota", age_hours=age_hours
+    )
+    assert _entity_staleness_mobile_message(finding, _l10n_hass("cs")) == (
+        f"Data senzoru Teplota se neaktualizují už {czech_age}. Zkontrolujte senzor."
+    )
+    assert _entity_staleness_mobile_message(finding) == (
+        f"Teplota data has been outdated for {english_age}. Please check the sensor."
+    )
+
+
+def _security_device_finding(
+    count: int, *, with_display: bool = True
+) -> AnomalyFinding:
+    """Build the finding the way SecurityDeviceUnavailableRule does."""
+    ids = [f"camera.c{i}" for i in range(1, count + 1)]
+    names = {entity_id: f"Camera {i}" for i, entity_id in enumerate(ids, start=1)}
+    minutes = {entity_id: 50 + i for i, entity_id in enumerate(ids, start=1)}
+    listed = ", ".join(f"{names[e]} ({minutes[e]} min)" for e in ids)
+    noun = "security device" if count == 1 else "security devices"
+    evidence: dict[str, Any] = {
+        "entity_ids": ids,
+        "threshold_minutes": 30,
+        "summary": f"{count} {noun} unavailable longer than 30 minutes: {listed}.",
+    }
+    if with_display:
+        evidence["friendly_names"] = names
+        evidence["unavailable_minutes"] = minutes
+    return AnomalyFinding(
+        anomaly_id="sdu1",
+        type="security_device_unavailable",
+        severity="high",
+        confidence=0.9,
+        triggering_entities=ids,
+        evidence=evidence,
+        suggested_actions=["check_sensor"],
+        is_sensitive=True,
+    )
+
+
+_CS_ONE = "1 bezpečnostní zařízení nedostupné déle než 30 min: Camera 1 (51 min)."
+_CS_TWO = (
+    "2 bezpečnostní zařízení nedostupná déle než 30 min: "
+    "Camera 1 (51 min), Camera 2 (52 min)."
+)
+_CS_FIVE = (
+    "5 bezpečnostních zařízení nedostupných déle než 30 min: "
+    "Camera 1 (51 min), Camera 2 (52 min), Camera 3 (53 min), "
+    "Camera 4 (54 min), Camera 5 (55 min)."
+)
+
+
+@pytest.mark.parametrize(
+    ("count", "czech"), [(1, _CS_ONE), (2, _CS_TWO), (5, _CS_FIVE)]
+)
+def test_security_device_summary_is_localized(count: int, czech: str) -> None:
+    finding = _security_device_finding(count)
+    assert _notifier_mod._network_summary(finding, _l10n_hass("cs")) == czech
+    # English is rebuilt to exactly the sentence the rule stored.
+    stored = finding.evidence["summary"]
+    assert _notifier_mod._network_summary(finding) == stored
+    assert _notifier_mod._network_summary(finding, _l10n_hass("en")) == stored
+
+
+def test_security_device_summary_falls_back_to_the_stored_sentence() -> None:
+    """Findings persisted without the figures keep their English summary."""
+    legacy = _security_device_finding(2, with_display=False)
+    assert (
+        _notifier_mod._network_summary(legacy, _l10n_hass("cs"))
+        == legacy.evidence["summary"]
+    )
+    broken = _security_device_finding(2)
+    del broken.evidence["unavailable_minutes"]["camera.c2"]
+    assert (
+        _notifier_mod._network_summary(broken, _l10n_hass("cs"))
+        == broken.evidence["summary"]
+    )
+
+
+def test_security_device_summary_survives_bad_figures() -> None:
+    """Odd persisted figures fall back or name the entity; rendering never raises."""
+    infinite = _security_device_finding(1)
+    infinite.evidence["unavailable_minutes"]["camera.c1"] = float("inf")
+    assert (
+        _notifier_mod._network_summary(infinite, _l10n_hass("cs"))
+        == (infinite.evidence["summary"])
+    )
+    nameless = _security_device_finding(1)
+    nameless.evidence["friendly_names"]["camera.c1"] = None
+    assert _notifier_mod._network_summary(nameless, _l10n_hass("en")) == (
+        "1 security device unavailable longer than 30 minutes: camera.c1 (51 min)."
+    )
+
+
+def test_security_device_summary_is_localized_on_every_surface() -> None:
+    finding = _security_device_finding(1)
+    cs = _l10n_hass("cs")
+    # Security copy never yields to model prose, in any language.
+    assert _mobile_message("model prose", finding, "Czech", cs) == _CS_ONE
+    assert _persistent_message("model prose", finding, cs) == _CS_ONE
+    assert (
+        _mobile_message("model prose", finding, "Czech")
+        == (finding.evidence["summary"])
+    )
+
+
+_CZECH_TEMPLATE_LABELS = {
+    "alarm_state_mismatch": "Stav alarmu neodpovídá přítomnosti",
+    "alarm_disarmed_open_entry": "Otevřený vstup při vypnutém alarmu",
+    "baseline_deviation": "Neobvyklá hodnota",
+    "time_of_day_anomaly": "Neobvyklé pro tuto denní dobu",
+    "entity_staleness": "Data se neaktualizují",
+    "lambda": "Upozornění vlastního pravidla",
+    "motion_while_alarm_disarmed_and_home_present": (
+        "Pohyb při vypnutém alarmu, někdo je doma"
+    ),
+    "motion_without_camera_activity": "Pohyb bez aktivity kamery",
+    "multiple_entries_open_count": "Otevřeno více vstupů",
+    "open_entry_when_home": "Otevřený vstup v přítomnosti",
+    "sensor_threshold_condition": "Senzor překročil práh",
+    "unavailable_sensors": "Senzory nedostupné",
+    "unavailable_sensors_while_home": "Senzor nedostupný v přítomnosti",
+    "unknown_person_camera_no_home": "Neznámá osoba na kameře v nepřítomnosti",
+    "unknown_person_camera_when_home": "Neznámá osoba na kameře v přítomnosti",
+    "unlocked_lock_when_home": "Zámek odemčený v přítomnosti",
+    "unlocked_lock_while_away": "Zámek odemčený v nepřítomnosti",
+}
+
+
+@pytest.mark.parametrize(
+    ("template_id", "czech"), sorted(_CZECH_TEMPLATE_LABELS.items())
+)
+def test_discovery_template_has_a_curated_label(template_id: str, czech: str) -> None:
+    """A dynamic rule shows its template label, never the slugified rule id."""
+    finding = AnomalyFinding(
+        anomaly_id="slug",
+        type="v1_subject_sensor_predicate_unavailable_night_any",
+        severity="medium",
+        confidence=0.8,
+        triggering_entities=["sensor.x"],
+        evidence={"template_id": template_id},
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+    english = _display_type(finding)
+    assert "predicate" not in english.lower()
+    assert _display_type(finding, _l10n_hass("en")) == english
+    assert _display_type(finding, _l10n_hass("cs")) == czech
+
+
+def test_every_supported_template_has_a_curated_label() -> None:
+    """A new template without a label would show its raw slug on the phone."""
+    from custom_components.home_generative_agent.sentinel.proposal_templates import (
+        SUPPORTED_TEMPLATES,
+    )
+
+    missing = sorted(SUPPORTED_TEMPLATES - set(_notifier_mod._KNOWN_TYPE_LABEL_KEYS))
+    assert missing == []

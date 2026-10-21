@@ -15,7 +15,11 @@ from custom_components.home_generative_agent.core.utils import (
     extract_final,
     run_sentinel_model_call,
 )
-from custom_components.home_generative_agent.sentinel.models import enrolled_people
+from custom_components.home_generative_agent.sentinel.models import (
+    RULE_NAMED_TEMPLATES,
+    SEMANTIC_KEY_SLUG_PREFIX,
+    enrolled_people,
+)
 from custom_components.home_generative_agent.sentinel.redaction import (
     redact_network_identifiers,
 )
@@ -183,7 +187,29 @@ _KNOWN_TYPE_LABELS = {
     "low_battery_sensors": "Low battery",
     "entity_state_duration": "Unchanged too long",
     "motion_detected_at_night_while_alarm_disarmed": "Motion at night, alarm disarmed",
+    "alarm_state_mismatch": "Alarm state mismatch",
+    "alarm_disarmed_open_entry": "Entry open, alarm disarmed",
+    "baseline_deviation": "Unusual value",
+    "time_of_day_anomaly": "Unusual for this time of day",
+    "entity_staleness": "Data not updating",
+    "lambda": "Custom rule alert",
+    "motion_while_alarm_disarmed_and_home_present": (
+        "Motion, alarm disarmed, someone home"
+    ),
+    "motion_without_camera_activity": "Motion without camera activity",
+    "multiple_entries_open_count": "Several entries open",
+    "open_entry_when_home": "Open entry while home",
+    "sensor_threshold_condition": "Sensor above threshold",
+    "unavailable_sensors": "Sensors unavailable",
+    "unavailable_sensors_while_home": "Sensor unavailable while home",
+    "unknown_person_camera_no_home": "Unknown person on camera while away",
+    "unknown_person_camera_when_home": "Unknown person on camera while home",
+    "unlocked_lock_when_home": "Door lock unlocked while home",
+    "unlocked_lock_while_away": "Door lock unlocked while away",
 }
+
+
+_UNLABELED_RULE = "Sentinel alert"
 
 
 def _display_type(finding: AnomalyFinding) -> str:
@@ -199,6 +225,13 @@ def _display_type(finding: AnomalyFinding) -> str:
         return _KNOWN_TYPE_LABELS[finding.type]
     template_id = str(finding.evidence.get("template_id") or "")
     if template_id in _KNOWN_TYPE_LABELS:
+        # A custom rule's own name is its only description (see notifier).
+        if template_id in RULE_NAMED_TEMPLATES and not finding.type.startswith(
+            SEMANTIC_KEY_SLUG_PREFIX
+        ):
+            name = _friendly_type(finding.type)
+            if name != _UNLABELED_RULE:
+                return name
         return _KNOWN_TYPE_LABELS[template_id]
     return _friendly_type(finding.type)
 
@@ -214,7 +247,7 @@ def _friendly_type(anomaly_type: str) -> str:
     display = display.replace("_", " ").strip().capitalize()
     # An approved rule id like "candidate_1" leaves no words at all.
     if not any(char.isalpha() for char in display):
-        return "Sentinel alert"
+        return _UNLABELED_RULE
     return display
 
 

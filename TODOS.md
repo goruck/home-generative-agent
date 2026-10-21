@@ -1020,17 +1020,16 @@ validation.
 
 ---
 
-### Most discovery templates still show the slugified rule id as the notification subtitle
+### Network and HA-security rule summaries are English-only
 
-**What:** `_display_type` in `sentinel/notifier.py` (and its twin in `explain/llm_explain.py`) resolves a dynamic rule's label from `_KNOWN_TYPE_LABEL_KEYS` by `finding.type`, then by `evidence.template_id`, and otherwise falls back to the slugified rule id with underscores replaced ("V1 subject sensor predicate unavailable night any"). Registered today: the network templates, the `open_entry_*` / `motion_detected_*` / `unlocked_lock_at_night` family, and `low_battery_sensors` (PR #696). Still unlabeled: `alarm_state_mismatch`, `entity_staleness`, `entity_state_duration`, `lambda`, `motion_detected_at_night_while_alarm_disarmed`, `motion_while_alarm_disarmed_and_home_present`, `motion_without_camera_activity`, `multiple_entries_open_count`, `open_entry_when_home`, `sensor_threshold_condition`, `unavailable_sensors`, `unavailable_sensors_while_home`, `unknown_person_camera_no_home`, `unknown_person_camera_when_home`, `unlocked_lock_when_home`, `unlocked_lock_while_away`. `alarm_disarmed_open_entry`, `baseline_deviation`, and `time_of_day_anomaly` get a curated *subtitle* from `_build_subtitle`, but every other surface below still slugs for them too, so they belong on the list. The slug reaches the push subtitle, the burst-batch type summary, the snooze confirmation, the persistent-notification fallback, and the explainer's `_compact_fallback` body, in English and Czech.
+**What:** Each rule in the network / HA-security family (`ha_*`, `network_*`, `radio_*`, `zwave_*`, `zigbee_*`) builds its own English `summary` at evaluation time, without `hass`, and the notifier shows that sentence as the push body and the persistent message in every language. Only `security_device_unavailable` is re-rendered per language (`_security_device_summary` in `sentinel/notifier.py`), because its evidence already carries the names and minutes.
 
-**Why:** Found during the PR #696 review (three independent passes agreed). The semantic-key rule ids introduced for dedup (`v1_subject_…_predicate_…`) are what every approved discovery rule carries now, so this is the normal case for a dynamic rule, not an edge. Pre-existing; #696 fixed one template because that is the one a Czech user hit.
+**Why:** Found while localizing the deterministic bodies. These summaries name tokens, ports, accounts and devices, so they must stay exact (#523) and are not paraphrased by a model. A Czech home still gets English text for these alerts.
 
-**How to apply:** Add a `type_<template_id>` entry per template above to `_KNOWN_TYPE_LABEL_KEYS`, with `en` and `cs` strings in `notifier_messages.py` (ask @hruba202 for the Czech) and the matching English string in `explain/llm_explain.py`; `test_explain_labels_match_notifier_label_keys` keeps the two tables' keys and English text in step. Consider a test asserting every `SUPPORTED_TEMPLATES` id either has a label key or a `_build_subtitle` override, so a new template cannot ship unlabeled. Mind inconsistent siblings: `open_entry_at_night_when_home` is labeled but `open_entry_when_home` is not; `unlocked_lock_at_night` is labeled but the `_while_away`/`_when_home` variants are not.
+**How to apply:** Follow the `security_device_unavailable` pattern: keep the figures in `evidence` / `display`, add `summary_*` templates to `notifier_messages.py` (with `one` / `few` / `many` forms where a count is named, via `notif_plural_category`), and re-render in `_network_summary` per rule type, falling back to the stored sentence when the figures are missing. One rule per PR keeps review small; `test_security_device_unavailable_finding_renders_in_czech` is the model for the rule-to-notifier contract test.
 
-**Effort:** S
+**Effort:** M
 **Priority:** P3
-
 ---
 
 ### Dynamic `sensor_threshold_condition` rules don't normalize units
