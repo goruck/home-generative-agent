@@ -38,6 +38,11 @@ async def garage(hass: HomeAssistant) -> HomeAssistant:
     )
     hass.states.async_set("switch.porch", "off")
     hass.states.async_set("switch.chained", "off")
+    # Names and classes no Critical Action rule matches: only Sentinel's own
+    # floor (alarm panels, covers, unlocking) holds them.
+    hass.states.async_set("alarm_control_panel.home", "armed_away")
+    hass.states.async_set("cover.ratgdo_main", "closed")
+    hass.states.async_set("lock.shed", "locked")
     assert await async_setup_component(
         hass,
         "template",
@@ -50,7 +55,30 @@ async def garage(hass: HomeAssistant) -> HomeAssistant:
                             "unique_id": "opener",
                             "turn_on": [_call("cover.open_cover", "cover.garage_door")],
                             "turn_off": [],
-                        }
+                        },
+                        {
+                            "name": "Disarmer",
+                            "unique_id": "disarmer",
+                            "turn_on": [
+                                _call(
+                                    "alarm_control_panel.alarm_disarm",
+                                    "alarm_control_panel.home",
+                                )
+                            ],
+                            "turn_off": [],
+                        },
+                        {
+                            "name": "Ratgdo Button",
+                            "unique_id": "ratgdo_button",
+                            "turn_on": [_call("cover.open_cover", "cover.ratgdo_main")],
+                            "turn_off": [],
+                        },
+                        {
+                            "name": "Shed Unlocker",
+                            "unique_id": "shed_unlocker",
+                            "turn_on": [_call("lock.unlock", "lock.shed")],
+                            "turn_off": [],
+                        },
                     ]
                 }
             ]
@@ -80,11 +108,21 @@ async def garage(hass: HomeAssistant) -> HomeAssistant:
     return hass
 
 
-@pytest.mark.parametrize("entity", ["switch.opener", "switch.chained"])
-async def test_a_switch_that_opens_the_garage_never_runs_alone(
+@pytest.mark.parametrize(
+    "entity",
+    [
+        "switch.opener",
+        "switch.chained",
+        # What Sentinel never runs itself, whatever the PIN rules say (#831).
+        "switch.disarmer",
+        "switch.ratgdo_button",
+        "switch.shed_unlocker",
+    ],
+)
+async def test_a_switch_that_starts_a_critical_action_never_runs_alone(
     garage: HomeAssistant, entity: str
 ) -> None:
-    """Its template action or the automation it starts opens the door."""
+    """Its template action, or the automation it starts, needs a person."""
     result = _evaluate(["switch.turn_on"], ["switch"], entities=[entity], hass=garage)
 
     assert result.block_reason == "critical_action"

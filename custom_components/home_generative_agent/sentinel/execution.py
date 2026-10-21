@@ -90,6 +90,13 @@ _NEVER_AUTO_DOMAINS = frozenset({"alarm_control_panel", "cover"})
 # The only lock service Sentinel may call by itself.
 _SAFE_LOCK_SERVICE = "lock.lock"
 _GENERIC_DOMAIN = "homeassistant"
+# The same floor as rules, for what an action starts (#831): a template
+# switch that disarms the alarm needs a person as much as a disarm does.
+_FLOOR_RULES: tuple[dict[str, str], ...] = (
+    *({"domain": domain, "service": ""} for domain in sorted(_NEVER_AUTO_DOMAINS)),
+    {"domain": "lock", "service": "unlock"},
+    {"domain": "lock", "service": "open"},
+)
 
 
 def executable_actions(finding: AnomalyFinding) -> list[str]:
@@ -626,7 +633,7 @@ class SentinelExecutionService:
             # button's or an automation it triggers, which can open the
             # garage. The PIN gate follows them, and so does Sentinel (#831).
             try:
-                found = stored_action_calls(self._hass, steps, rules)
+                found = stored_action_calls(self._hass, steps, [*rules, *_FLOOR_RULES])
             except Exception:
                 LOGGER.exception(
                     "Auto-execute blocked: could not check what %s starts.",
