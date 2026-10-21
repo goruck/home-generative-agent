@@ -248,3 +248,40 @@ def test_stored_rules_cannot_carry_the_internal_keys() -> None:
     )
 
     assert policy.critical_actions == [{"domain": "switch", "service": ""}]
+
+
+@pytest.mark.parametrize("listed", ["registry_id", "unknown_registry_id"])
+async def test_an_unavailable_group_listing_the_relay_by_registry_id_is_held(
+    hass: HomeAssistant, listed: str
+) -> None:
+    """
+    An unavailable group helper shows no members, so its config is read.
+
+    It may list the hidden relay by registry id; unresolved, the group was not
+    linked to the relay and an area call reaching the group skipped it. An id
+    the registry does not know could be the relay too (#804 review).
+    """
+    relay = _relay_garage(hass)
+    entry = MockConfigEntry(
+        domain="group",
+        options={
+            "group_type": "switch",
+            "entities": [relay.id if listed == "registry_id" else "f" * 32],
+        },
+    )
+    entry.add_to_hass(hass)
+    er.async_get(hass).async_get_or_create(
+        "switch",
+        "group",
+        "relay_group_uid",
+        suggested_object_id="relay_group",
+        config_entry=entry,
+    )
+    hass.states.async_set("switch.relay_group", "unavailable")
+
+    assert _automation_held(
+        hass, {"action": "switch.turn_on", "target": {"area_id": "garage"}}
+    )
+    assert _tool_held(
+        hass, {"domain": "switch", "service": "turn_on", "area_id": "garage"}
+    )

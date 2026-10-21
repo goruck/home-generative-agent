@@ -418,8 +418,10 @@ class _EntityIndex:
         )
         if not members and self._platform(entity_id, entry) == _GROUP_PLATFORM:
             # An unavailable group helper writes no member list.
-            members = self._helper_members(entry)
-            if not members:
+            members, complete = self._helper_members(entry)
+            if not members or not complete:
+                # A member it names by an id the registry does not know
+                # could be the relay (#804): fail closed.
                 self.unreadable_groups.add(entity_id)
         if members:
             self.members[entity_id] = members
@@ -441,14 +443,29 @@ class _EntityIndex:
         get_entity = getattr(component, "get_entity", None)
         return get_entity(entity_id) if callable(get_entity) else None
 
-    def _helper_members(self, entry: er.RegistryEntry | None) -> list[str]:
-        """Return the members a group helper's config entry lists."""
+    def _helper_members(self, entry: er.RegistryEntry | None) -> tuple[list[str], bool]:
+        """
+        Return the members a group helper's config entry lists, and if all are known.
+
+        The helper may list a member by its registry id, which is resolved to
+        its entity id: unresolved, a hidden relay listed that way was not seen
+        as a member, and an area call reaching the group skipped it (#804).
+        """
         if entry is None or entry.config_entry_id is None:
-            return []
+            return [], False
         config_entry = self._hass.config_entries.async_get_entry(entry.config_entry_id)
         if config_entry is None:
-            return []
-        return _text_list(config_entry.options.get(CONF_ENTITIES))
+            return [], False
+        registry = er.async_get(self._hass)
+        members: list[str] = []
+        complete = True
+        for listed in _text_list(config_entry.options.get(CONF_ENTITIES)):
+            resolved = er.async_resolve_entity_id(registry, listed)
+            if resolved is None:
+                complete = False
+                continue
+            members.append(resolved.lower())
+        return members, complete
 
     def reach(self, domain: str, match: str) -> set[str]:
         """Return every entity a rule on ``domain`` with this match reaches."""
