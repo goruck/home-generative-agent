@@ -617,3 +617,30 @@ def test_a_stalled_provider_is_not_logged_as_an_error_per_frame(
         )
 
     assert [r.levelno for r in caplog.records] == [logging.DEBUG]
+
+
+def test_a_short_budget_keeps_its_whole_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Triage's 10 s goes entirely to the provider, as before #828."""
+    _real_floors(monkeypatch)
+    with model_call_budget(10.0):
+        share = member_timeout(last=True)
+    assert share is not None
+    assert share > 9.99
+
+
+@pytest.mark.asyncio
+async def test_a_failed_sampling_rebind_reports_its_own_error() -> None:
+    """The rebound request's timeout is what the caller sees and the tracker counts."""
+    bound = AsyncMock()
+    bound.ainvoke.side_effect = [_rejected_temperature(), _rejected_temperature()]
+    rebound = AsyncMock()
+    rebound.ainvoke.side_effect = httpx.ReadTimeout("no answer")
+    stripped = MagicMock()
+    stripped.bind_tools.return_value = rebound
+    source = MagicMock()
+    source.bind_tools.return_value = bound
+    source.with_config.return_value = stripped
+    chain = FallbackChatModel([(source, "cloud", "p0")]).bind_tools([{"name": "t"}])
+
+    with pytest.raises(httpx.ReadTimeout):
+        await chain.ainvoke(_MESSAGES)

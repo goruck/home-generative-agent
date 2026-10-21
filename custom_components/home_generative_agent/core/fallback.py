@@ -583,9 +583,9 @@ def _handle_member_failure(  # noqa: PLR0913
     lone = len(wrapper.chain) == 1
     now = asyncio.get_running_loop().time()
     spent = not split and deadline is not None and now >= deadline
-    if lone and not is_model_not_found(err):
+    if lone:
         # A lone provider's caller reports the error, as it did before every
-        # model was wrapped (#828); a missing model stays loud.
+        # model was wrapped (#828); there is no next provider to announce.
         LOGGER.debug("%s failed for provider %s: %s", kind, provider_id, err)
     else:
         _log_provider_failure(kind, provider_id, i + 1, len(wrapper.chain), err)
@@ -712,8 +712,10 @@ class FallbackChatModel:
         Rebind one provider without rejected sampling params and retry it.
 
         Returns the result on success, or None when this error is not a
-        sampling-param rejection, the provider has no pre-bind source, or the
-        rebound call failed (callers fall through to normal fallback).
+        sampling-param rejection or the provider has no pre-bind source. A
+        rebound call that fails raises its own error, so the chain handles
+        what actually happened (a timeout counts toward a stall) instead of
+        the stale rejection.
         """
         if unsupported_sampling_param_in_chain(err) is None:
             return None
@@ -731,17 +733,11 @@ class FallbackChatModel:
             )
             return stripped.bind_tools(tools, **tool_kwargs)
 
-        try:
-            rebound = await asyncio.to_thread(_rebuild)
-            result = await rebound.ainvoke(
-                adapt_system_message_for_model(rebound, input_data), config, **kwargs
-            )
-            _raise_for_retryable_empty_response(result)
-        except Exception:
-            LOGGER.exception(
-                "Sampling-param rebind retry failed for provider %s", provider_id
-            )
-            return None
+        rebound = await asyncio.to_thread(_rebuild)
+        result = await rebound.ainvoke(
+            adapt_system_message_for_model(rebound, input_data), config, **kwargs
+        )
+        _raise_for_retryable_empty_response(result)
         LOGGER.warning(
             "Provider %s rejected an unsupported sampling parameter with tools "
             "bound; retried with provider-default sampling parameters.",
@@ -822,7 +818,9 @@ class FallbackChatModel:
                         rebind_result = await self._retry_with_default_sampling(
                             i, err, input_data, config, **kwargs
                         )
-                except TimeoutError as retry_err:
+                except Exception as retry_err:  # noqa: BLE001
+                    # The rebound request's own failure, not the rejection
+                    # that prompted it (#828).
                     rebind_result = None
                     failure = retry_err
                 if rebind_result is not None:
@@ -832,9 +830,9 @@ class FallbackChatModel:
                     return rebind_result
                 last_err = failure
                 if not _is_retryable(failure):
-                    # Only the original error can be non-retryable here: a
-                    # retry that ran out of time raised a TimeoutError.
-                    raise
+                    if failure is err:
+                        raise
+                    raise failure from err
                 if _handle_member_failure(
                     self,
                     "Model call",

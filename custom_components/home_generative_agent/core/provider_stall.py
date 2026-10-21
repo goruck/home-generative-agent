@@ -135,7 +135,13 @@ def member_timeout(*, last: bool) -> float | None:
         return None
     remaining = budget.deadline - monotonic()
     if last or not budget.split:
-        margin = min(_LAST_MEMBER_MARGIN_S, remaining * _LAST_MEMBER_MARGIN_FRACTION)
+        # The margin only lets this timeout fire (and be counted) before the
+        # caller's; a share too short to count as stall evidence keeps it all.
+        margin = (
+            min(_LAST_MEMBER_MARGIN_S, remaining * _LAST_MEMBER_MARGIN_FRACTION)
+            if remaining >= STALL_EVIDENCE_MIN_S
+            else 0.0
+        )
         return max(remaining - margin, 0.0)
     return max(remaining / 2, 0.0)
 
