@@ -1,13 +1,14 @@
 # ruff: noqa: S101
 """
-Area, device and label switch calls skip a hidden garage relay (#804).
+How a garage relay's PIN hold reads a call's targets (#804).
 
-switch_as_x hides the switch it wraps, and Home Assistant never expands an
-area, device, floor or label target to a hidden entity. So with a relay
-garage in the home, a switch call aimed at an area need not ask for the PIN,
-unless the relay can really be reached: it was un-hidden, or another wrapper
-of it (a light, a fan) is reached instead. Device actions name their entity
-(by registry id) and reach it hidden or not.
+Device actions act on the entity they name, so one is held only when it
+names the relay; a registry id is matched against the relay's own. An area,
+device, floor or label target is still held while a relay garage exists,
+even with the relay hidden: what else in the area drives the relay (groups,
+template switches, automations it triggers, MQTT) cannot all be known. Group
+helpers that are offline are read from their settings, so a named group
+holding the relay, or a template switch that drives it, is held.
 """
 
 from __future__ import annotations
@@ -26,7 +27,6 @@ from custom_components.home_generative_agent.agent.automation_pin import (
 )
 from custom_components.home_generative_agent.agent.graph import _is_critical_action
 from custom_components.home_generative_agent.agent.helpers import (
-    CRITICAL_RULE_HIDDEN,
     CRITICAL_RULE_REGISTRY_ID,
     resolve_critical_action_policy,
 )
@@ -116,37 +116,16 @@ TARGETS = [
 ]
 
 
+@pytest.mark.parametrize("hidden", [True, False])
 @pytest.mark.parametrize("target", TARGETS)
-async def test_an_area_device_or_label_switch_call_skips_a_hidden_relay(
-    hass: HomeAssistant, target: dict[str, str]
+async def test_an_area_device_or_label_switch_call_is_still_held(
+    hass: HomeAssistant, target: dict[str, str], *, hidden: bool
 ) -> None:
-    """The issue's case: an ordinary switch call no longer asks for the PIN."""
-    _relay_garage(hass)
-
-    assert not _tool_held(hass, {"domain": "switch", "service": "turn_on", **target})
-    assert not _automation_held(hass, {"action": "switch.turn_on", "target": target})
-
-
-@pytest.mark.parametrize("target", TARGETS)
-async def test_an_unhidden_relay_is_still_held(
-    hass: HomeAssistant, target: dict[str, str]
-) -> None:
-    """Once the user un-hides the relay, an area can reach it again."""
-    _relay_garage(hass, hidden=False)
+    """Hidden or not: something else in the area may drive the relay."""
+    _relay_garage(hass, hidden=hidden)
 
     assert _tool_held(hass, {"domain": "switch", "service": "turn_on", **target})
     assert _automation_held(hass, {"action": "switch.turn_on", "target": target})
-
-
-async def test_un_hiding_the_relay_takes_effect_at_once(hass: HomeAssistant) -> None:
-    """The registry is read on every check, not cached."""
-    relay = _relay_garage(hass)
-    call = {"domain": "switch", "service": "turn_on", "area_id": "garage"}
-    assert not _tool_held(hass, call)
-
-    er.async_get(hass).async_update_entity(relay.entity_id, hidden_by=None)
-
-    assert _tool_held(hass, call)
 
 
 async def test_another_wrapper_of_the_relay_is_reached_by_area(
@@ -173,10 +152,6 @@ async def test_another_wrapper_of_the_relay_is_reached_by_area(
     hass.states.async_set("light.porch", "off")
 
     assert _tool_held(hass, {"domain": "light", "service": "turn_on", "area_id": "x"})
-    # The hidden relay itself is still skipped by an area switch call.
-    assert not _tool_held(
-        hass, {"domain": "switch", "service": "turn_on", "area_id": "x"}
-    )
 
 
 @pytest.mark.parametrize(
@@ -241,12 +216,11 @@ async def test_a_relay_copy_records_what_the_registry_says(
         if rule.get("_exact_entity") == relay.entity_id
     ]
 
-    assert copy[CRITICAL_RULE_HIDDEN] == "1"
     assert copy[CRITICAL_RULE_REGISTRY_ID] == relay.id
 
 
 def test_stored_rules_cannot_carry_the_internal_keys() -> None:
-    """A user rule marked hidden would narrow itself; the marks are dropped."""
+    """A user rule carrying a registry id would narrow itself; it is dropped."""
     policy = resolve_critical_action_policy(
         {
             CONF_CRITICAL_ACTIONS: [
@@ -254,7 +228,6 @@ def test_stored_rules_cannot_carry_the_internal_keys() -> None:
                     "domain": "switch",
                     "service": "",
                     "_exact_entity": "switch.x",
-                    CRITICAL_RULE_HIDDEN: "1",
                     CRITICAL_RULE_REGISTRY_ID: "0" * 32,
                 }
             ]
@@ -271,9 +244,9 @@ async def test_an_unavailable_group_listing_the_relay_by_registry_id_is_held(
     """
     An unavailable group helper shows no members, so its config is read.
 
-    It may list the hidden relay by registry id; unresolved, the group was not
-    linked to the relay and an area call reaching the group skipped it. An id
-    the registry does not know could be the relay too (#804 review).
+    It may list the relay by registry id; unresolved, the group was not
+    linked to the relay, so turning the group on was not held. An id the
+    registry does not know could be the relay too (#804 review).
     """
     relay = _relay_garage(hass)
     entry = MockConfigEntry(
@@ -292,13 +265,10 @@ async def test_an_unavailable_group_listing_the_relay_by_registry_id_is_held(
         config_entry=entry,
     )
     hass.states.async_set("switch.relay_group", "unavailable")
+    group = {"entity_id": "switch.relay_group"}
 
-    assert _automation_held(
-        hass, {"action": "switch.turn_on", "target": {"area_id": "garage"}}
-    )
-    assert _tool_held(
-        hass, {"domain": "switch", "service": "turn_on", "area_id": "garage"}
-    )
+    assert _automation_held(hass, {"action": "switch.turn_on", "target": group})
+    assert _tool_held(hass, {"domain": "switch", "service": "turn_on", **group})
 
 
 async def test_an_offline_group_in_another_wrappers_domain_is_held(
@@ -335,7 +305,8 @@ async def test_an_offline_group_in_another_wrappers_domain_is_held(
     hass.states.async_set("light.garage_lights", "unavailable")
 
     assert _automation_held(
-        hass, {"action": "light.turn_on", "target": {"area_id": "garage"}}
+        hass,
+        {"action": "light.turn_on", "target": {"entity_id": "light.garage_lights"}},
     )
 
 
@@ -343,7 +314,7 @@ async def test_the_webhook_audit_follows_a_template_switch_to_the_relay(
     hass: HomeAssistant,
 ) -> None:
     """
-    A public webhook switching an area reaches a template switch that opens.
+    A public webhook turning on a template switch that opens the garage.
 
     The relay's own copy is skipped as hidden; the audit follows the template
     switch's actions, as the add_automation gate does (#804 review).
@@ -377,7 +348,9 @@ async def test_the_webhook_audit_follows_a_template_switch_to_the_relay(
     er.async_get(hass).async_update_entity("switch.opener", area_id=area.id)
     automation = {
         "triggers": [{"trigger": "webhook", "webhook_id": "x", "local_only": False}],
-        "actions": [{"action": "switch.turn_on", "target": {"area_id": area.id}}],
+        "actions": [
+            {"action": "switch.turn_on", "target": {"entity_id": "switch.opener"}}
+        ],
     }
     automations = [AutomationInput("automation.open", automation)]
     context = NetworkBuildContext(options={})
@@ -485,10 +458,10 @@ async def test_an_offline_group_holding_a_template_opener_is_held(
     assert group_state is not None
     assert group_state.state == "unavailable"
     rules = expand_critical_rules(hass, RULES)
-    step = {"action": "switch.turn_on", "target": {"area_id": area.id}}
+    step = {"action": "switch.turn_on", "target": {"entity_id": group_id}}
 
     assert _is_critical_action(
-        {"domain": "switch", "service": "turn_on", "area_id": area.id},
+        {"domain": "switch", "service": "turn_on", "entity_id": group_id},
         rules,
         "mcp__call_service",
         hass,

@@ -98,11 +98,7 @@ from homeassistant.const import (
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
-from .helpers import (
-    CRITICAL_RULE_EXACT_ENTITY,
-    CRITICAL_RULE_HIDDEN,
-    CRITICAL_RULE_REGISTRY_ID,
-)
+from .helpers import CRITICAL_RULE_EXACT_ENTITY, CRITICAL_RULE_REGISTRY_ID
 from .template_actions import action_scripts, driven_entities, template_entities
 
 LOGGER = logging.getLogger(__name__)
@@ -686,17 +682,12 @@ def expand_critical_rules(
 
 def _with_registry_facts(hass: HomeAssistant, rule: dict[str, str]) -> dict[str, str]:
     """
-    Add what the registry says about a copy's entity, read on every check.
+    Add a copy's registry id, read on every check.
 
-    Hidden: an area, device, floor or label target skips it, so only a call
-    naming it reaches it (#804). The registry id: what a device action names
-    it by. Neither is set for an entity the registry does not know, so that
-    copy keeps holding every unresolved call.
+    What a device action, or a target, may name the entity by (#804). Not set
+    for an entity the registry does not know: nothing can name it that way.
     """
     entry = er.async_get(hass).async_get(rule[CRITICAL_RULE_EXACT_ENTITY])
     if entry is None:
         return rule
-    facts = {CRITICAL_RULE_REGISTRY_ID: entry.id.lower()}
-    if entry.hidden_by is not None:
-        facts[CRITICAL_RULE_HIDDEN] = "1"
-    return {**rule, **facts}
+    return {**rule, CRITICAL_RULE_REGISTRY_ID: entry.id.lower()}

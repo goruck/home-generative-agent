@@ -1159,15 +1159,10 @@ def thread_has_pending_action(
 # keeps the user rule's `entity_match`, so a reader that does not know this
 # key still reads it as the rule it was copied from.
 CRITICAL_RULE_EXACT_ENTITY = "_exact_entity"
-# Also on a copy: set when its entity is hidden, so an area, device, floor or
-# label target cannot reach it (Home Assistant skips hidden entities there;
-# switch_as_x hides the relay it wraps, #804), and the entity's registry id,
-# which a device action names it by. Internal like the marker above.
-CRITICAL_RULE_HIDDEN = "_hidden"
+# Also on a copy: its entity's registry id, which a device action or a target
+# may name it by (#804). Internal like the marker above.
 CRITICAL_RULE_REGISTRY_ID = "_registry_id"
-INTERNAL_RULE_KEYS = frozenset(
-    {CRITICAL_RULE_EXACT_ENTITY, CRITICAL_RULE_HIDDEN, CRITICAL_RULE_REGISTRY_ID}
-)
+INTERNAL_RULE_KEYS = frozenset({CRITICAL_RULE_EXACT_ENTITY, CRITICAL_RULE_REGISTRY_ID})
 
 
 @dataclass(frozen=True)
@@ -1175,9 +1170,9 @@ class TargetParts:
     """
     What a call's targets name, for matching per-entity rule copies (#804).
 
-    ``indirect``: an area, device, floor or label, which Home Assistant
-    expands without hidden entities. ``opaque``: anything that could name
-    any entity (``all``, a template, a group, or no target at all).
+    ``indirect``: an area, device, floor or label. ``opaque``: anything that
+    could name any entity (``all``, a template, a group, or no target at
+    all).
     """
 
     entities: tuple[str, ...] = ()
@@ -1203,12 +1198,18 @@ class TargetParts:
 
 
 def exact_copy_reached(rule: Mapping[str, str], targets: TargetParts) -> bool:
-    """Return True if a per-entity copy's entity may be among these targets."""
+    """
+    Return True if a per-entity copy's entity may be among these targets.
+
+    An area, device, floor or label always may: Home Assistant skips a hidden
+    entity there, but what else in it drives the entity (a group, a template
+    switch, an automation it triggers) cannot all be known (#804).
+    """
     return (
         targets.opaque
+        or targets.indirect
         or rule_entity_matches(rule, targets.entities)
         or (rule.get(CRITICAL_RULE_REGISTRY_ID) or "").lower() in targets.registry_ids
-        or (targets.indirect and not rule.get(CRITICAL_RULE_HIDDEN))
     )
 
 
@@ -1262,9 +1263,8 @@ def matches_critical_rule(  # noqa: PLR0913
         if rule_service and rule_service != service:
             continue
         if targets is not None and rule.get(CRITICAL_RULE_EXACT_ENTITY):
-            # A per-entity copy is held only when its entity may really be
-            # among the targets: by id, by registry id, or through an area,
-            # device, floor or label that does not skip it as hidden (#804).
+            # A per-entity copy is held only when its entity may be among the
+            # targets: by id, by registry id, or anything not named (#804).
             if exact_copy_reached(rule, targets):
                 return True
             continue
