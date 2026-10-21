@@ -7,6 +7,12 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+## [3.44.8] - 2026-10-20
+
+### Fixed
+
+- **An automation watching a template sensor or helper computed from what the agent changes now asks for the Critical Action PIN when it would unlock or open something** ([#820](https://github.com/goruck/home-generative-agent/issues/820)). Since 3.44.7 a change the agent makes is checked against the automations watching that entity, but not those watching an entity computed from it: turning on an input boolean read by a template binary sensor, whose automation unlocked the front door, ran with no PIN. Entities computed from the changed one are now followed the way Home Assistant tracks them: template entities whose templates read it at their last render, trigger-based template entities it triggers, and helpers subscribed to its changes (min/max, threshold, bayesian, statistics, filter, utility meter, switch_as_x and others, YAML or UI), through several steps. If a Home Assistant update renames what this reads, a warning is logged.
+
 ## [3.44.7] - 2026-10-20
 
 ### Fixed

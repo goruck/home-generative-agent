@@ -28,7 +28,9 @@ Acting on an entity can run stored actions no rule names:
   change runs. A disabled automation does not count, and a wait counts
   only while its script or automation may be running. A group holding the
   entity changes with it, as a person does with a tracker and a zone with
-  the people in it. A trigger's ``to:``/``from:`` is not read: turning a switch
+  the people in it. An entity computed from it changes with it too:
+  a template entity reading it, a helper subscribed to it (#820, see
+  ``DerivedEntities``). A trigger's ``to:``/``from:`` is not read: turning a switch
   off counts if turning it on would start the automation. A template naming
   other entities (``states('sensor.x')``), another event type (a ZHA or
   mobile notification event) or another device's trigger (a remote) cannot
@@ -50,10 +52,14 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from functools import partial
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.helpers import entity_platform
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import event as ha_event
+from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import async_get_platforms
 from homeassistant.helpers.target import (
     TargetSelection,
@@ -115,6 +121,9 @@ _INLINE_STATE_KEYS = ("entities", "snapshot_entities")
 # Scripts and template entities a template entity's actions reach, and the
 # members of a group, are followed this deep.
 MAX_FOLLOW_DEPTH = 5
+# Entities following one another (a template of a helper of a template...)
+# are followed this many steps; one still followed past it is held.
+_MAX_FOLLOWING_DEPTH = 10
 # A group lists its members in `entity_id`; MQTT and ZHA groups in
 # `group_entities`.
 _MEMBER_ATTRIBUTES = ("entity_id", "group_entities")
@@ -387,6 +396,7 @@ class StoredActionReader:
     _index: _ReactorIndex | None = None
     _read: bool = False
     _parents: dict[str, set[str]] | None = None
+    _derived: DerivedEntities | None = None
     _started: dict[str, list[Reactor] | None] = field(default_factory=dict)
 
     def own_sequences(self, entity_id: str, service: str | None) -> list[Any] | None:
@@ -415,28 +425,67 @@ class StoredActionReader:
             LOGGER.debug("Cannot read the actions of %s; holding it", entity_id)
         return own
 
-    def started_by(self, entity_id: str, depth: int = 0) -> list[Reactor] | None:
+    def started_by(self, entity_id: str) -> list[Reactor] | None:
         """
-        Return what may react to a change to the entity, or to a group holding it.
+        Return what may react to a change to the entity, or to one following it.
 
         A group's state follows its members', so turning on a light changes
-        the light group it is in too (#814). None when an automation cannot
-        be read: the change is then held.
+        the light group it is in too (#814); a template sensor or a helper
+        computed from it changes too (#820). Everything the change reaches is
+        read breadth first, so entities following one another in a loop are
+        each one step away. None when an automation cannot be read, when what
+        follows an entity cannot be read, or when an entity is reached only
+        past ``_MAX_FOLLOWING_DEPTH`` steps: the change is then held.
         """
         entity_id = entity_id.lower()
         if entity_id in self._started:
             return self._started[entity_id]
-        self._started[entity_id] = []  # a group holding itself adds nothing
-        found = self._find_started_by(entity_id)
-        if found is not None and depth < MAX_FOLLOW_DEPTH:
-            for parent in sorted(self._groups_holding(entity_id)):
-                parents = self.started_by(parent, depth + 1)
-                if parents is None:
-                    found = None
-                    break
-                found += [r for r in parents if r not in found]
-        self._started[entity_id] = found
+        result = self._reached_reactors(entity_id)
+        self._started[entity_id] = result
+        return result
+
+    def _reached_reactors(self, entity_id: str) -> list[Reactor] | None:
+        steps = {entity_id: 0}
+        frontier = [entity_id]
+        while frontier:
+            next_frontier: list[str] = []
+            for current in frontier:
+                following = self._following(current)
+                if following is None:
+                    return None
+                new = sorted(following - steps.keys())
+                if new and steps[current] >= _MAX_FOLLOWING_DEPTH:
+                    LOGGER.debug(
+                        "%s is followed too deep to read; holding it", entity_id
+                    )
+                    return None
+                for reached in new:
+                    steps[reached] = steps[current] + 1
+                next_frontier.extend(new)
+            frontier = next_frontier
+        found: list[Reactor] = []
+        for reached in steps:
+            reactors = self._find_started_by(reached)
+            if reactors is None:
+                return None
+            found += [reactor for reactor in reactors if reactor not in found]
         return found
+
+    def _following(self, entity_id: str) -> set[str] | None:
+        """Return the entities whose state follows this one's, or None."""
+        try:
+            if self._derived is None:
+                self._derived = DerivedEntities(self.hass)
+            derived = self._derived.of(entity_id)
+        except Exception:
+            # Hold rather than fail the turn or pass: an unexpected shape in
+            # what Home Assistant tracks.
+            LOGGER.exception(
+                "Critical Action PIN: cannot read what follows %s; holding it",
+                entity_id,
+            )
+            return None
+        return (self._groups_holding(entity_id) | derived) - {entity_id}
 
     def mqtt_reactors(self) -> list[Reactor] | None:
         """
@@ -495,13 +544,7 @@ class StoredActionReader:
             return None
         if self._index is None:
             self._index = _ReactorIndex.build(reactors)
-        names = [entity_id]
-        entry = er.async_get(self.hass).async_get(entity_id)
-        device_id = None
-        if entry is not None:
-            names.append(entry.id.lower())
-            device_id = entry.device_id
-        domain = entity_id.split(".", 1)[0]
+        names, domain, device_id = _change_keys(self.hass, entity_id)
         return [
             reactors[number]
             for number in sorted(self._index.find(names, domain, device_id))
@@ -532,6 +575,440 @@ class StoredActionReader:
             self._read = True
             self._reactors = _read_reactors(self.hass)
         return self._reactors
+
+
+def _change_keys(
+    hass: HomeAssistant, entity_id: str
+) -> tuple[list[str], str, str | None]:
+    """Return what a trigger may name a change by: ids, domain and device."""
+    names = [entity_id]
+    entry = er.async_get(hass).async_get(entity_id)
+    device_id = None
+    if entry is not None:
+        names.append(entry.id.lower())
+        device_id = entry.device_id
+    return names, entity_id.split(".", 1)[0], device_id
+
+
+# Where Home Assistant keeps its per-entity state-change subscriptions
+# (`helpers/event.py`); private, so read by name and warned about if gone.
+_TRACK_STATE_CHANGE_KEY = "_TRACK_STATE_CHANGE_DATA"
+_ALL_LISTENER, _ENTITIES_LISTENER, _DOMAINS_LISTENER = "all", "entities", "domains"
+_warned_unreadable: set[str] = set()
+
+
+def _warn_once(what: str) -> None:
+    if what not in _warned_unreadable:
+        _warned_unreadable.add(what)
+        LOGGER.warning(
+            "Critical Action PIN: cannot read %s; entities computed from a "
+            "change the agent makes may not be followed",
+            what,
+        )
+
+
+class DerivedEntities:
+    """
+    The entities whose state is computed from another's, as HA tracks them (#820).
+
+    Read once per check from what Home Assistant itself listens to:
+
+    * a template entity re-renders on the entities, domains or all states its
+      templates read at their last render (``TrackTemplateResultInfo``), so a
+      template that reads the helper only while another entity is on is
+      followed only then; one whose listeners cannot be read follows every
+      change;
+    * a trigger-based template entity changes when its block's triggers fire;
+    * any other entity listening to a state change through
+      ``async_track_state_change_event`` (min/max, threshold, bayesian,
+      statistics, filter, trend, derivative, integration, utility meter,
+      mold indicator, switch_as_x; YAML or UI) follows that entity.
+    """
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        """Read what Home Assistant tracks, once."""
+        self.hass = hass
+        self.by_entity: dict[str, set[str]] = {}
+        self.by_domain: dict[str, set[str]] = {}
+        self.every: set[str] = set()
+        self._triggered: list[tuple[Reactor, set[str]]] = []
+        self._trigger_index: _ReactorIndex | None = None
+        self._read_templates()
+        self._read_subscriptions()
+        self._read_entity_trackers()
+
+    def of(self, entity_id: str) -> set[str]:
+        """Return the entities a change to this one changes too."""
+        found = (
+            self.by_entity.get(entity_id, set())
+            | self.by_domain.get(entity_id.split(".", 1)[0], set())
+            | self.every
+        )
+        if self._triggered:
+            if self._trigger_index is None:
+                self._trigger_index = _ReactorIndex.build(
+                    [reactor for reactor, _ in self._triggered]
+                )
+            names, domain, device_id = _change_keys(self.hass, entity_id)
+            for number in self._trigger_index.find(names, domain, device_id):
+                found = found | self._triggered[number][1]
+        return found - {entity_id}
+
+    def _read_templates(self) -> None:
+        blocks: dict[int, tuple[Any, set[str]]] = {}
+        for platform in async_get_platforms(self.hass, TEMPLATE_PLATFORM):
+            for entity_id, entity in list(getattr(platform, "entities", {}).items()):
+                entity_id = str(entity_id).lower()  # noqa: PLW2901
+                coordinator = getattr(entity, "coordinator", None)
+                if coordinator is not None and isinstance(
+                    getattr(coordinator, "config", None), dict
+                ):
+                    # Trigger-based: changes when its block is triggered.
+                    blocks.setdefault(id(coordinator), (coordinator, set()))[1].add(
+                        entity_id
+                    )
+                    continue
+                self._read_template(entity_id, entity)
+        for coordinator, entity_ids in blocks.values():
+            config = coordinator.config
+            raw = next((config[key] for key in _TRIGGER_KEYS if key in config), [])
+            triggers = raw if isinstance(raw, list) else [raw]
+            self._add_triggered(
+                [_compile_trigger(t) for t in triggers],
+                entity_ids,
+                "\n".join(
+                    text for key in _VARIABLE_KEYS for text in _texts(config.get(key))
+                ),
+            )
+
+    def _read_template(self, entity_id: str, entity: Any) -> None:
+        """
+        Follow a template entity from what it reads.
+
+        HA's live listeners, plus what its text reads generically: while a
+        rate-limited render is pending, HA drops the domain and all-states
+        listeners from its summary. Before it first renders, or when the
+        listeners cannot be read, its text alone: every entity or domain it
+        names.
+        """
+        texts = _template_texts(entity)
+        listeners = self._listeners(entity)
+        if listeners is None or (not listeners and texts):
+            if not texts:
+                _warn_once(f"what template entity {entity_id} reads")
+                self.every.add(entity_id)
+                return
+            self._add_triggered(
+                [_compile_trigger({"trigger": "template", "value_template": texts})],
+                {entity_id},
+            )
+            return
+        reads_all, domains = _template_domains([texts.lower()])
+        if listeners.get(_ALL_LISTENER) or reads_all or _IMPORTS_TEMPLATE.search(texts):
+            self.every.add(entity_id)
+        for source in listeners.get(_ENTITIES_LISTENER) or ():
+            self.by_entity.setdefault(str(source).lower(), set()).add(entity_id)
+        for domain in {*(listeners.get(_DOMAINS_LISTENER) or ()), *domains}:
+            self.by_domain.setdefault(str(domain).lower(), set()).add(entity_id)
+
+    def _add_triggered(
+        self, triggers: list[_Trigger], entity_ids: set[str], variables: str = ""
+    ) -> None:
+        self._triggered.append(
+            (
+                Reactor(name=None, triggers=triggers, sequence=[], variables=variables),
+                entity_ids,
+            )
+        )
+
+    @staticmethod
+    def _listeners(entity: Any) -> dict[str, Any] | None:
+        """Return what a template entity re-renders on, {} before it renders."""
+        if not hasattr(entity, "_template_result_info"):
+            return None
+        info = entity._template_result_info  # noqa: SLF001
+        if info is None:
+            return {}  # not rendered yet
+        listeners = info.listeners
+        return listeners if isinstance(listeners, dict) else None
+
+    def _read_subscriptions(self) -> None:
+        """Follow each entity subscribed to a state change, by entity or to all."""
+        key = getattr(ha_event, _TRACK_STATE_CHANGE_KEY, None)
+        if key is None:
+            _warn_once("Home Assistant's state-change subscriptions")
+            return
+        data = self.hass.data.get(key)
+        callbacks = getattr(data, "callbacks", None) if data is not None else {}
+        if not isinstance(callbacks, dict):
+            _warn_once("Home Assistant's state-change subscriptions")
+            return
+        search = _OwnerSearch()
+        for source, jobs in list(callbacks.items()):
+            for job in list(jobs):
+                owners = search.owners(job)
+                if owners:
+                    self.by_entity.setdefault(str(source).lower(), set()).update(owners)
+        # A template reading every state listens on the bus itself.
+        for job in _bus_state_listeners(self.hass):
+            self.every |= search.owners(job)
+        search.finish()
+
+    def _read_entity_trackers(self) -> None:
+        """
+        Follow each entity's template trackers (bayesian, universal...).
+
+        An entity keeps its tracker's ``async_remove`` to call on removal,
+        so its trackers are found whatever they subscribe to right now: a
+        pending rate-limited render has no domain or all-states subscription.
+        """
+        platforms = self.hass.data.get(entity_platform.DATA_ENTITY_PLATFORM) or {}
+        for domain_platforms in list(platforms.values()):
+            for platform in list(domain_platforms):
+                for entity_id, entity in list(
+                    getattr(platform, "entities", {}).items()
+                ):
+                    try:
+                        trackers = [
+                            tracker
+                            for remove in list(
+                                getattr(entity, "_on_remove", None) or ()
+                            )
+                            if hasattr(
+                                tracker := getattr(remove, "__self__", None),
+                                "_track_templates",
+                            )
+                        ]
+                    except Exception:  # noqa: BLE001
+                        _warn_once(f"the template trackers of {entity_id}")
+                        continue
+                    for tracker in trackers:
+                        self._read_tracker(str(entity_id).lower(), tracker)
+
+    def _read_tracker(self, owner: str, tracker: Any) -> None:
+        """Follow a template tracker's owner by what it and its text read."""
+        try:
+            listeners = tracker.listeners
+        except Exception:  # noqa: BLE001
+            listeners = None  # not set up yet: the text alone
+        if isinstance(listeners, dict):
+            if listeners.get(_ALL_LISTENER):
+                self.every.add(owner)
+            for source in listeners.get(_ENTITIES_LISTENER) or ():
+                self.by_entity.setdefault(str(source).lower(), set()).add(owner)
+            for domain in listeners.get(_DOMAINS_LISTENER) or ():
+                self.by_domain.setdefault(str(domain).lower(), set()).add(owner)
+        self._read_tracker_text(tracker, {owner}, names=not isinstance(listeners, dict))
+
+    def _read_tracker_text(
+        self, tracker: Any, owners: set[str], *, names: bool = False
+    ) -> None:
+        """
+        Follow a template tracker's owners by what its text reads.
+
+        Generic reads always: a pending rate-limited render drops its domain
+        and all-states subscriptions. Named entities too (``names``) when its
+        live listeners cannot be read.
+        """
+        texts = "\n".join(
+            text
+            for track in getattr(tracker, "_track_templates", None) or ()
+            if isinstance(
+                text := getattr(getattr(track, "template", None), "template", None), str
+            )
+        )
+        reads_all, domains = _template_domains([texts.lower()])
+        if reads_all or _IMPORTS_TEMPLATE.search(texts):
+            self.every |= owners
+        for domain in domains:
+            self.by_domain.setdefault(domain, set()).update(owners)
+        if names and texts:
+            self._add_triggered(
+                [_compile_trigger({"trigger": "template", "value_template": texts})],
+                set(owners),
+            )
+
+
+def _bus_state_listeners(hass: HomeAssistant) -> list[Any]:
+    """
+    Return the jobs listening to every state change on the bus.
+
+    One with an event filter is left out: it hears only the changes its
+    filter passes (the Assist agent hears entities added and removed), and
+    a template reading every state listens unfiltered.
+    """
+    listeners = getattr(getattr(hass, "bus", None), "_listeners", None)
+    if not isinstance(listeners, dict):
+        _warn_once("Home Assistant's event bus listeners")
+        return []
+    jobs: list[Any] = []
+    for entry in list(listeners.get("state_changed") or []):
+        if isinstance(entry, tuple):
+            # (job, event filter, ...): a filtered one hears only some changes.
+            job, event_filter = [*entry, None, None][:2]
+            if job is not None and event_filter is None:
+                jobs.append(job)
+        else:
+            jobs.append(entry)
+    return jobs
+
+
+def _template_texts(entity: Any) -> str:
+    """Return a template entity's templates as text, or "" if unreadable."""
+    attrs = getattr(entity, "_template_attrs", None)
+    if not isinstance(attrs, dict):
+        return ""
+    return "\n".join(
+        text
+        for template in attrs
+        if isinstance(text := getattr(template, "template", None), str)
+    )
+
+
+# A template importing another template (a macro) may read anything.
+_IMPORTS_TEMPLATE = re.compile(r"\{%-?\s*(?:from|import|include)\b")
+# How many links one owner search follows, and how many objects one check
+# visits in all before it stops reading (and warns).
+_OWNER_SEARCH_DEPTH = 8
+_OWNER_SEARCH_BUDGET = 50_000
+_CONTAINERS = (dict, list, tuple, set, frozenset, str, bytes)
+# The entities each state-change job updates, kept across checks: a job's
+# closure and bound object do not change. Entity objects, not ids, so a
+# renamed entity is read by its new id. Not kept: a search cut short, or one
+# through a coordinator, whose listeners change (its sensors are added after
+# it subscribes). Replaced by the jobs still subscribed at each read.
+_JOB_OWNERS: dict[int, tuple[Any, tuple[Entity, ...]]] = {}
+
+
+class OwnerSearchExceededError(Exception):
+    """Raised when a check would read more than ``_OWNER_SEARCH_BUDGET``."""
+
+
+@dataclass
+class _Found:
+    """What a search from one object reached, and whether it can be kept."""
+
+    entities: frozenset[Entity] = frozenset()
+    complete: bool = True
+    volatile: bool = False
+
+
+class _OwnerSearch:
+    """
+    Find the entities a state-change callback updates (#820).
+
+    Only the links Home Assistant uses are followed, not every object a
+    callback can reach (a shared dict of an integration's entities would
+    follow them all):
+
+    * a job to its target, a bound method to its object, a partial to its
+      function and arguments, a function to the values it closes over (an
+      entity's method defines its listener inside, closing over the entity);
+    * a filtered state tracker to its action, a template tracker
+      (``TrackTemplateResultInfo``) to its job, a coordinator (history
+      stats, proximity) to the callbacks of its listeners.
+
+    Every entity reached counts. An object that cannot be read is skipped
+    with a warning; a read over the budget raises, and the change is held.
+    """
+
+    def __init__(self) -> None:
+        self._memo: dict[int, _Found] = {}
+        self._visited = 0
+        self._jobs: dict[int, tuple[Any, tuple[Entity, ...]]] = {}
+
+    def owners(self, job: Any) -> set[str]:
+        cached = _JOB_OWNERS.get(id(job))
+        if cached is not None and cached[0] is job:
+            entities: tuple[Entity, ...] = cached[1]
+            self._jobs[id(job)] = cached
+        else:
+            found = self._search(job, 0, set())
+            entities = tuple(found.entities)
+            if found.complete and not found.volatile:
+                self._jobs[id(job)] = (job, entities)
+        return {
+            entity_id.lower()
+            for entity in entities
+            if isinstance(entity_id := getattr(entity, "entity_id", None), str)
+            and entity_id
+        }
+
+    def finish(self) -> None:
+        """Keep the owners of the jobs seen in this read, for the next."""
+        _JOB_OWNERS.clear()
+        _JOB_OWNERS.update(self._jobs)
+
+    def _search(self, node: Any, depth: int, path: set[int]) -> _Found:  # noqa: PLR0911
+        if node is None or isinstance(node, _CONTAINERS):
+            return _Found()
+        if id(node) in path:
+            return _Found(complete=False)  # a loop: the caller decides
+        if (memo := self._memo.get(id(node))) is not None:
+            return memo
+        self._visited += 1
+        if self._visited > _OWNER_SEARCH_BUDGET:
+            raise OwnerSearchExceededError
+        if isinstance(node, Entity):
+            found = _Found(entities=frozenset([node]))
+            self._memo[id(node)] = found
+            return found
+        if type(node).__name__ == "HomeAssistant":
+            return _Found()
+        if depth >= _OWNER_SEARCH_DEPTH:
+            return _Found(complete=False)
+        try:
+            links, coordinator = _owner_links(node)
+        except Exception:  # noqa: BLE001
+            _warn_once(f"a state-change callback ({type(node).__name__})")
+            links, coordinator = [], False
+        entities: set[Entity] = set()
+        complete, volatile = True, coordinator
+        path.add(id(node))
+        for link in links:
+            found = self._search(link, depth + 1, path)
+            entities |= found.entities
+            complete = complete and found.complete
+            volatile = volatile or found.volatile
+        path.discard(id(node))
+        result = _Found(frozenset(entities), complete, volatile)
+        if complete:
+            self._memo[id(node)] = result
+        return result
+
+
+def _owner_links(node: Any) -> tuple[list[Any], bool]:
+    """
+    Return what a callback, job or tracker hands state changes to.
+
+    And whether it is a coordinator, whose listeners change.
+    """
+    if isinstance(node, partial):
+        return [node.func, *node.args, *node.keywords.values()], False
+    links: list[Any] = [getattr(node, "__self__", None)]
+    links.extend(
+        cell.cell_contents
+        for cell in getattr(node, "__closure__", None) or ()
+        if _cell_filled(cell)
+    )
+    links.extend(getattr(node, name, None) for name in ("target", "_job", "_action"))
+    listeners = getattr(node, "_listeners", None)
+    if isinstance(listeners, dict) and hasattr(node, "async_update_listeners"):
+        # A coordinator: each listener is (update callback, context).
+        links.extend(
+            entry[0] if isinstance(entry, tuple) and entry else entry
+            for entry in listeners.values()
+        )
+        return links, True
+    return links, False
+
+
+def _cell_filled(cell: Any) -> bool:
+    try:
+        cell.cell_contents  # noqa: B018
+    except ValueError:
+        return False
+    return True
 
 
 def _read_reactors(hass: HomeAssistant) -> list[Reactor] | None:
