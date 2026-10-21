@@ -183,6 +183,25 @@ _KNOWN_TYPE_LABELS = {
     "low_battery_sensors": "Low battery",
     "entity_state_duration": "Unchanged too long",
     "motion_detected_at_night_while_alarm_disarmed": "Motion at night, alarm disarmed",
+    "alarm_state_mismatch": "Alarm state mismatch",
+    "alarm_disarmed_open_entry": "Entry open, alarm disarmed",
+    "baseline_deviation": "Unusual value",
+    "time_of_day_anomaly": "Unusual for this time of day",
+    "entity_staleness": "Data not updating",
+    "lambda": "Custom rule alert",
+    "motion_while_alarm_disarmed_and_home_present": (
+        "Motion, alarm disarmed, someone home"
+    ),
+    "motion_without_camera_activity": "Motion without camera activity",
+    "multiple_entries_open_count": "Several entries open",
+    "open_entry_when_home": "Open entry while home",
+    "sensor_threshold_condition": "Sensor above threshold",
+    "unavailable_sensors": "Sensors unavailable",
+    "unavailable_sensors_while_home": "Sensor unavailable while home",
+    "unknown_person_camera_no_home": "Unknown person on camera while away",
+    "unknown_person_camera_when_home": "Unknown person on camera while home",
+    "unlocked_lock_when_home": "Door lock unlocked while home",
+    "unlocked_lock_while_away": "Door lock unlocked while away",
 }
 
 

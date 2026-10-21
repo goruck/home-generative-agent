@@ -20,11 +20,17 @@ automatically for a Czech-configured instance even if
 ``sentinel_response_language`` (the LLM explainer option) is left
 unset.
 
-Deliberately out of scope: the deterministic per-template mobile
-message bodies (``_deterministic_mobile_message`` and friends in
-``notifier.py``) stay English-only by design -- they carry exact
-figures/units/entity names that a translation could blur, per the
-#523 review discussion. Only the chrome around them is localized here.
+The deterministic per-template mobile message bodies
+(``_deterministic_mobile_message`` and friends in ``notifier.py``) are
+localized here too, as fixed templates with named placeholders: figures,
+units, and entity names are substituted verbatim, so a translation cannot
+blur them (the concern behind the #523 review discussion).
+
+Still English-only: the pre-rendered ``summary`` of the network /
+HA-security rule family. Each rule builds it at evaluation time without
+access to ``hass``. ``security_device_unavailable`` is the exception: its
+evidence carries the names and minutes, so the notifier re-renders the
+sentence from them (``_network_summary``).
 
 Add a new language by adding a key to ``_MESSAGES`` with the same set
 of message ids as ``"en"``. Missing keys in a non-English language
@@ -95,6 +101,25 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "type_zigbee_permit_join_open": "Zigbee pairing is open",
         "type_zwave_inclusion_active": "Z-Wave inclusion is active",
         "type_radio_coordinator_update_pending": "Radio coordinator update available",
+        "type_alarm_state_mismatch": "Alarm state mismatch",
+        "type_alarm_disarmed_open_entry": "Entry open, alarm disarmed",
+        "type_baseline_deviation": "Unusual value",
+        "type_time_of_day_anomaly": "Unusual for this time of day",
+        "type_entity_staleness": "Data not updating",
+        "type_lambda": "Custom rule alert",
+        "type_motion_while_alarm_disarmed_and_home_present": (
+            "Motion, alarm disarmed, someone home"
+        ),
+        "type_motion_without_camera_activity": "Motion without camera activity",
+        "type_multiple_entries_open_count": "Several entries open",
+        "type_open_entry_when_home": "Open entry while home",
+        "type_sensor_threshold_condition": "Sensor above threshold",
+        "type_unavailable_sensors": "Sensors unavailable",
+        "type_unavailable_sensors_while_home": "Sensor unavailable while home",
+        "type_unknown_person_camera_no_home": "Unknown person on camera while away",
+        "type_unknown_person_camera_when_home": "Unknown person on camera while home",
+        "type_unlocked_lock_when_home": "Door lock unlocked while home",
+        "type_unlocked_lock_while_away": "Door lock unlocked while away",
         "subtitle_appliance_finished": "{appliance} finished",
         "subtitle_appliance_cycle_complete": "Appliance cycle complete",
         "subtitle_entry_open_alarm_disarmed": "{entry_name} open, alarm disarmed",
@@ -147,6 +172,75 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "snooze_confirm_message": (
             "Permanently suppress '{friendly}' alerts? "
             "This can only be undone from settings."
+        ),
+        # Deterministic notification bodies. These are fixed templates, so the
+        # figures, units, and entity names stay exact; only the words around
+        # them are localized (follow-up to #523).
+        "body_a_camera": "A camera",
+        "body_an_entry": "An entry",
+        "body_appliance_power": (
+            "{appliance} drew {power} {duration}, {threshold}. Check it."
+        ),
+        "body_power_watts": "about {watts} W",
+        "body_power_unknown": "high power",
+        "body_duration_min": "for {minutes} min",
+        "body_duration_unknown": "for an extended period",
+        "body_threshold_min": "above the {minutes} min threshold",
+        "body_threshold_unknown": "above the configured threshold",
+        "body_alarm_camera_seen_ago": (
+            "{camera} saw an unrecognized person {minutes} min ago."
+        ),
+        "body_alarm_camera_seen": "{camera} saw an unrecognized person.",
+        "body_alarm_disarmed_since": "The alarm has been disarmed since {since}.",
+        "body_alarm_disarmed_now": "The alarm is currently disarmed.",
+        "body_alarm_cta": "Arm the alarm or view the camera.",
+        "body_entry_alarm_since": "Alarm disarmed since {since}.",
+        "body_entry_alarm_now": "Alarm is disarmed.",
+        "body_entry_open_alarm": (
+            "{entry} is open. {alarm} Close it or snooze if expected."
+        ),
+        "disarm_since_other_day": "{date} at {time}",
+        "body_baseline_values": (
+            "{appliance}: {cur}{unit} vs usual {base}{unit}{pct}. {cta}"
+        ),
+        "body_baseline_pct_above": "({pct}% above normal)",
+        "body_baseline_pct_below": "({pct}% below normal)",
+        "body_baseline_noval": "{appliance} {noun} {direction} normal. {cta}",
+        "body_baseline_noval_pct": (
+            "{appliance} {noun} {pct}% {direction} normal. {cta}"
+        ),
+        "body_dir_above": "above",
+        "body_dir_below": "below",
+        "body_noun_power": "power",
+        "body_noun_reading": "reading",
+        "body_cta_appliance": "Check appliance.",
+        "body_cta_worth": "Worth checking.",
+        "body_stale_person": (
+            "{name}'s location tracking has been outdated for {age}. "
+            "Check if their phone is on and reachable."
+        ),
+        "body_stale_sensor": (
+            "{name} data has been outdated for {age}. Please check the sensor."
+        ),
+        "age_unknown": "an extended period",
+        "age_day_one": "about 1 day",
+        "age_days_few": "about {count} days",
+        "age_days_many": "about {count} days",
+        "age_hour_one": "about 1 hour",
+        "age_hours_few": "about {count} hours",
+        "age_hours_many": "about {count} hours",
+        "summary_device_minutes": "{name} ({minutes} min)",
+        "summary_security_devices_one": (
+            "{count} security device unavailable longer than {minutes} minutes: "
+            "{listed}."
+        ),
+        "summary_security_devices_few": (
+            "{count} security devices unavailable longer than {minutes} minutes: "
+            "{listed}."
+        ),
+        "summary_security_devices_many": (
+            "{count} security devices unavailable longer than {minutes} minutes: "
+            "{listed}."
         ),
         "action_hint_high": "Urgent: check and secure it now.",
         "action_hint_medium": "Check soon and secure it if unexpected.",
@@ -216,6 +310,29 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "type_radio_coordinator_update_pending": (
             "K dispozici aktualizace rádiového koordinátoru"
         ),
+        "type_alarm_state_mismatch": "Stav alarmu neodpovídá přítomnosti",
+        "type_alarm_disarmed_open_entry": "Otevřený vstup při vypnutém alarmu",
+        "type_baseline_deviation": "Neobvyklá hodnota",
+        "type_time_of_day_anomaly": "Neobvyklé pro tuto denní dobu",
+        "type_entity_staleness": "Data se neaktualizují",
+        "type_lambda": "Upozornění vlastního pravidla",
+        "type_motion_while_alarm_disarmed_and_home_present": (
+            "Pohyb při vypnutém alarmu, někdo je doma"
+        ),
+        "type_motion_without_camera_activity": "Pohyb bez aktivity kamery",
+        "type_multiple_entries_open_count": "Otevřeno více vstupů",
+        "type_open_entry_when_home": "Otevřený vstup v přítomnosti",
+        "type_sensor_threshold_condition": "Senzor překročil práh",
+        "type_unavailable_sensors": "Senzory nedostupné",
+        "type_unavailable_sensors_while_home": "Senzor nedostupný v přítomnosti",
+        "type_unknown_person_camera_no_home": (
+            "Neznámá osoba na kameře v nepřítomnosti"
+        ),
+        "type_unknown_person_camera_when_home": (
+            "Neznámá osoba na kameře v přítomnosti"
+        ),
+        "type_unlocked_lock_when_home": "Zámek odemčený v přítomnosti",
+        "type_unlocked_lock_while_away": "Zámek odemčený v nepřítomnosti",
         "subtitle_appliance_finished": "{appliance} dokončeno",
         "subtitle_appliance_cycle_complete": "Cyklus spotřebiče dokončen",
         "subtitle_entry_open_alarm_disarmed": "{entry_name} otevřeno, alarm vypnutý",
@@ -274,6 +391,71 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "Trvale potlačit upozornění typu '{friendly}'? "
             "Lze vrátit zpět pouze v nastavení."
         ),
+        "body_a_camera": "Kamera",
+        "body_an_entry": "Vstup",
+        "body_appliance_power": (
+            "{appliance}: {power}, {duration} ({threshold}). Zkontrolujte spotřebič."
+        ),
+        "body_power_watts": "odběr asi {watts} W",
+        "body_power_unknown": "vysoký odběr",
+        "body_duration_min": "trvá {minutes} min",
+        "body_duration_unknown": "trvá delší dobu",
+        "body_threshold_min": "limit {minutes} min",
+        "body_threshold_unknown": "přes nastavený limit",
+        "body_alarm_camera_seen_ago": "{camera}: neznámá osoba před {minutes} min.",
+        "body_alarm_camera_seen": "{camera}: neznámá osoba.",
+        "body_alarm_disarmed_since": "Alarm je vypnutý od {since}.",
+        "body_alarm_disarmed_now": "Alarm je teď vypnutý.",
+        "body_alarm_cta": "Zapněte alarm nebo si prohlédněte kameru.",
+        "body_entry_alarm_since": "Alarm vypnutý od {since}.",
+        "body_entry_alarm_now": "Alarm je vypnutý.",
+        "body_entry_open_alarm": (
+            "{entry}: otevřeno. {alarm} "
+            "Zavřete to, nebo ztlumte upozornění, pokud je to v pořádku."
+        ),
+        "disarm_since_other_day": "{date} v {time}",
+        "body_baseline_values": (
+            "{appliance}: {cur}{unit} oproti obvyklým {base}{unit}{pct}. {cta}"
+        ),
+        "body_baseline_pct_above": "({pct} % nad normálem)",
+        "body_baseline_pct_below": "({pct} % pod normálem)",
+        "body_baseline_noval": "{appliance}: {noun} {direction} normálem. {cta}",
+        "body_baseline_noval_pct": (
+            "{appliance}: {noun} {pct} % {direction} normálem. {cta}"
+        ),
+        "body_dir_above": "nad",
+        "body_dir_below": "pod",
+        "body_noun_power": "odběr",
+        "body_noun_reading": "hodnota",
+        "body_cta_appliance": "Zkontrolujte spotřebič.",
+        "body_cta_worth": "Stojí za kontrolu.",
+        "body_stale_person": (
+            "Poloha osoby {name} se neaktualizuje už {age}. "
+            "Zkontrolujte, zda je telefon zapnutý a dostupný."
+        ),
+        "body_stale_sensor": (
+            "Data senzoru {name} se neaktualizují už {age}. Zkontrolujte senzor."
+        ),
+        "age_unknown": "delší dobu",
+        "age_day_one": "asi 1 den",
+        "age_days_few": "asi {count} dny",
+        "age_days_many": "asi {count} dní",
+        "age_hour_one": "asi 1 hodinu",
+        "age_hours_few": "asi {count} hodiny",
+        "age_hours_many": "asi {count} hodin",
+        "summary_device_minutes": "{name} ({minutes} min)",
+        "summary_security_devices_one": (
+            "{count} bezpečnostní zařízení nedostupné déle než {minutes} min: "
+            "{listed}."
+        ),
+        "summary_security_devices_few": (
+            "{count} bezpečnostní zařízení nedostupná déle než {minutes} min: "
+            "{listed}."
+        ),
+        "summary_security_devices_many": (
+            "{count} bezpečnostních zařízení nedostupných déle než {minutes} min: "
+            "{listed}."
+        ),
         "action_hint_high": "Naléhavé: zkontrolujte a zajistěte to hned.",
         "action_hint_medium": "Zkontrolujte brzy a zajistěte, pokud je to neobvyklé.",
         "action_hint_low": "Projděte si to, až budete mít čas.",
@@ -327,3 +509,24 @@ def notif_msg(hass: HomeAssistant | None, key: str, /, **kwargs: Any) -> str:
         except (KeyError, IndexError, ValueError):
             continue
     return template
+
+
+def notif_language(hass: HomeAssistant | None) -> str:
+    """Return the resolved notification language (``"en"`` when unsupported)."""
+    return _resolve_language(hass)
+
+
+def notif_plural_category(count: int) -> str:
+    """
+    Return ``"one"``, ``"few"`` or ``"many"`` for a whole-number *count*.
+
+    Follows the Czech cardinal rules (1 / 2-4 / everything else, with the
+    teens counting as "many"). English tables give ``few`` and ``many`` the
+    same text, so the same call site serves both languages.
+    """
+    n = abs(int(count))
+    if n == 1:
+        return "one"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:  # noqa: PLR2004
+        return "few"
+    return "many"

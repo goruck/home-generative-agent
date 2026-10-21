@@ -570,6 +570,33 @@ def test_security_device_unavailable_aggregates_past_threshold() -> None:
     assert SecurityDeviceUnavailableRule(offline_minutes=90).evaluate(snapshot) == []
 
 
+def test_security_device_unavailable_finding_renders_in_czech() -> None:
+    """The notifier rebuilds the sentence from the rule's own evidence keys."""
+    from types import SimpleNamespace
+
+    from custom_components.home_generative_agent.sentinel.notifier import (
+        _network_summary,
+    )
+
+    snapshot = _snapshot(
+        ha_security={
+            "unavailable_security_devices": {"lock.front": 45, "camera.yard": 60}
+        },
+        entities=[_entity("lock.front", "unavailable", friendly_name="Front Door")],
+    )
+    finding = _only(
+        SecurityDeviceUnavailableRule(offline_minutes=30).evaluate(snapshot)
+    )
+    czech: Any = SimpleNamespace(config=SimpleNamespace(language="cs"))
+    assert _network_summary(finding, czech) == (
+        "2 bezpečnostní zařízení nedostupná déle než 30 min: "
+        "camera.yard (60 min), Front Door (45 min)."
+    )
+    # Without a language the stored English sentence comes back unchanged, so a
+    # renamed evidence key would show up here as a Czech/English mismatch.
+    assert _network_summary(finding) == finding.evidence["summary"]
+
+
 def test_unconfigured_devices_aggregate_severity_by_camera_and_presence() -> None:
     """A camera handler while away makes the one finding medium; else low."""
     ha = {

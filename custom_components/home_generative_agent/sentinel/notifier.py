@@ -57,7 +57,9 @@ from custom_components.home_generative_agent.sentinel.models import (
     trust_device_ids,
 )
 from custom_components.home_generative_agent.sentinel.notifier_messages import (
+    notif_language,
     notif_msg,
+    notif_plural_category,
 )
 from custom_components.home_generative_agent.sentinel.owed import SEEN_WHILE_SILENCED
 from custom_components.home_generative_agent.sentinel.power_units import (
@@ -70,6 +72,7 @@ from custom_components.home_generative_agent.sentinel.proposal_templates import 
 from custom_components.home_generative_agent.sentinel.rules.network_common import (
     CHANGE_ALERT_RULE_TYPES,
     NETWORK_RULE_TYPES,
+    printable,
 )
 from custom_components.home_generative_agent.sentinel.suppression import (
     SUPPRESSION_REASON_NOT_SUPPRESSED,
@@ -919,6 +922,25 @@ _KNOWN_TYPE_LABEL_KEYS = {
     "motion_detected_at_night_while_alarm_disarmed": (
         "type_motion_detected_at_night_while_alarm_disarmed"
     ),
+    "alarm_state_mismatch": "type_alarm_state_mismatch",
+    "alarm_disarmed_open_entry": "type_alarm_disarmed_open_entry",
+    "baseline_deviation": "type_baseline_deviation",
+    "time_of_day_anomaly": "type_time_of_day_anomaly",
+    "entity_staleness": "type_entity_staleness",
+    "lambda": "type_lambda",
+    "motion_while_alarm_disarmed_and_home_present": (
+        "type_motion_while_alarm_disarmed_and_home_present"
+    ),
+    "motion_without_camera_activity": "type_motion_without_camera_activity",
+    "multiple_entries_open_count": "type_multiple_entries_open_count",
+    "open_entry_when_home": "type_open_entry_when_home",
+    "sensor_threshold_condition": "type_sensor_threshold_condition",
+    "unavailable_sensors": "type_unavailable_sensors",
+    "unavailable_sensors_while_home": "type_unavailable_sensors_while_home",
+    "unknown_person_camera_no_home": "type_unknown_person_camera_no_home",
+    "unknown_person_camera_when_home": "type_unknown_person_camera_when_home",
+    "unlocked_lock_when_home": "type_unlocked_lock_when_home",
+    "unlocked_lock_while_away": "type_unlocked_lock_while_away",
 }
 
 
@@ -1030,7 +1052,9 @@ def _is_power_class_evidence(ev: dict[str, Any]) -> bool:
     return "power" in entity_id or "energy" in entity_id
 
 
-def _appliance_power_duration_mobile_message(finding: AnomalyFinding) -> str:
+def _appliance_power_duration_mobile_message(
+    finding: AnomalyFinding, hass: HomeAssistant | None = None
+) -> str:
     """Deterministic mobile copy for appliance_power_duration."""
     ev = finding.evidence
     raw_name = (ev.get("friendly_name") or "").strip()
@@ -1048,18 +1072,28 @@ def _appliance_power_duration_mobile_message(finding: AnomalyFinding) -> str:
     threshold_min = ev.get("threshold_min")
 
     power_str = (
-        f"about {round(float(power_w))} W" if power_w is not None else "high power"
+        notif_msg(hass, "body_power_watts", watts=round(float(power_w)))
+        if power_w is not None
+        else notif_msg(hass, "body_power_unknown")
     )
     dur_str = (
-        f"{int(duration_min)} min" if duration_min is not None else "an extended period"
+        notif_msg(hass, "body_duration_min", minutes=int(duration_min))
+        if duration_min is not None
+        else notif_msg(hass, "body_duration_unknown")
     )
     thr_str = (
-        f"{int(threshold_min)} min" if threshold_min is not None else "the configured"
+        notif_msg(hass, "body_threshold_min", minutes=int(threshold_min))
+        if threshold_min is not None
+        else notif_msg(hass, "body_threshold_unknown")
     )
 
-    msg = (
-        f"{appliance} drew {power_str} for {dur_str},"
-        f" above the {thr_str} threshold. Check it."
+    msg = notif_msg(
+        hass,
+        "body_appliance_power",
+        appliance=appliance,
+        power=power_str,
+        duration=dur_str,
+        threshold=thr_str,
     )
     return msg[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
 
@@ -1245,7 +1279,7 @@ def _fallback_message(
     )
 
 
-def _format_disarm_since(parsed: datetime) -> str:
+def _format_disarm_since(parsed: datetime, hass: HomeAssistant | None = None) -> str:
     """
     Return a human-readable 'since …' string for a disarm timestamp.
 
@@ -1254,13 +1288,21 @@ def _format_disarm_since(parsed: datetime) -> str:
     """
     local = dt_util.as_local(parsed)
     local_now = dt_util.now()
-    time_str = local.strftime("%-I:%M %p")
+    if notif_language(hass) == "en":
+        time_str = local.strftime("%-I:%M %p")
+        date_str = local.strftime("%-d %b")
+    else:
+        # No platform-specific strftime flags and no English month names.
+        time_str = f"{local.hour}:{local.minute:02d}"
+        date_str = f"{local.day}. {local.month}."
     if local.date() == local_now.date():
         return time_str
-    return local.strftime(f"%-d %b at {time_str}")
+    return notif_msg(hass, "disarm_since_other_day", date=date_str, time=time_str)
 
 
-def _alarm_disarmed_mobile_message(finding: AnomalyFinding) -> str:
+def _alarm_disarmed_mobile_message(
+    finding: AnomalyFinding, hass: HomeAssistant | None = None
+) -> str:
     """Deterministic mobile copy for alarm_disarmed_during_external_threat."""
     ev = finding.evidence
 
@@ -1272,60 +1314,74 @@ def _alarm_disarmed_mobile_message(finding: AnomalyFinding) -> str:
         else:
             cam_name = ""
     if not cam_name:
-        cam_name = "A camera"
+        cam_name = notif_msg(hass, "body_a_camera")
 
     age = ev.get("camera_activity_age_minutes")
     if age is not None:
         age_mins = max(1, round(float(age)))
-        activity_phrase = f"{cam_name} saw an unrecognized person {age_mins} min ago."
+        activity_phrase = notif_msg(
+            hass, "body_alarm_camera_seen_ago", camera=cam_name, minutes=age_mins
+        )
     else:
         # Unreachable for newly generated findings — the rule's freshness
         # gate guarantees a numeric age — but findings persisted before that
         # gate existed can still re-render through this branch.
-        activity_phrase = f"{cam_name} saw an unrecognized person."
+        activity_phrase = notif_msg(hass, "body_alarm_camera_seen", camera=cam_name)
 
     last_changed = ev.get("alarm_last_changed")
     alarm_phrase = ""
     if last_changed:
         parsed = dt_util.parse_datetime(str(last_changed))
         if parsed is not None:
-            alarm_phrase = (
-                f" The alarm has been disarmed since {_format_disarm_since(parsed)}."
+            alarm_phrase = notif_msg(
+                hass,
+                "body_alarm_disarmed_since",
+                since=_format_disarm_since(parsed, hass),
             )
     if not alarm_phrase:
-        alarm_phrase = " The alarm is currently disarmed."
+        alarm_phrase = notif_msg(hass, "body_alarm_disarmed_now")
 
-    cta = " Arm the alarm or view the camera."
-    return (activity_phrase + alarm_phrase + cta)[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
+    cta = notif_msg(hass, "body_alarm_cta")
+    msg = f"{activity_phrase} {alarm_phrase} {cta}"
+    return msg[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
 
 
-def _alarm_disarmed_open_entry_mobile_message(finding: AnomalyFinding) -> str:
+def _alarm_disarmed_open_entry_mobile_message(
+    finding: AnomalyFinding, hass: HomeAssistant | None = None
+) -> str:
     """Deterministic mobile copy for alarm_disarmed_open_entry dynamic rule."""
     ev = finding.evidence
     entry_id = str(ev.get("entry_entity_id") or "")
-    entry_name = _friendly_entity(entry_id) if entry_id else "An entry"
+    entry_name = (
+        _friendly_entity(entry_id) if entry_id else notif_msg(hass, "body_an_entry")
+    )
 
+    alarm_phrase = notif_msg(hass, "body_entry_alarm_now")
     alarm_last_changed = ev.get("alarm_last_changed")
     if alarm_last_changed:
         parsed = dt_util.parse_datetime(str(alarm_last_changed))
         if parsed is not None:
-            alarm_phrase = f"Alarm disarmed since {_format_disarm_since(parsed)}."
-        else:
-            alarm_phrase = "Alarm is disarmed."
-    else:
-        alarm_phrase = "Alarm is disarmed."
+            alarm_phrase = notif_msg(
+                hass,
+                "body_entry_alarm_since",
+                since=_format_disarm_since(parsed, hass),
+            )
 
-    msg = f"{entry_name} is open. {alarm_phrase} Close it or snooze if expected."
+    msg = notif_msg(hass, "body_entry_open_alarm", entry=entry_name, alarm=alarm_phrase)
     return msg[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
 
 
-def _baseline_deviation_mobile_message(finding: AnomalyFinding) -> str:
+def _baseline_deviation_mobile_message(
+    finding: AnomalyFinding, hass: HomeAssistant | None = None
+) -> str:
     """Deterministic mobile copy for baseline_deviation and time_of_day_anomaly."""
     ev = finding.evidence
     raw_name = (ev.get("friendly_name") or "").strip()
     if not raw_name and finding.triggering_entities:
         raw_name = _friendly_entity(finding.triggering_entities[0])
-    appliance = _strip_power_suffix(raw_name).title() or "Sensor"
+    appliance = _strip_power_suffix(raw_name).title() or notif_msg(
+        hass, "fallback_sensor"
+    )
 
     current_value = ev.get("current_value")
     # DOW-blended time_of_day_anomaly findings carry the comparison value as
@@ -1350,9 +1406,10 @@ def _baseline_deviation_mobile_message(finding: AnomalyFinding) -> str:
         # ABSENCE is the legacy signal — a present-but-empty unit means a
         # genuinely unitless sensor, where fabricating a unit would be wrong.
         unit = "kWh" if "energy" in str(ev.get("entity_id") or "") else "W"
-    cta = "Check appliance." if is_power else "Worth checking."
+    cta = notif_msg(hass, "body_cta_appliance" if is_power else "body_cta_worth")
 
-    direction_word = "below" if direction == "below" else "above"
+    is_below = direction == "below"
+    direction_word = notif_msg(hass, "body_dir_below" if is_below else "body_dir_above")
     # Persisted evidence re-renders through here: values may be missing,
     # non-numeric, or non-finite (poisoned baselines).  Rendering must never
     # raise — a crash here kills the dispatch path.
@@ -1375,16 +1432,46 @@ def _baseline_deviation_mobile_message(finding: AnomalyFinding) -> str:
     if have_values:
         cur = round(cur_f, 1)
         base = round(base_f, 1)
-        pct = f" ({pct_val}% {direction_word} normal)" if pct_val is not None else ""
-        msg = f"{appliance}: {cur}{unit} vs usual {base}{unit}{pct}. {cta}"
+        pct = ""
+        if pct_val is not None:
+            pct_key = (
+                "body_baseline_pct_below" if is_below else "body_baseline_pct_above"
+            )
+            pct = " " + notif_msg(hass, pct_key, pct=pct_val)
+        msg = notif_msg(
+            hass,
+            "body_baseline_values",
+            appliance=appliance,
+            cur=cur,
+            unit=unit,
+            base=base,
+            pct=pct,
+            cta=cta,
+        )
     else:
-        noun = "power" if is_power else "reading"
-        dev = f" {pct_val}%" if pct_val is not None else ""
-        msg = f"{appliance} {noun}{dev} {direction_word} normal. {cta}"
+        noun = notif_msg(hass, "body_noun_power" if is_power else "body_noun_reading")
+        msg = notif_msg(
+            hass,
+            "body_baseline_noval" if pct_val is None else "body_baseline_noval_pct",
+            appliance=appliance,
+            noun=noun,
+            pct=pct_val,
+            direction=direction_word,
+            cta=cta,
+        )
     return msg[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
 
 
-def _entity_staleness_mobile_message(finding: AnomalyFinding) -> str:
+def _age_phrase(hass: HomeAssistant | None, noun: str, count: int) -> str:
+    """Return "about 3 days" style text, inflected for the language's plurals."""
+    category = notif_plural_category(count)
+    key = f"age_{noun}_one" if category == "one" else f"age_{noun}s_{category}"
+    return notif_msg(hass, key, count=count)
+
+
+def _entity_staleness_mobile_message(
+    finding: AnomalyFinding, hass: HomeAssistant | None = None
+) -> str:
     """Deterministic mobile copy for entity_staleness findings."""
     ev = finding.evidence
     entity_id = str(ev.get("entity_id") or "").strip()
@@ -1393,30 +1480,29 @@ def _entity_staleness_mobile_message(finding: AnomalyFinding) -> str:
         raw_name = _friendly_entity(entity_id)
 
     age_hours = ev.get("age_hours")
-    age_str = "an extended period"
+    age_str = notif_msg(hass, "age_unknown")
     if age_hours is not None:
         try:
             age_h = float(age_hours)
             if age_h >= 48:  # noqa: PLR2004
-                age_str = f"about {int(age_h // 24)} days"
+                age_str = _age_phrase(hass, "day", int(age_h // 24))
             elif age_h >= 24:  # noqa: PLR2004
-                age_str = "about 1 day"
+                age_str = _age_phrase(hass, "day", 1)
             elif age_h >= 2:  # noqa: PLR2004
-                age_str = f"about {int(age_h)} hours"
+                age_str = _age_phrase(hass, "hour", int(age_h))
             else:
-                age_str = "about 1 hour"
+                age_str = _age_phrase(hass, "hour", 1)
         except (TypeError, ValueError):
             pass
 
     if entity_id.startswith("person."):
-        msg = (
-            f"{raw_name}'s location tracking has been outdated for {age_str}. "
-            f"Check if their phone is on and reachable."
-        )
+        msg = notif_msg(hass, "body_stale_person", name=raw_name, age=age_str)
     else:
-        msg = (
-            f"{raw_name or 'Sensor'} data has been outdated for {age_str}. "
-            f"Please check the sensor."
+        msg = notif_msg(
+            hass,
+            "body_stale_sensor",
+            name=raw_name or notif_msg(hass, "fallback_sensor"),
+            age=age_str,
         )
     return msg[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
 
@@ -1463,7 +1549,55 @@ def escape_markdown(text: str) -> str:
     return _MARKDOWN_ESCAPE_RE.sub(r"\\\1", text)
 
 
-def _network_summary(finding: AnomalyFinding) -> str | None:
+def _security_device_summary(
+    finding: AnomalyFinding, hass: HomeAssistant | None
+) -> str | None:
+    """
+    Re-render a security_device_unavailable summary in the notification language.
+
+    The rule stores its sentence in English (it has no ``hass``) but keeps the
+    names and minutes in the evidence, so the sentence can be rebuilt from
+    those figures. Returns None when the evidence is missing or malformed
+    (e.g. a finding persisted by an older version), and the caller falls back
+    to the stored English summary.
+    """
+    ev = finding.evidence
+    ids = ev.get("entity_ids")
+    names = ev.get("friendly_names")
+    minutes = ev.get("unavailable_minutes")
+    if not (
+        isinstance(ids, list)
+        and ids
+        and isinstance(names, dict)
+        and isinstance(minutes, dict)
+    ):
+        return None
+    try:
+        listed = ", ".join(
+            notif_msg(
+                hass,
+                "summary_device_minutes",
+                name=printable(str(names.get(entity_id, entity_id))),
+                minutes=int(minutes[entity_id]),
+            )
+            for entity_id in ids
+        )
+        key = f"summary_security_devices_{notif_plural_category(len(ids))}"
+        text = notif_msg(
+            hass,
+            key,
+            count=len(ids),
+            minutes=int(ev["threshold_minutes"]),
+            listed=listed,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    return printable(text)
+
+
+def _network_summary(
+    finding: AnomalyFinding, hass: HomeAssistant | None = None
+) -> str | None:
     """
     Return the pre-rendered summary of a network / HA-security finding.
 
@@ -1474,6 +1608,10 @@ def _network_summary(finding: AnomalyFinding) -> str | None:
     template_id = str(finding.evidence.get("template_id") or "")
     if finding.type not in NETWORK_RULE_TYPES and template_id not in NETWORK_TEMPLATES:
         return None
+    if finding.type == "security_device_unavailable" and (
+        localized := _security_device_summary(finding, hass)
+    ):
+        return localized
     summary = str(finding.evidence.get("summary") or "").strip()
     return summary or None
 
@@ -1493,20 +1631,23 @@ def is_security_copy(finding: AnomalyFinding) -> bool:
     )
 
 
-def _deterministic_mobile_message(finding: AnomalyFinding) -> str | None:
+def _deterministic_mobile_message(
+    finding: AnomalyFinding, hass: HomeAssistant | None = None
+) -> str | None:
     """
-    Return the hardcoded-English template message for *finding*, or ``None``.
+    Return the fixed-template message for *finding*, or ``None``.
 
     These formatters render exact figures, units, and entity names that an LLM
-    paraphrase can blur, so they are preferred whenever the notification is
-    meant to be English.
+    paraphrase can blur, so they are preferred over model prose. The words
+    around the figures follow ``hass.config.language`` (English when *hass* is
+    None or the language has no table).
     """
     if finding.type == "alarm_disarmed_during_external_threat":
-        return _alarm_disarmed_mobile_message(finding)
+        return _alarm_disarmed_mobile_message(finding, hass)
     if finding.type == "appliance_power_duration":
-        return _appliance_power_duration_mobile_message(finding)
-    if (summary := _network_summary(finding)) is not None:
-        hint = _trust_hint(finding, None)
+        return _appliance_power_duration_mobile_message(finding, hass)
+    if (summary := _network_summary(finding, hass)) is not None:
+        hint = _trust_hint(finding, hass)
         if hint is None:
             return summary[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
         # The names come first and are cut; the pointer must survive the cut.
@@ -1516,7 +1657,7 @@ def _deterministic_mobile_message(finding: AnomalyFinding) -> str | None:
         str(finding.evidence.get("template_id") or "")
     )
     if formatter:
-        return formatter(finding)
+        return formatter(finding, hass)
     return None
 
 
@@ -2005,10 +2146,10 @@ def _mobile_message(
 
     Deterministic per-template formatters win by default.  When a response
     language is configured the translated *explanation* wins instead for
-    informational findings: the deterministic strings are English-only, so
-    they would otherwise be the one part of the notification that ignores the
-    setting — and because ``_persistent_message`` already prefers the
-    explanation, the mobile push and the persistent notification would
+    informational findings: the operator asked for model phrasing in that
+    language, which the fixed templates (keyed on ``hass.config.language``)
+    would otherwise override. ``_persistent_message`` already prefers the
+    explanation, so the mobile push and the persistent notification would
     disagree for the same finding.
 
     Security copy (see ``is_security_copy``) is exempt and stays
@@ -2016,10 +2157,10 @@ def _mobile_message(
     time, or the call to action matters more than the language it is in.
 
     Falls back to the deterministic string when no translation is usable
-    (explainer disabled or empty explanation): accurate English beats a
-    generic English fallback.
+    (explainer disabled or empty explanation): the fixed template, with its
+    exact figures, beats the generic fallback.
     """
-    deterministic = _deterministic_mobile_message(finding)
+    deterministic = _deterministic_mobile_message(finding, hass)
     if deterministic is not None and (
         not response_language or is_security_copy(finding)
     ):
@@ -2041,7 +2182,7 @@ def _persistent_message(
     # Security copy never yields to model prose (see is_security_copy):
     # the summary names the token, port, or account, and a paraphrase built
     # from attacker-influenced evidence could drop or reshape it.
-    if (summary := _network_summary(finding)) is not None:
+    if (summary := _network_summary(finding, hass)) is not None:
         hint = _trust_hint(finding, hass)
         text = escape_markdown(summary)
         return f"{text}\n\n{escape_markdown(hint)}" if hint else text
@@ -2051,7 +2192,7 @@ def _persistent_message(
             return text
 
     if finding.type == "appliance_power_duration":
-        return _appliance_power_duration_mobile_message(finding)
+        return _appliance_power_duration_mobile_message(finding, hass)
 
     entities = ", ".join(
         _friendly_entity(entity) for entity in finding.triggering_entities
