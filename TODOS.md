@@ -1830,7 +1830,7 @@ That satisfies all three cases at once: different devices with identical prose s
 
 **Why:** Pre-existing evaluator behavior, explicitly deferred by #541's scope ("separate issue if it bites"), but #541 is what steers these quantities into the evaluator. Illuminance — the third pathological class — was mitigated in-ship by routing to `time_of_day_anomaly`. Flagged by both ship adversarial passes (2026-08-11).
 
-**How to apply:** Make the deviation class/unit-aware: absolute-delta or stddev-based thresholds for interval-scale units (°C/°F, hPa), keeping pct deviation for ratio-scale quantities (W, lx, ppm). Applies to both `evaluate_baseline_deviation` and the baseline updater's drift logic; needs unit metadata from the snapshot or baseline store.
+**How to apply:** Make the deviation class/unit-aware: absolute-delta or stddev-based thresholds for interval-scale units (°C/°F, hPa), keeping pct deviation for ratio-scale quantities (W, lx, ppm). Applies to `evaluate_baseline_deviation` (and `time_of_day_anomaly`'s pct floor); needs unit metadata from the snapshot or baseline store.
 
 **Effort:** L
 **Priority:** P2

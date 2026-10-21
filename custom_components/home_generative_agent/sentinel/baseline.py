@@ -39,7 +39,6 @@ from homeassistant.core import callback
 from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.const import (
-    CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
     CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
     CONF_SENTINEL_BASELINE_MAX_SAMPLES,
     CONF_SENTINEL_BASELINE_MIN_SAMPLES,
@@ -162,10 +161,9 @@ METRIC_DOW_STD_PREFIX = "hourly_stddev_"
 # Global hourly metrics have one part ("14"); DOW metrics have two ("5_14").
 _DOW_METRIC_PARTS = 2
 
-# One persistent notice per kind instead of one per entity (#791). Each cycle
-# adds to the notice until it is dismissed; it names at most this many.
+# One persistent notice instead of one per entity (#791). Each cycle adds to
+# the notice until it is dismissed; it names at most this many.
 _ESTABLISHED_NOTIFICATION_ID = "hga_baseline_established"
-_DRIFT_NOTIFICATION_ID = "hga_baseline_drift"
 _NOTICE_MAX_LISTED = 10
 _NOTICES_KEY = "home_generative_agent_baseline_notices"
 
@@ -173,15 +171,13 @@ _NOTICES_KEY = "home_generative_agent_baseline_notices"
 @dataclass
 class _BaselineNotices:
     """
-    What the open established and drift notices tell, by entity id.
+    What the open established notice tells, by entity id: (name, value).
 
-    Entries are (name, value) and (name, current, reference, drift percent).
-    Each cycle adds to these and re-posts the notice; dismissing a notice
+    Each cycle adds to these and re-posts the notice; dismissing the notice
     clears its entries, so an unread notice is never overwritten (#791).
     """
 
     established: dict[str, tuple[str, float]] = field(default_factory=dict)
-    drift: dict[str, tuple[str, float, float, float]] = field(default_factory=dict)
 
 
 @callback
@@ -207,8 +203,6 @@ def _baseline_notices(hass: HomeAssistant) -> _BaselineNotices:
             return
         if _ESTABLISHED_NOTIFICATION_ID in notifications:
             notices.established.clear()
-        if _DRIFT_NOTIFICATION_ID in notifications:
-            notices.drift.clear()
 
     # Listen before publishing the store, so no store exists without it.
     persistent_notification.async_register_callback(hass, _on_updated)
@@ -231,7 +225,9 @@ CREATE TABLE IF NOT EXISTS sentinel_baselines (
 )
 """
 
-# ALTER TABLE migrations for columns added after initial release.
+# ALTER TABLE migrations for columns added after initial release. The
+# reference columns were for a baseline drift notice that never fired and was
+# removed (#807); they are kept so the table stays as every install has it.
 _MIGRATE_REFERENCE_VALUE_SQL = """
 ALTER TABLE sentinel_baselines
 ADD COLUMN IF NOT EXISTS reference_value DOUBLE PRECISION
@@ -277,38 +273,6 @@ ON CONFLICT (entity_id, metric, period) DO UPDATE SET
 RETURNING sample_count
 """
 
-# Upsert that also updates the drift reference columns.
-# Params: (entity_id, metric, period, value, updated_at, max_samples x3, ref_value, ref_at)  # noqa: E501
-# RETURNING sample_count eliminates a post-commit SELECT per entity.
-_UPSERT_WITH_REF_SQL = """
-INSERT INTO sentinel_baselines
-    (entity_id, metric, period, value, sample_count,
-     updated_at, reference_value, reference_at)
-VALUES
-    (%s, %s, %s, %s, 1, %s, %s, %s)
-ON CONFLICT (entity_id, metric, period) DO UPDATE SET
-    value = CASE
-        WHEN sentinel_baselines.value = 'NaN'::float8
-             OR abs(sentinel_baselines.value) = 'Infinity'::float8
-        THEN EXCLUDED.value
-        ELSE (
-            sentinel_baselines.value
-            * LEAST(sentinel_baselines.sample_count, %s - 1)
-            + EXCLUDED.value
-        ) / (LEAST(sentinel_baselines.sample_count, %s - 1) + 1)
-    END,
-    sample_count = CASE
-        WHEN sentinel_baselines.value = 'NaN'::float8
-             OR abs(sentinel_baselines.value) = 'Infinity'::float8
-        THEN 1
-        ELSE LEAST(sentinel_baselines.sample_count + 1, %s)
-    END,
-    updated_at      = EXCLUDED.updated_at,
-    reference_value = EXCLUDED.reference_value,
-    reference_at    = EXCLUDED.reference_at
-RETURNING sample_count
-"""
-
 _FRESHNESS_SQL = """
 SELECT updated_at
 FROM sentinel_baselines
@@ -346,13 +310,6 @@ _FETCH_FULL_SQL = """
 SELECT entity_id, metric, value, sample_count, updated_at
 FROM sentinel_baselines
 ORDER BY entity_id, metric
-"""
-
-# Fetch reference values for drift detection (rolling_avg only).
-_FETCH_REFS_SQL = """
-SELECT entity_id, reference_value, reference_at
-FROM sentinel_baselines
-WHERE metric = %s AND period = 'rolling' AND entity_id = ANY(%s)
 """
 
 # Seed the established set at startup: entities already above min_samples.
@@ -646,8 +603,8 @@ class SentinelBaselineUpdater:
         """
         Store the counters offered since the last write, then prune the old.
 
-        No establishment or drift notice (counters are not entities, and
-        dozens of clients would crowd out the entities the notices name)
+        No establishment notice (counters are not entities, and dozens of
+        clients would crowd out the entities the notice names)
         and no day-of-week rows: the usage rule reads
         the hourly profile, and the weekly rows would be 336 more per
         counter for nothing. Rows of clients that left expire after
@@ -723,7 +680,7 @@ class SentinelBaselineUpdater:
             return
         self._router_rows_pruned = True
 
-    async def _write_samples(  # noqa: PLR0912, PLR0915
+    async def _write_samples(
         self,
         entity_values: dict[str, float],
         snapshot: FullStateSnapshot | None,
@@ -733,8 +690,8 @@ class SentinelBaselineUpdater:
         """
         Upsert rolling, hourly, and day-of-week stats for *entity_values*.
 
-        *snapshot* supplies the names for the establishment and drift
-        notices; None (the network counters) means no notice is raised.
+        *snapshot* supplies the names for the establishment notice; None
+        (the network counters) means no notice is raised.
         *weekly* False skips the day-of-week rows.
         """
         now = dt_util.utcnow()
@@ -755,10 +712,6 @@ class SentinelBaselineUpdater:
                 default=RECOMMENDED_SENTINEL_BASELINE_MAX_SAMPLES,
             ),
         )
-        drift_threshold_pct = _coerce_float(
-            self._options.get(CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT),
-            default=RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
-        )
         weekly_patterns = weekly and bool(
             self._options.get(
                 CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS,
@@ -768,66 +721,24 @@ class SentinelBaselineUpdater:
 
         try:
             async with self._pool.connection() as conn, conn.cursor() as cur:
-                # Batch-fetch reference values for drift detection (rolling_avg only).
-                entity_ids_list = list(entity_values.keys())
-                await cur.execute(
-                    _FETCH_REFS_SQL, (METRIC_ROLLING_AVG, entity_ids_list)
-                )
-                ref_rows = await cur.fetchall()
-                refs: dict[str, float | None] = {}
-                for row in ref_rows:
-                    if isinstance(row, dict):
-                        eid = row.get("entity_id", "")
-                        rv = row.get("reference_value")
-                    else:
-                        eid, rv = row[0], row[1]
-                    if eid and (rv is None or math.isfinite(float(rv))):
-                        refs[str(eid)] = rv
-
                 # Collect sample_count from RETURNING clause — eliminates N+1 SELECTs.
                 rolling_sample_counts: dict[str, int] = {}
 
                 for entity_id, value in entity_values.items():
                     # --- rolling_avg upsert ---
-                    ref_val = refs.get(entity_id)
-                    drift_detected = False
-                    if ref_val is not None:
-                        if ref_val == 0.0:
-                            drift_pct = 100.0 if value != 0.0 else 0.0
-                        else:
-                            drift_pct = abs(value - ref_val) / abs(ref_val) * 100.0
-                        drift_detected = drift_pct >= drift_threshold_pct
-
-                    if drift_detected:
-                        await cur.execute(
-                            _UPSERT_WITH_REF_SQL,
-                            (
-                                entity_id,
-                                METRIC_ROLLING_AVG,
-                                "rolling",
-                                value,
-                                now,
-                                value,  # new reference_value
-                                now,  # new reference_at
-                                max_samples,
-                                max_samples,
-                                max_samples,
-                            ),
-                        )
-                    else:
-                        await cur.execute(
-                            _UPSERT_SQL,
-                            (
-                                entity_id,
-                                METRIC_ROLLING_AVG,
-                                "rolling",
-                                value,
-                                now,
-                                max_samples,
-                                max_samples,
-                                max_samples,
-                            ),
-                        )
+                    await cur.execute(
+                        _UPSERT_SQL,
+                        (
+                            entity_id,
+                            METRIC_ROLLING_AVG,
+                            "rolling",
+                            value,
+                            now,
+                            max_samples,
+                            max_samples,
+                            max_samples,
+                        ),
+                    )
                     row = await cur.fetchone()
                     if row is not None:
                         sc = (
@@ -895,9 +806,7 @@ class SentinelBaselineUpdater:
         if snapshot is None:
             return
         try:
-            self._tell_notices(
-                snapshot, entity_values, established, refs, drift_threshold_pct
-            )
+            self._tell_notices(snapshot, entity_values, established)
         except Exception:
             LOGGER.exception("Baseline notice failed; the baselines were saved.")
 
@@ -906,10 +815,8 @@ class SentinelBaselineUpdater:
         snapshot: FullStateSnapshot,
         entity_values: dict[str, float],
         established: list[str],
-        refs: Mapping[str, float | None],
-        drift_threshold_pct: float,
     ) -> None:
-        """Add this cycle's establishments and drifts to their notices."""
+        """Add this cycle's establishments to the established notice."""
         notices = _baseline_notices(self._hass)
         names = _friendly_names(snapshot)
         # A reset can land while the write gives its connection back; an
@@ -927,35 +834,6 @@ class SentinelBaselineUpdater:
             )
         if established:
             self._post_established(notices)
-        # Only established entities drift; entities still building up do not.
-        drifted = False
-        for entity_id, value in entity_values.items():
-            if entity_id not in self._established:
-                continue
-            ref_val = refs.get(entity_id)
-            if ref_val is None:
-                continue
-            if ref_val == 0.0:
-                drift_pct = 100.0 if value != 0.0 else 0.0
-            else:
-                drift_pct = abs(value - ref_val) / abs(ref_val) * 100.0
-            if drift_pct >= drift_threshold_pct:
-                LOGGER.debug(
-                    "Baseline drift for %s: %.2f -> %.2f (%.1f%%).",
-                    entity_id,
-                    ref_val,
-                    value,
-                    drift_pct,
-                )
-                notices.drift[entity_id] = (
-                    names.get(entity_id, entity_id),
-                    value,
-                    ref_val,
-                    drift_pct,
-                )
-                drifted = True
-        if drifted:
-            self._post_drift(notices)
 
     def _notify(self, title: str, message: str, notification_id: str) -> None:
         """
@@ -996,62 +874,28 @@ class SentinelBaselineUpdater:
             "Sentinel Baseline Established", message, _ESTABLISHED_NOTIFICATION_ID
         )
 
-    def _post_drift(self, notices: _BaselineNotices) -> None:
-        """
-        Post the notice of every baseline drift since it was dismissed.
-
-        A home-wide shift drifts many entities at once, so they share one
-        notice (#791), largest drift first. A drift's reference is reset when
-        it is told, so a later cycle adds to the notice rather than
-        overwriting it; an entity that drifts again shows its latest drift.
-        """
-        entries = sorted(
-            notices.drift.values(), key=lambda entry: entry[3], reverse=True
-        )
-        if len(entries) == 1:
-            name, current, reference, pct = entries[0]
-            message = (
-                f"Baseline drift detected for {name}: "
-                f"was {reference:.2f}, now {current:.2f} "
-                f"({pct:.1f}% change). Reference updated."
-            )
-        else:
-            lines = [
-                f"- {name}: was {reference:.2f}, now {current:.2f} ({pct:.1f}% change)"
-                for name, current, reference, pct in entries[:_NOTICE_MAX_LISTED]
-            ]
-            header = (
-                f"Baseline drift detected for {len(entries)} entities "
-                "(references updated):"
-            )
-            message = "\n".join([header, *lines, *_more_line(len(entries))])
-        self._notify(
-            "Sentinel Baseline Drift Detected", message, _DRIFT_NOTIFICATION_ID
-        )
-
     def _forget_notices(self, entity_id: str | None) -> None:
         """
-        Drop a reset baseline from the notices (every baseline when None).
+        Drop a reset baseline from the notice (every baseline when None).
 
         A notice left with nothing to tell is dismissed; one that still names
         other entities is posted again without the reset one.
         """
         notices = _baseline_notices(self._hass)
-        for entries, notification_id, post in (
-            (notices.established, _ESTABLISHED_NOTIFICATION_ID, self._post_established),
-            (notices.drift, _DRIFT_NOTIFICATION_ID, self._post_drift),
-        ):
-            if entity_id is None:
-                removed = bool(entries)
-                entries.clear()
-            else:
-                removed = entries.pop(entity_id, None) is not None
-            if not removed:
-                continue
-            if entries:
-                post(notices)
-            else:
-                persistent_notification.async_dismiss(self._hass, notification_id)
+        entries = notices.established
+        if entity_id is None:
+            removed = bool(entries)
+            entries.clear()
+        else:
+            removed = entries.pop(entity_id, None) is not None
+        if not removed:
+            return
+        if entries:
+            self._post_established(notices)
+        else:
+            persistent_notification.async_dismiss(
+                self._hass, _ESTABLISHED_NOTIFICATION_ID
+            )
 
     # ---------------------------------------------------------------------- #
     # DOW Welford helpers
