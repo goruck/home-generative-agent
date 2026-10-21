@@ -87,6 +87,7 @@ from ..core.prompt_cache import (  # noqa: TID252
     build_system_message,
     concrete_chat_model,
 )
+from ..core.provider_stall import model_call_budget  # noqa: TID252
 from ..core.utils import extract_final  # noqa: TID252
 from .automation_pin import STEP_TARGET_KEYS
 from .automation_targets import AUTOMATION_REFUSAL_PREFIX
@@ -3129,12 +3130,15 @@ async def _invoke_model(
     # system message per member itself (FallbackChatModel.ainvoke).
     messages = adapt_system_message_for_model(model, messages)
     try:
-        async with asyncio.timeout(_LLM_INVOKE_TIMEOUT_S):
-            if drop_unsupported:
-                return await ainvoke_dropping_unsupported_params(
-                    model, messages, config
-                )
-            return await model.ainvoke(messages, config)
+        # The budget lets a fallback chain split the time between providers,
+        # so a hung primary still leaves the fallback time to answer (#828).
+        with model_call_budget(_LLM_INVOKE_TIMEOUT_S):
+            async with asyncio.timeout(_LLM_INVOKE_TIMEOUT_S):
+                if drop_unsupported:
+                    return await ainvoke_dropping_unsupported_params(
+                        model, messages, config
+                    )
+                return await model.ainvoke(messages, config)
     except TimeoutError:
         msg = f"Model invocation timed out after {_LLM_INVOKE_TIMEOUT_S}s."
         raise HomeAssistantError(msg) from None

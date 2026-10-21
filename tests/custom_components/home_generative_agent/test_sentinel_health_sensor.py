@@ -280,14 +280,14 @@ def _mock_async_write_ha_state(sensor: SentinelHealthSensor) -> MagicMock:
 
 @pytest.mark.asyncio
 async def test_refresh_disabled_sentinel() -> None:
-    """When sentinel is disabled the state should be 'disabled' and attrs empty."""
+    """Disabled Sentinel keeps only the stalled-provider attribute (#828)."""
     sensor = _make_sensor(sentinel_enabled=False)
     mock_write = _mock_async_write_ha_state(sensor)
 
     await sensor._async_refresh()
 
     assert sensor._attr_native_value == "disabled"
-    assert sensor._attrs == {}
+    assert sensor._attrs == {"stalled_model_providers": []}
     mock_write.assert_called_once()
 
 

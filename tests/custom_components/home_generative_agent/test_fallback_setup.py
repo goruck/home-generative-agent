@@ -189,6 +189,13 @@ def _register_capture_service(
     hass.services.async_register(domain, service, _handler)
 
 
+def _only_member(model: Any) -> Any:
+    """Return the one provider in a single-provider chain (#828 wraps them too)."""
+    assert isinstance(model, (FallbackChatModel, FallbackVLM))
+    assert len(model.chain) == 1
+    return model.chain[0][0]
+
+
 @dataclass
 class FallbackSetupData:
     """Test data for setup fallback wiring."""
@@ -487,16 +494,20 @@ async def test_setup_model_fallback_skips_unavailable_primary(
     result = await cast("Any", hga_component).async_setup_entry(hass, entry)
 
     assert result is True
-    chat_model = cast("FakeConfiguredModel", entry.runtime_data.chat_model)
+    chat_model = cast(
+        "FakeConfiguredModel", _only_member(entry.runtime_data.chat_model)
+    )
     assert chat_model.base.name == "ollama"
     assert chat_model.config["configurable"]["model"] == "qwen-chat-fallback"
 
-    vision_model = cast("FakeConfiguredModel", entry.runtime_data.vision_model)
+    vision_model = cast(
+        "FakeConfiguredModel", _only_member(entry.runtime_data.vision_model)
+    )
     assert vision_model.base.name == "ollama"
     assert vision_model.config["configurable"]["model"] == "llava-fallback"
 
     summarization_model = cast(
-        "FakeConfiguredModel", entry.runtime_data.summarization_model
+        "FakeConfiguredModel", _only_member(entry.runtime_data.summarization_model)
     )
     assert summarization_model.base.name == "ollama"
     assert (
@@ -789,7 +800,7 @@ async def test_setup_drops_the_anthropic_provider_when_priming_fails(
 
     prime.assert_awaited_once()
     assert fake.configured == []
-    chat_model = entry.runtime_data.chat_model
+    chat_model = _only_member(entry.runtime_data.chat_model)
     assert isinstance(chat_model, FakeConfiguredModel)
     assert chat_model.base.name == "ollama"
     assert "Anthropic provider init failed; continuing without it." in caplog.text
@@ -1096,7 +1107,7 @@ async def test_setup_rechecks_a_fallback_only_ollama_url_that_failed(
         entry.runtime_data.vision_model,
         entry.runtime_data.summarization_model,
     ):
-        assert not isinstance(model, (FallbackChatModel, FallbackVLM))
+        _only_member(model)
     assert "chain" not in data.captured_embedding_chain
 
 
@@ -1167,7 +1178,7 @@ async def test_setup_continues_when_a_fallback_ollama_chat_client_fails_to_build
 
     assert await cast("Any", hga_component).async_setup_entry(hass, entry)
 
-    assert not isinstance(entry.runtime_data.chat_model, FallbackChatModel)
+    _only_member(entry.runtime_data.chat_model)
     assert "Ollama provider init failed for http://ollama-fallback:11434" in caplog.text
     # The client's error text quotes the URL, so no traceback is logged.
     assert "s3cret" not in caplog.text
@@ -1228,7 +1239,7 @@ async def test_setup_survives_a_malformed_fallback_ollama_url(
 
     assert await cast("Any", hga_component).async_setup_entry(hass, entry)
 
-    assert not isinstance(entry.runtime_data.chat_model, FallbackChatModel)
+    _only_member(entry.runtime_data.chat_model)
     assert [probe.label for probe in scheduled] == ["Ollama (<invalid URL>)"]
 
 

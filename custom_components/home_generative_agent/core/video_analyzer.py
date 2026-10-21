@@ -114,6 +114,7 @@ from .notify_cooldown import (
     window_after_unknown_face,
 )
 from .person_gallery import FACE_EMBEDDING_DIMS
+from .provider_stall import model_call_budget
 from .utils import (
     MOBILE_APP_SERVICE_PREFIX,
     discover_mobile_notify_service,
@@ -1534,10 +1535,11 @@ class VideoAnalyzer:
                 t_model = monotonic()
                 try:
                     try:
-                        async with asyncio.timeout(_SUMMARY_TIMEOUT_SEC):
-                            summary_text: str = await self._generate_summary(
-                                frame_descriptions, sole_person
-                            )
+                        with model_call_budget(_SUMMARY_TIMEOUT_SEC):
+                            async with asyncio.timeout(_SUMMARY_TIMEOUT_SEC):
+                                summary_text: str = await self._generate_summary(
+                                    frame_descriptions, sole_person
+                                )
                     except TimeoutError as exc:
                         LOGGER.warning("[%s] Summary timed out: %s", camera_id, exc)
                         return None
@@ -1552,10 +1554,11 @@ class VideoAnalyzer:
                 )
         else:
             try:
-                async with asyncio.timeout(_SUMMARY_TIMEOUT_SEC):
-                    summary_text = await self._generate_summary(
-                        frame_descriptions, sole_person
-                    )
+                with model_call_budget(_SUMMARY_TIMEOUT_SEC):
+                    async with asyncio.timeout(_SUMMARY_TIMEOUT_SEC):
+                        summary_text = await self._generate_summary(
+                            frame_descriptions, sole_person
+                        )
             except TimeoutError as exc:
                 LOGGER.warning("[%s] Summary timed out: %s", camera_id, exc)
                 return None
@@ -2707,14 +2710,15 @@ class VideoAnalyzer:
                         )
                         t_model = monotonic()
                         try:
-                            async with asyncio.timeout(_VISION_TIMEOUT_SEC):
-                                frame_description = await analyze_image(
-                                    vision_model,
-                                    data,
-                                    None,
-                                    prev_text=prev_text,
-                                    overrides=vlm_overrides,
-                                )
+                            with model_call_budget(_VISION_TIMEOUT_SEC):
+                                async with asyncio.timeout(_VISION_TIMEOUT_SEC):
+                                    frame_description = await analyze_image(
+                                        vision_model,
+                                        data,
+                                        None,
+                                        prev_text=prev_text,
+                                        overrides=vlm_overrides,
+                                    )
                         finally:
                             sem.release()
                         LOGGER.debug(
@@ -2723,14 +2727,15 @@ class VideoAnalyzer:
                             monotonic() - t_model,
                         )
                 else:
-                    async with asyncio.timeout(_VISION_TIMEOUT_SEC):
-                        frame_description = await analyze_image(
-                            vision_model,
-                            data,
-                            None,
-                            prev_text=prev_text,
-                            overrides=vlm_overrides,
-                        )
+                    with model_call_budget(_VISION_TIMEOUT_SEC):
+                        async with asyncio.timeout(_VISION_TIMEOUT_SEC):
+                            frame_description = await analyze_image(
+                                vision_model,
+                                data,
+                                None,
+                                prev_text=prev_text,
+                                overrides=vlm_overrides,
+                            )
             except TimeoutError as exc:
                 self._m_inc(camera_id, "timeouts")
                 self._log_snapshot_error(camera_id, path, exc)
