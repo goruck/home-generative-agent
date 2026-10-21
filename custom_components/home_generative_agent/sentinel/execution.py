@@ -590,6 +590,9 @@ class SentinelExecutionService:
         from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
             resolve_critical_action_policy,
         )
+        from custom_components.home_generative_agent.agent.indirect_pin import (  # noqa: PLC0415
+            stored_action_calls,
+        )
         from custom_components.home_generative_agent.agent.rule_entities import (  # noqa: PLC0415
             expand_critical_rules,
         )
@@ -618,6 +621,18 @@ class SentinelExecutionService:
         target = {"entity_id": list(finding.triggering_entities)}
         steps = [{"action": action, "target": target} for action in actions]
         found = find_critical_automation_calls({"actions": steps}, rules)
+        if not found:
+            # What the call starts runs too: a template switch's actions, a
+            # button's or an automation it triggers, which can open the
+            # garage. The PIN gate follows them, and so does Sentinel (#831).
+            try:
+                found = stored_action_calls(self._hass, steps, rules)
+            except Exception:
+                LOGGER.exception(
+                    "Auto-execute blocked: could not check what %s starts.",
+                    ", ".join(actions),
+                )
+                return True
         if found:
             LOGGER.debug(
                 "Auto-execute blocked: critical action %s.",

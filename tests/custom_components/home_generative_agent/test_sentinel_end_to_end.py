@@ -500,6 +500,13 @@ def _make_ae_engine(
         hass.services.async_call = AsyncMock(return_value=None)
     else:
         hass.services.async_call = AsyncMock(side_effect=service_side_effect)
+    # A MagicMock registry reads as unreadable, so the stored-action check
+    # (#831) would fail closed on every action; these tests cover the
+    # engine's flow, and test_sentinel_stored_actions covers that check.
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.agent.indirect_pin.stored_action_calls",
+        lambda *_args: [],
+    )
 
     # Freeze time so snapshot entities are always fresh and guardrails are deterministic.
     monkeypatch.setattr(
