@@ -317,8 +317,11 @@ class _EntityIndex:
         any of them; and, with ``fail_closed``, any entity in the relay's
         domain that is not set up or whose members cannot be read, as
         ``reach`` holds one. Then every other switch_as_x wrapper of any of
-        those, and the groups holding one. Not ``wrapper`` itself, nor a group
-        holding only it: closing "All Covers" is not a call on the relay.
+        those, and the groups holding one, plus (with ``fail_closed``) any
+        entity in such a wrapper's domain that is not set up or unreadable:
+        a light group that is offline could hold a light wrapper of the
+        relay (#804). Not ``wrapper`` itself, nor a group holding only it:
+        closing "All Covers" is not a call on the relay.
         """
         key = (switch_id, fail_closed)
         switches = self._relay_switches.get(key)
@@ -338,6 +341,14 @@ class _EntityIndex:
             for other in self.wrappers_of.get(held, ())
             if other != wrapper
         }
+        if fail_closed:
+            wrapper_domains = {other.split(".", 1)[0] for other in others}
+            others |= {
+                entity_id
+                for entity_id in self.unknown | self.unreadable_groups
+                if entity_id.split(".", 1)[0] in wrapper_domains
+                and entity_id != wrapper
+            }
         return set(switches), self.climb(others)
 
     def descend(self, entity_id: str) -> set[str]:

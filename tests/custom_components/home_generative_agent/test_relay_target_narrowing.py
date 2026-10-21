@@ -15,7 +15,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import entity_registry as er
+from homeassistant.setup import async_setup_component
+from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.home_generative_agent.agent.automation_pin import (
@@ -27,12 +30,23 @@ from custom_components.home_generative_agent.agent.helpers import (
     CRITICAL_RULE_REGISTRY_ID,
     resolve_critical_action_policy,
 )
+from custom_components.home_generative_agent.agent.indirect_pin import (
+    stored_action_calls,
+)
 from custom_components.home_generative_agent.agent.rule_entities import (
     expand_critical_rules,
 )
 from custom_components.home_generative_agent.const import (
     CONF_CRITICAL_ACTIONS,
     RECOMMENDED_CRITICAL_ACTIONS,
+)
+from custom_components.home_generative_agent.snapshot.network import (
+    AutomationInput,
+    HaNativeInputs,
+    NetworkBuildContext,
+    _collect_critical_actions,
+    _collect_stored_critical,
+    ha_native_adapter,
 )
 
 if TYPE_CHECKING:
@@ -285,3 +299,198 @@ async def test_an_unavailable_group_listing_the_relay_by_registry_id_is_held(
     assert _tool_held(
         hass, {"domain": "switch", "service": "turn_on", "area_id": "garage"}
     )
+
+
+async def test_an_offline_group_in_another_wrappers_domain_is_held(
+    hass: HomeAssistant,
+) -> None:
+    """
+    An offline light group could hold a light wrapper of the relay (#804 review).
+
+    Its members cannot be read, so it is held like an offline switch group.
+    """
+    relay = _relay_garage(hass)
+    entry = MockConfigEntry(
+        domain="switch_as_x",
+        options={
+            "entity_id": relay.entity_id,
+            "invert": False,
+            "target_domain": "light",
+        },
+    )
+    entry.add_to_hass(hass)
+    registry = er.async_get(hass)
+    alias = registry.async_get_or_create(
+        "light",
+        "switch_as_x",
+        "alias_uid",
+        suggested_object_id="relay_alias",
+        config_entry=entry,
+    )
+    registry.async_update_entity(alias.entity_id, hidden_by=er.RegistryEntryHider.USER)
+    hass.states.async_set(alias.entity_id, "off")
+    registry.async_get_or_create(
+        "light", "group", "yaml_group_uid", suggested_object_id="garage_lights"
+    )
+    hass.states.async_set("light.garage_lights", "unavailable")
+
+    assert _automation_held(
+        hass, {"action": "light.turn_on", "target": {"area_id": "garage"}}
+    )
+
+
+async def test_the_webhook_audit_follows_a_template_switch_to_the_relay(
+    hass: HomeAssistant,
+) -> None:
+    """
+    A public webhook switching an area reaches a template switch that opens.
+
+    The relay's own copy is skipped as hidden; the audit follows the template
+    switch's actions, as the add_automation gate does (#804 review).
+    """
+    relay = _relay_garage(hass)
+    assert await async_setup_component(
+        hass,
+        "template",
+        {
+            "template": [
+                {
+                    "switch": [
+                        {
+                            "name": "Opener",
+                            "unique_id": "opener",
+                            "turn_on": [
+                                {
+                                    "action": "switch.turn_on",
+                                    "target": {"entity_id": relay.entity_id},
+                                }
+                            ],
+                            "turn_off": [],
+                        }
+                    ]
+                }
+            ]
+        },
+    )
+    await hass.async_block_till_done()
+    area = ar.async_get(hass).async_create("Garage")
+    er.async_get(hass).async_update_entity("switch.opener", area_id=area.id)
+    automation = {
+        "triggers": [{"trigger": "webhook", "webhook_id": "x", "local_only": False}],
+        "actions": [{"action": "switch.turn_on", "target": {"area_id": area.id}}],
+    }
+    automations = [AutomationInput("automation.open", automation)]
+    context = NetworkBuildContext(options={})
+    critical_actions = _collect_critical_actions(hass, context, automations)
+    inputs = HaNativeInputs(
+        now=dt_util.utcnow(),
+        automations=automations,
+        critical_actions=critical_actions,
+        stored_critical_automations=_collect_stored_critical(
+            hass, automations, critical_actions
+        ),
+    )
+
+    ha = ha_native_adapter(inputs, [], context).ha_security
+
+    assert ha["webhook_automations_critical"] == ["automation.open"]
+
+
+def _step_call(action: str, entity_id: str) -> dict[str, Any]:
+    return {"action": action, "target": {"entity_id": entity_id}}
+
+
+async def test_an_offline_group_holding_a_template_opener_is_held(
+    hass: HomeAssistant,
+) -> None:
+    """
+    A group helper whose only member is unavailable lists no members.
+
+    Its member, a template switch that turns on the hidden relay, is read
+    from the helper's config instead, so an area call reaching the group is
+    held; when it runs later, the group forwards to the opener (#804 review).
+    """
+    assert await async_setup_component(
+        hass, "input_boolean", {"input_boolean": {"ready": {}}}
+    )
+    assert await async_setup_component(
+        hass,
+        "template",
+        {
+            "template": [
+                {
+                    "switch": [
+                        {
+                            "name": "Shelly Relay",
+                            "unique_id": "relay_uid",
+                            "optimistic": True,
+                            "turn_on": [],
+                            "turn_off": [],
+                        },
+                        {
+                            "name": "Opener",
+                            "unique_id": "opener_uid",
+                            "availability": "{{ is_state('input_boolean.ready', 'on') }}",
+                            "turn_on": [
+                                _step_call("switch.turn_on", "switch.shelly_relay")
+                            ],
+                            "turn_off": [],
+                        },
+                    ]
+                }
+            ]
+        },
+    )
+    await hass.async_block_till_done()
+    registry = er.async_get(hass)
+    registry.async_update_entity(
+        "switch.shelly_relay", hidden_by=er.RegistryEntryHider.INTEGRATION
+    )
+    wrapper_entry = MockConfigEntry(
+        domain="switch_as_x",
+        options={
+            "entity_id": "switch.shelly_relay",
+            "invert": False,
+            "target_domain": "cover",
+        },
+    )
+    wrapper_entry.add_to_hass(hass)
+    registry.async_get_or_create(
+        "cover",
+        "switch_as_x",
+        "garage_uid",
+        suggested_object_id="garage",
+        config_entry=wrapper_entry,
+    )
+    hass.states.async_set("cover.garage", "closed", {"friendly_name": "Garage Door"})
+    group_entry = MockConfigEntry(
+        domain="group",
+        title="Garage switches",
+        options={
+            "group_type": "switch",
+            "name": "Garage switches",
+            "entities": ["switch.opener"],
+            "hide_members": False,
+            "all": False,
+        },
+    )
+    group_entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(group_entry.entry_id)
+    await hass.async_block_till_done()
+    group_id = registry.async_get_entity_id("switch", "group", group_entry.entry_id)
+    assert group_id is not None
+    area = ar.async_get(hass).async_get_or_create("garage")
+    registry.async_update_entity(group_id, area_id=area.id)
+    group_state = hass.states.get(group_id)
+    assert group_state is not None
+    assert group_state.state == "unavailable"
+    rules = expand_critical_rules(hass, RULES)
+    step = {"action": "switch.turn_on", "target": {"area_id": area.id}}
+
+    assert _is_critical_action(
+        {"domain": "switch", "service": "turn_on", "area_id": area.id},
+        rules,
+        "mcp__call_service",
+        hass,
+    )
+    assert stored_action_calls(hass, [step], rules)
