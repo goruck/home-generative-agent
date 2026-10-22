@@ -1041,7 +1041,7 @@ async def test_a_script_tool_line_shows_only_what_home_assistant_knows(
         ),
         (
             {"domain": "lock", "service": "unlock", "target": {"entity_id": "all"}},
-            "unlock an unnamed device",
+            "unlock devices it does not name",
         ),
         (
             {
@@ -1066,7 +1066,7 @@ async def test_the_line_never_names_less_than_what_runs(
     [
         # An id HA does not know, or a comma-joined list, still reaches the
         # script: the line says it reaches more (#787 review).
-        ({"door": "cover.made_up"}, 'turn on "Open door" (an unnamed device)'),
+        ({"door": "cover.made_up"}, 'turn on "Open door" (devices it does not name)'),
         (
             {"door": "cover.garage, lock.front_door"},
             'turn on "Open door" ("Garage Door" and other devices)',
@@ -1100,3 +1100,128 @@ async def test_an_area_is_named_as_home_assistant_matches_it(hass: Any) -> None:
     # HA matches the slot as the renamed area's id and as the new area's
     # name, and acts in both: the line names both.
     assert line == 'unlock "Door" in Guest Room, Garage'
+
+
+@pytest.mark.parametrize(
+    ("tool_args", "expected"),
+    [
+        # A cover's position decides its effect over its state: not shown.
+        (
+            {
+                "domain": "scene",
+                "service": "apply",
+                "entities": {
+                    "cover.garage": {"state": "closed", "current_position": 100}
+                },
+            },
+            'change "cover.garage"',
+        ),
+        # Text shaped like a state but not one HA sets is not shown.
+        (
+            {
+                "domain": "scene",
+                "service": "apply",
+                "entities": {"light.a": "NO_DOORS_WILL_UNLOCK"},
+            },
+            'change "light.a"',
+        ),
+        # A scene key is one entity id; HA rejects a list.
+        (
+            {
+                "domain": "scene",
+                "service": "apply",
+                "entities": {"lock.front,lock.back": "unlocked"},
+            },
+            "devices it does not name",
+        ),
+        # The scene id may be under data too.
+        (
+            {
+                "domain": "scene",
+                "service": "create",
+                "data": {"scene_id": "arrival", "entities": {"light.a": "on"}},
+            },
+            'create the scene "arrival" that sets "light.a" to on',
+        ),
+        # Only an area: devices it does not name, not "an unnamed device".
+        (
+            {"domain": "lock", "service": "unlock", "area_id": "house"},
+            "unlock devices it does not name",
+        ),
+    ],
+)
+async def test_scene_and_target_lines_after_review(
+    hass: Any, tool_args: dict[str, Any], expected: str
+) -> None:
+    assert describe_pending_action(hass, _action("call_service", tool_args)) == expected
+
+
+async def test_an_area_with_no_name_is_named_as_home_assistant_matches_it(
+    hass: Any,
+) -> None:
+    from homeassistant.helpers import area_registry as ar  # noqa: PLC0415
+    from homeassistant.helpers import floor_registry as fr  # noqa: PLC0415
+
+    areas = ar.async_get(hass)
+    garage = areas.async_create("Garage")
+    areas.async_update(garage.id, name="Guest Room")
+    ground = fr.async_get(hass).async_create("Ground")
+
+    line = describe_pending_action(
+        hass,
+        _action(
+            "HassTurnOff",
+            {"domain": ["lock"], "area": garage.id, "floor": ground.floor_id},
+        ),
+    )
+
+    assert line == "unlock every lock in Guest Room on floor Ground"
+
+
+async def test_a_device_intent_names_its_slots_not_an_ignored_entity_id(
+    hass: Any,
+) -> None:
+    """HA's intents ignore an entity id; the line follows the name slot."""
+    line = describe_pending_action(
+        hass,
+        _action(
+            "HassLightSet",
+            {"name": "Entry", "entity_id": "light.desk", "brightness": 100},
+        ),
+    )
+
+    assert line == 'HassLightSet "Entry"'
+
+
+async def test_a_device_with_a_non_text_name_still_gets_a_line(hass: Any) -> None:
+    hass.states.async_set("lock.front_door", "locked", {"friendly_name": 123})
+
+    line = describe_pending_action(
+        hass,
+        _action(
+            "call_service",
+            {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door"},
+        ),
+    )
+
+    assert line == 'unlock "123" (lock.front_door)'
+
+
+async def test_a_script_target_field_is_read_by_id_as_home_assistant_passes_it(
+    hass: Any,
+) -> None:
+    """A target is passed on as given: an area id, not a name match."""
+    from homeassistant.helpers import area_registry as ar  # noqa: PLC0415
+
+    await _open_door_script(hass)
+    areas = ar.async_get(hass)
+    garage = areas.async_create("Garage")
+    areas.async_update(garage.id, name="Guest Room")
+    areas.async_create("Garage")
+
+    line = describe_pending_action(
+        hass,
+        _action("script__open_door", {"where": {"area_id": garage.id}}),
+    )
+
+    assert line == 'turn on "Open door" ("Guest Room")'
