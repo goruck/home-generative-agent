@@ -1341,7 +1341,7 @@ def _spend_pin_reply(cfg: Mapping[str, Any]) -> None:
         pin_reply.spent = True
 
 
-async def _execute_pending_action(
+async def _execute_pending_action(  # noqa: PLR0911
     resolved_action_id: str,
     action: dict[str, Any],
     cfg: Mapping[str, Any],
@@ -1374,7 +1374,13 @@ async def _execute_pending_action(
     # read name/area/floor and ignore an entity id, so a held lock call with
     # only an entity id would otherwise act on every exposed lock. Any other
     # tool runs with its arguments as held (#836).
-    kind = action.get("args_kind") or tool_args_kind(cfg.get("hass"), tool_name)
+    kind = tool_args_kind(cfg.get("hass"), tool_name)
+    if action.get("args_kind") not in (None, kind):
+        # An intent script took over the tool, or gave it back, since the
+        # PIN was asked for: the line no longer names what would run, so the
+        # request is dropped and has to be asked again (#836 review).
+        cfg.get("pending_actions", {}).pop(resolved_action_id, None)
+        return None, pin_msg(cfg.get("hass"), "pending_action_not_found_or_expired")
     if kind == BUILTIN_INTENT:
         tool_args = normalize_intent_for_alarm(tool_name, tool_args, None)
         tool_args = normalize_intent_for_lock(tool_name, tool_args, None)

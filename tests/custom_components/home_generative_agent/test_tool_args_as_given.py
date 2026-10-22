@@ -119,6 +119,14 @@ class _RecordingAPI:
 
 async def _confirm(home: HomeAssistant, ctx: Any) -> dict[str, Any]:
     """Confirm the one held action with the right PIN; return what HA got."""
+    result, calls = await _answer_pin(home, ctx)
+    assert json.loads(result).get("status") == "completed"
+    (sent,) = calls
+    return sent
+
+
+async def _answer_pin(home: HomeAssistant, ctx: Any) -> tuple[str, list[Any]]:
+    """Answer the one held action with the right PIN; return reply and calls."""
     ((action_id, action),) = ctx.pending_actions.items()
     action.update(user="u1", thread_id="conv1", reply_turn="turn2")
     hashed, salt = hash_pin("1234")
@@ -138,9 +146,7 @@ async def _confirm(home: HomeAssistant, ctx: Any) -> dict[str, Any]:
         }
     }
     result = await confirm_tool(action_id, "1234", config=config, store=None)
-    assert json.loads(result).get("status") == "completed"
-    (sent,) = api.calls
-    return sent
+    return result, api.calls
 
 
 @pytest.mark.parametrize(
@@ -295,10 +301,10 @@ def test_a_repeated_request_matches_only_what_runs_the_same() -> None:
     assert key("HassTurnOff", as_text) == key("HassTurnOff", as_list)
 
 
-async def test_a_held_intent_runs_as_held_after_an_intent_script_takes_over(
+async def test_a_held_intent_is_not_run_once_an_intent_script_takes_over(
     home: HomeAssistant,
 ) -> None:
-    """An intent script added after the hold does not revive dropped slots."""
+    """An intent script taking over the tool before the PIN voids the request."""
     args = {"domain": "lock", "entity_id": "lock.front_door", "door": "lock.garage"}
     ctx = _ctx(home, pin=True)
     _prepare_tool_args("intent__HassTurnOff", dict(args), ctx, {"id": "c1"})
@@ -321,9 +327,12 @@ async def test_a_held_intent_runs_as_held_after_an_intent_script_takes_over(
         },
     )
     await home.async_block_till_done()
-    sent = await _confirm(home, ctx)
-    assert "door" not in sent
-    assert sent["name"] == "lock.front_door"
+    # The PIN line no longer names what would run: nothing runs, and the
+    # request has to be asked again.
+    result, calls = await _answer_pin(home, ctx)
+    assert "completed" not in result
+    assert calls == []
+    assert ctx.pending_actions == {}
 
 
 def test_a_repeated_request_is_read_as_it_was_held() -> None:
@@ -338,6 +347,9 @@ def test_a_repeated_request_is_read_as_it_was_held() -> None:
     lock_and_cover = {"domain": ["lock", "cover"], "name": "front door"}
     assert key(lock, OTHER_INTENT) != key(lock_and_cover, OTHER_INTENT)
     assert key(lock, BUILTIN_INTENT) == key(lock, BUILTIN_INTENT)
+    # The same arguments, once an intent script takes over, run differently.
+    plain = {"name": "front door"}
+    assert key(plain, BUILTIN_INTENT) != key(plain, OTHER_INTENT)
 
 
 async def test_only_an_exact_intent_script_name_takes_over_a_tool(
@@ -350,6 +362,7 @@ async def test_only_an_exact_intent_script_name_takes_over_a_tool(
         {
             "intent_script": {
                 "HassTurnOn!": {"speech": {"text": "ok"}},
+                "HassUnlockDoor!": {"speech": {"text": "ok"}},
                 "unlock_door": {"speech": {"text": "ok"}},
             }
         },
@@ -358,3 +371,19 @@ async def test_only_an_exact_intent_script_name_takes_over_a_tool(
     assert tool_args_kind(home, "intent__HassTurnOn") == BUILTIN_INTENT
     assert tool_args_kind(home, SCRIPT_TOOL) == NOT_AN_INTENT
     assert tool_args_kind(home, "intent_script__unlock_door") == OTHER_INTENT
+    # An intent script's own tool, even with a name shaped like a built-in's.
+    assert tool_args_kind(home, "intent_script__HassUnlockDoor") == OTHER_INTENT
+    # The PIN line names the built-in intent HA runs, not the slug-alike.
+    action = {
+        "tool_name": "intent__HassTurnOn",
+        "tool_args": {"domain": ["lock"], "name": "lock.front_door"},
+    }
+    line = describe_pending_action(home, action)
+    assert "HassTurnOn!" not in line
+    assert "Front Door" in line
+
+
+async def test_a_bare_script_tool_line_names_its_target(home: HomeAssistant) -> None:
+    """A script tool named as HA 2026.8 names them shows the door it is given."""
+    action = {"tool_name": "unlock_door", "tool_args": dict(SCRIPT_ARGS)}
+    assert "Front Door" in describe_pending_action(home, action)

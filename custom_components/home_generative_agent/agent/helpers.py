@@ -902,7 +902,7 @@ def pending_action_expired(action: Mapping[str, Any], now: datetime) -> bool:
         return True
 
 
-def _request_key(action: Mapping[str, Any]) -> tuple[Any, Any, Any]:
+def _request_key(action: Mapping[str, Any]) -> tuple[Any, Any, Any, Any]:
     """
     Return what makes two pending actions the same request.
 
@@ -937,7 +937,9 @@ def _request_key(action: Mapping[str, Any]) -> tuple[Any, Any, Any]:
     automation = action.get("automation_config")
     if isinstance(automation, dict):
         automation = {key: value for key, value in automation.items() if key != "id"}
-    return tool_name, tool_args, automation
+    # The kind too: the same arguments run differently once an intent script
+    # takes over a built-in intent (#836 review).
+    return tool_name, action.get("args_kind"), tool_args, automation
 
 
 def _same_request(existing: Mapping[str, Any], action: Mapping[str, Any]) -> bool:

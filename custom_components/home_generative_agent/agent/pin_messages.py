@@ -54,6 +54,7 @@ from .helpers import (
     intent_service_calls,
     is_actuating_intent,
     is_device_intent,
+    is_intent_tool,
     is_on_off_intent,
     minimal_payload_for_domain,
     normalize_intent_for_lock,
@@ -665,6 +666,15 @@ def _intent_script_line(
     device.
     """
     handlers = [h for h in intent_script_handlers(hass, tool_name) if h]
+    if (
+        is_intent_tool(tool_name)
+        and TOOL_NAMESPACE_SEP + "intent_script" + (TOOL_NAMESPACE_SEP)
+        not in TOOL_NAMESPACE_SEP + tool_name
+    ):
+        # A built-in intent's tool runs an intent script only of exactly its
+        # name ("HassTurnOff!" leaves the built-in in place, #836 review).
+        base = base_tool_name(tool_name)
+        handlers = [h for h in handlers if getattr(h, "intent_type", None) == base]
     if not handlers or script_tool_entity_id(tool_name) is not None:
         return None
     # A tool another API offers under the same name is a service tool when
@@ -875,7 +885,7 @@ def _describe_line(  # noqa: PLR0911
             target=_service_target(hass, tool_args),
         )
     if bare_script is not None:
-        return ", ".join([_script_line(hass, bare_script), line])
+        return ", ".join([_script_line(hass, bare_script, tool_args), line])
     return line
 
 

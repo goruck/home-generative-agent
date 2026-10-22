@@ -216,7 +216,7 @@ def bare_script_tool_entity_id(
     return entity_id if states.get(entity_id) is not None else None
 
 
-def tool_args_kind(hass: HomeAssistant | None, tool_name: str) -> str:
+def tool_args_kind(hass: HomeAssistant | None, tool_name: str) -> str:  # noqa: PLR0911
     """
     Return how a tool's arguments are prepared before it runs (#836).
 
@@ -233,6 +233,9 @@ def tool_args_kind(hass: HomeAssistant | None, tool_name: str) -> str:
     """
     if script_tool_entity_id(tool_name) is not None:
         return NOT_AN_INTENT
+    parts = tool_name.split(TOOL_NAMESPACE_SEP)
+    if len(parts) >= _SCRIPT_TOOL_PARTS and parts[-2] == _INTENT_SCRIPT:
+        return OTHER_INTENT  # an intent script's own tool, whatever its name
     base = base_tool_name(tool_name)
     handlers = intent_script_handlers(hass, tool_name)
     if is_intent_tool(tool_name):
