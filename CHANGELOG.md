@@ -7,6 +7,12 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+## [3.44.9] - 2026-10-22
+
+### Fixed
+
+- **Turning on an offline group that holds the garage relay now asks for the Critical Action PIN, and switch device actions are held only when they act on the relay** ([#804](https://github.com/goruck/home-generative-agent/issues/804)). A switch group helper that was unavailable or not yet loaded showed no members, so turning it on was not held even when it held the relay a garage door is built on (from #794), another wrapper of that relay, or a template switch that switches it; nor was a group listing the relay by its registry id. These groups are now read from their settings and held, and one whose members cannot be read is held too. A switch device action in an automation the agent writes was held whenever a relay garage existed; it acts on the entity it names, so it is now held only when that is the relay. A target naming the relay by registry id is held, and one naming another entity's registry id is not. A service call the agent made on a device (`device_id`) was read as an unidentifiable device action; it is now checked as a call on that device. The security audit's `webhook_automations_critical` now also follows a public webhook automation into the template switches and buttons it turns on or presses, as the PIN gate does. Switch calls aimed at an area, device or label are still held while a relay garage exists: what else in the area drives the relay cannot all be known.
+
 ## [3.44.8] - 2026-10-20
 
 ### Fixed
