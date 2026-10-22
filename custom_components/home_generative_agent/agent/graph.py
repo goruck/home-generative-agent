@@ -133,9 +133,14 @@ from .indirect_pin import (
     SCRIPT_DOMAIN,
     StoredActionCheck,
     bare_script_tool_entity_id,
+    call_service_names,
     call_target_domains,
+    calls_a_service,
     collect_started_automations,
+    has_service,
     intent_scripts_are_critical,
+    named_services,
+    rule_domains,
     runs_critical_action,
     script_rule_matches,
     script_tool_entity_id,
@@ -493,6 +498,9 @@ def _critical_action_guard(
         "turn_id": pin_reply.turn_id if pin_reply is not None else None,
         # The automations the change would start, for the PIN line (#814).
         "starts": list(started),
+        # The domains the rules name, so the PIN line reads a tool's name as
+        # the gate did (#837 review).
+        "rule_domains": sorted(rule_domains(rules)),
     }
     action_id = register_pending_action(ctx.pending_actions, action)
     if action_id is None:
@@ -3423,7 +3431,7 @@ def _coerce_entity_ids(args: dict[str, Any]) -> list[str]:
     return entity_ids
 
 
-def _is_critical_action(  # noqa: PLR0911, PLR0912
+def _is_critical_action(  # noqa: PLR0911
     tool_args: dict[str, Any],
     critical_actions: list[dict[str, str]],
     tool_name: str,
@@ -3441,16 +3449,9 @@ def _is_critical_action(  # noqa: PLR0911, PLR0912
     domain_val = tool_args.get("domain", "")
     if isinstance(domain_val, list):
         domain_val = domain_val[0] if domain_val else ""
-    domain = str(domain_val).lower()
-
-    service = str(tool_args.get("service", "") or "").lower()
+    # A null or blank domain names none: the entities' own domain is read.
+    domain_given = domain_val is not None and bool(str(domain_val).strip())
     entities = [e.lower() for e in _coerce_entity_ids(tool_args)]
-    domain_given = bool(domain)
-    if not domain and entities:
-        try:
-            domain = entities[0].split(".", maxsplit=1)[0]
-        except IndexError:
-            domain = ""
 
     # An intent script's tool names no domain or service, and one may take
     # over a built-in intent's tool; what it runs is checked first, and only
@@ -3498,16 +3499,73 @@ def _is_critical_action(  # noqa: PLR0911, PLR0912
         # A template panel runs its own arm and disarm actions, with no code of
         # its own to enforce (#780).
         return True
-    if not service or alarm_only:
+    # A tool may name its service another way than `domain` and `service`
+    # (#837); each name it gives is screened, whichever one the tool runs.
+    names = call_service_names(tool_args)
+    if names.unreadable and calls_a_service(tool_args, entities):
+        return True  # which service it runs cannot be read
+    if any(
+        _named_service_is_critical(action, tool_args, entities, critical_actions, hass)
+        for action in named_services(
+            tool_args, tool_name, hass, rule_domains(critical_actions)
+        )
+    ):
+        return True
+    if alarm_only:
         return False
-    # A list of domains is screened in each one it names.
-    domains = (
+    given = declared if domain_given else []
+    return any(
+        _bare_service_is_critical(service, tool_args, given, critical_actions, hass)
+        for service in names.bare_services
+    ) or any(
+        _bare_service_is_critical(
+            service, tool_args, given, critical_actions, hass, known_only=True
+        )
+        for service in names.bare_actions
+    )
+
+
+def _bare_service_is_critical(  # noqa: PLR0913
+    service: str,
+    tool_args: dict[str, Any],
+    declared: list[Any],
+    critical_actions: list[dict[str, str]],
+    hass: HomeAssistant | None,
+    *,
+    known_only: bool = False,
+) -> bool:
+    """
+    Return True if a service named without its domain could be critical.
+
+    It runs in each domain the call declares; with none, in the domain of the
+    first entity it targets. With `known_only` (a bare `action`, which HA
+    never writes without its domain), a domain read from the targets counts
+    only for a service HA has there: a tool's own `action: get` on a script is
+    not `script.get`.
+    """
+    entities = [e.lower() for e in _coerce_entity_ids(tool_args)]
+    domain_given = bool(declared)
+    domain = ""
+    if not domain_given and entities:
+        domain = entities[0].split(".", maxsplit=1)[0]
+    # A list of domains is screened in each one it names. With none, each
+    # domain the call targets, wherever its targets sit (#837 review).
+    domains: list[str] = (
         [d for d in (str(d).strip().lower() for d in declared) if d]
         if domain_given
-        else [domain]
-        if domain
-        else []
+        else list(
+            dict.fromkeys(
+                [
+                    *([domain] if domain else []),
+                    *sorted(call_target_domains(tool_args)[0]),
+                ]
+            )
+        )
     )
+    # A rule names its service outright, wherever the call may run it, so it
+    # is matched in every domain. Otherwise a bare `action` is read in a
+    # domain the call targets only if HA has the service there; a domain the
+    # call declares is read as given (#837 review).
     if any(
         matches_critical_rule(
             domain=d,
@@ -3518,6 +3576,8 @@ def _is_critical_action(  # noqa: PLR0911, PLR0912
         for d in domains
     ):
         return True
+    if known_only and not domain_given:
+        domains = [d for d in domains if has_service(hass, d, service)]
     actions = [f"{d}.{service}" for d in domains]
     # A service tool's call is screened like an automation step, opening any
     # script or scene it runs. With no domain given, the one read from the
@@ -3535,12 +3595,29 @@ def _is_critical_action(  # noqa: PLR0911, PLR0912
             or len(target_domains) > 1
             or not domain
             or unresolved
-        ):
+        ) and (not known_only or has_service(hass, "homeassistant", service)):
             actions.append(f"homeassistant.{service}")
     return any(
         service_runs_critical_action(hass, action, tool_args, critical_actions)
         for action in actions
     )
+
+
+def _named_service_is_critical(
+    action: str,
+    tool_args: dict[str, Any],
+    entities: list[str],
+    critical_actions: list[dict[str, str]],
+    hass: HomeAssistant | None,
+) -> bool:
+    """Return True if a rule names the service, or what it runs is critical."""
+    domain, _, service = action.partition(".")
+    return matches_critical_rule(
+        domain=domain,
+        service=service,
+        entity_ids=entities,
+        critical_actions=critical_actions,
+    ) or service_runs_critical_action(hass, action, tool_args, critical_actions)
 
 
 _ALARM_TOOL = "alarm_control"
