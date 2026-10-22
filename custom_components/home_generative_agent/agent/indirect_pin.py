@@ -707,54 +707,79 @@ def _stored_call(call: str, entity_id: str) -> CriticalAutomationCall:
 
 # `<domain>.<service>` the way HA spells a service.
 _SERVICE_NAME_SHAPE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
+_TEMPLATE_MARKS = ("{{", "{%")
+
+
+def call_service_names(
+    tool_args: Mapping[str, Any],
+) -> tuple[list[str], list[str]] | None:
+    """
+    Return the dotted and the bare service names a call gives (#837).
+
+    From `service` and `action`, each one name or a list of them. Both count
+    when both are given: which one runs is up to the tool. None when a name
+    cannot be read (a template, or a value that is not text) or a domain is
+    templated, since which service runs is then unknown.
+    """
+    dotted: list[str] = []
+    bare: list[str] = []
+    for key in ("service", "action"):
+        value = tool_args.get(key)
+        if value is None or value == "":
+            continue
+        for item in value if isinstance(value, list) else [value]:
+            if not isinstance(item, str):
+                return None
+            name = item.strip().lower()
+            if any(mark in name for mark in _TEMPLATE_MARKS):
+                return None
+            if name:
+                (dotted if "." in name else bare).append(name)
+    domains = tool_args.get("domain")
+    if any(
+        isinstance(domain, str) and any(mark in domain for mark in _TEMPLATE_MARKS)
+        for domain in (domains if isinstance(domains, list) else [domains])
+    ):
+        return None
+    return list(dict.fromkeys(dotted)), list(dict.fromkeys(bare))
 
 
 def named_services(
-    tool_args: dict[str, Any], tool_name: str, hass: HomeAssistant | None
+    tool_args: Mapping[str, Any], tool_name: str, hass: HomeAssistant | None
 ) -> list[str] | None:
     """
-    Return the services a call names other than by `domain` and `service`.
+    Return each `<domain>.<service>` a call names in full (#837).
 
-    One `action` or `service` of the form `<domain>.<service>`, an `action`
-    beside a `domain`, or a tool named after the service: `scene.apply`, or
-    `scene__apply` the way HA names an action's tool, namespaced or not. Only
-    a service HA has counts, so a tool such as `mcp__get_weather` is not read
-    as one; without `hass`, any name of that shape. None when a service name
-    is templated.
+    A dotted `service` or `action`, whether or not this Home Assistant has
+    the service (a tool may send it elsewhere), and a tool named after a
+    service: `scene.apply`, or `scene__apply` the way HA names an action's
+    tool, namespaced or not. A tool name counts only for a service HA has, so
+    a tool such as `mcp__get_weather` is not read as one; without `hass`, any
+    name of that shape. A bare `service` or `action` is left to the caller,
+    which reads its domain the way the `domain`/`service` form is read. None
+    when `call_service_names` cannot read the call.
     """
-    candidates: list[str] = []
-    for key in ("action", "service"):
-        value = tool_args.get(key)
-        if not isinstance(value, str):
-            continue
-        if "{{" in value or "{%" in value:
-            return None
-        if "." in value:
-            candidates.append(value)
-    action = tool_args.get("action")
-    domains = tool_args.get("domain")
-    if isinstance(action, str) and "." not in action and not tool_args.get("service"):
-        candidates.extend(
-            f"{domain}.{action}"
-            for domain in (domains if isinstance(domains, list) else [domains])
-            if isinstance(domain, str) and domain
-        )
+    names = call_service_names(tool_args)
+    if names is None:
+        return None
+    named = [name for name in names[0] if _SERVICE_NAME_SHAPE.match(name)]
+    from_tool: list[str] = []
     if "." in (base := tool_name.rsplit(TOOL_NAMESPACE_SEP, maxsplit=1)[-1]):
-        candidates.append(base)
+        from_tool.append(base)
     parts = tool_name.split(TOOL_NAMESPACE_SEP)
     if len(parts) > 1:
-        candidates.append(f"{parts[-2]}.{parts[-1]}")
-    named: list[str] = []
-    for candidate in candidates:
+        from_tool.append(f"{parts[-2]}.{parts[-1]}")
+    for candidate in from_tool:
         name = candidate.strip().lower()
-        if not _SERVICE_NAME_SHAPE.match(name) or name in named:
+        if not _SERVICE_NAME_SHAPE.match(name):
             continue
-        if hass is not None and not hass.services.has_service(
+        services = getattr(hass, "services", None)
+        if services is not None and not services.has_service(
             *name.split(".", maxsplit=1)
         ):
             continue
         named.append(name)
-    return named
+    return list(dict.fromkeys(named))
 
 
 def service_runs_critical_action(  # noqa: PLR0911

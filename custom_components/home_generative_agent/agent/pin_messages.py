@@ -61,6 +61,7 @@ from .helpers import (
 )
 from .indirect_pin import (
     bare_script_tool_entity_id,
+    call_service_names,
     intent_script_handlers,
     named_services,
     script_tool_entity_id,
@@ -807,8 +808,13 @@ def _describe_line(  # noqa: PLR0911
     # held for the script or for the call its arguments make, so the line
     # names the script, and the call too when it makes one.
     bare_script = bare_script_tool_entity_id(tool_name, hass)
+    # A tool may name its service by `action`, a dotted `service` or its own
+    # name (#837): the line names each service the gate holds the call for.
+    names = call_service_names(tool_args)
+    bare_services = names[1] if names is not None else []
+    named = named_services(tool_args, tool_name, hass) or []
     if bare_script is not None and not (
-        tool_args.get("domain") or tool_args.get("service")
+        tool_args.get("domain") or named or bare_services
     ):
         return _script_line(hass, bare_script, tool_args)
 
@@ -843,7 +849,6 @@ def _describe_line(  # noqa: PLR0911
             )
         return ", ".join(parts)
 
-    service = str(tool_args.get("service") or base_tool_name(tool_name))
     if is_device_intent(tool_name):
         # HA's intents read the name, area and floor slots and ignore an
         # entity id and any `service` the model adds, so the line names the
@@ -861,20 +866,13 @@ def _describe_line(  # noqa: PLR0911
                 _single_kind(hass, tool_name, tool_args) or _SEVERAL_KINDS,
             ),
         )
-    # A tool may name its service by `action`, a dotted `service` or its own
-    # name (#837): the line names each service the gate holds the call for.
-    named = named_services(tool_args, tool_name, hass) or []
     lines = [
         _service_line(hass, {**tool_args, "domain": domain}, call)
         for domain, _, call in (name.partition(".") for name in named)
     ]
-    raw_service = tool_args.get("service")
-    if not named or (
-        tool_args.get("domain")
-        and isinstance(raw_service, str)
-        and "." not in raw_service
-    ):
-        lines.append(_service_line(hass, tool_args, service))
+    lines += [_service_line(hass, tool_args, call) for call in bare_services]
+    if not lines:
+        lines.append(_service_line(hass, tool_args, base_tool_name(tool_name)))
     line = ", ".join(dict.fromkeys(lines))
     if bare_script is not None:
         return ", ".join([_script_line(hass, bare_script), line])

@@ -135,6 +135,7 @@ from .indirect_pin import (
     SCRIPT_DOMAIN,
     StoredActionCheck,
     bare_script_tool_entity_id,
+    call_service_names,
     call_target_domains,
     collect_started_automations,
     intent_scripts_are_critical,
@@ -3577,7 +3578,7 @@ def _coerce_entity_ids(args: dict[str, Any]) -> list[str]:
     return entity_ids
 
 
-def _is_critical_action(  # noqa: PLR0911, PLR0912
+def _is_critical_action(  # noqa: PLR0911
     tool_args: dict[str, Any],
     critical_actions: list[dict[str, str]],
     tool_name: str,
@@ -3595,16 +3596,9 @@ def _is_critical_action(  # noqa: PLR0911, PLR0912
     domain_val = tool_args.get("domain", "")
     if isinstance(domain_val, list):
         domain_val = domain_val[0] if domain_val else ""
-    domain = str(domain_val).lower()
-
-    service = str(tool_args.get("service", "") or "").lower()
+    # A null or blank domain names none: the entities' own domain is read.
+    domain_given = domain_val is not None and bool(str(domain_val).strip())
     entities = [e.lower() for e in _coerce_entity_ids(tool_args)]
-    domain_given = bool(domain)
-    if not domain and entities:
-        try:
-            domain = entities[0].split(".", maxsplit=1)[0]
-        except IndexError:
-            domain = ""
 
     # An intent script's tool names no domain or service, and one may take
     # over a built-in intent's tool; what it runs is checked first, and only
@@ -3654,16 +3648,47 @@ def _is_critical_action(  # noqa: PLR0911, PLR0912
         return True
     # A tool may name its service another way than `domain` and `service`
     # (#837); each name it gives is screened, whichever one the tool runs.
+    names = call_service_names(tool_args)
     named = named_services(tool_args, tool_name, hass)
-    if named is None:
-        return True  # a templated service name: which one runs is unknown
+    if names is None or named is None:
+        return True  # a templated or unreadable service: which one runs is unknown
     if any(
         _named_service_is_critical(action, tool_args, entities, critical_actions, hass)
         for action in named
     ):
         return True
-    if not service or alarm_only:
+    if alarm_only:
         return False
+    return any(
+        _bare_service_is_critical(
+            service,
+            tool_args,
+            declared if domain_given else [],
+            critical_actions,
+            hass,
+        )
+        for service in names[1]
+    )
+
+
+def _bare_service_is_critical(
+    service: str,
+    tool_args: dict[str, Any],
+    declared: list[Any],
+    critical_actions: list[dict[str, str]],
+    hass: HomeAssistant | None,
+) -> bool:
+    """
+    Return True if a service named without its domain could be critical.
+
+    It runs in each domain the call declares; with none, in the domain of the
+    first entity it targets.
+    """
+    entities = [e.lower() for e in _coerce_entity_ids(tool_args)]
+    domain_given = bool(declared)
+    domain = ""
+    if not domain_given and entities:
+        domain = entities[0].split(".", maxsplit=1)[0]
     # A list of domains is screened in each one it names.
     domains = (
         [d for d in (str(d).strip().lower() for d in declared) if d]
