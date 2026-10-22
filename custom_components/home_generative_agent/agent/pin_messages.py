@@ -35,6 +35,12 @@ import logging
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import floor_registry as fr
+from homeassistant.helpers import label_registry as lr
+from homeassistant.helpers.service import async_get_cached_service_description
+
 from .automation_pin import DATA_CONTAINER_KEYS
 from .helpers import (
     INTENT_NAME_ALL,
@@ -56,6 +62,7 @@ from .indirect_pin import (
     script_tool_entity_id,
 )
 from .rule_entities import relay_wrappers_reached
+from .template_actions import INLINE_STATE_KEYS, inline_states
 
 LOGGER = logging.getLogger(__name__)
 
@@ -172,6 +179,10 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "action_unnamed_automation": "add an unnamed automation",
         "action_automation_runs": "{action}, which runs {calls}",
         "action_calls_more": "{calls} and {count} more",
+        # A state a scene call sets (#786).
+        "action_set_state": "set {target} to {state}",
+        # What the agent passed to a script's device fields (#787).
+        "action_script_targets": "{action} ({targets})",
         "action_unnamed_target": "an unnamed device",
         # The target as HA reads it: one named device, or the scope of a
         # call that names none (every device of the domain, in an area, on
@@ -182,6 +193,10 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "target_every": "{kind}",
         "target_every_in_area": "{kind} in {area}",
         "target_every_on_floor": "{kind} on floor {floor}",
+        # A named device the call limits to an area or floor (#784): two
+        # locks named "Door" read differently.
+        "target_in_area": "{target} in {area}",
+        "target_on_floor": "{target} on floor {floor}",
         "kind_lock": "every lock",
         "kind_cover": "every cover",
         "kind_valve": "every valve",
@@ -297,12 +312,16 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "action_unnamed_automation": "přidat nepojmenovanou automatizaci",
         "action_automation_runs": "{action}, která spouští {calls}",
         "action_calls_more": "{calls} a dalších {count}",
+        "action_set_state": "nastavit {target} na {state}",
+        "action_script_targets": "{action} ({targets})",
         "action_unnamed_target": "nepojmenované zařízení",
         "target_named": "„{name}“",
         "target_entity": "„{name}“ ({entity_id})",
         "target_every": "{kind}",
         "target_every_in_area": "{kind} v oblasti {area}",
         "target_every_on_floor": "{kind} v patře {floor}",
+        "target_in_area": "{target} v oblasti {area}",
+        "target_on_floor": "{target} v patře {floor}",
         "kind_lock": "všechny zámky",
         "kind_cover": "všechny rolety a vrata",
         "kind_valve": "všechny ventily",
@@ -341,6 +360,11 @@ def pin_msg(hass: HomeAssistant | None, key: str, /, **kwargs: Any) -> str:
 
 # Longest target name the action line repeats. The name comes from the model.
 _ACTION_TARGET_MAX_LEN = 80
+# How many states of a scene call, or targets of a service call, the line
+# spells out before "and N more".
+_LINE_TARGETS_SHOWN = 3
+_SCENE_DOMAIN = "scene"
+_SCENE_INLINE_SERVICES = frozenset({"apply", "create"})
 # Longest service name the line repeats, for a call that is not an intent.
 _ACTION_SERVICE_MAX_LEN = 40
 # Critical calls named for an automation, and the length of each. More calls
@@ -495,13 +519,21 @@ def _intent_target(
     payload = minimal_payload_for_domain(dict(tool_args))
     raw_name = payload.get("name")
     name = "" if raw_name == INTENT_NAME_ALL else _slot_line(raw_name)
+    area = _slot_line(payload.get("area"))
+    floor = _slot_line(payload.get("floor"))
     if name:
         friendly = _entity_friendly_name(hass, raw_name)
         if friendly and friendly != name:
-            return pin_msg(hass, "target_entity", name=friendly, entity_id=name)
-        return _named(hass, name)
-    area = _slot_line(payload.get("area"))
-    floor = _slot_line(payload.get("floor"))
+            target = pin_msg(hass, "target_entity", name=friendly, entity_id=name)
+        else:
+            target = _named(hass, name)
+        # HA matches the name within the area and floor the call gives, so
+        # the line names them too (#784).
+        if area:
+            target = pin_msg(hass, "target_in_area", target=target, area=area)
+        if floor:
+            target = pin_msg(hass, "target_on_floor", target=target, floor=floor)
+        return target
     if not domain and not area and not floor:
         return pin_msg(hass, "action_unnamed_target")
     if domain and domain != _SEVERAL_KINDS:
@@ -708,7 +740,7 @@ def _describe_line(  # noqa: PLR0911
     if (line := _intent_script_line(hass, tool_name, tool_args)) is not None:
         return line
     if (script_id := script_tool_entity_id(tool_name)) is not None:
-        return _script_line(hass, script_id)
+        return _script_line(hass, script_id, tool_args)
     # A tool named like a script (HA before 2026.9 named script tools so) is
     # held for the script or for the call its arguments make, so the line
     # names the script, and the call too when it makes one.
@@ -716,7 +748,7 @@ def _describe_line(  # noqa: PLR0911
     if bare_script is not None and not (
         tool_args.get("domain") or tool_args.get("service")
     ):
-        return _script_line(hass, bare_script)
+        return _script_line(hass, bare_script, tool_args)
 
     if base_tool_name(tool_name) == SET_POSITION_INTENT:
         return pin_msg(
@@ -749,40 +781,197 @@ def _describe_line(  # noqa: PLR0911
             )
         return ", ".join(parts)
 
-    target = _one_line(
-        tool_args.get("name")
-        or tool_args.get("entity_id")
-        or tool_args.get("entity_ids")
-        or tool_args.get("area"),
-        _ACTION_TARGET_MAX_LEN,
-    )
     service = str(tool_args.get("service") or base_tool_name(tool_name))
-    line = pin_msg(
-        hass,
-        "action_service",
-        service=sanitize_tool_text(
-            service.replace("_", " "), limit=_ACTION_SERVICE_MAX_LEN
-        ),
-        target=_named(hass, target)
-        if target
-        else pin_msg(hass, "action_unnamed_target"),
-    )
+    line = _scene_state_line(hass, tool_args, service)
+    if line is None:
+        target = _one_line(
+            tool_args.get("name")
+            or tool_args.get("entity_id")
+            or tool_args.get("entity_ids")
+            or tool_args.get("area"),
+            _ACTION_TARGET_MAX_LEN,
+        )
+        line = pin_msg(
+            hass,
+            "action_service",
+            service=sanitize_tool_text(
+                service.replace("_", " "), limit=_ACTION_SERVICE_MAX_LEN
+            ),
+            target=_named(hass, target) if target else _nested_targets(hass, tool_args),
+        )
     if bare_script is not None:
         return ", ".join([_script_line(hass, bare_script), line])
     return line
 
 
-def _script_line(hass: HomeAssistant | None, script_id: str) -> str:
+def _entity_target(hass: HomeAssistant | None, entity_id: str) -> str:
+    """Name one entity by its name and id, or by its id when HA has no name."""
+    friendly = _entity_friendly_name(hass, entity_id)
+    shown = _one_line(entity_id, _ACTION_TARGET_MAX_LEN)
+    if friendly and friendly != shown:
+        return pin_msg(hass, "target_entity", name=friendly, entity_id=shown)
+    return _named(hass, shown)
+
+
+def _limited(hass: HomeAssistant | None, parts: list[str]) -> str:
+    """Join the first parts and count the rest."""
+    text = ", ".join(parts[:_LINE_TARGETS_SHOWN])
+    if (more := len(parts) - _LINE_TARGETS_SHOWN) > 0:
+        return pin_msg(hass, "action_calls_more", calls=text, count=more)
+    return text
+
+
+def _nested_targets(hass: HomeAssistant | None, tool_args: Mapping[str, Any]) -> str:
     """
-    Name running a script, from Home Assistant.
+    Name the entities a service call targets under `target:` or `data:`.
+
+    A service tool can pass a call's targets nested (#786): the PIN check
+    reads them there, so the line names them too, not "an unnamed device".
+    """
+    named = sorted(_named_entity_ids(tool_args))
+    if not named:
+        return pin_msg(hass, "action_unnamed_target")
+    return _limited(hass, [_entity_target(hass, entity_id) for entity_id in named])
+
+
+def _scene_state_line(
+    hass: HomeAssistant | None, tool_args: Mapping[str, Any], service: str
+) -> str | None:
+    """
+    Name the states a service tool's `scene.apply` or `scene.create` sets.
+
+    Read as the PIN check reads them (`inline_states`), whether the tool
+    passed them at the top or under `data` (#786): "set "Front Door"
+    (lock.front_door) to unlocked", not "apply an unnamed device". None when
+    the call is not one, or its states cannot be read.
+    """
+    if (
+        str(tool_args.get("domain") or "").lower() != _SCENE_DOMAIN
+        or service.lower() not in _SCENE_INLINE_SERVICES
+    ):
+        return None
+    step: dict[str, Any] = {
+        key: tool_args[key] for key in DATA_CONTAINER_KEYS if key in tool_args
+    }
+    top = {key: tool_args[key] for key in INLINE_STATE_KEYS if key in tool_args}
+    if top:
+        data = step.get("data", {})
+        if not isinstance(data, Mapping):
+            return None
+        step["data"] = {**data, **top}
+    states, readable = inline_states(step)
+    if not readable or not states:
+        return None
+    parts = [
+        pin_msg(
+            hass,
+            "action_set_state",
+            target=_entity_target(hass, entity_id),
+            state=_slot_line(state),
+        )
+        if state
+        else _entity_target(hass, entity_id)
+        for entity_id, state in sorted(states.items())
+    ]
+    return _limited(hass, parts)
+
+
+def _script_line(
+    hass: HomeAssistant | None,
+    script_id: str,
+    tool_args: Mapping[str, Any] | None = None,
+) -> str:
+    """
+    Name running a script, from Home Assistant, and the devices passed to it.
 
     A script's arguments are free-form fields the model fills in, so the line
-    names the script from Home Assistant, never from them.
+    names the script from Home Assistant, and adds only what a field that
+    selects an entity, area, device, floor, label or target resolves to in
+    Home Assistant's registries (#787): text the model writes cannot change
+    the line, but the door it picked is shown.
     """
     state = hass.states.get(script_id) if hass is not None else None
     name = state.name if state is not None else script_id
-    return pin_msg(
+    line = pin_msg(
         hass,
         "action_turn_on",
         target=_named(hass, _one_line(name, _ACTION_TARGET_MAX_LEN)),
     )
+    if hass is None or not tool_args:
+        return line
+    try:
+        names = _script_field_targets(hass, script_id, tool_args)
+    except Exception:
+        # The names only add to the line: they must never cost the prompt.
+        LOGGER.exception("Critical Action PIN: could not name a script's targets")
+        names = []
+    if not names:
+        return line
+    return pin_msg(
+        hass, "action_script_targets", action=line, targets=_limited(hass, names)
+    )
+
+
+# Selector types whose value names something in Home Assistant's registries.
+_TARGET_SELECTORS = frozenset({"entity", "area", "device", "floor", "label", "target"})
+_TARGET_KEYS = {
+    "entity_id": "entity",
+    "area_id": "area",
+    "device_id": "device",
+    "floor_id": "floor",
+    "label_id": "label",
+}
+
+
+def _script_field_targets(
+    hass: HomeAssistant, script_id: str, tool_args: Mapping[str, Any]
+) -> list[str]:
+    """Return the names of what a script's selector fields were given."""
+    object_id = script_id.split(".", 1)[1]
+    description = async_get_cached_service_description(hass, "script", object_id)
+    fields = description.get("fields") if isinstance(description, Mapping) else None
+    if not isinstance(fields, Mapping):
+        return []
+    names: list[str] = []
+    for field, config in sorted(fields.items()):
+        selector = config.get("selector") if isinstance(config, Mapping) else None
+        if not isinstance(selector, Mapping) or field not in tool_args:
+            continue
+        kinds = _TARGET_SELECTORS.intersection(selector)
+        if not kinds:
+            continue
+        value = tool_args[field]
+        if "target" in kinds and isinstance(value, Mapping):
+            for key, kind in _TARGET_KEYS.items():
+                names += _registry_names(hass, kind, value.get(key))
+        else:
+            names += _registry_names(hass, min(kinds), value)
+    return list(dict.fromkeys(names))
+
+
+def _registry_names(hass: HomeAssistant, kind: str, value: Any) -> list[str]:
+    """Return the quoted names of the ids in a value that Home Assistant knows."""
+    values = value if isinstance(value, (list, tuple)) else [value]
+    names: list[str] = []
+    for item in values:
+        if not isinstance(item, str):
+            continue
+        name: str | None = None
+        if kind == "entity":
+            state = hass.states.get(item)
+            name = state.name if state is not None else None
+        elif kind == "area":
+            area = ar.async_get(hass).async_get_area(item)
+            name = area.name if area else None
+        elif kind == "device":
+            device = dr.async_get(hass).async_get(item)
+            name = (device.name_by_user or device.name) if device else None
+        elif kind == "floor":
+            floor = fr.async_get(hass).async_get_floor(item)
+            name = floor.name if floor else None
+        elif kind == "label":
+            label = lr.async_get(hass).async_get_label(item)
+            name = label.name if label else None
+        if name:
+            names.append(_named(hass, _slot_line(name.translate(_QUOTE_MARKS))))
+    return names

@@ -61,6 +61,7 @@ from .automation_pin import (
 from .helpers import TOOL_NAMESPACE_SEP, matches_critical_rule, rule_entity_matches
 from .rule_entities import read_switch_wrappers
 from .template_actions import (
+    INLINE_STATE_KEYS,
     PRESS_DOMAINS,
     Reactor,
     StoredActionReader,
@@ -107,7 +108,6 @@ _LIGHT_SCENE_PLATFORMS = frozenset(
 RUN_SERVICES = frozenset({"turn_on", "toggle"})
 _SCRIPT_SERVICES_THAT_DO_NOT_RUN = frozenset({"turn_off", "reload"})
 _SCENE_INLINE_SERVICES = frozenset({"apply", "create"})
-_INLINE_STATE_KEYS = ("entities", "snapshot_entities")
 # Tool arguments that name the call rather than carry its fields.
 _CALL_KEYS = frozenset({"domain", "service", "action", "entity_ids"})
 
@@ -917,7 +917,7 @@ def _inline_states_are_critical(
         if not isinstance(nested, dict):
             return True  # fields the screen cannot read, such as JSON text
         fields.update(nested)
-    if not any(key in fields for key in _INLINE_STATE_KEYS):
+    if not any(key in fields for key in INLINE_STATE_KEYS):
         return True  # the states it sets are not where they can be read
     step: dict[str, Any] = {"action": f"{SCENE_DOMAIN}.apply", "data": fields}
     return bool(find_critical_automation_calls({"actions": [step]}, rules))

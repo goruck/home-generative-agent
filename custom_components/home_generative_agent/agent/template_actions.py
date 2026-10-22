@@ -117,7 +117,7 @@ _ENTITY_ID = re.compile(r"[a-z0-9_]+\.[a-z0-9_]+")
 _SCRIPT_PER_SERVICE_DOMAINS = frozenset({"switch", "button", "lock", "cover"})
 # Script and inline-scene services that run something other than their target.
 _SCENE_INLINE_SERVICES = frozenset({"apply", "create"})
-_INLINE_STATE_KEYS = ("entities", "snapshot_entities")
+INLINE_STATE_KEYS = ("entities", "snapshot_entities")
 # Scripts and template entities a template entity's actions reach, and the
 # members of a group, are followed this deep.
 MAX_FOLLOW_DEPTH = 5
@@ -1246,7 +1246,7 @@ def inline_states(step: Mapping[str, Any]) -> tuple[dict[str, str | None], bool]
             return {}, False
         fields.update(block)
     states: dict[str, str | None] = {}
-    for key in _INLINE_STATE_KEYS:
+    for key in INLINE_STATE_KEYS:
         block = fields.get(key)
         if isinstance(block, dict):
             for entity_id, value in block.items():

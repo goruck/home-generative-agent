@@ -35,6 +35,8 @@ _DUMMY_KWARGS: dict[str, Any] = {
     "entity_id": "lock.front_door",
     "count": 2,
     "position": 50,
+    "state": "unlocked",
+    "targets": "targets",
 }
 
 
