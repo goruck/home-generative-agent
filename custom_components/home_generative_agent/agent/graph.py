@@ -481,6 +481,7 @@ def _critical_action_guard(
     tool_args: dict[str, Any],
     ctx: ToolExecutionContext,
     tool_call: dict[str, Any],
+    args_kind: str | None = None,
 ) -> ToolMessage | None:
     """Enforce critical-action PIN flow when needed."""
     if not ctx.pin_enabled:
@@ -511,6 +512,10 @@ def _critical_action_guard(
         "turn_id": pin_reply.turn_id if pin_reply is not None else None,
         # The automations the change would start, for the PIN line (#814).
         "starts": list(started),
+        # How the arguments are prepared, fixed now: the confirmation and a
+        # repeated request read the call as it was held, even if an intent
+        # script is added or removed meanwhile (#836 review).
+        "args_kind": args_kind or tool_args_kind(ctx.hass, tool_name),
     }
     action_id = register_pending_action(ctx.pending_actions, action)
     if action_id is None:
@@ -630,6 +635,7 @@ def _prepare_tool_args(
         tool_args=tool_args,
         ctx=ctx,
         tool_call=tool_call,
+        args_kind=kind,
     )
     if critical_guard:
         return critical_guard, tool_args

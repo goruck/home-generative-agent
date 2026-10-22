@@ -59,6 +59,9 @@ from .automation_pin import (
     step_targets,
 )
 from .helpers import (
+    BUILTIN_INTENT,
+    NOT_AN_INTENT,
+    OTHER_INTENT,
     TOOL_NAMESPACE_SEP,
     base_tool_name,
     is_intent_tool,
@@ -213,12 +216,6 @@ def bare_script_tool_entity_id(
     return entity_id if states.get(entity_id) is not None else None
 
 
-# How a tool's arguments are prepared before it runs (#836).
-BUILTIN_INTENT = "builtin_intent"
-OTHER_INTENT = "other_intent"
-NOT_AN_INTENT = "not_an_intent"
-
-
 def tool_args_kind(hass: HomeAssistant | None, tool_name: str) -> str:
     """
     Return how a tool's arguments are prepared before it runs (#836).
@@ -228,13 +225,23 @@ def tool_args_kind(hass: HomeAssistant | None, tool_name: str) -> str:
     over a built-in intent's name) or another integration's intent, which
     keeps its own slots but matches its targets the way the built-ins do.
     `NOT_AN_INTENT`: a script, service or other tool, run as given.
+
+    A built-in intent's name counts as an intent script's only when the
+    intent script has that exact name, the one HA registers it under: one
+    whose name only slugifies to it ("HassTurnOn!") leaves the built-in in
+    place (#836 review).
     """
-    if intent_script_handlers(hass, tool_name):
-        return OTHER_INTENT
+    if script_tool_entity_id(tool_name) is not None:
+        return NOT_AN_INTENT
+    base = base_tool_name(tool_name)
+    handlers = intent_script_handlers(hass, tool_name)
     if is_intent_tool(tool_name):
+        if any(str(getattr(h, "intent_type", "")) == base for h in handlers):
+            return OTHER_INTENT
         return BUILTIN_INTENT
+    if handlers:
+        return OTHER_INTENT
     if _has_entities(hass):
-        base = base_tool_name(tool_name)
         try:
             handlers = list(intent.async_get(cast("HomeAssistant", hass)))
         except Exception:

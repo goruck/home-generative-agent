@@ -1374,7 +1374,7 @@ async def _execute_pending_action(
     # read name/area/floor and ignore an entity id, so a held lock call with
     # only an entity id would otherwise act on every exposed lock. Any other
     # tool runs with its arguments as held (#836).
-    kind = tool_args_kind(cfg.get("hass"), tool_name)
+    kind = action.get("args_kind") or tool_args_kind(cfg.get("hass"), tool_name)
     if kind == BUILTIN_INTENT:
         tool_args = normalize_intent_for_alarm(tool_name, tool_args, None)
         tool_args = normalize_intent_for_lock(tool_name, tool_args, None)

@@ -24,10 +24,14 @@ from homeassistant.setup import async_setup_component
 
 from custom_components.home_generative_agent.agent.graph import _prepare_tool_args
 from custom_components.home_generative_agent.agent.helpers import (
+    BUILTIN_INTENT,
+    NOT_AN_INTENT,
+    OTHER_INTENT,
     PinReply,
     _request_key,
     minimal_payload_for_domain,
 )
+from custom_components.home_generative_agent.agent.indirect_pin import tool_args_kind
 from custom_components.home_generative_agent.agent.pin_messages import (
     describe_pending_action,
 )
@@ -289,3 +293,68 @@ def test_a_repeated_request_matches_only_what_runs_the_same() -> None:
     as_list = {"domain": ["lock"], "name": "bob"}
     assert key(SCRIPT_TOOL, as_text) != key(SCRIPT_TOOL, as_list)
     assert key("HassTurnOff", as_text) == key("HassTurnOff", as_list)
+
+
+async def test_a_held_intent_runs_as_held_after_an_intent_script_takes_over(
+    home: HomeAssistant,
+) -> None:
+    """An intent script added after the hold does not revive dropped slots."""
+    args = {"domain": "lock", "entity_id": "lock.front_door", "door": "lock.garage"}
+    ctx = _ctx(home, pin=True)
+    _prepare_tool_args("intent__HassTurnOff", dict(args), ctx, {"id": "c1"})
+    (action,) = ctx.pending_actions.values()
+    assert action["args_kind"] == BUILTIN_INTENT
+    assert await async_setup_component(
+        home,
+        "intent_script",
+        {
+            "intent_script": {
+                "HassTurnOff": {
+                    "action": [
+                        {
+                            "action": "lock.unlock",
+                            "target": {"entity_id": "{{ door }}"},
+                        }
+                    ]
+                }
+            }
+        },
+    )
+    await home.async_block_till_done()
+    sent = await _confirm(home, ctx)
+    assert "door" not in sent
+    assert sent["name"] == "lock.front_door"
+
+
+def test_a_repeated_request_is_read_as_it_was_held() -> None:
+    """An intent script's arguments are compared as given, not as a built-in's."""
+
+    def key(args: dict[str, Any], kind: str) -> Any:
+        return _request_key(
+            {"tool_name": "HassTurnOff", "tool_args": args, "args_kind": kind}
+        )
+
+    lock = {"domain": ["lock"], "name": "Front Door"}
+    lock_and_cover = {"domain": ["lock", "cover"], "name": "front door"}
+    assert key(lock, OTHER_INTENT) != key(lock_and_cover, OTHER_INTENT)
+    assert key(lock, BUILTIN_INTENT) == key(lock, BUILTIN_INTENT)
+
+
+async def test_only_an_exact_intent_script_name_takes_over_a_tool(
+    home: HomeAssistant,
+) -> None:
+    """A slug-alike intent script name or a script's own tool is not taken over."""
+    assert await async_setup_component(
+        home,
+        "intent_script",
+        {
+            "intent_script": {
+                "HassTurnOn!": {"speech": {"text": "ok"}},
+                "unlock_door": {"speech": {"text": "ok"}},
+            }
+        },
+    )
+    await home.async_block_till_done()
+    assert tool_args_kind(home, "intent__HassTurnOn") == BUILTIN_INTENT
+    assert tool_args_kind(home, SCRIPT_TOOL) == NOT_AN_INTENT
+    assert tool_args_kind(home, "intent_script__unlock_door") == OTHER_INTENT

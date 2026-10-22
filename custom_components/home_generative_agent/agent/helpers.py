@@ -915,7 +915,10 @@ def _request_key(action: Mapping[str, Any]) -> tuple[Any, Any, Any]:
     if isinstance(tool_name, str) and isinstance(tool_args, dict):
         # Without hass: both actions compared were held after normalizing
         # with hass, so their stored arguments already carry the domain.
-        if is_intent_tool(tool_name):
+        # Read as it was held (`args_kind`): an intent script that took
+        # over a built-in's name runs its arguments as given.
+        kind = action.get("args_kind")
+        if (kind == BUILTIN_INTENT) if kind else is_intent_tool(tool_name):
             tool_args = normalize_intent_for_alarm(tool_name, tool_args, None)
             tool_args = sanitize_tool_args(
                 normalize_intent_for_lock(tool_name, tool_args, None)
@@ -1346,6 +1349,13 @@ def _alarm_payload(tool_args: Mapping[str, Any]) -> dict[str, Any]:
         if value := tool_args.get(key):
             payload[key] = value
     return payload
+
+
+# How a tool's arguments are prepared before it runs (#836): see
+# `indirect_pin.tool_args_kind`.
+BUILTIN_INTENT = "builtin_intent"
+OTHER_INTENT = "other_intent"
+NOT_AN_INTENT = "not_an_intent"
 
 
 def is_intent_tool(tool_name: str) -> bool:
