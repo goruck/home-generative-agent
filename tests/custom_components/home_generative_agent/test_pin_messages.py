@@ -37,6 +37,8 @@ _DUMMY_KWARGS: dict[str, Any] = {
     "position": 50,
     "state": "unlocked",
     "targets": "targets",
+    "scene": "scene",
+    "states": "states",
 }
 
 
