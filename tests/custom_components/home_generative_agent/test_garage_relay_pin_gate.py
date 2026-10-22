@@ -477,15 +477,16 @@ async def test_a_switch_group_not_set_up_yet_is_held(hass: HomeAssistant) -> Non
     assert _held(hass, _call("switch.mqtt_group", "turn_on"))
 
 
-@pytest.mark.parametrize("entity_id", ["switch.shelly_relay", "switch.lamp"])
-async def test_switch_device_actions_fail_closed_with_a_relay(
-    hass: HomeAssistant, entity_id: str
+@pytest.mark.parametrize(
+    ("entity_id", "held"), [("switch.shelly_relay", True), ("switch.lamp", False)]
+)
+async def test_switch_device_actions_hold_only_the_relay(
+    hass: HomeAssistant, entity_id: str, *, held: bool
 ) -> None:
     """
-    A device action targets a device id, which the screen cannot name.
+    A device action acts on the entity it names, not on its device (#804).
 
-    So while a relay garage exists, any switch device action is held, the
-    relay's own included (see the docs and the follow-up to narrow it).
+    So the relay's own device action is held; another switch's is not.
     """
     _wrap(hass, "switch.shelly_relay", "cover.garage", name="Garage Door")
     hass.states.async_set("switch.lamp", "off")
@@ -499,7 +500,10 @@ async def test_switch_device_actions_fail_closed_with_a_relay(
             }
         ]
     }
-    assert find_critical_automation_calls(device, expand_critical_rules(hass, RULES))
+    assert (
+        bool(find_critical_automation_calls(device, expand_critical_rules(hass, RULES)))
+        is held
+    )
     assert not find_critical_automation_calls(device, RULES)
 
 

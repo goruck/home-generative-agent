@@ -98,7 +98,7 @@ from homeassistant.const import (
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
-from .helpers import CRITICAL_RULE_EXACT_ENTITY
+from .helpers import CRITICAL_RULE_EXACT_ENTITY, CRITICAL_RULE_REGISTRY_ID
 from .template_actions import action_scripts, driven_entities, template_entities
 
 LOGGER = logging.getLogger(__name__)
@@ -313,8 +313,11 @@ class _EntityIndex:
         any of them; and, with ``fail_closed``, any entity in the relay's
         domain that is not set up or whose members cannot be read, as
         ``reach`` holds one. Then every other switch_as_x wrapper of any of
-        those, and the groups holding one. Not ``wrapper`` itself, nor a group
-        holding only it: closing "All Covers" is not a call on the relay.
+        those, and the groups holding one, plus (with ``fail_closed``) any
+        entity in such a wrapper's domain that is not set up or unreadable:
+        a light group that is offline could hold a light wrapper of the
+        relay (#804). Not ``wrapper`` itself, nor a group holding only it:
+        closing "All Covers" is not a call on the relay.
         """
         key = (switch_id, fail_closed)
         switches = self._relay_switches.get(key)
@@ -334,6 +337,14 @@ class _EntityIndex:
             for other in self.wrappers_of.get(held, ())
             if other != wrapper
         }
+        if fail_closed:
+            wrapper_domains = {other.split(".", 1)[0] for other in others}
+            others |= {
+                entity_id
+                for entity_id in self.unknown | self.unreadable_groups
+                if entity_id.split(".", 1)[0] in wrapper_domains
+                and entity_id != wrapper
+            }
         return set(switches), self.climb(others)
 
     def descend(self, entity_id: str) -> set[str]:
@@ -414,8 +425,10 @@ class _EntityIndex:
         )
         if not members and self._platform(entity_id, entry) == _GROUP_PLATFORM:
             # An unavailable group helper writes no member list.
-            members = self._helper_members(entry)
-            if not members:
+            members, complete = self._helper_members(entry)
+            if not members or not complete:
+                # A member it names by an id the registry does not know
+                # could be the relay (#804): fail closed.
                 self.unreadable_groups.add(entity_id)
         if members:
             self.members[entity_id] = members
@@ -437,14 +450,29 @@ class _EntityIndex:
         get_entity = getattr(component, "get_entity", None)
         return get_entity(entity_id) if callable(get_entity) else None
 
-    def _helper_members(self, entry: er.RegistryEntry | None) -> list[str]:
-        """Return the members a group helper's config entry lists."""
+    def _helper_members(self, entry: er.RegistryEntry | None) -> tuple[list[str], bool]:
+        """
+        Return the members a group helper's config entry lists, and if all are known.
+
+        The helper may list a member by its registry id, which is resolved to
+        its entity id: unresolved, a hidden relay listed that way was not seen
+        as a member, and an area call reaching the group skipped it (#804).
+        """
         if entry is None or entry.config_entry_id is None:
-            return []
+            return [], False
         config_entry = self._hass.config_entries.async_get_entry(entry.config_entry_id)
         if config_entry is None:
-            return []
-        return _text_list(config_entry.options.get(CONF_ENTITIES))
+            return [], False
+        registry = er.async_get(self._hass)
+        members: list[str] = []
+        complete = True
+        for listed in _text_list(config_entry.options.get(CONF_ENTITIES)):
+            resolved = er.async_resolve_entity_id(registry, listed)
+            if resolved is None:
+                complete = False
+                continue
+            members.append(resolved.lower())
+        return members, complete
 
     def reach(self, domain: str, match: str) -> set[str]:
         """Return every entity a rule on ``domain`` with this match reaches."""
@@ -649,4 +677,17 @@ def expand_critical_rules(
             (rule.get("service") or "").lower(),
         )
         unique.setdefault(key, rule)
-    return expanded + list(unique.values())
+    return expanded + [_with_registry_facts(hass, rule) for rule in unique.values()]
+
+
+def _with_registry_facts(hass: HomeAssistant, rule: dict[str, str]) -> dict[str, str]:
+    """
+    Add a copy's registry id, read on every check.
+
+    What a device action, or a target, may name the entity by (#804). Not set
+    for an entity the registry does not know: nothing can name it that way.
+    """
+    entry = er.async_get(hass).async_get(rule[CRITICAL_RULE_EXACT_ENTITY])
+    if entry is None:
+        return rule
+    return {**rule, CRITICAL_RULE_REGISTRY_ID: entry.id.lower()}

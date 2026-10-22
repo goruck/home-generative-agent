@@ -39,6 +39,9 @@ from custom_components.home_generative_agent.agent.automation_pin import (
 from custom_components.home_generative_agent.agent.helpers import (
     resolve_critical_action_policy,
 )
+from custom_components.home_generative_agent.agent.indirect_pin import (
+    stored_action_calls,
+)
 from custom_components.home_generative_agent.agent.rule_entities import (
     expand_critical_rules,
 )
@@ -686,6 +689,10 @@ class HaNativeInputs:
     # (nothing to screen) or extending failed; the configured rules are then
     # used.
     critical_actions: list[dict[str, str]] | None = None
+    # Public webhook automations whose steps reach stored actions that are
+    # critical (a template switch that opens the garage, #780, #804): read
+    # with `hass`, as the add_automation gate reads them.
+    stored_critical_automations: frozenset[str] = frozenset()
     # Conversation engines used by Assist pipelines that this integration's
     # Critical Action PIN does not cover (built-in agent, other LLM agents).
     assist_agents_outside_pin: list[str] | None = None
@@ -1085,6 +1092,35 @@ def _collect_critical_actions(
         return None
 
 
+def _collect_stored_critical(
+    hass: HomeAssistant,
+    automations: Sequence[AutomationInput] | None,
+    rules: Sequence[Mapping[str, str]] | None,
+) -> frozenset[str]:
+    """
+    Return the public webhook automations that reach critical stored actions.
+
+    A step turning on a template switch or pressing a button runs actions the
+    automation itself does not show; the add_automation gate follows them
+    (`stored_action_calls`), and so does this audit.
+    """
+    if not automations or rules is None:
+        return frozenset()
+    found: set[str] = set()
+    for automation in automations:
+        if not automation_has_public_webhook(automation.config):
+            continue
+        actions = automation.config.get("actions", automation.config.get("action"))
+        try:
+            if stored_action_calls(hass, actions, rules):
+                found.add(automation.entity_id)
+        except Exception as err:  # noqa: BLE001 - one input must not fail the snapshot
+            _log_input_failure("stored actions", err)
+            # Cannot be checked: count it, as the screen fails closed.
+            found.add(automation.entity_id)
+    return frozenset(found)
+
+
 async def async_collect_ha_native_inputs(  # noqa: PLR0913
     hass: HomeAssistant,
     context: NetworkBuildContext,
@@ -1101,6 +1137,7 @@ async def async_collect_ha_native_inputs(  # noqa: PLR0913
     unconfigured, ignored = _collect_discovery(hass)
     sensitive_ids = [e["entity_id"] for e in entities if is_sensitive_entity(e)]
     automations = _collect_automations(hass)
+    critical_actions = _collect_critical_actions(hass, context, automations)
     return HaNativeInputs(
         now=now,
         auth=auth,
@@ -1111,7 +1148,10 @@ async def async_collect_ha_native_inputs(  # noqa: PLR0913
         trusted_networks_bypass_login=_collect_auth_providers(hass),
         addons=_collect_addons(hass),
         automations=automations,
-        critical_actions=_collect_critical_actions(hass, context, automations),
+        critical_actions=critical_actions,
+        stored_critical_automations=_collect_stored_critical(
+            hass, automations, critical_actions
+        ),
         assist_agents_outside_pin=_collect_assist_agents(hass),
         discovered_unconfigured=unconfigured,
         discovered_ignored=ignored,
@@ -1387,7 +1427,10 @@ def ha_native_adapter(  # noqa: PLR0912 - one branch per input, kept flat on pur
             a.entity_id
             for a in inputs.automations
             if a.entity_id in public_set
-            and automation_calls_critical_action(a.config, critical_actions)
+            and (
+                automation_calls_critical_action(a.config, critical_actions)
+                or a.entity_id in inputs.stored_critical_automations
+            )
         )
 
     unavailable: dict[str, int] = {}

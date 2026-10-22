@@ -127,6 +127,9 @@ _MAX_FOLLOWING_DEPTH = 10
 # A group lists its members in `entity_id`; MQTT and ZHA groups in
 # `group_entities`.
 _MEMBER_ATTRIBUTES = ("entity_id", "group_entities")
+# A group helper's integration, and the option listing its members.
+_GROUP_INTEGRATION = "group"
+_CONF_GROUP_ENTITIES = "entities"
 # Entities whose state follows others': a group's members, a person's
 # trackers, the people a zone counts (#814).
 _PARENT_ATTRIBUTES = (*_MEMBER_ATTRIBUTES, "device_trackers", "persons")
@@ -1295,7 +1298,10 @@ def call_targets(
             for entity_id in selected.referenced | selected.indirectly_referenced
             if domain == _GENERIC_DOMAIN or entity_id.split(".", 1)[0] == domain
         }
-    return with_members(hass, named), unresolved
+    unreadable: set[str] = set()
+    found = with_members(hass, named, unreadable=unreadable)
+    # A group whose members cannot be read could hold anything (#804).
+    return found, unresolved or bool(unreadable)
 
 
 def _merged_targets(
@@ -1351,24 +1357,77 @@ def _merged_targets(
     return merged, unresolved
 
 
-def with_members(hass: HomeAssistant, entities: set[str], depth: int = 0) -> set[str]:
-    """Return the entities and, for each group among them, its members."""
+def with_members(
+    hass: HomeAssistant,
+    entities: set[str],
+    depth: int = 0,
+    *,
+    unreadable: set[str] | None = None,
+) -> set[str]:
+    """
+    Return the entities and, for each group among them, its members.
+
+    A group helper that is unavailable or not loaded lists no members in its
+    state, so its config entry is read (registry ids resolved). A group whose
+    members still cannot be read is added to ``unreadable`` (#804).
+    """
     found = set(entities)
     if depth >= MAX_FOLLOW_DEPTH:
         return found
     for entity_id in entities:
-        state = hass.states.get(entity_id)
-        if state is None or entity_id.split(".", 1)[0] in {SCRIPT_DOMAIN, SCENE_DOMAIN}:
+        if entity_id.split(".", 1)[0] in {SCRIPT_DOMAIN, SCENE_DOMAIN}:
             continue
+        state = hass.states.get(entity_id)
         members: set[str] = set()
-        for attribute in _MEMBER_ATTRIBUTES:
-            value = state.attributes.get(attribute)
-            if isinstance(value, (list, tuple)):
-                members |= {str(member).lower() for member in value}
+        if state is not None:
+            for attribute in _MEMBER_ATTRIBUTES:
+                value = state.attributes.get(attribute)
+                if isinstance(value, (list, tuple)):
+                    members |= {str(member).lower() for member in value}
+        if not members:
+            members = _group_helper_members(hass, entity_id, unreadable)
         members -= found
         if members:
-            found |= with_members(hass, members, depth + 1)
+            found |= with_members(hass, members, depth + 1, unreadable=unreadable)
     return found
+
+
+def _group_helper_members(
+    hass: HomeAssistant, entity_id: str, unreadable: set[str] | None
+) -> set[str]:
+    """
+    Return the members a group entity's config lists, when its state shows none.
+
+    Only for an entity of the `group` integration; one whose config cannot be
+    read (a YAML group, an id the registry does not know) is unreadable.
+    """
+    entry = er.async_get(hass).async_get(entity_id)
+    if entry is None or entry.platform != _GROUP_INTEGRATION:
+        return set()
+    config_entry = (
+        hass.config_entries.async_get_entry(entry.config_entry_id)
+        if entry.config_entry_id
+        else None
+    )
+    listed = config_entry.options.get(_CONF_GROUP_ENTITIES) if config_entry else None
+    if not isinstance(listed, list):
+        if unreadable is not None:
+            unreadable.add(entity_id)
+        return set()
+    registry = er.async_get(hass)
+    members: set[str] = set()
+    for member in listed:
+        resolved = (
+            er.async_resolve_entity_id(registry, member)
+            if isinstance(member, str)
+            else None
+        )
+        if resolved is None:
+            if unreadable is not None:
+                unreadable.add(entity_id)
+            continue
+        members.add(resolved.lower())
+    return members
 
 
 def driven_entities(hass: HomeAssistant, sequences: Iterable[Any]) -> set[str]:
