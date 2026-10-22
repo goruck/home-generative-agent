@@ -586,10 +586,13 @@ def _resolved_places(hass: HomeAssistant | None, value: Any, kind: str) -> str:
     """
     if (
         hass is None
-        or not isinstance(value, str)
+        or value is None
+        or isinstance(value, (list, dict))
         or getattr(hass, "data", None) is None
     ):
         return ""
+    # HA reads the slot as text (`cv.string`): floor 0 is the floor "0".
+    value = str(value)
     try:
         if kind == "area":
             names = [
@@ -842,15 +845,19 @@ def _describe_line(  # noqa: PLR0911
     service = str(tool_args.get("service") or base_tool_name(tool_name))
     if is_device_intent(tool_name):
         # HA's intents read the name, area and floor slots and ignore an
-        # entity id, so the line names those (#786 review).
+        # entity id and any `service` the model adds, so the line names the
+        # intent and those slots (#786 review). With no name, the intent acts
+        # on every device it handles.
         return pin_msg(
             hass,
             "action_service",
             service=sanitize_tool_text(
-                service.replace("_", " "), limit=_ACTION_SERVICE_MAX_LEN
+                base_tool_name(tool_name), limit=_ACTION_SERVICE_MAX_LEN
             ),
             target=_intent_target(
-                hass, tool_args, _single_kind(hass, tool_name, tool_args)
+                hass,
+                tool_args,
+                _single_kind(hass, tool_name, tool_args) or _SEVERAL_KINDS,
             ),
         )
     line = _scene_state_line(hass, tool_args, service)
@@ -894,6 +901,7 @@ def _joined(hass: HomeAssistant | None, parts: list[str], *, others: bool) -> st
 
 
 _ENTITY_ID_MAX_LEN = 255
+_SCENE_ID_SHAPE = re.compile(r"^[a-z0-9_]{1,80}$")
 _ENTITY_ID_SHAPE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
 _REGISTRY_ID_SHAPE = re.compile(r"^[0-9a-f]{32}$")
 # The states a scene can set that the line names; anything else (a value HA
@@ -1092,14 +1100,22 @@ def _scene_state_line(
     until it is turned on. None when the call is not one, or its states
     cannot be read.
     """
+    raw_domains = tool_args.get("domain")
+    domains = raw_domains if isinstance(raw_domains, list) else [raw_domains]
     if (
-        _first(tool_args.get("domain")).lower() != _SCENE_DOMAIN
+        _SCENE_DOMAIN not in {str(domain).lower() for domain in domains}
         or service.lower() not in _SCENE_INLINE_SERVICES
     ):
         return None
     entries = _scene_entries(tool_args)
     if not entries:
-        return None
+        # States it sets that the line cannot read still run.
+        return pin_msg(
+            hass,
+            "action_service",
+            service=sanitize_tool_text(service, limit=_ACTION_SERVICE_MAX_LEN),
+            target=pin_msg(hass, "target_unnamed_devices"),
+        )
     creating = service.lower() == "create"
     parts: list[str] = []
     others = False
@@ -1128,9 +1144,13 @@ def _scene_state_line(
     if not creating:
         return states
     given = _scene_ids(tool_args)
+    # Only a slug HA accepts as a scene id is shown: anything else is text
+    # the model wrote, and HA rejects it (#786 review).
     scene = (
-        _one_line(given[0], _ACTION_TARGET_MAX_LEN)
-        if len(given) == 1 and isinstance(given[0], str)
+        given[0]
+        if len(given) == 1
+        and isinstance(given[0], str)
+        and _SCENE_ID_SHAPE.fullmatch(given[0])
         else ""
     )
     return pin_msg(
@@ -1204,8 +1224,13 @@ def _script_field_targets(
     review): a comma-joined list, an unknown id, a value of the wrong shape.
     Those still reach the script, so the line says it reaches other devices.
     """
-    object_id = script_id.split(".", 1)[1]
-    description = async_get_cached_service_description(hass, "script", object_id)
+    # HA's script tool calls the service its registry entry's unique id
+    # names, which a renamed script keeps (#787 review).
+    service_name = script_id.split(".", 1)[1]
+    entry = er.async_get(hass).async_get(script_id)
+    if entry is not None and entry.unique_id:
+        service_name = entry.unique_id
+    description = async_get_cached_service_description(hass, "script", service_name)
     fields = description.get("fields") if isinstance(description, Mapping) else None
     if not isinstance(fields, Mapping):
         return [], False
@@ -1259,13 +1284,11 @@ def _registry_names(
         entity_ids, others = _entity_ids_in(hass, value)
         names: list[str] = []
         for entity_id in entity_ids:
-            state = hass.states.get(entity_id)
-            if state is None:
+            if hass.states.get(entity_id) is None:
                 others = True
                 continue
-            names.append(
-                _named(hass, _slot_line(str(state.name).translate(_QUOTE_MARKS)))
-            )
+            # Named with its id: two devices of one name stay two (#787 review).
+            names.append(_entity_target(hass, entity_id))
         return names, others
     values = value if isinstance(value, (list, tuple)) else [value]
     names = []

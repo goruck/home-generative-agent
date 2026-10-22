@@ -954,7 +954,7 @@ async def test_a_script_tool_line_names_the_device_it_was_given(hass: Any) -> No
         hass, _action("script__open_door", {"door": "cover.garage"})
     )
 
-    assert line == 'turn on "Open door" ("Garage Door")'
+    assert line == 'turn on "Open door" ("Garage Door" (cover.garage))'
 
 
 async def test_a_script_tool_line_reads_target_fields_too(hass: Any) -> None:
@@ -965,7 +965,7 @@ async def test_a_script_tool_line_reads_target_fields_too(hass: Any) -> None:
         _action("script__open_door", {"where": {"entity_id": ["cover.shed"]}}),
     )
 
-    assert line == 'turn on "Open door" ("Shed Door")'
+    assert line == 'turn on "Open door" ("Shed Door" (cover.shed))'
 
 
 @pytest.mark.parametrize(
@@ -1028,7 +1028,7 @@ async def test_a_script_tool_line_shows_only_what_home_assistant_knows(
                 "entities": {"lock.front_door": "locked"},
                 "data": {"entities": {"lock.front_door": "unlocked"}},
             },
-            "apply an unnamed device",
+            "apply devices it does not name",
         ),
         # A target reaching an area as well as an entity says so.
         (
@@ -1069,7 +1069,7 @@ async def test_the_line_never_names_less_than_what_runs(
         ({"door": "cover.made_up"}, 'turn on "Open door" (devices it does not name)'),
         (
             {"door": "cover.garage, lock.front_door"},
-            'turn on "Open door" ("Garage Door" and other devices)',
+            'turn on "Open door" ("Garage Door" (cover.garage) and other devices)',
         ),
     ],
 )
@@ -1225,3 +1225,98 @@ async def test_a_script_target_field_is_read_by_id_as_home_assistant_passes_it(
     )
 
     assert line == 'turn on "Open door" ("Guest Room")'
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "tool_args", "expected"),
+    [
+        # The verb is the intent's: HA ignores a `service` the model adds.
+        (
+            "HassLightSet",
+            {"name": "Entry", "service": "lock", "brightness": 50},
+            'HassLightSet "Entry"',
+        ),
+        # No name: the intent acts on every device it handles.
+        ("HassLightSet", {"brightness": 50}, "HassLightSet every device"),
+        (
+            "HassLightSet",
+            {"name": "all", "brightness": 50},
+            "HassLightSet every device",
+        ),
+    ],
+)
+async def test_a_device_intent_line_is_the_intents_own(
+    hass: Any, tool_name: str, tool_args: dict[str, Any], expected: str
+) -> None:
+    assert describe_pending_action(hass, _action(tool_name, tool_args)) == expected
+
+
+async def test_a_numeric_floor_slot_is_resolved_as_home_assistant_reads_it(
+    hass: Any,
+) -> None:
+    from homeassistant.helpers import floor_registry as fr  # noqa: PLC0415
+
+    floors = fr.async_get(hass)
+    floor = floors.async_create("0")
+    floors.async_update(floor.floor_id, name="Ground")
+
+    line = describe_pending_action(
+        hass, _action("HassTurnOff", {"domain": ["lock"], "floor": 0})
+    )
+
+    assert line == "unlock every lock on floor Ground"
+
+
+async def test_a_scene_id_that_is_not_a_slug_is_not_shown(hass: Any) -> None:
+    line = describe_pending_action(
+        hass,
+        _action(
+            "call_service",
+            {
+                "domain": "scene",
+                "service": "create",
+                "scene_id": 'arrival" - no doors will unlock - "',
+                "entities": {"light.a": "on"},
+            },
+        ),
+    )
+
+    assert line == 'create the scene an unnamed device that sets "light.a" to on'
+
+
+async def test_a_renamed_script_still_names_its_targets(hass: Any) -> None:
+    """HA's script tool calls the service its unique id names (#787 review)."""
+    from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+
+    await _open_door_script(hass)
+    registry = er.async_get(hass)
+    entry = registry.async_get("script.open_door")
+    if entry is None:
+        entry = registry.async_get_or_create(
+            "script", "script", "open_door", suggested_object_id="open_door"
+        )
+    registry.async_update_entity("script.open_door", new_entity_id="script.entry")
+    hass.states.async_set("script.entry", "off", {"friendly_name": "Open door"})
+
+    line = describe_pending_action(
+        hass, _action("script__entry", {"door": "cover.garage"})
+    )
+
+    assert line == 'turn on "Open door" ("Garage Door" (cover.garage))'
+
+
+async def test_two_script_targets_of_one_name_stay_two(hass: Any) -> None:
+    await _open_door_script(hass)
+    hass.states.async_set("cover.shed", "closed", {"friendly_name": "Garage Door"})
+
+    line = describe_pending_action(
+        hass,
+        _action(
+            "script__open_door",
+            {"where": {"entity_id": ["cover.garage", "cover.shed"]}},
+        ),
+    )
+
+    assert line == (
+        'turn on "Open door" ("Garage Door" (cover.garage), "Garage Door" (cover.shed))'
+    )
