@@ -814,7 +814,8 @@ def _describe_line(  # noqa: PLR0911
     # name (#837): the line names each service the gate holds the call for.
     names = call_service_names(tool_args)
     bare_services = list(dict.fromkeys([*names.bare_services, *names.bare_actions]))
-    named = named_services(tool_args, tool_name, hass)
+    domains = frozenset(str(d) for d in action.get("rule_domains") or [])
+    named = named_services(tool_args, tool_name, hass, domains)
     if bare_script is not None and not (
         tool_args.get("domain") or named or bare_services
     ):

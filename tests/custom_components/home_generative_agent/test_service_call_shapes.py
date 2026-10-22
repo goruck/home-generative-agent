@@ -402,3 +402,74 @@ async def test_an_intent_script_sharing_the_name_does_not_hide_the_service(
     action = {"tool_name": "scene__apply", "tool_args": dict(UNLOCK_SCENE)}
     assert _is_critical_action(dict(UNLOCK_SCENE), RULES, "scene__apply", home)
     assert SET_UNLOCKED in describe_pending_action(home, action)
+
+
+@pytest.mark.parametrize(
+    ("args", "tool_name", "critical"),
+    [
+        # A bare `action` for a service HA does not have here, as when the
+        # tool sends the call to another Home Assistant (#837 review 3).
+        (
+            {
+                "domain": "cover",
+                "action": "open_cover",
+                "entity_id": "cover.garage_door",
+            },
+            "mcp__call_service",
+            True,
+        ),
+        (
+            {"action": "open_cover", "entity_id": "cover.garage_door"},
+            "mcp__call_service",
+            True,
+        ),
+        (
+            {"action": "close_cover", "entity_id": "cover.garage_door"},
+            "mcp__call_service",
+            False,
+        ),
+        # A service name that cannot be read, with the call inside it.
+        (
+            {
+                "action": {
+                    "action": "lock.unlock",
+                    "target": {"entity_id": "lock.front_door"},
+                }
+            },
+            "mcp__call_service",
+            True,
+        ),
+        (
+            {"action": [{"service": "lock.unlock", "entity_id": "lock.front_door"}]},
+            "mcp__execute",
+            True,
+        ),
+        ({"action": "{{ 'scene.apply' }}", **UNLOCK_SCENE}, "mcp__call_service", True),
+        ({"action": "{{ 'lock.unlock' }}"}, "mcp__call_service", True),
+        # A tool of an MCP server titled like a domain names no service.
+        ({"name": "milk"}, "homeassistant__HassListAddItem", False),
+        ({"name": "milk"}, "lock__HassListAddItem", False),
+    ],
+)
+async def test_calls_a_tool_may_send_elsewhere_or_nest(
+    home: HomeAssistant, args: dict[str, Any], tool_name: str, *, critical: bool
+) -> None:
+    """A service HA lacks here, or a call nested in `action`, is screened."""
+    assert _is_critical_action(dict(args), RULES, tool_name, home) is critical
+
+
+async def test_the_pin_line_reads_a_tool_name_in_a_rule_domain(
+    home: HomeAssistant,
+) -> None:
+    """The line names the service a tool's name gives, as the gate reads it."""
+    tool_name = "remote__garage_door__open"
+    args = {"service": "close", "entity_id": "garage_door.main"}
+    assert _is_critical_action(dict(args), RULES, tool_name, home)
+    action = {
+        "tool_name": tool_name,
+        "tool_args": args,
+        "rule_domains": ["garage_door", "lock"],
+    }
+    line = describe_pending_action(home, action)
+    assert line.startswith("open "), line
+    assert "close" in line

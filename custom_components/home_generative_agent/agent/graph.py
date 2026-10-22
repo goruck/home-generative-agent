@@ -137,10 +137,12 @@ from .indirect_pin import (
     bare_script_tool_entity_id,
     call_service_names,
     call_target_domains,
+    calls_a_service,
     collect_started_automations,
     has_service,
     intent_scripts_are_critical,
     named_services,
+    rule_domains,
     runs_critical_action,
     script_rule_matches,
     script_tool_entity_id,
@@ -504,6 +506,9 @@ def _critical_action_guard(
         "turn_id": pin_reply.turn_id if pin_reply is not None else None,
         # The automations the change would start, for the PIN line (#814).
         "starts": list(started),
+        # The domains the rules name, so the PIN line reads a tool's name as
+        # the gate did (#837 review).
+        "rule_domains": sorted(rule_domains(rules)),
     }
     action_id = register_pending_action(ctx.pending_actions, action)
     if action_id is None:
@@ -3650,14 +3655,13 @@ def _is_critical_action(  # noqa: PLR0911
     # A tool may name its service another way than `domain` and `service`
     # (#837); each name it gives is screened, whichever one the tool runs.
     names = call_service_names(tool_args)
-    rule_domains = frozenset(
-        str(rule.get("domain") or "").lower() for rule in critical_actions
-    )
-    if names.unreadable and _calls_a_service(tool_args, entities):
+    if names.unreadable and calls_a_service(tool_args, entities):
         return True  # which service it runs cannot be read
     if any(
         _named_service_is_critical(action, tool_args, entities, critical_actions, hass)
-        for action in named_services(tool_args, tool_name, hass, rule_domains)
+        for action in named_services(
+            tool_args, tool_name, hass, rule_domains(critical_actions)
+        )
     ):
         return True
     if alarm_only:
@@ -3671,21 +3675,6 @@ def _is_critical_action(  # noqa: PLR0911
             service, tool_args, given, critical_actions, hass, known_only=True
         )
         for service in names.bare_actions
-    )
-
-
-def _calls_a_service(tool_args: dict[str, Any], entities: list[str]) -> bool:
-    """
-    Return True if a call looks like a service call.
-
-    It gives a domain, a `service`, or a target. An `action` field alone, in
-    a tool that takes one for its own use, does not make it one.
-    """
-    return bool(
-        tool_args.get("domain")
-        or "service" in tool_args
-        or entities
-        or any(key in tool_args for key in STEP_TARGET_KEYS)
     )
 
 
@@ -3703,8 +3692,9 @@ def _bare_service_is_critical(  # noqa: PLR0913
 
     It runs in each domain the call declares; with none, in the domain of the
     first entity it targets. With `known_only` (a bare `action`, which HA
-    never writes without its domain), only a service HA has counts: a tool's
-    own `action: get` on a script is not `script.get`.
+    never writes without its domain), a domain read from the targets counts
+    only for a service HA has there: a tool's own `action: get` on a script is
+    not `script.get`.
     """
     entities = [e.lower() for e in _coerce_entity_ids(tool_args)]
     domain_given = bool(declared)
@@ -3725,8 +3715,10 @@ def _bare_service_is_critical(  # noqa: PLR0913
             )
         )
     )
-    if known_only:
-        domains = [d for d in domains if has_service(hass, d, service)]
+    # A rule names its service outright, wherever the call may run it, so it
+    # is matched in every domain. Otherwise a bare `action` is read in a
+    # domain the call targets only if HA has the service there; a domain the
+    # call declares is read as given (#837 review).
     if any(
         matches_critical_rule(
             domain=d,
@@ -3737,6 +3729,8 @@ def _bare_service_is_critical(  # noqa: PLR0913
         for d in domains
     ):
         return True
+    if known_only and not domain_given:
+        domains = [d for d in domains if has_service(hass, d, service)]
     actions = [f"{d}.{service}" for d in domains]
     # A service tool's call is screened like an automation step, opening any
     # script or scene it runs. With no domain given, the one read from the
