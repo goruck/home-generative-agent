@@ -138,6 +138,7 @@ from .indirect_pin import (
     call_service_names,
     call_target_domains,
     collect_started_automations,
+    has_service,
     intent_scripts_are_critical,
     named_services,
     runs_critical_action,
@@ -3649,54 +3650,83 @@ def _is_critical_action(  # noqa: PLR0911
     # A tool may name its service another way than `domain` and `service`
     # (#837); each name it gives is screened, whichever one the tool runs.
     names = call_service_names(tool_args)
-    named = named_services(tool_args, tool_name, hass)
-    if names is None or named is None:
-        return True  # a templated or unreadable service: which one runs is unknown
+    rule_domains = frozenset(
+        str(rule.get("domain") or "").lower() for rule in critical_actions
+    )
+    if names.unreadable and _calls_a_service(tool_args, entities):
+        return True  # which service it runs cannot be read
     if any(
         _named_service_is_critical(action, tool_args, entities, critical_actions, hass)
-        for action in named
+        for action in named_services(tool_args, tool_name, hass, rule_domains)
     ):
         return True
     if alarm_only:
         return False
+    given = declared if domain_given else []
     return any(
+        _bare_service_is_critical(service, tool_args, given, critical_actions, hass)
+        for service in names.bare_services
+    ) or any(
         _bare_service_is_critical(
-            service,
-            tool_args,
-            declared if domain_given else [],
-            critical_actions,
-            hass,
+            service, tool_args, given, critical_actions, hass, known_only=True
         )
-        for service in names[1]
+        for service in names.bare_actions
     )
 
 
-def _bare_service_is_critical(
+def _calls_a_service(tool_args: dict[str, Any], entities: list[str]) -> bool:
+    """
+    Return True if a call looks like a service call.
+
+    It gives a domain, a `service`, or a target. An `action` field alone, in
+    a tool that takes one for its own use, does not make it one.
+    """
+    return bool(
+        tool_args.get("domain")
+        or "service" in tool_args
+        or entities
+        or any(key in tool_args for key in STEP_TARGET_KEYS)
+    )
+
+
+def _bare_service_is_critical(  # noqa: PLR0913
     service: str,
     tool_args: dict[str, Any],
     declared: list[Any],
     critical_actions: list[dict[str, str]],
     hass: HomeAssistant | None,
+    *,
+    known_only: bool = False,
 ) -> bool:
     """
     Return True if a service named without its domain could be critical.
 
     It runs in each domain the call declares; with none, in the domain of the
-    first entity it targets.
+    first entity it targets. With `known_only` (a bare `action`, which HA
+    never writes without its domain), only a service HA has counts: a tool's
+    own `action: get` on a script is not `script.get`.
     """
     entities = [e.lower() for e in _coerce_entity_ids(tool_args)]
     domain_given = bool(declared)
     domain = ""
     if not domain_given and entities:
         domain = entities[0].split(".", maxsplit=1)[0]
-    # A list of domains is screened in each one it names.
-    domains = (
+    # A list of domains is screened in each one it names. With none, each
+    # domain the call targets, wherever its targets sit (#837 review).
+    domains: list[str] = (
         [d for d in (str(d).strip().lower() for d in declared) if d]
         if domain_given
-        else [domain]
-        if domain
-        else []
+        else list(
+            dict.fromkeys(
+                [
+                    *([domain] if domain else []),
+                    *sorted(call_target_domains(tool_args)[0]),
+                ]
+            )
+        )
     )
+    if known_only:
+        domains = [d for d in domains if has_service(hass, d, service)]
     if any(
         matches_critical_rule(
             domain=d,
@@ -3724,7 +3754,7 @@ def _bare_service_is_critical(
             or len(target_domains) > 1
             or not domain
             or unresolved
-        ):
+        ) and (not known_only or has_service(hass, "homeassistant", service)):
             actions.append(f"homeassistant.{service}")
     return any(
         service_runs_critical_action(hass, action, tool_args, critical_actions)

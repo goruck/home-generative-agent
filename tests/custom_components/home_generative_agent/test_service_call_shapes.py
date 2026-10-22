@@ -320,3 +320,85 @@ async def test_the_pin_line_names_the_service_the_call_names(
     """The PIN line names the service, however the tool names it."""
     action = {"tool_name": tool_name, "tool_args": args}
     assert describe_pending_action(home, action) == line
+
+
+@pytest.mark.parametrize(
+    ("args", "tool_name", "critical"),
+    [
+        # A name with spaces is read as a tool that drops them would read it.
+        (
+            {"service": "lock. unlock", "entity_id": "lock.front_door"},
+            "mcp__call_service",
+            True,
+        ),
+        (
+            {"action": "lock.unlock\u200b", "entity_id": "lock.front_door"},
+            "mcp__call_service",
+            True,
+        ),
+        # A dotted name not shaped like a service cannot be read.
+        (
+            {"service": "lock.unlock.x", "entity_id": "lock.front_door"},
+            "mcp__call_service",
+            True,
+        ),
+        # One unreadable field does not hide a readable one.
+        (
+            {"service": "lock.unlock", "action": {}, "entity_id": "lock.front_door"},
+            "mcp__call_service",
+            True,
+        ),
+        # A tool named after a service HA does not have here (another HA's,
+        # or one registered late) is screened in a critical domain.
+        ({"entity_id": "cover.garage_door"}, "cover__open_cover", True),
+        ({"entity_id": "cover.garage_door"}, "remote__cover__open_cover", True),
+        ({"entity_id": "cover.garage_door"}, "mcp__cover.open_cover", True),
+        ({"entity_id": "cover.garage_door"}, "cover__close_cover", False),
+        # A tool's own `action` that is not a service HA has.
+        (
+            {"action": "get", "entity_id": "script.porch"},
+            "mcp__manage_scripts",
+            False,
+        ),
+        # An `action` field alone, in a tool that takes one for its own use.
+        ({"action": {"operation": "list"}}, "mcp__todo", False),
+        ({"action": True}, "mcp__thing", False),
+        ({"action": "{% raw %}"}, "mcp__thing", False),
+        # A tool for a script service is not a script's own tool.
+        ({"entity_id": "script.porch"}, "mcp__script__turn_off", False),
+        ({"entity_id": "script.porch"}, "script__turn_off", False),
+    ],
+)
+async def test_odd_service_names_and_tools(
+    home: HomeAssistant, args: dict[str, Any], tool_name: str, *, critical: bool
+) -> None:
+    """Names a tool may clean up are read; fields that name no service are not."""
+    assert _is_critical_action(dict(args), RULES, tool_name, home) is critical
+
+
+async def test_the_pin_line_keeps_a_readable_service_beside_an_odd_one(
+    home: HomeAssistant,
+) -> None:
+    """A field that cannot be read does not hide the unlock from the line."""
+    action = {
+        "tool_name": "mcp__call_service",
+        "tool_args": {
+            "service": "lock.unlock",
+            "action": {},
+            "entity_id": "lock.front_door",
+        },
+    }
+    assert describe_pending_action(home, action) == UNLOCK
+
+
+async def test_an_intent_script_sharing_the_name_does_not_hide_the_service(
+    home: HomeAssistant,
+) -> None:
+    """A tool named after a service is described as that service."""
+    assert await async_setup_component(
+        home, "intent_script", {"intent_script": {"apply": {"speech": {"text": "ok"}}}}
+    )
+    await home.async_block_till_done()
+    action = {"tool_name": "scene__apply", "tool_args": dict(UNLOCK_SCENE)}
+    assert _is_critical_action(dict(UNLOCK_SCENE), RULES, "scene__apply", home)
+    assert SET_UNLOCKED in describe_pending_action(home, action)

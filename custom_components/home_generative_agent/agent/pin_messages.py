@@ -676,8 +676,10 @@ def _intent_script_line(
         or is_actuating_intent(tool_name)
         or is_device_intent(tool_name)
     )
-    if not owned and tool_args.get("service"):
-        return None
+    if not owned and (
+        tool_args.get("service") or named_services(tool_args, tool_name, hass)
+    ):
+        return None  # a service tool (#837 review)
     names = sorted(
         {str(getattr(h, "intent_type", "") or "") for h in handlers} - {""}
     ) or [base_tool_name(tool_name)]
@@ -811,8 +813,8 @@ def _describe_line(  # noqa: PLR0911
     # A tool may name its service by `action`, a dotted `service` or its own
     # name (#837): the line names each service the gate holds the call for.
     names = call_service_names(tool_args)
-    bare_services = names[1] if names is not None else []
-    named = named_services(tool_args, tool_name, hass) or []
+    bare_services = list(dict.fromkeys([*names.bare_services, *names.bare_actions]))
+    named = named_services(tool_args, tool_name, hass)
     if bare_script is not None and not (
         tool_args.get("domain") or named or bare_services
     ):
