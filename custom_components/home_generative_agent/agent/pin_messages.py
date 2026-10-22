@@ -32,8 +32,17 @@ act on), and ``conversation.py`` joins it to every reply as the
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
+
+from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import floor_registry as fr
+from homeassistant.helpers import intent as ha_intent
+from homeassistant.helpers import label_registry as lr
+from homeassistant.helpers.service import async_get_cached_service_description
 
 from .automation_pin import DATA_CONTAINER_KEYS
 from .helpers import (
@@ -56,6 +65,7 @@ from .indirect_pin import (
     script_tool_entity_id,
 )
 from .rule_entities import relay_wrappers_reached
+from .template_actions import INLINE_STATE_KEYS
 
 LOGGER = logging.getLogger(__name__)
 
@@ -172,6 +182,16 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "action_unnamed_automation": "add an unnamed automation",
         "action_automation_runs": "{action}, which runs {calls}",
         "action_calls_more": "{calls} and {count} more",
+        # A state a scene call sets (#786), or one whose value is not shown.
+        "action_set_state": "set {target} to {state}",
+        "action_change": "change {target}",
+        "action_create_scene": "create the scene {scene} that sets {states}",
+        "target_to_state": "{target} to {state}",
+        # The devices a call names, when it also reaches others it does not.
+        "target_and_others": "{targets} and other devices",
+        "target_unnamed_devices": "devices it does not name",
+        # What the agent passed to a script's device fields (#787).
+        "action_script_targets": "{action} ({targets})",
         "action_unnamed_target": "an unnamed device",
         # The target as HA reads it: one named device, or the scope of a
         # call that names none (every device of the domain, in an area, on
@@ -182,6 +202,10 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "target_every": "{kind}",
         "target_every_in_area": "{kind} in {area}",
         "target_every_on_floor": "{kind} on floor {floor}",
+        # A named device the call limits to an area or floor (#784): two
+        # locks named "Door" read differently.
+        "target_in_area": "{target} in {area}",
+        "target_on_floor": "{target} on floor {floor}",
         "kind_lock": "every lock",
         "kind_cover": "every cover",
         "kind_valve": "every valve",
@@ -297,12 +321,21 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "action_unnamed_automation": "přidat nepojmenovanou automatizaci",
         "action_automation_runs": "{action}, která spouští {calls}",
         "action_calls_more": "{calls} a dalších {count}",
+        "action_set_state": "nastavit {target} na {state}",
+        "action_change": "změnit {target}",
+        "action_create_scene": "vytvořit scénu {scene}, která nastaví {states}",
+        "target_to_state": "{target} na {state}",
+        "target_and_others": "{targets} a další zařízení",
+        "target_unnamed_devices": "zařízení, která nejmenuje",
+        "action_script_targets": "{action} ({targets})",
         "action_unnamed_target": "nepojmenované zařízení",
         "target_named": "„{name}“",
         "target_entity": "„{name}“ ({entity_id})",
         "target_every": "{kind}",
         "target_every_in_area": "{kind} v oblasti {area}",
         "target_every_on_floor": "{kind} v patře {floor}",
+        "target_in_area": "{target} v oblasti {area}",
+        "target_on_floor": "{target} v patře {floor}",
         "kind_lock": "všechny zámky",
         "kind_cover": "všechny rolety a vrata",
         "kind_valve": "všechny ventily",
@@ -341,6 +374,8 @@ def pin_msg(hass: HomeAssistant | None, key: str, /, **kwargs: Any) -> str:
 
 # Longest target name the action line repeats. The name comes from the model.
 _ACTION_TARGET_MAX_LEN = 80
+_SCENE_DOMAIN = "scene"
+_SCENE_INLINE_SERVICES = frozenset({"apply", "create"})
 # Longest service name the line repeats, for a call that is not an intent.
 _ACTION_SERVICE_MAX_LEN = 40
 # Critical calls named for an automation, and the length of each. More calls
@@ -474,7 +509,7 @@ def _entity_friendly_name(hass: HomeAssistant | None, raw_name: Any) -> str:
     state = states.get(raw_name)
     if state is None or state.entity_id != raw_name:
         return ""
-    return _slot_line(state.name.translate(_QUOTE_MARKS))
+    return _slot_line(str(state.name).translate(_QUOTE_MARKS))
 
 
 def _intent_target(
@@ -495,13 +530,22 @@ def _intent_target(
     payload = minimal_payload_for_domain(dict(tool_args))
     raw_name = payload.get("name")
     name = "" if raw_name == INTENT_NAME_ALL else _slot_line(raw_name)
+    area = _place(hass, payload.get("area"), "area")
+    floor = _place(hass, payload.get("floor"), "floor")
     if name:
         friendly = _entity_friendly_name(hass, raw_name)
         if friendly and friendly != name:
-            return pin_msg(hass, "target_entity", name=friendly, entity_id=name)
-        return _named(hass, name)
-    area = _slot_line(payload.get("area"))
-    floor = _slot_line(payload.get("floor"))
+            target = pin_msg(hass, "target_entity", name=friendly, entity_id=name)
+        else:
+            target = _named(hass, name)
+        # HA matches the name within the area and floor the call gives, so
+        # the line names them too (#784), as HA resolves them: by id, name or
+        # alias, every match.
+        if area:
+            target = pin_msg(hass, "target_in_area", target=target, area=area)
+        if floor:
+            target = pin_msg(hass, "target_on_floor", target=target, floor=floor)
+        return target
     if not domain and not area and not floor:
         return pin_msg(hass, "action_unnamed_target")
     if domain and domain != _SEVERAL_KINDS:
@@ -510,10 +554,59 @@ def _intent_target(
     else:
         kind = pin_msg(hass, "kind_device")
     if area:
-        return pin_msg(hass, "target_every_in_area", kind=kind, area=area)
+        target = pin_msg(hass, "target_every_in_area", kind=kind, area=area)
+        if floor:
+            target = pin_msg(hass, "target_on_floor", target=target, floor=floor)
+        return target
     if floor:
         return pin_msg(hass, "target_every_on_floor", kind=kind, floor=floor)
     return pin_msg(hass, "target_every", kind=kind)
+
+
+def _place(hass: HomeAssistant | None, value: Any, kind: str) -> str:
+    """
+    Name an area or floor slot as HA matches it, with or without a name.
+
+    HA resolves the slot by id, name or alias and acts in every match (#784
+    review); a slot nothing matches is shown as given.
+    """
+    shown = _slot_line(value)
+    if not shown:
+        return ""
+    return _resolved_places(hass, value, kind) or shown
+
+
+def _resolved_places(hass: HomeAssistant | None, value: Any, kind: str) -> str:
+    """
+    Return the names of the areas or floors a slot matches, as HA matches it.
+
+    HA's intents accept an id, a name or an alias and act in every match, so
+    a slot "garage" may be an area renamed "Guest Room" (#784 review). "" when
+    nothing matches or the registries cannot be read: the slot is shown.
+    """
+    if (
+        hass is None
+        or value is None
+        or isinstance(value, (list, dict))
+        or getattr(hass, "data", None) is None
+    ):
+        return ""
+    # HA reads the slot as text (`cv.string`): floor 0 is the floor "0".
+    value = str(value)
+    try:
+        if kind == "area":
+            names = [
+                place.name for place in ha_intent.find_areas(value, ar.async_get(hass))
+            ]
+        else:
+            names = [
+                place.name for place in ha_intent.find_floors(value, fr.async_get(hass))
+            ]
+    except Exception:  # noqa: BLE001 - the slot as given still names it
+        return ""
+    return ", ".join(
+        dict.fromkeys(_slot_line(name.translate(_QUOTE_MARKS)) for name in names)
+    )
 
 
 def _position_text(value: Any) -> str:
@@ -708,7 +801,7 @@ def _describe_line(  # noqa: PLR0911
     if (line := _intent_script_line(hass, tool_name, tool_args)) is not None:
         return line
     if (script_id := script_tool_entity_id(tool_name)) is not None:
-        return _script_line(hass, script_id)
+        return _script_line(hass, script_id, tool_args)
     # A tool named like a script (HA before 2026.9 named script tools so) is
     # held for the script or for the call its arguments make, so the line
     # names the script, and the call too when it makes one.
@@ -716,7 +809,7 @@ def _describe_line(  # noqa: PLR0911
     if bare_script is not None and not (
         tool_args.get("domain") or tool_args.get("service")
     ):
-        return _script_line(hass, bare_script)
+        return _script_line(hass, bare_script, tool_args)
 
     if base_tool_name(tool_name) == SET_POSITION_INTENT:
         return pin_msg(
@@ -749,40 +842,503 @@ def _describe_line(  # noqa: PLR0911
             )
         return ", ".join(parts)
 
-    target = _one_line(
-        tool_args.get("name")
-        or tool_args.get("entity_id")
-        or tool_args.get("entity_ids")
-        or tool_args.get("area"),
-        _ACTION_TARGET_MAX_LEN,
-    )
     service = str(tool_args.get("service") or base_tool_name(tool_name))
-    line = pin_msg(
-        hass,
-        "action_service",
-        service=sanitize_tool_text(
-            service.replace("_", " "), limit=_ACTION_SERVICE_MAX_LEN
-        ),
-        target=_named(hass, target)
-        if target
-        else pin_msg(hass, "action_unnamed_target"),
-    )
+    if is_device_intent(tool_name):
+        # HA's intents read the name, area and floor slots and ignore an
+        # entity id and any `service` the model adds, so the line names the
+        # intent and those slots (#786 review). With no name, the intent acts
+        # on every device it handles.
+        return pin_msg(
+            hass,
+            "action_service",
+            service=sanitize_tool_text(
+                base_tool_name(tool_name), limit=_ACTION_SERVICE_MAX_LEN
+            ),
+            target=_intent_target(
+                hass,
+                tool_args,
+                _single_kind(hass, tool_name, tool_args) or _SEVERAL_KINDS,
+            ),
+        )
+    line = _scene_state_line(hass, tool_args, service)
+    if line is None:
+        line = pin_msg(
+            hass,
+            "action_service",
+            service=sanitize_tool_text(
+                service.replace("_", " "), limit=_ACTION_SERVICE_MAX_LEN
+            ),
+            target=_service_target(hass, tool_args),
+        )
     if bare_script is not None:
         return ", ".join([_script_line(hass, bare_script), line])
     return line
 
 
-def _script_line(hass: HomeAssistant | None, script_id: str) -> str:
+def _entity_target(hass: HomeAssistant | None, entity_id: str) -> str:
+    """Name one entity by its name and id, or by its id when HA has no name."""
+    friendly = _entity_friendly_name(hass, entity_id)
+    # An entity id is shown whole: two ids sharing a long prefix are two
+    # devices (#786 review). Only its shape is allowed, so it is plain text.
+    shown = _one_line(entity_id, _ENTITY_ID_MAX_LEN)
+    if friendly and friendly != shown:
+        return pin_msg(hass, "target_entity", name=friendly, entity_id=shown)
+    return _named(hass, shown)
+
+
+def _joined(hass: HomeAssistant | None, parts: list[str], *, others: bool) -> str:
     """
-    Name running a script, from Home Assistant.
+    Name every part, and say so when the call reaches more than it names.
+
+    Nothing is cut: an "and N more" could hide the unlock (#786 review).
+    """
+    if not parts:
+        return pin_msg(
+            hass, "target_unnamed_devices" if others else "action_unnamed_target"
+        )
+    text = ", ".join(parts)
+    return pin_msg(hass, "target_and_others", targets=text) if others else text
+
+
+_ENTITY_ID_MAX_LEN = 255
+_SCENE_ID_SHAPE = re.compile(r"^[a-z0-9_]{1,80}$")
+_ENTITY_ID_SHAPE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
+_REGISTRY_ID_SHAPE = re.compile(r"^[0-9a-f]{32}$")
+# The states a scene can set that the line names; anything else (a value HA
+# rejects, or text the model wrote) reads as "change" (#786 review).
+_KNOWN_STATES = frozenset(
+    {
+        "on",
+        "off",
+        "open",
+        "closed",
+        "locked",
+        "unlocked",
+        "armed_away",
+        "armed_home",
+        "armed_night",
+        "armed_vacation",
+        "armed_custom_bypass",
+        "disarmed",
+        "home",
+        "not_home",
+        "playing",
+        "paused",
+        "idle",
+        "heat",
+        "cool",
+        "heat_cool",
+        "auto",
+        "dry",
+        "fan_only",
+    }
+)
+_EXPANDING_DOMAINS = frozenset({"group"})
+_NON_ENTITY_TARGETS = ("area_id", "device_id", "floor_id", "label_id")
+
+
+def _entity_ids_in(hass: HomeAssistant | None, value: Any) -> tuple[list[str], bool]:
+    """
+    Return the entity ids a target value names, and if it names anything else.
+
+    Comma-joined ids are split and registry ids resolved, as HA does; `all`,
+    a group, a template or an unknown id is "something else".
+    """
+    values = value if isinstance(value, (list, tuple)) else [value]
+    found: list[str] = []
+    others = False
+    for item in values:
+        if item is None:
+            continue
+        if not isinstance(item, str):
+            others = True
+            continue
+        for part in item.split(","):
+            entity_id = part.strip().lower()
+            if not entity_id:
+                continue
+            if _REGISTRY_ID_SHAPE.fullmatch(entity_id) and hass is not None:
+                try:
+                    resolved = er.async_resolve_entity_id(er.async_get(hass), entity_id)
+                except Exception:  # noqa: BLE001 - unnamed, so marked as others
+                    resolved = None
+                entity_id = (resolved or "").lower()
+            if not _ENTITY_ID_SHAPE.fullmatch(entity_id):
+                others = True
+                continue
+            if entity_id.split(".", 1)[0] in _EXPANDING_DOMAINS:
+                others = True
+            found.append(entity_id)
+    return found, others
+
+
+def _call_targets(
+    hass: HomeAssistant | None, tool_args: Mapping[str, Any]
+) -> tuple[list[str], bool]:
+    """
+    Return the entities a service call names anywhere, and if it reaches more.
+
+    Read at the top, under `target` and under `data` (#786), as the PIN check
+    reads them; an area, device, floor or label anywhere means it reaches
+    devices it does not name (#786 review).
+    """
+    sources: list[Mapping[str, Any]] = [tool_args] + [
+        tool_args[key]
+        for key in ("target", *DATA_CONTAINER_KEYS)
+        if isinstance(tool_args.get(key), Mapping)
+    ]
+    found: list[str] = []
+    others = any(
+        tool_args.get(key) is not None and not isinstance(tool_args.get(key), Mapping)
+        for key in ("target", *DATA_CONTAINER_KEYS)
+    )
+    for source in sources:
+        for key in ("entity_id", "entity_ids"):
+            names, more = _entity_ids_in(hass, source.get(key))
+            found += names
+            others = others or more
+        others = others or any(source.get(key) for key in _NON_ENTITY_TARGETS)
+    return list(dict.fromkeys(found)), others
+
+
+def _service_target(hass: HomeAssistant | None, tool_args: Mapping[str, Any]) -> str:
+    """Name what a service call acts on: every entity it names, and if more."""
+    found, others = _call_targets(hass, tool_args)
+    if not found and isinstance(tool_args.get("name"), str):
+        name = _one_line(tool_args.get("name"), _ACTION_TARGET_MAX_LEN)
+        if name:
+            return _joined(hass, [_named(hass, name)], others=others)
+    return _joined(
+        hass, [_entity_target(hass, entity_id) for entity_id in found], others=others
+    )
+
+
+def _scene_fields(tool_args: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return a scene call's state fields from the top and `data`, or None."""
+    fields: dict[str, Any] = {
+        key: tool_args[key] for key in INLINE_STATE_KEYS if key in tool_args
+    }
+    for container in DATA_CONTAINER_KEYS:
+        block = tool_args.get(container)
+        if block is None:
+            continue
+        if not isinstance(block, Mapping):
+            return None
+        for key in INLINE_STATE_KEYS:
+            if key in block:
+                if key in fields:
+                    return None
+                fields[key] = block[key]
+    return fields
+
+
+def _scene_entries(
+    tool_args: Mapping[str, Any],
+) -> list[tuple[str, Any, bool]] | None:
+    """
+    Return (entity id, state, has state) for each state a scene call sets.
+
+    Read from the top and from `data`, as a service tool may pass either. Two
+    copies of a field, or a field HA would not read, give None: the line does
+    not pick one copy over the other (#786 review).
+    """
+    fields = _scene_fields(tool_args)
+    if fields is None:
+        return None
+    entries: list[tuple[str, Any, bool]] = []
+    entities = fields.get("entities")
+    if isinstance(entities, Mapping):
+        for entity_id, value in entities.items():
+            state = value.get("state") if isinstance(value, Mapping) else value
+            if isinstance(value, Mapping) and set(value) - {"state"}:
+                # Attributes can decide the effect (a cover's position wins
+                # over its state, #786 review): the state is not shown.
+                state = None
+            entries.append((str(entity_id), state, True))
+    elif entities is not None:
+        return None
+    snapshot = fields.get("snapshot_entities")
+    if isinstance(snapshot, str):
+        snapshot = [snapshot]
+    if isinstance(snapshot, (list, tuple)):
+        entries += [(str(entity_id), None, False) for entity_id in snapshot]
+    elif snapshot is not None:
+        return None
+    return entries
+
+
+def _scene_ids(tool_args: Mapping[str, Any]) -> list[Any]:
+    """Return every `scene_id` a scene call gives, at the top or under `data`."""
+    blocks: list[Mapping[str, Any]] = [tool_args]
+    for container in DATA_CONTAINER_KEYS:
+        block = tool_args.get(container)
+        if isinstance(block, Mapping):
+            blocks.append(block)
+    return [
+        block.get("scene_id") for block in blocks if block.get("scene_id") is not None
+    ]
+
+
+def _state_text(state: Any) -> str:
+    """Return a state as HA reads it, or "" when it is not one to show."""
+    if isinstance(state, bool):
+        return "on" if state else "off"
+    if isinstance(state, str) and state in _KNOWN_STATES:
+        return state
+    return ""
+
+
+def _scene_state_line(
+    hass: HomeAssistant | None, tool_args: Mapping[str, Any], service: str
+) -> str | None:
+    """
+    Name the states a service tool's `scene.apply` or `scene.create` sets.
+
+    Every state is named (#786): "set "Front Door" (lock.front_door) to
+    unlocked". A value HA would not read as a plain state is not shown. A
+    created scene is named with what it stores: creating it changes nothing
+    until it is turned on. None when the call is not one, or its states
+    cannot be read.
+    """
+    raw_domains = tool_args.get("domain")
+    domains = raw_domains if isinstance(raw_domains, list) else [raw_domains]
+    if (
+        _SCENE_DOMAIN not in {str(domain).lower() for domain in domains}
+        or service.lower() not in _SCENE_INLINE_SERVICES
+    ):
+        return None
+    entries = _scene_entries(tool_args)
+    if not entries:
+        # States it sets that the line cannot read still run.
+        return pin_msg(
+            hass,
+            "action_service",
+            service=sanitize_tool_text(service, limit=_ACTION_SERVICE_MAX_LEN),
+            target=pin_msg(hass, "target_unnamed_devices"),
+        )
+    creating = service.lower() == "create"
+    parts: list[str] = []
+    others = False
+    for raw_id, state, has_state in entries:
+        # A scene key is one entity id, as HA validates it: not a list, not
+        # a registry id (#786 review).
+        key = raw_id.strip().lower()
+        found = [key] if _ENTITY_ID_SHAPE.fullmatch(key) else []
+        others = others or not found
+        for entity_id in found:
+            target = _entity_target(hass, entity_id)
+            text = _state_text(state) if has_state else ""
+            if creating:
+                parts.append(
+                    pin_msg(hass, "target_to_state", target=target, state=text)
+                    if text
+                    else target
+                )
+            elif text:
+                parts.append(
+                    pin_msg(hass, "action_set_state", target=target, state=text)
+                )
+            else:
+                parts.append(pin_msg(hass, "action_change", target=target))
+    states = _joined(hass, parts, others=others)
+    if not creating:
+        return states
+    given = _scene_ids(tool_args)
+    # Only a slug HA accepts as a scene id is shown: anything else is text
+    # the model wrote, and HA rejects it (#786 review).
+    scene = (
+        given[0]
+        if len(given) == 1
+        and isinstance(given[0], str)
+        and _SCENE_ID_SHAPE.fullmatch(given[0])
+        else ""
+    )
+    return pin_msg(
+        hass,
+        "action_create_scene",
+        scene=_named(hass, scene) if scene else pin_msg(hass, "action_unnamed_target"),
+        states=states,
+    )
+
+
+def _script_line(
+    hass: HomeAssistant | None,
+    script_id: str,
+    tool_args: Mapping[str, Any] | None = None,
+) -> str:
+    """
+    Name running a script, from Home Assistant, and the devices passed to it.
 
     A script's arguments are free-form fields the model fills in, so the line
-    names the script from Home Assistant, never from them.
+    names the script from Home Assistant, and adds only what a field that
+    selects an entity, area, device, floor, label or target resolves to in
+    Home Assistant's registries (#787): text the model writes cannot change
+    the line, but the door it picked is shown.
     """
     state = hass.states.get(script_id) if hass is not None else None
     name = state.name if state is not None else script_id
-    return pin_msg(
+    line = pin_msg(
         hass,
         "action_turn_on",
         target=_named(hass, _one_line(name, _ACTION_TARGET_MAX_LEN)),
     )
+    if hass is None or not tool_args:
+        return line
+    # The arguments as they are sent: the normal path and the confirmation
+    # both reduce them first (`minimal_payload_for_domain`).
+    sent = minimal_payload_for_domain(dict(tool_args))
+    try:
+        names, others = _script_field_targets(hass, script_id, sent)
+    except Exception:
+        # The names only add to the line: they must never cost the prompt.
+        LOGGER.exception("Critical Action PIN: could not name a script's targets")
+        return line
+    if not names and not others:
+        return line
+    return pin_msg(
+        hass,
+        "action_script_targets",
+        action=line,
+        targets=_joined(hass, names, others=others),
+    )
+
+
+# Selector types whose value names something in Home Assistant's registries.
+_TARGET_SELECTORS = ("target", "entity", "device", "area", "floor", "label")
+_TARGET_KEYS = {
+    "entity_id": "entity",
+    "area_id": "area",
+    "device_id": "device",
+    "floor_id": "floor",
+    "label_id": "label",
+}
+
+
+def _script_field_targets(
+    hass: HomeAssistant, script_id: str, tool_args: Mapping[str, Any]
+) -> tuple[list[str], bool]:
+    """
+    Return the names of what a script's selector fields were given.
+
+    And whether a field holds something that could not be named (#787
+    review): a comma-joined list, an unknown id, a value of the wrong shape.
+    Those still reach the script, so the line says it reaches other devices.
+    """
+    # HA's script tool calls the service its registry entry's unique id
+    # names, which a renamed script keeps (#787 review).
+    service_name = script_id.split(".", 1)[1]
+    entry = er.async_get(hass).async_get(script_id)
+    if entry is not None and entry.unique_id:
+        service_name = entry.unique_id
+    description = async_get_cached_service_description(hass, "script", service_name)
+    fields = description.get("fields") if isinstance(description, Mapping) else None
+    if not isinstance(fields, Mapping):
+        return [], False
+    names: list[str] = []
+    others = False
+    for field, config in sorted(fields.items()):
+        selector = config.get("selector") if isinstance(config, Mapping) else None
+        if not isinstance(selector, Mapping) or field not in tool_args:
+            continue
+        kind = next((k for k in _TARGET_SELECTORS if k in selector), None)
+        if kind is None:
+            continue
+        options = selector.get(kind)
+        multiple = isinstance(options, Mapping) and bool(options.get("multiple"))
+        value = tool_args[field]
+        if isinstance(value, Mapping):
+            # A target, or an entity field given as one.
+            # HA passes a target on as it is, so ids are looked up exactly,
+            # not by name (#787 review).
+            for key, target_kind in _TARGET_KEYS.items():
+                found, more = _registry_names(
+                    hass, target_kind, value.get(key), multiple=True, exact=True
+                )
+                names += found
+                others = others or more
+            continue
+        found, more = _registry_names(hass, kind, value, multiple=multiple)
+        names += found
+        others = others or more
+    return list(dict.fromkeys(names)), others
+
+
+def _registry_names(
+    hass: HomeAssistant,
+    kind: str,
+    value: Any,
+    *,
+    multiple: bool,
+    exact: bool = False,
+) -> tuple[list[str], bool]:
+    """
+    Return the quoted names a value resolves to, and if some did not resolve.
+
+    Resolved as Home Assistant's script tool resolves them: an area or floor
+    by id, name or alias (only the first match for a single selector), an
+    entity by id or registry id.
+    """
+    if value is None:
+        return [], False
+    if kind == "entity":
+        entity_ids, others = _entity_ids_in(hass, value)
+        names: list[str] = []
+        for entity_id in entity_ids:
+            if hass.states.get(entity_id) is None:
+                others = True
+                continue
+            # Named with its id: two devices of one name stay two (#787 review).
+            names.append(_entity_target(hass, entity_id))
+        return names, others
+    values = value if isinstance(value, (list, tuple)) else [value]
+    names = []
+    others = False
+    for item in values:
+        found = _registry_item_names(hass, kind, item, exact=exact)
+        if not found:
+            others = True
+            continue
+        names += found if multiple else found[:1]
+    return (
+        [_named(hass, _slot_line(name.translate(_QUOTE_MARKS))) for name in names],
+        others,
+    )
+
+
+def _registry_item_names(
+    hass: HomeAssistant, kind: str, item: Any, *, exact: bool = False
+) -> list[str]:
+    """Return the names one area, floor, device or label value matches."""
+    if not isinstance(item, str):
+        return []
+    if kind in {"area", "floor"}:
+        return _place_names(hass, kind, item, exact=exact)
+    if kind == "device":
+        device = dr.async_get(hass).async_get(item)
+        name = (device.name_by_user or device.name) if device else None
+    elif kind == "label":
+        labels = lr.async_get(hass)
+        label = labels.async_get_label(item) or (
+            None if exact else labels.async_get_label_by_name(item)
+        )
+        name = label.name if label else None
+    else:
+        name = None
+    return [name] if name else []
+
+
+def _place_names(
+    hass: HomeAssistant, kind: str, item: str, *, exact: bool
+) -> list[str]:
+    """Return the areas or floors a value names: by id, or as HA matches it."""
+    if kind == "area":
+        areas = ar.async_get(hass)
+        if exact:
+            area = areas.async_get_area(item)
+            return [area.name] if area else []
+        return [area.name for area in ha_intent.find_areas(item, areas)]
+    floors = fr.async_get(hass)
+    if exact:
+        floor = floors.async_get_floor(item)
+        return [floor.name] if floor else []
+    return [floor.name for floor in ha_intent.find_floors(item, floors)]

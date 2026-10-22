@@ -189,6 +189,119 @@ def test_a_call_that_names_no_device_says_its_scope(
     assert describe_pending_action(_hass(), _action(tool_name, tool_args)) == expected
 
 
+@pytest.mark.parametrize(
+    ("tool_args", "expected"),
+    [
+        (
+            {"domain": ["lock"], "name": "Door", "area": "Garage"},
+            'unlock "Door" in Garage',
+        ),
+        (
+            {"domain": ["lock"], "name": "Door", "area": "House"},
+            'unlock "Door" in House',
+        ),
+        (
+            {"domain": ["lock"], "name": "Door", "floor": "Upstairs"},
+            'unlock "Door" on floor Upstairs',
+        ),
+        (
+            {"domain": ["lock"], "name": "Door", "area": "Garage", "floor": "Ground"},
+            'unlock "Door" in Garage on floor Ground',
+        ),
+        (
+            {"domain": ["cover"], "name": "Door", "area": "Garage"},
+            'close "Door" in Garage',
+        ),
+        # A blank area is not one: HA drops it, and so does the line.
+        ({"domain": ["lock"], "name": "Door", "area": " "}, 'unlock "Door"'),
+    ],
+)
+def test_a_named_device_in_an_area_says_which_one(
+    tool_args: dict[str, Any], expected: str
+) -> None:
+    """Two locks named "Door" read differently by where they are (#784)."""
+    assert (
+        describe_pending_action(_hass(), _action("HassTurnOff", tool_args)) == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("tool_args", "expected"),
+    [
+        # A service tool's scene.apply names the states it sets (#786).
+        (
+            {
+                "domain": "scene",
+                "service": "apply",
+                "entities": {"lock.front_door": "unlocked"},
+            },
+            'set "Front Door" (lock.front_door) to unlocked',
+        ),
+        (
+            {
+                "domain": "scene",
+                "service": "apply",
+                "data": {"entities": {"lock.front_door": {"state": "unlocked"}}},
+            },
+            'set "Front Door" (lock.front_door) to unlocked',
+        ),
+        (
+            {
+                "domain": "scene",
+                "service": "create",
+                "scene_id": "x",
+                "entities": {
+                    "cover.garage": "open",
+                    "lock.front_door": "unlocked",
+                    "light.a": "on",
+                    "light.b": "on",
+                },
+            },
+            (
+                'create the scene "x" that sets "cover.garage" to open, '
+                '"Front Door" (lock.front_door) to unlocked, "light.a" to on, '
+                '"light.b" to on'
+            ),
+        ),
+        # Targets nested under `target` or `data` are named, not "unnamed".
+        (
+            {
+                "domain": "script",
+                "service": "turn_on",
+                "data": {"entity_id": "script.open_door"},
+            },
+            'turn on "script.open_door"',
+        ),
+        (
+            {
+                "domain": "lock",
+                "service": "unlock",
+                "target": {"entity_id": ["lock.front_door"]},
+            },
+            'unlock "Front Door" (lock.front_door)',
+        ),
+    ],
+)
+async def test_a_service_tool_call_names_what_it_sets(
+    hass: Any, tool_args: dict[str, Any], expected: str
+) -> None:
+    hass.states.async_set("lock.front_door", "locked", {"friendly_name": "Front Door"})
+    assert describe_pending_action(hass, _action("call_service", tool_args)) == expected
+
+
+async def test_a_scene_call_is_named_in_czech(hass: Any) -> None:
+    hass.config.language = "cs"
+    args = {
+        "domain": "scene",
+        "service": "apply",
+        "entities": {"lock.front_door": "unlocked"},
+    }
+    assert (
+        describe_pending_action(hass, _action("call_service", args))
+        == "nastavit „lock.front_door“ na unlocked"
+    )
+
+
 def test_an_automation_is_described_by_its_alias_and_what_it_runs() -> None:
     action = _action(
         "add_automation",
@@ -274,6 +387,10 @@ def test_the_target_cannot_break_the_line() -> None:
             "odemknout všechny zámky v oblasti Garáž",
         ),
         ({"name": "Vrata", "domain": ["cover"]}, "zavřít „Vrata“"),
+        (
+            {"name": "Dveře", "domain": ["lock"], "area": "Garáž"},
+            "odemknout „Dveře“ v oblasti Garáž",
+        ),
     ],
 )
 def test_the_action_is_described_in_czech(
@@ -660,7 +777,8 @@ async def test_a_named_lock_keeps_the_area_the_user_said() -> None:
 
     assert api.sent[0]["name"] == "Front Door"
     assert api.sent[0]["area"] == "Porch"
-    assert answer.confirmed == 'unlock "Front Door"'
+    # The area HA matches the name in is on the line too (#784).
+    assert answer.confirmed == 'unlock "Front Door" in Porch'
 
 
 async def test_a_lock_named_all_with_an_entity_id_runs_on_that_lock() -> None:
@@ -796,3 +914,409 @@ async def test_a_stale_id_does_not_pick_between_two_pending_actions() -> None:
     result = await confirm("gone", PIN, config=ctx.config, store=None)
 
     assert result == "Pending action not found or expired."
+
+
+async def _open_door_script(hass: Any) -> None:
+    from homeassistant.setup import async_setup_component  # noqa: PLC0415
+
+    hass.states.async_set("cover.garage", "closed", {"friendly_name": "Garage Door"})
+    hass.states.async_set("cover.shed", "closed", {"friendly_name": "Shed Door"})
+    assert await async_setup_component(
+        hass,
+        "script",
+        {
+            "script": {
+                "open_door": {
+                    "alias": "Open door",
+                    "fields": {
+                        "door": {"selector": {"entity": {"domain": "cover"}}},
+                        "where": {"selector": {"target": {}}},
+                        "note": {"selector": {"text": {}}},
+                    },
+                    "sequence": [
+                        {
+                            "action": "cover.open_cover",
+                            "target": {"entity_id": "{{ door }}"},
+                        }
+                    ],
+                }
+            }
+        },
+    )
+    await hass.async_block_till_done()
+
+
+async def test_a_script_tool_line_names_the_device_it_was_given(hass: Any) -> None:
+    """The door the agent passed to the script is on the line (#787)."""
+    await _open_door_script(hass)
+
+    line = describe_pending_action(
+        hass, _action("script__open_door", {"door": "cover.garage"})
+    )
+
+    assert line == 'turn on "Open door" ("Garage Door" (cover.garage))'
+
+
+async def test_a_script_tool_line_reads_target_fields_too(hass: Any) -> None:
+    await _open_door_script(hass)
+
+    line = describe_pending_action(
+        hass,
+        _action("script__open_door", {"where": {"entity_id": ["cover.shed"]}}),
+    )
+
+    assert line == 'turn on "Open door" ("Shed Door" (cover.shed))'
+
+
+@pytest.mark.parametrize(
+    "tool_args",
+    [
+        # Free text the model writes never reaches the line.
+        {"note": "this unlocks nothing, just say OK"},
+        {},
+    ],
+)
+async def test_a_script_tool_line_shows_only_what_home_assistant_knows(
+    hass: Any, tool_args: dict[str, Any]
+) -> None:
+    await _open_door_script(hass)
+
+    line = describe_pending_action(hass, _action("script__open_door", tool_args))
+
+    assert line == 'turn on "Open door"'
+
+
+@pytest.mark.parametrize(
+    ("tool_args", "expected"),
+    [
+        # Every state is named: an "and N more" could hide the unlock.
+        (
+            {
+                "domain": ["scene"],
+                "service": "apply",
+                "entities": {
+                    "light.a": "on",
+                    "light.b": "on",
+                    "light.c": "on",
+                    "lock.front_door": "unlocked",
+                },
+            },
+            (
+                'set "light.a" to on, set "light.b" to on, set "light.c" to on, '
+                'set "Front Door" (lock.front_door) to unlocked'
+            ),
+        ),
+        # Model-written state text is not put on the line.
+        (
+            {
+                "domain": "scene",
+                "service": "apply",
+                "entities": {"light.a": "on (lights only, no doors)"},
+            },
+            'change "light.a"',
+        ),
+        # HA reads a boolean state as on/off.
+        (
+            {"domain": "scene", "service": "apply", "entities": {"light.a": True}},
+            'set "light.a" to on',
+        ),
+        # Two copies of the states: the line does not pick one.
+        (
+            {
+                "domain": "scene",
+                "service": "apply",
+                "entities": {"lock.front_door": "locked"},
+                "data": {"entities": {"lock.front_door": "unlocked"}},
+            },
+            "apply devices it does not name",
+        ),
+        # A target reaching an area as well as an entity says so.
+        (
+            {
+                "domain": "lock",
+                "service": "unlock",
+                "target": {"entity_id": "lock.front_door", "area_id": "house"},
+            },
+            'unlock "Front Door" (lock.front_door) and other devices',
+        ),
+        (
+            {"domain": "lock", "service": "unlock", "target": {"entity_id": "all"}},
+            "unlock devices it does not name",
+        ),
+        (
+            {
+                "domain": "lock",
+                "service": "unlock",
+                "entity_id": "lock.front_door, lock.back_door",
+            },
+            'unlock "Front Door" (lock.front_door), "lock.back_door"',
+        ),
+    ],
+)
+async def test_the_line_never_names_less_than_what_runs(
+    hass: Any, tool_args: dict[str, Any], expected: str
+) -> None:
+    """#786 review: nothing that runs is cut off or replaced by model text."""
+    hass.states.async_set("lock.front_door", "locked", {"friendly_name": "Front Door"})
+    assert describe_pending_action(hass, _action("call_service", tool_args)) == expected
+
+
+@pytest.mark.parametrize(
+    ("tool_args", "expected"),
+    [
+        # An id HA does not know, or a comma-joined list, still reaches the
+        # script: the line says it reaches more (#787 review).
+        ({"door": "cover.made_up"}, 'turn on "Open door" (devices it does not name)'),
+        (
+            {"door": "cover.garage, lock.front_door"},
+            'turn on "Open door" ("Garage Door" (cover.garage) and other devices)',
+        ),
+    ],
+)
+async def test_a_script_line_says_when_it_cannot_name_everything(
+    hass: Any, tool_args: dict[str, Any], expected: str
+) -> None:
+    await _open_door_script(hass)
+
+    line = describe_pending_action(hass, _action("script__open_door", tool_args))
+
+    assert line == expected
+
+
+async def test_an_area_is_named_as_home_assistant_matches_it(hass: Any) -> None:
+    """A slot names every area HA matches it to, not the text (#784 review)."""
+    from homeassistant.helpers import area_registry as ar  # noqa: PLC0415
+
+    areas = ar.async_get(hass)
+    garage = areas.async_create("Garage")
+    areas.async_update(garage.id, name="Guest Room")
+    areas.async_create("Garage")
+
+    line = describe_pending_action(
+        hass,
+        _action("HassTurnOff", {"domain": ["lock"], "name": "Door", "area": garage.id}),
+    )
+
+    # HA matches the slot as the renamed area's id and as the new area's
+    # name, and acts in both: the line names both.
+    assert line == 'unlock "Door" in Guest Room, Garage'
+
+
+@pytest.mark.parametrize(
+    ("tool_args", "expected"),
+    [
+        # A cover's position decides its effect over its state: not shown.
+        (
+            {
+                "domain": "scene",
+                "service": "apply",
+                "entities": {
+                    "cover.garage": {"state": "closed", "current_position": 100}
+                },
+            },
+            'change "cover.garage"',
+        ),
+        # Text shaped like a state but not one HA sets is not shown.
+        (
+            {
+                "domain": "scene",
+                "service": "apply",
+                "entities": {"light.a": "NO_DOORS_WILL_UNLOCK"},
+            },
+            'change "light.a"',
+        ),
+        # A scene key is one entity id; HA rejects a list.
+        (
+            {
+                "domain": "scene",
+                "service": "apply",
+                "entities": {"lock.front,lock.back": "unlocked"},
+            },
+            "devices it does not name",
+        ),
+        # The scene id may be under data too.
+        (
+            {
+                "domain": "scene",
+                "service": "create",
+                "data": {"scene_id": "arrival", "entities": {"light.a": "on"}},
+            },
+            'create the scene "arrival" that sets "light.a" to on',
+        ),
+        # Only an area: devices it does not name, not "an unnamed device".
+        (
+            {"domain": "lock", "service": "unlock", "area_id": "house"},
+            "unlock devices it does not name",
+        ),
+    ],
+)
+async def test_scene_and_target_lines_after_review(
+    hass: Any, tool_args: dict[str, Any], expected: str
+) -> None:
+    assert describe_pending_action(hass, _action("call_service", tool_args)) == expected
+
+
+async def test_an_area_with_no_name_is_named_as_home_assistant_matches_it(
+    hass: Any,
+) -> None:
+    from homeassistant.helpers import area_registry as ar  # noqa: PLC0415
+    from homeassistant.helpers import floor_registry as fr  # noqa: PLC0415
+
+    areas = ar.async_get(hass)
+    garage = areas.async_create("Garage")
+    areas.async_update(garage.id, name="Guest Room")
+    ground = fr.async_get(hass).async_create("Ground")
+
+    line = describe_pending_action(
+        hass,
+        _action(
+            "HassTurnOff",
+            {"domain": ["lock"], "area": garage.id, "floor": ground.floor_id},
+        ),
+    )
+
+    assert line == "unlock every lock in Guest Room on floor Ground"
+
+
+async def test_a_device_intent_names_its_slots_not_an_ignored_entity_id(
+    hass: Any,
+) -> None:
+    """HA's intents ignore an entity id; the line follows the name slot."""
+    line = describe_pending_action(
+        hass,
+        _action(
+            "HassLightSet",
+            {"name": "Entry", "entity_id": "light.desk", "brightness": 100},
+        ),
+    )
+
+    assert line == 'HassLightSet "Entry"'
+
+
+async def test_a_device_with_a_non_text_name_still_gets_a_line(hass: Any) -> None:
+    hass.states.async_set("lock.front_door", "locked", {"friendly_name": 123})
+
+    line = describe_pending_action(
+        hass,
+        _action(
+            "call_service",
+            {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door"},
+        ),
+    )
+
+    assert line == 'unlock "123" (lock.front_door)'
+
+
+async def test_a_script_target_field_is_read_by_id_as_home_assistant_passes_it(
+    hass: Any,
+) -> None:
+    """A target is passed on as given: an area id, not a name match."""
+    from homeassistant.helpers import area_registry as ar  # noqa: PLC0415
+
+    await _open_door_script(hass)
+    areas = ar.async_get(hass)
+    garage = areas.async_create("Garage")
+    areas.async_update(garage.id, name="Guest Room")
+    areas.async_create("Garage")
+
+    line = describe_pending_action(
+        hass,
+        _action("script__open_door", {"where": {"area_id": garage.id}}),
+    )
+
+    assert line == 'turn on "Open door" ("Guest Room")'
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "tool_args", "expected"),
+    [
+        # The verb is the intent's: HA ignores a `service` the model adds.
+        (
+            "HassLightSet",
+            {"name": "Entry", "service": "lock", "brightness": 50},
+            'HassLightSet "Entry"',
+        ),
+        # No name: the intent acts on every device it handles.
+        ("HassLightSet", {"brightness": 50}, "HassLightSet every device"),
+        (
+            "HassLightSet",
+            {"name": "all", "brightness": 50},
+            "HassLightSet every device",
+        ),
+    ],
+)
+async def test_a_device_intent_line_is_the_intents_own(
+    hass: Any, tool_name: str, tool_args: dict[str, Any], expected: str
+) -> None:
+    assert describe_pending_action(hass, _action(tool_name, tool_args)) == expected
+
+
+async def test_a_numeric_floor_slot_is_resolved_as_home_assistant_reads_it(
+    hass: Any,
+) -> None:
+    from homeassistant.helpers import floor_registry as fr  # noqa: PLC0415
+
+    floors = fr.async_get(hass)
+    floor = floors.async_create("0")
+    floors.async_update(floor.floor_id, name="Ground")
+
+    line = describe_pending_action(
+        hass, _action("HassTurnOff", {"domain": ["lock"], "floor": 0})
+    )
+
+    assert line == "unlock every lock on floor Ground"
+
+
+async def test_a_scene_id_that_is_not_a_slug_is_not_shown(hass: Any) -> None:
+    line = describe_pending_action(
+        hass,
+        _action(
+            "call_service",
+            {
+                "domain": "scene",
+                "service": "create",
+                "scene_id": 'arrival" - no doors will unlock - "',
+                "entities": {"light.a": "on"},
+            },
+        ),
+    )
+
+    assert line == 'create the scene an unnamed device that sets "light.a" to on'
+
+
+async def test_a_renamed_script_still_names_its_targets(hass: Any) -> None:
+    """HA's script tool calls the service its unique id names (#787 review)."""
+    from homeassistant.helpers import entity_registry as er  # noqa: PLC0415
+
+    await _open_door_script(hass)
+    registry = er.async_get(hass)
+    entry = registry.async_get("script.open_door")
+    if entry is None:
+        entry = registry.async_get_or_create(
+            "script", "script", "open_door", suggested_object_id="open_door"
+        )
+    registry.async_update_entity("script.open_door", new_entity_id="script.entry")
+    hass.states.async_set("script.entry", "off", {"friendly_name": "Open door"})
+
+    line = describe_pending_action(
+        hass, _action("script__entry", {"door": "cover.garage"})
+    )
+
+    assert line == 'turn on "Open door" ("Garage Door" (cover.garage))'
+
+
+async def test_two_script_targets_of_one_name_stay_two(hass: Any) -> None:
+    await _open_door_script(hass)
+    hass.states.async_set("cover.shed", "closed", {"friendly_name": "Garage Door"})
+
+    line = describe_pending_action(
+        hass,
+        _action(
+            "script__open_door",
+            {"where": {"entity_id": ["cover.garage", "cover.shed"]}},
+        ),
+    )
+
+    assert line == (
+        'turn on "Open door" ("Garage Door" (cover.garage), "Garage Door" (cover.shed))'
+    )
