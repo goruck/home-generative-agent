@@ -61,7 +61,9 @@ from .helpers import (
 )
 from .indirect_pin import (
     bare_script_tool_entity_id,
+    call_service_names,
     intent_script_handlers,
+    named_services,
     script_tool_entity_id,
 )
 from .rule_entities import relay_wrappers_reached
@@ -674,8 +676,10 @@ def _intent_script_line(
         or is_actuating_intent(tool_name)
         or is_device_intent(tool_name)
     )
-    if not owned and tool_args.get("service"):
-        return None
+    if not owned and (
+        tool_args.get("service") or named_services(tool_args, tool_name, hass)
+    ):
+        return None  # a service tool (#837 review)
     names = sorted(
         {str(getattr(h, "intent_type", "") or "") for h in handlers} - {""}
     ) or [base_tool_name(tool_name)]
@@ -806,8 +810,14 @@ def _describe_line(  # noqa: PLR0911
     # held for the script or for the call its arguments make, so the line
     # names the script, and the call too when it makes one.
     bare_script = bare_script_tool_entity_id(tool_name, hass)
+    # A tool may name its service by `action`, a dotted `service` or its own
+    # name (#837): the line names each service the gate holds the call for.
+    names = call_service_names(tool_args)
+    bare_services = list(dict.fromkeys([*names.bare_services, *names.bare_actions]))
+    domains = frozenset(str(d) for d in action.get("rule_domains") or [])
+    named = named_services(tool_args, tool_name, hass, domains)
     if bare_script is not None and not (
-        tool_args.get("domain") or tool_args.get("service")
+        tool_args.get("domain") or named or bare_services
     ):
         return _script_line(hass, bare_script, tool_args)
 
@@ -842,7 +852,6 @@ def _describe_line(  # noqa: PLR0911
             )
         return ", ".join(parts)
 
-    service = str(tool_args.get("service") or base_tool_name(tool_name))
     if is_device_intent(tool_name):
         # HA's intents read the name, area and floor slots and ignore an
         # entity id and any `service` the model adds, so the line names the
@@ -860,19 +869,34 @@ def _describe_line(  # noqa: PLR0911
                 _single_kind(hass, tool_name, tool_args) or _SEVERAL_KINDS,
             ),
         )
-    line = _scene_state_line(hass, tool_args, service)
-    if line is None:
-        line = pin_msg(
-            hass,
-            "action_service",
-            service=sanitize_tool_text(
-                service.replace("_", " "), limit=_ACTION_SERVICE_MAX_LEN
-            ),
-            target=_service_target(hass, tool_args),
-        )
+    lines = [
+        _service_line(hass, {**tool_args, "domain": domain}, call)
+        for domain, _, call in (name.partition(".") for name in named)
+    ]
+    lines += [_service_line(hass, tool_args, call) for call in bare_services]
+    if not lines:
+        lines.append(_service_line(hass, tool_args, base_tool_name(tool_name)))
+    line = ", ".join(dict.fromkeys(lines))
     if bare_script is not None:
         return ", ".join([_script_line(hass, bare_script), line])
     return line
+
+
+def _service_line(
+    hass: HomeAssistant | None, tool_args: Mapping[str, Any], service: str
+) -> str:
+    """Name one service a tool calls, and the targets or states it sets."""
+    line = _scene_state_line(hass, tool_args, service)
+    if line is not None:
+        return line
+    return pin_msg(
+        hass,
+        "action_service",
+        service=sanitize_tool_text(
+            service.replace("_", " "), limit=_ACTION_SERVICE_MAX_LEN
+        ),
+        target=_service_target(hass, tool_args),
+    )
 
 
 def _entity_target(hass: HomeAssistant | None, entity_id: str) -> str:
