@@ -117,9 +117,9 @@ from .helpers import (
     ConfigurableData,
     base_tool_name,
     drop_empty_args,
-    is_intent_tool,
     keep_pin_prompt,
     minimal_payload_for_domain,
+    narrow_intent_args,
     normalize_intent_for_alarm,
     normalize_intent_for_lock,
     parse_tool_response,
@@ -131,7 +131,12 @@ from .helpers import (
     sanitize_tool_text,
     tool_call_data,
 )
-from .indirect_pin import stored_action_calls
+from .indirect_pin import (
+    BUILTIN_INTENT,
+    OTHER_INTENT,
+    stored_action_calls,
+    tool_args_kind,
+)
 from .on_off_direction import with_action_performed
 from .pin_messages import describe_pending_action, pin_msg
 from .rule_entities import expand_critical_rules
@@ -1365,19 +1370,21 @@ async def _execute_pending_action(
     # here could bind a different device than the one the PIN line named,
     # e.g. after the held one was removed, so only the hass-free
     # normalization runs.
-    tool_args = normalize_intent_for_alarm(tool_name, tool_args, None)
-    tool_args = normalize_intent_for_lock(tool_name, tool_args, None)
     # The same payload the normal path sends after its guard: HA's intents
     # read name/area/floor and ignore an entity id, so a held lock call with
-    # only an entity id would otherwise act on every exposed lock.
-    # Any other tool runs with its arguments as held (#836).
-    tool_args = (
-        sanitize_tool_args(
+    # only an entity id would otherwise act on every exposed lock. Any other
+    # tool runs with its arguments as held (#836).
+    kind = tool_args_kind(cfg.get("hass"), tool_name)
+    if kind == BUILTIN_INTENT:
+        tool_args = normalize_intent_for_alarm(tool_name, tool_args, None)
+        tool_args = normalize_intent_for_lock(tool_name, tool_args, None)
+        tool_args = sanitize_tool_args(
             minimal_payload_for_domain(sanitize_tool_args(tool_args), tool_name)
         )
-        if is_intent_tool(tool_name)
-        else drop_empty_args(tool_args)
-    )
+    elif kind == OTHER_INTENT:
+        tool_args = narrow_intent_args(drop_empty_args(tool_args))
+    else:
+        tool_args = drop_empty_args(tool_args)
 
     if not _claim_pending_action(cfg, resolved_action_id):
         return None, pin_msg(cfg.get("hass"), "pending_action_not_found_or_expired")

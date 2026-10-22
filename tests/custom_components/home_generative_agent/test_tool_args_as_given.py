@@ -25,6 +25,7 @@ from homeassistant.setup import async_setup_component
 from custom_components.home_generative_agent.agent.graph import _prepare_tool_args
 from custom_components.home_generative_agent.agent.helpers import (
     PinReply,
+    _request_key,
     minimal_payload_for_domain,
 )
 from custom_components.home_generative_agent.agent.pin_messages import (
@@ -187,3 +188,104 @@ async def test_an_intent_is_still_reduced_to_its_slots(home: HomeAssistant) -> N
     )
     assert out["domain"] == ["lock"]
     assert out["name"] == "lock.front_door"
+
+
+@pytest.fixture
+async def intents(home: HomeAssistant) -> HomeAssistant:
+    """Add intent scripts: one unlocking what it matches, one taking a code."""
+    home.states.async_set("alarm_control_panel.home", "armed_away")
+    assert await async_setup_component(
+        home,
+        "intent_script",
+        {
+            "intent_script": {
+                "UnlockDoor": {
+                    "action": [
+                        {
+                            "action": "lock.unlock",
+                            "target": {"entity_id": "{{ targets.entities }}"},
+                        }
+                    ]
+                },
+                # Takes over a name shaped like a built-in intent's.
+                "HassUnlockFront": {
+                    "action": [
+                        {
+                            "action": "lock.unlock",
+                            "target": {"entity_id": "lock.front_door"},
+                        }
+                    ]
+                },
+            }
+        },
+    )
+    await home.async_block_till_done()
+    return home
+
+
+async def test_an_intent_script_keeps_its_slots_and_is_narrowed(
+    intents: HomeAssistant,
+) -> None:
+    """HA matches an intent script's targets by name: the entity id is sent so."""
+    args = {"domain": "lock", "entity_id": "lock.front_door", "speed": "slow"}
+    _, out = _prepare_tool_args(
+        "intent_script__UnlockDoor", dict(args), _ctx(intents, pin=False), {}
+    )
+    assert out == {**args, "name": "lock.front_door"}
+    ctx = _ctx(intents, pin=True)
+    redirect, _ = _prepare_tool_args(
+        "intent_script__UnlockDoor", dict(args), ctx, {"id": "c1"}
+    )
+    assert redirect is not None
+    assert "requires_pin" in str(redirect.content)
+    assert await _confirm(intents, ctx) == {**args, "name": "lock.front_door"}
+
+
+async def test_an_intent_script_with_a_built_in_shaped_name_keeps_its_slots(
+    intents: HomeAssistant,
+) -> None:
+    """An intent script named like a built-in intent is not reduced as one."""
+    args = {"domain": "lock", "name": "Front Door", "device_class": ["front"]}
+    for tool_name in ("intent_script__HassUnlockFront", "HassUnlockFront"):
+        ctx = _ctx(intents, pin=True)
+        _prepare_tool_args(tool_name, dict(args), ctx, {"id": "c1"})
+        assert await _confirm(intents, ctx) == args
+
+
+async def test_a_script_code_is_not_read_as_an_alarm_code(
+    intents: HomeAssistant,
+) -> None:
+    """Only HA's own intents are sent to the alarm tool for a numeric code."""
+    redirect, out = _prepare_tool_args(
+        "script__gate_keypad", {"code": "1234"}, _ctx(intents, pin=False), {}
+    )
+    assert redirect is None
+    assert out == {"code": "1234"}
+    redirect, _ = _prepare_tool_args(
+        "intent__HassTurnOff", {"code": "1234"}, _ctx(intents, pin=False), {}
+    )
+    assert redirect is not None
+
+
+async def test_a_blank_domain_entry_does_not_hide_a_lock(home: HomeAssistant) -> None:
+    """A tool's list of domains is screened without its blank entries."""
+    args = {"domain": ["", "lock"], "service": "unlock", "name": "Front Door"}
+    ctx = _ctx(home, pin=True)
+    redirect, out = _prepare_tool_args(
+        "mcp__call_service", dict(args), ctx, {"id": "c1"}
+    )
+    assert redirect is not None
+    assert "requires_pin" in str(redirect.content)
+    assert out == args
+
+
+def test_a_repeated_request_matches_only_what_runs_the_same() -> None:
+    """Two calls a tool runs differently are not the same held request."""
+
+    def key(tool_name: str, args: dict[str, Any]) -> Any:
+        return _request_key({"tool_name": tool_name, "tool_args": args})
+
+    as_text = {"domain": "lock", "name": "Bob"}
+    as_list = {"domain": ["lock"], "name": "bob"}
+    assert key(SCRIPT_TOOL, as_text) != key(SCRIPT_TOOL, as_list)
+    assert key("HassTurnOff", as_text) == key("HassTurnOff", as_list)

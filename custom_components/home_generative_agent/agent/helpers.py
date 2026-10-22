@@ -915,14 +915,22 @@ def _request_key(action: Mapping[str, Any]) -> tuple[Any, Any, Any]:
     if isinstance(tool_name, str) and isinstance(tool_args, dict):
         # Without hass: both actions compared were held after normalizing
         # with hass, so their stored arguments already carry the domain.
-        tool_args = normalize_intent_for_alarm(tool_name, tool_args, None)
-        tool_args = sanitize_tool_args(
-            normalize_intent_for_lock(tool_name, tool_args, None)
-        )
-        tool_args = {
-            key: value.casefold() if key == "name" and isinstance(value, str) else value
-            for key, value in tool_args.items()
-        }
+        if is_intent_tool(tool_name):
+            tool_args = normalize_intent_for_alarm(tool_name, tool_args, None)
+            tool_args = sanitize_tool_args(
+                normalize_intent_for_lock(tool_name, tool_args, None)
+            )
+            tool_args = {
+                key: value.casefold()
+                if key == "name" and isinstance(value, str)
+                else value
+                for key, value in tool_args.items()
+            }
+        else:
+            # Any other tool runs with its arguments as given: a string and a
+            # list `domain`, or two spellings of a name, may run differently
+            # (#836 review).
+            tool_args = drop_empty_args(tool_args)
     automation = action.get("automation_config")
     if isinstance(automation, dict):
         automation = {key: value for key, value in automation.items() if key != "id"}
@@ -1343,6 +1351,21 @@ def _alarm_payload(tool_args: Mapping[str, Any]) -> dict[str, Any]:
 def is_intent_tool(tool_name: str) -> bool:
     """Return True for one of Home Assistant's built-in intent tools."""
     return base_tool_name(tool_name).startswith("Hass")
+
+
+def narrow_intent_args(tool_args: dict[str, Any]) -> dict[str, Any]:
+    """
+    Send an entity id as the name for an intent that is not a built-in one.
+
+    An intent script matches its targets from the name, area, floor and
+    domain slots as the built-in intents do, and ignores an entity id: with a
+    domain and no name, every device of the domain matched. Its other slots
+    are its own and are kept (#836 review).
+    """
+    name, entity_id = _payload_target(tool_args)
+    if declared_domains(tool_args) and not name and entity_id:
+        return {**tool_args, "name": entity_id}
+    return tool_args
 
 
 def minimal_payload_for_domain(
