@@ -62,6 +62,7 @@ from .helpers import (
 from .indirect_pin import (
     bare_script_tool_entity_id,
     intent_script_handlers,
+    named_services,
     script_tool_entity_id,
 )
 from .rule_entities import relay_wrappers_reached
@@ -860,19 +861,41 @@ def _describe_line(  # noqa: PLR0911
                 _single_kind(hass, tool_name, tool_args) or _SEVERAL_KINDS,
             ),
         )
-    line = _scene_state_line(hass, tool_args, service)
-    if line is None:
-        line = pin_msg(
-            hass,
-            "action_service",
-            service=sanitize_tool_text(
-                service.replace("_", " "), limit=_ACTION_SERVICE_MAX_LEN
-            ),
-            target=_service_target(hass, tool_args),
-        )
+    # A tool may name its service by `action`, a dotted `service` or its own
+    # name (#837): the line names each service the gate holds the call for.
+    named = named_services(tool_args, tool_name, hass) or []
+    lines = [
+        _service_line(hass, {**tool_args, "domain": domain}, call)
+        for domain, _, call in (name.partition(".") for name in named)
+    ]
+    raw_service = tool_args.get("service")
+    if not named or (
+        tool_args.get("domain")
+        and isinstance(raw_service, str)
+        and "." not in raw_service
+    ):
+        lines.append(_service_line(hass, tool_args, service))
+    line = ", ".join(dict.fromkeys(lines))
     if bare_script is not None:
         return ", ".join([_script_line(hass, bare_script), line])
     return line
+
+
+def _service_line(
+    hass: HomeAssistant | None, tool_args: Mapping[str, Any], service: str
+) -> str:
+    """Name one service a tool calls, and the targets or states it sets."""
+    line = _scene_state_line(hass, tool_args, service)
+    if line is not None:
+        return line
+    return pin_msg(
+        hass,
+        "action_service",
+        service=sanitize_tool_text(
+            service.replace("_", " "), limit=_ACTION_SERVICE_MAX_LEN
+        ),
+        target=_service_target(hass, tool_args),
+    )
 
 
 def _entity_target(hass: HomeAssistant | None, entity_id: str) -> str:

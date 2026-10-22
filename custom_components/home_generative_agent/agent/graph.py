@@ -138,6 +138,7 @@ from .indirect_pin import (
     call_target_domains,
     collect_started_automations,
     intent_scripts_are_critical,
+    named_services,
     runs_critical_action,
     script_rule_matches,
     script_tool_entity_id,
@@ -3651,6 +3652,16 @@ def _is_critical_action(  # noqa: PLR0911, PLR0912
         # A template panel runs its own arm and disarm actions, with no code of
         # its own to enforce (#780).
         return True
+    # A tool may name its service another way than `domain` and `service`
+    # (#837); each name it gives is screened, whichever one the tool runs.
+    named = named_services(tool_args, tool_name, hass)
+    if named is None:
+        return True  # a templated service name: which one runs is unknown
+    if any(
+        _named_service_is_critical(action, tool_args, entities, critical_actions, hass)
+        for action in named
+    ):
+        return True
     if not service or alarm_only:
         return False
     # A list of domains is screened in each one it names.
@@ -3694,6 +3705,23 @@ def _is_critical_action(  # noqa: PLR0911, PLR0912
         service_runs_critical_action(hass, action, tool_args, critical_actions)
         for action in actions
     )
+
+
+def _named_service_is_critical(
+    action: str,
+    tool_args: dict[str, Any],
+    entities: list[str],
+    critical_actions: list[dict[str, str]],
+    hass: HomeAssistant | None,
+) -> bool:
+    """Return True if a rule names the service, or what it runs is critical."""
+    domain, _, service = action.partition(".")
+    return matches_critical_rule(
+        domain=domain,
+        service=service,
+        entity_ids=entities,
+        critical_actions=critical_actions,
+    ) or service_runs_critical_action(hass, action, tool_args, critical_actions)
 
 
 _ALARM_TOOL = "alarm_control"

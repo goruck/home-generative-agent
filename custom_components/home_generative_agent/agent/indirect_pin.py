@@ -705,6 +705,58 @@ def _stored_call(call: str, entity_id: str) -> CriticalAutomationCall:
     )
 
 
+# `<domain>.<service>` the way HA spells a service.
+_SERVICE_NAME_SHAPE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
+
+
+def named_services(
+    tool_args: dict[str, Any], tool_name: str, hass: HomeAssistant | None
+) -> list[str] | None:
+    """
+    Return the services a call names other than by `domain` and `service`.
+
+    One `action` or `service` of the form `<domain>.<service>`, an `action`
+    beside a `domain`, or a tool named after the service: `scene.apply`, or
+    `scene__apply` the way HA names an action's tool, namespaced or not. Only
+    a service HA has counts, so a tool such as `mcp__get_weather` is not read
+    as one; without `hass`, any name of that shape. None when a service name
+    is templated.
+    """
+    candidates: list[str] = []
+    for key in ("action", "service"):
+        value = tool_args.get(key)
+        if not isinstance(value, str):
+            continue
+        if "{{" in value or "{%" in value:
+            return None
+        if "." in value:
+            candidates.append(value)
+    action = tool_args.get("action")
+    domains = tool_args.get("domain")
+    if isinstance(action, str) and "." not in action and not tool_args.get("service"):
+        candidates.extend(
+            f"{domain}.{action}"
+            for domain in (domains if isinstance(domains, list) else [domains])
+            if isinstance(domain, str) and domain
+        )
+    if "." in (base := tool_name.rsplit(TOOL_NAMESPACE_SEP, maxsplit=1)[-1]):
+        candidates.append(base)
+    parts = tool_name.split(TOOL_NAMESPACE_SEP)
+    if len(parts) > 1:
+        candidates.append(f"{parts[-2]}.{parts[-1]}")
+    named: list[str] = []
+    for candidate in candidates:
+        name = candidate.strip().lower()
+        if not _SERVICE_NAME_SHAPE.match(name) or name in named:
+            continue
+        if hass is not None and not hass.services.has_service(
+            *name.split(".", maxsplit=1)
+        ):
+            continue
+        named.append(name)
+    return named
+
+
 def service_runs_critical_action(  # noqa: PLR0911
     hass: HomeAssistant | None,
     action: str,
