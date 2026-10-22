@@ -328,17 +328,17 @@
 
 ---
 
-### A service tool that names its call as `action` is not screened
+### The PIN line for a service name it cannot read names the tool instead
 
-**What:** `_is_critical_action` (`agent/graph.py`) reads a service tool's call from top-level `domain` and `service`. An MCP tool whose arguments spell it `action: "lock.unlock"` (or `service: "lock.unlock"` with no domain) gets an empty domain or service and is let through without any rule check, script/scene screening included.
+**What:** When a held call's `service` or `action` cannot be read (a template, a non-text value, a name with a soft hyphen), `_describe_line` (`agent/pin_messages.py`) falls back to the tool's own name, e.g. `call service "Front Door"`. A dotted `action: script.unlock_door` reads `unlock door an unnamed device` rather than naming the script it turns on.
 
-**Why:** Adversarial review of #775 (2026-10-16). Pre-existing; depends on the argument shape of the MCP servers users actually run, which is unknown.
+**Why:** Adversarial review of #837 (2026-10-22). The call is held either way; only the wording is weak.
 
-**How to apply:** Normalize the tool's arguments before the check: split a dotted `action`/`service` into domain and service, and hold a call whose service cannot be read. Check the argument schemas of the common Home Assistant MCP servers first.
+**How to apply:** Add a fixed line for an unreadable service ("run a service the call does not name plainly") and route `script.<object id>` through `_script_line`.
 
 **Effort:** S
 **Priority:** P3
-**Depends on:** #775
+**Depends on:** #837
 
 ---
 
@@ -362,7 +362,7 @@
 
 **Why:** Adversarial review of #775 (2026-10-16), low confidence. Needs a remote HA as an MCP server plus a colliding script name.
 
-**How to apply:** Resolve the tool object from the merged LLM API (unwrap `NamespacedTool`) and treat it as a script tool only when it is HA's `ScriptTool`; hold any other `script__*`-shaped tool. Test with a namespaced fake tool. The same applies to the bare names Home Assistant 2026.8 gives script tools (`<object id>`), which `script_tool_entity_id` also takes for a local script when one has that object id.
+**How to apply:** Resolve the tool object from the merged LLM API (unwrap `NamespacedTool`) and treat it as a script tool only when it is HA's `ScriptTool`; hold any other `script__*`-shaped tool. Test with a namespaced fake tool. The same applies to the bare names Home Assistant 2026.8 gives script tools (`<object id>`), which `script_tool_entity_id` also takes for a local script when one has that object id. Also: HA names a script's tool from its entity id but runs the script by its registry unique id, so a harmless script renamed to `script.turn_on` has its `script__turn_on` tool held as targetless `script.turn_on` (an extra PIN prompt, not a bypass; #837 review 3).
 
 **Effort:** S
 **Priority:** P3

@@ -40,8 +40,10 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.core import State
@@ -81,7 +83,7 @@ from .template_actions import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping, Sequence
+    from collections.abc import Iterator, Sequence
 
     from homeassistant.core import HomeAssistant
 
@@ -188,6 +190,10 @@ def script_tool_entity_id(tool_name: str) -> str | None:
     """
     parts = tool_name.split(TOOL_NAMESPACE_SEP)
     if len(parts) < _SCRIPT_TOOL_PARTS or parts[-2] != SCRIPT_DOMAIN or not parts[-1]:
+        return None
+    if parts[-1] in RUN_SERVICES | _SCRIPT_SERVICES_THAT_DO_NOT_RUN:
+        # HA allows no script named after its own services: this is a tool
+        # for the service, such as `script__turn_off` (#837 review).
         return None
     return f"{SCRIPT_DOMAIN}.{parts[-1]}"
 
@@ -751,6 +757,191 @@ def _stored_call(call: str, entity_id: str) -> CriticalAutomationCall:
         entity_ids=(entity_id,),
         reason="the entity runs stored actions that perform a critical action",
     )
+
+
+# `<domain>.<service>` the way HA spells a service.
+_SERVICE_NAME_SHAPE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
+_SERVICE_SLUG = re.compile(r"^[a-z0-9_]+$")
+_TEMPLATE_MARKS = ("{{", "{%")
+# Spaces and zero-width characters, which a tool may strip from a name.
+_NAME_SPACE = re.compile(r"[\s\u200b-\u200d\u2060\ufeff]+")
+# Domains whose services a tool may send to another Home Assistant, or that
+# register theirs late: a tool named after one is screened even when this
+# Home Assistant has no such service (#837 review).
+_SCREENED_TOOL_DOMAINS = frozenset(
+    {
+        "alarm_control_panel",
+        "button",
+        "cover",
+        "homeassistant",
+        "input_button",
+        "lock",
+        SCENE_DOMAIN,
+        SCRIPT_DOMAIN,
+        "switch",
+        "valve",
+    }
+)
+
+
+@dataclass(frozen=True)
+class ServiceNames:
+    """The service names a call gives in `service` and `action` (#837)."""
+
+    dotted: list[str] = field(default_factory=list)
+    bare_services: list[str] = field(default_factory=list)
+    bare_actions: list[str] = field(default_factory=list)
+    # A name that cannot be read: a template, a value that is not text, a
+    # dotted name not shaped like a service, or a templated domain.
+    unreadable: bool = False
+
+
+def call_service_names(tool_args: Mapping[str, Any]) -> ServiceNames:
+    """
+    Return the service names a call gives (#837).
+
+    From `service` and `action`, each one name or a list of them. Both count
+    when both are given: which one runs is up to the tool. Spaces inside a
+    name are dropped, as a tool may drop them.
+    """
+    dotted: list[str] = []
+    bare: dict[str, list[str]] = {"service": [], "action": []}
+    unreadable = False
+    for key in ("service", "action"):
+        value = tool_args.get(key)
+        if value is None or value == "":
+            continue
+        for item in value if isinstance(value, list) else [value]:
+            if not isinstance(item, str):
+                unreadable = True
+                continue
+            if any(mark in item for mark in _TEMPLATE_MARKS):
+                unreadable = True
+                continue
+            name = _NAME_SPACE.sub("", item).lower()
+            if "." not in name:
+                if name:
+                    bare[key].append(name)
+            elif _SERVICE_NAME_SHAPE.match(name):
+                dotted.append(name)
+            else:
+                unreadable = True
+    domains = tool_args.get("domain")
+    if any(
+        isinstance(domain, str) and any(mark in domain for mark in _TEMPLATE_MARKS)
+        for domain in (domains if isinstance(domains, list) else [domains])
+    ):
+        unreadable = True
+    return ServiceNames(
+        dotted=list(dict.fromkeys(dotted)),
+        bare_services=list(dict.fromkeys(bare["service"])),
+        bare_actions=list(dict.fromkeys(bare["action"])),
+        unreadable=unreadable,
+    )
+
+
+# Fields a scene service sets its states from.
+_SCENE_STATE_KEYS = frozenset({"entities", "snapshot_entities"})
+# A dotted name anywhere in a value: a service, an entity, or one in a
+# template.
+_DOTTED_NAME = re.compile(r"[a-z0-9_]+\.[a-z0-9_]+", re.IGNORECASE)
+
+
+def mentions_a_service_call(value: object) -> bool:
+    """
+    Return True if a value may hold a service call or its target (#837).
+
+    For a `service` or `action` value that cannot be read: a template or a
+    nested object naming a service or an entity, or carrying a target or a
+    scene's states, could run one. An odd value naming none could not.
+    """
+    if isinstance(value, str):
+        return bool(_DOTTED_NAME.search(value))
+    if isinstance(value, Mapping):
+        return any(
+            key in STEP_TARGET_KEYS
+            or key in _SCENE_STATE_KEYS
+            or mentions_a_service_call(key)
+            or mentions_a_service_call(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple, set)):
+        return any(mentions_a_service_call(item) for item in value)
+    return False
+
+
+def calls_a_service(tool_args: Mapping[str, Any], entity_ids: Sequence[str]) -> bool:
+    """
+    Return True if a call whose service cannot be read may still make one.
+
+    It gives a domain, a `service`, a target or a scene's states, or its
+    `service` or `action` holds one. An `action` field alone, in a tool that
+    takes one for its own use, does not make it one.
+    """
+    return bool(
+        tool_args.get("domain")
+        or "service" in tool_args
+        or entity_ids
+        or any(key in tool_args for key in STEP_TARGET_KEYS)
+        or any(key in tool_args for key in _SCENE_STATE_KEYS)
+        or any(
+            mentions_a_service_call(tool_args.get(key)) for key in ("service", "action")
+        )
+    )
+
+
+def rule_domains(rules: Sequence[Mapping[str, str]]) -> frozenset[str]:
+    """Return the domains critical-action rules name."""
+    return frozenset(
+        domain for rule in rules if (domain := str(rule.get("domain") or "").lower())
+    )
+
+
+def has_service(hass: HomeAssistant | None, domain: str, service: str) -> bool:
+    """Return True if HA has the service, or when it cannot be asked."""
+    services = getattr(hass, "services", None)
+    return services is None or bool(services.has_service(domain, service))
+
+
+def named_services(
+    tool_args: Mapping[str, Any],
+    tool_name: str,
+    hass: HomeAssistant | None,
+    domains: frozenset[str] = frozenset(),
+) -> list[str]:
+    """
+    Return each `<domain>.<service>` a call names in full (#837).
+
+    A dotted `service` or `action`, whether or not this Home Assistant has
+    the service (a tool may send it elsewhere), and a tool named after a
+    service: `scene.apply`, or `scene__apply` the way HA names an action's
+    tool, namespaced or not. A tool name counts when HA has the service, or
+    its domain is one critical services live in (``_SCREENED_TOOL_DOMAINS``
+    and the given `domains`), so a tool such as `mcp__get_weather` is not
+    read as one. A bare `service` or `action` is left to the caller, which
+    reads its domain the way the `domain`/`service` form is read.
+    """
+    named = list(call_service_names(tool_args).dotted)
+    from_tool: list[str] = []
+    if "." in (base := tool_name.rsplit(TOOL_NAMESPACE_SEP, maxsplit=1)[-1]):
+        from_tool.append(base)
+    parts = tool_name.split(TOOL_NAMESPACE_SEP)
+    if len(parts) > 1:
+        from_tool.append(f"{parts[-2]}.{parts[-1]}")
+    for candidate in from_tool:
+        name = candidate.strip().lower()
+        if not _SERVICE_NAME_SHAPE.match(name):
+            continue
+        domain, _, service = name.partition(".")
+        # A name HA does not have counts in a critical domain only when it is
+        # spelled the way HA spells a service: an MCP server titled "Lock"
+        # gives `lock__HassListAddItem`, which names none (#837 review).
+        spelled = _SERVICE_SLUG.match(candidate.strip().partition(".")[2])
+        if has_service(hass, domain, service) or (
+            spelled and (domain in _SCREENED_TOOL_DOMAINS or domain in domains)
+        ):
+            named.append(name)
+    return list(dict.fromkeys(named))
 
 
 def service_runs_critical_action(  # noqa: PLR0911
