@@ -100,6 +100,7 @@ from .helpers import (
     base_tool_name,
     declared_domains,
     declared_intent_service_calls,
+    drop_empty_args,
     entity_domain,
     format_tool,
     intent_service_calls,
@@ -107,6 +108,7 @@ from .helpers import (
     is_actuating_intent,
     is_actuation_tool,
     is_device_intent,
+    is_intent_tool,
     is_on_off_intent,
     is_tool_excluded,
     langchain_tool_parameters_json,
@@ -573,14 +575,19 @@ def _prepare_tool_args(
         # query it added service/entity_id keys HA rejects (ExtraKeysInvalid),
         # so every "is the lock locked?" failed and looped since v2.8.0.
         return None, _live_context_args(sanitize_tool_args(tool_args))
-    tool_args = maybe_fill_lock_entity(tool_args, ctx.hass)
-    tool_args = sanitize_tool_args(tool_args)
-
-    # Normalize domains to a clean list for downstream consumers.
-    domains = tool_args.get("domain") or []
-    if isinstance(domains, str):
-        domains = [domains]
-    tool_args["domain"] = [str(d).strip() for d in domains if str(d).strip()]
+    # Only HA's intents are reshaped: a script, intent script or service
+    # tool reads its own arguments, and runs with them as given (#836).
+    intent = is_intent_tool(tool_name)
+    if intent:
+        tool_args = maybe_fill_lock_entity(tool_args, ctx.hass)
+        tool_args = sanitize_tool_args(tool_args)
+        # Normalize domains to a clean list for downstream consumers.
+        domains = tool_args.get("domain") or []
+        if isinstance(domains, str):
+            domains = [domains]
+        tool_args["domain"] = [str(d).strip() for d in domains if str(d).strip()]
+    else:
+        tool_args = drop_empty_args(tool_args)
 
     redirect = _route_alarm_intent_to_tool(tool_name, tool_args, ctx.hass, tool_call)
     if redirect:
@@ -611,9 +618,10 @@ def _prepare_tool_args(
     if critical_guard:
         return critical_guard, tool_args
 
-    # Reduce payload to the minimal arguments HA expects (avoids extra-key errors).
-    tool_args = minimal_payload_for_domain(tool_args)
-    tool_args = sanitize_tool_args(tool_args)
+    if intent:
+        # Reduce an intent's payload to the slots HA reads (avoids extra-key
+        # errors).
+        tool_args = sanitize_tool_args(minimal_payload_for_domain(tool_args, tool_name))
     return None, tool_args
 
 

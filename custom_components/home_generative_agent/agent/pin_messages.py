@@ -513,7 +513,10 @@ def _entity_friendly_name(hass: HomeAssistant | None, raw_name: Any) -> str:
 
 
 def _intent_target(
-    hass: HomeAssistant | None, tool_args: Mapping[str, Any], domain: str
+    hass: HomeAssistant | None,
+    tool_name: str,
+    tool_args: Mapping[str, Any],
+    domain: str,
 ) -> str:
     """
     Name what Home Assistant will act on for an actuating intent.
@@ -527,7 +530,7 @@ def _intent_target(
     given, and the line says so rather than naming a device it will not
     single out.
     """
-    payload = minimal_payload_for_domain(dict(tool_args))
+    payload = minimal_payload_for_domain(dict(tool_args), tool_name)
     raw_name = payload.get("name")
     name = "" if raw_name == INTENT_NAME_ALL else _slot_line(raw_name)
     area = _place(hass, payload.get("area"), "area")
@@ -816,7 +819,7 @@ def _describe_line(  # noqa: PLR0911
             hass,
             "action_set_position",
             target=_intent_target(
-                hass, tool_args, _single_kind(hass, tool_name, tool_args)
+                hass, tool_name, tool_args, _single_kind(hass, tool_name, tool_args)
             ),
             position=_position_text(tool_args.get("position")),
         )
@@ -825,7 +828,7 @@ def _describe_line(  # noqa: PLR0911
             hass,
             "action_stop",
             target=_intent_target(
-                hass, tool_args, _single_kind(hass, tool_name, tool_args)
+                hass, tool_name, tool_args, _single_kind(hass, tool_name, tool_args)
             ),
         )
     if is_on_off_intent(tool_name):
@@ -837,7 +840,7 @@ def _describe_line(  # noqa: PLR0911
                 pin_msg(
                     hass,
                     on_key if turns_on else off_key,
-                    target=_intent_target(hass, tool_args, kind),
+                    target=_intent_target(hass, tool_name, tool_args, kind),
                 )
             )
         return ", ".join(parts)
@@ -856,6 +859,7 @@ def _describe_line(  # noqa: PLR0911
             ),
             target=_intent_target(
                 hass,
+                tool_name,
                 tool_args,
                 _single_kind(hass, tool_name, tool_args) or _SEVERAL_KINDS,
             ),
@@ -1184,11 +1188,10 @@ def _script_line(
     )
     if hass is None or not tool_args:
         return line
-    # The arguments as they are sent: the normal path and the confirmation
-    # both reduce them first (`minimal_payload_for_domain`).
-    sent = minimal_payload_for_domain(dict(tool_args))
+    # A script's tool is sent the arguments as given: only an intent's are
+    # reduced (#836).
     try:
-        names, others = _script_field_targets(hass, script_id, sent)
+        names, others = _script_field_targets(hass, script_id, tool_args)
     except Exception:
         # The names only add to the line: they must never cost the prompt.
         LOGGER.exception("Critical Action PIN: could not name a script's targets")

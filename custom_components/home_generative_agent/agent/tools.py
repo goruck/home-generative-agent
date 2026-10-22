@@ -116,6 +116,8 @@ from .helpers import (
     PIN_REFUSAL_ENDS_TURN,
     ConfigurableData,
     base_tool_name,
+    drop_empty_args,
+    is_intent_tool,
     keep_pin_prompt,
     minimal_payload_for_domain,
     normalize_intent_for_alarm,
@@ -1368,8 +1370,13 @@ async def _execute_pending_action(
     # The same payload the normal path sends after its guard: HA's intents
     # read name/area/floor and ignore an entity id, so a held lock call with
     # only an entity id would otherwise act on every exposed lock.
-    tool_args = sanitize_tool_args(
-        minimal_payload_for_domain(sanitize_tool_args(tool_args))
+    # Any other tool runs with its arguments as held (#836).
+    tool_args = (
+        sanitize_tool_args(
+            minimal_payload_for_domain(sanitize_tool_args(tool_args), tool_name)
+        )
+        if is_intent_tool(tool_name)
+        else drop_empty_args(tool_args)
     )
 
     if not _claim_pending_action(cfg, resolved_action_id):
