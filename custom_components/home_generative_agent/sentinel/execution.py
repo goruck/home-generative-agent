@@ -90,6 +90,13 @@ _NEVER_AUTO_DOMAINS = frozenset({"alarm_control_panel", "cover"})
 # The only lock service Sentinel may call by itself.
 _SAFE_LOCK_SERVICE = "lock.lock"
 _GENERIC_DOMAIN = "homeassistant"
+# The same floor as rules, for what an action starts (#831): a template
+# switch that disarms the alarm needs a person as much as a disarm does.
+_FLOOR_RULES: tuple[dict[str, str], ...] = (
+    *({"domain": domain, "service": ""} for domain in sorted(_NEVER_AUTO_DOMAINS)),
+    {"domain": "lock", "service": "unlock"},
+    {"domain": "lock", "service": "open"},
+)
 
 
 def executable_actions(finding: AnomalyFinding) -> list[str]:
@@ -590,6 +597,9 @@ class SentinelExecutionService:
         from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
             resolve_critical_action_policy,
         )
+        from custom_components.home_generative_agent.agent.indirect_pin import (  # noqa: PLC0415
+            stored_action_calls,
+        )
         from custom_components.home_generative_agent.agent.rule_entities import (  # noqa: PLC0415
             expand_critical_rules,
         )
@@ -618,6 +628,18 @@ class SentinelExecutionService:
         target = {"entity_id": list(finding.triggering_entities)}
         steps = [{"action": action, "target": target} for action in actions]
         found = find_critical_automation_calls({"actions": steps}, rules)
+        if not found:
+            # What the call starts runs too: a template switch's actions, a
+            # button's or an automation it triggers, which can open the
+            # garage. The PIN gate follows them, and so does Sentinel (#831).
+            try:
+                found = stored_action_calls(self._hass, steps, [*rules, *_FLOOR_RULES])
+            except Exception:
+                LOGGER.exception(
+                    "Auto-execute blocked: could not check what %s starts.",
+                    ", ".join(actions),
+                )
+                return True
         if found:
             LOGGER.debug(
                 "Auto-execute blocked: critical action %s.",
