@@ -125,6 +125,8 @@ from .helpers import (
     pin_lines_follow,
     pin_refusal,
     register_pending_action,
+    remote_house_words,
+    remote_tool_label,
     remote_tool_name,
     resolve_critical_action_policy,
     sanitize_tool_args,
@@ -897,6 +899,10 @@ class RawTool(TypedDict):
     description: str
     parameters: str
     is_actuation: bool
+    # The words of a remote Home Assistant's server name that say which house
+    # it is (`remote_house_words`), which the keyword fallback ranks on: the
+    # bind adds the server's name to the description only after ranking (#848).
+    house: NotRequired[str]
 
 
 def _get_allowed_api_ids(config: RunnableConfig) -> set[str]:
@@ -2030,18 +2036,23 @@ def _rank_fallback_by_query(
     Stable-sort fallback tools by keyword overlap with the query.
 
     A query word in a tool's name scores double one in its description only.
+    A remote Home Assistant's house words count as description, so naming
+    that house ranks its tools above this one's namesakes (#848); they are
+    never too common to count, since one house can offer most of the tools.
     Tools that tie (including every tool when nothing matches) keep their
     incoming order, so the caller's actuation / GetLiveContext ordering is the
     tiebreak. Returns the ranked list and how many tools matched at all.
     """
     if not fallback:
         return fallback, 0
+    house_words = [_fallback_words(t.get("house")) for t in fallback]
     tool_words = [
         (
             _fallback_words(t["name"][:_FALLBACK_MAX_TEXT_CHARS]),
-            _fallback_words((t["description"] or "")[:_FALLBACK_MAX_TEXT_CHARS]),
+            _fallback_words((t["description"] or "")[:_FALLBACK_MAX_TEXT_CHARS])
+            | house,
         )
-        for t in fallback
+        for t, house in zip(fallback, house_words, strict=True)
     ]
     # How many tools each word appears in. Every pass below is linear in the
     # tools' words, so a long pasted query costs no more than its own
@@ -2053,10 +2064,11 @@ def _rank_fallback_by_query(
         else len(fallback)
     )
     # The newest text is at the end of the ranking query, so keep the tail.
+    any_house = set().union(*house_words)
     informative = {
         word
         for word in _fallback_words(query[-_FALLBACK_MAX_TEXT_CHARS:])
-        if 0 < doc_freq[word] <= cutoff
+        if 0 < doc_freq[word] <= cutoff or word in any_house
     }
     if not informative:
         return fallback, 0
@@ -2113,21 +2125,27 @@ def _get_fallback_tools(
 
     ha_llm_api = config.get("configurable", {}).get("ha_llm_api")
     if ha_llm_api and hasattr(ha_llm_api, "apis"):
+        houses = {
+            api_id: words
+            for api_id, api_name in remote_api_names(ha_llm_api).items()
+            if (words := remote_house_words(api_name))
+        }
         for api_id, api in ha_llm_api.apis.items():
             if api_id in allowed_api_ids:
                 for tool in api.tools:
                     formatted = format_tool(tool, api.custom_serializer)
                     f_func = formatted["function"]
                     name = tool.name
-                    fallback_tools.append(
-                        RawTool(
-                            name=name,
-                            api_id=api_id,
-                            description=f_func.get("description", ""),
-                            parameters=json.dumps(f_func["parameters"]),
-                            is_actuation=is_actuation_tool(name),
-                        )
+                    raw = RawTool(
+                        name=name,
+                        api_id=api_id,
+                        description=f_func.get("description", ""),
+                        parameters=json.dumps(f_func["parameters"]),
+                        is_actuation=is_actuation_tool(name),
                     )
+                    if api_id in houses:
+                        raw["house"] = houses[api_id]
+                    fallback_tools.append(raw)
 
     # Gated like the HA APIs above: every caller filters results by api_id
     # membership anyway, so formatting hga_local tools for a lookup restricted
@@ -2569,8 +2587,7 @@ def _format_and_dedupe_tools(
             name = (aliases or {}).get((tool["api_id"], name)) or remote_tool_name(
                 api_name, name
             )
-            server = sanitize_tool_text(" ".join(api_name.split()), limit=60)
-            description = f"[{server}, another Home Assistant] {description}"
+            description = f"{remote_tool_label(api_name)} {description}"
         if name in routing_map:
             continue
 

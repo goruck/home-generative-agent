@@ -328,7 +328,13 @@ def _is_judged_remote(ha_llm_api: Any, api_id: str, instance: Any) -> bool:
     """Return True if the API is a remote Home Assistant, as judged this turn."""
     # Judged once per turn on every tool each API offers; a wrapper built
     # without that judgement (a test) is judged on the tools it offers now.
-    judged = getattr(ha_llm_api, "remote_home_assistants", None)
+    return _judged_remote(
+        getattr(ha_llm_api, "remote_home_assistants", None), api_id, instance
+    )
+
+
+def _judged_remote(judged: Any, api_id: str, instance: Any) -> bool:
+    """Return True if `judged` holds the API, or it is judged remote now."""
     if isinstance(judged, frozenset | set):
         return api_id in judged
     return is_remote_home_assistant(api_id, instance)
@@ -429,6 +435,22 @@ def remote_api_names(ha_llm_api: Any) -> dict[str, str]:
         for api_id, instance in apis.items()
         if _is_judged_remote(ha_llm_api, api_id, instance)
     }
+
+
+def remote_house_name(
+    api_id: str, instance: Any, judged: frozenset[str] | set[str] | None = None
+) -> str | None:
+    """
+    Return a remote Home Assistant API's name, or None for any other API.
+
+    `judged`: the remote APIs as judged this turn on every tool they offer;
+    without it the API is judged on the tools it offers now.
+    """
+    return (
+        _api_name(instance, api_id)
+        if _judged_remote(judged, api_id, instance)
+        else None
+    )
 
 
 def api_tool_name(ha_llm_api: Any, api_id: str, name: str) -> str:

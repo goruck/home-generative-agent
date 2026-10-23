@@ -1708,6 +1708,38 @@ def remote_tool_name(api_name: str, name: str, salt: str | None = None) -> str:
     return f"{prefix}{TOOL_NAMESPACE_SEP}{safe[-room:]}"
 
 
+def _remote_server_text(api_name: str) -> str:
+    """Return a remote server's name on one clean, bounded line."""
+    return sanitize_tool_text(" ".join(api_name.split()), limit=60)
+
+
+def remote_tool_label(api_name: str) -> str:
+    """Return the label a remote Home Assistant's tool description starts with."""
+    return f"[{_remote_server_text(api_name)}, another Home Assistant]"
+
+
+# Words of a remote server's name that do not say which house it is: Home
+# Assistant names every MCP entry "home-assistant" until renamed, and "the
+# house lights" means this one (#848).
+_GENERIC_HOUSE_WORDS = frozenset({"assistant", "home", "house", "server"})
+_HOUSE_WORD_RE = re.compile(r"[^\W_]+")
+
+
+def remote_house_words(api_name: str) -> str:
+    """
+    Return the words of a remote server's name that say which house it is.
+
+    Tool search ranks a remote Home Assistant's tools on them, in the index
+    and the keyword fallback alike, so a request naming that house ranks its
+    tools above this one's namesakes (#848). Empty for a generic name.
+    """
+    return " ".join(
+        word
+        for word in _HOUSE_WORD_RE.findall(_remote_server_text(api_name))
+        if word.casefold() not in _GENERIC_HOUSE_WORDS
+    )
+
+
 def is_on_off_intent(tool_name: str) -> bool:
     """Return True for the HA turn-on/turn-off intent tools, namespaced or not."""
     return base_tool_name(tool_name) in {"HassTurnOn", "HassTurnOff"}
