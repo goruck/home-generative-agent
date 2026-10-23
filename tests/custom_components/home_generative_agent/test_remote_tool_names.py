@@ -34,6 +34,7 @@ from custom_components.home_generative_agent.agent.graph import (
     _append_included_tools,
     _append_security_audit_tool,
     _format_and_dedupe_tools,
+    _get_fallback_tools,
     _get_held_action_tools,
     _get_rag_retrieved_tools,
     _get_tool_by_name,
@@ -41,10 +42,12 @@ from custom_components.home_generative_agent.agent.graph import (
     _open_state_args,
     _open_state_live_context_normalization_context,
     _prepare_tool_args,
+    _rank_fallback_by_query,
     _retrieve_tools,
 )
 from custom_components.home_generative_agent.agent.helpers import (
     PinReply,
+    remote_house_words,
     remote_tool_name,
 )
 from custom_components.home_generative_agent.agent.indirect_pin import (
@@ -768,3 +771,66 @@ def test_a_remote_only_house_gets_the_open_state_rewrite() -> None:
         force_broad=True,
     )
     assert remote_call is False  # its reply is filtered like this house's
+
+
+# ----- #848: tool search reads which house a tool belongs to -----
+
+
+def _house_raw(name: str, api_id: str, house: str | None = None) -> RawTool:
+    raw = _raw(name, api_id)
+    if house is not None:
+        raw["house"] = house
+    return raw
+
+
+def test_naming_the_remote_house_ranks_its_namesake_first() -> None:
+    """The keyword fallback reads the server's name, not only the tool's."""
+    tools = [
+        _house_raw(TURN_ON, LOCAL),
+        _house_raw(TURN_ON, "mcp-cabin", "Cabin"),
+        _house_raw("intent__HassLightSet", LOCAL),
+    ]
+    ranked, _ = _rank_fallback_by_query(tools, "turn on the porch at the cabin")
+    assert [(t["name"], t["api_id"]) for t in ranked[:2]] == [
+        (TURN_ON, "mcp-cabin"),
+        (TURN_ON, LOCAL),
+    ]
+
+    ranked, _ = _rank_fallback_by_query(tools, "turn on the porch")
+    assert [t["api_id"] for t in ranked[:2]] == [LOCAL, "mcp-cabin"]
+
+
+def test_a_house_offering_most_tools_still_counts_when_named() -> None:
+    """A house word is never dropped as too common, unlike other words."""
+    remote = [_house_raw(f"tool_{i}", "mcp-cabin", "Cabin") for i in range(5)]
+    tools = [_house_raw(TURN_ON, LOCAL), *remote]
+    ranked, matched = _rank_fallback_by_query(tools, "what's on at the cabin")
+    assert ranked[0]["api_id"] == "mcp-cabin"
+    assert matched == len(remote)
+
+
+def test_only_the_words_naming_a_house_are_ranked_on() -> None:
+    """The default "home-assistant" name says nothing about which house."""
+    assert remote_house_words("home-assistant") == ""
+    assert remote_house_words("Lake\nCabin Home") == "Lake Cabin"
+    # Cut where the label the model reads is, so both search paths agree.
+    assert "Tahoe" not in remote_house_words(f"{'x' * 70} Tahoe")
+
+
+def test_a_generic_server_name_is_not_a_house_in_the_fallback() -> None:
+    """A remote server left at its default name ranks like this house."""
+    api = _two_houses([TURN_ON], [TURN_ON])
+    api.apis[REMOTE].api.name = "home-assistant"
+    fallback = _get_fallback_tools(_retrieval_config(api), {LOCAL, REMOTE})
+    assert all("house" not in t for t in fallback)
+
+
+def test_the_fallback_marks_the_remote_houses_tools() -> None:
+    """Only a remote Home Assistant's fallback tools carry its server name."""
+    api = _two_houses([], [])
+    api.apis[LOCAL].tools = [_local_intent(f"intent__HassLocal{i}") for i in range(3)]
+    api.apis[REMOTE].tools = [_RemoteTool(f"remote_tool_{i}") for i in range(3)]
+    api.tool_aliases = build_remote_aliases(api)
+    fallback = _get_fallback_tools(_retrieval_config(api), {LOCAL, REMOTE})
+    houses = {t["api_id"]: t.get("house") for t in fallback}
+    assert houses == {LOCAL: None, REMOTE: "Upstairs HA"}

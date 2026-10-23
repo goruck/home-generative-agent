@@ -59,6 +59,7 @@ from .agent.helpers import (
     keep_pin_prompts,
     langchain_tool_parameters_json,
     prompts_awaiting_reply,
+    remote_house_words,
     resolve_critical_action_policy,
     safe_convert,
     sanitize_tool_text,
@@ -70,6 +71,7 @@ from .agent.indirect_pin import (
     api_tool_name,
     build_remote_aliases,
     is_remote_home_assistant,
+    remote_house_name,
 )
 from .agent.pin_messages import describe_pending_action, pin_msg
 from .agent.rag_embedding_text import (
@@ -2259,15 +2261,26 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         index_tasks: list[Any],
         new_hashes: dict[str, str],
         seen_keys: set[str] | None = None,
+        remote_judged: frozenset[str] | None = None,
     ) -> None:
         """
         Queue index writes for an API instance's new or changed tools.
+
+        A remote Home Assistant's tools are indexed with the words of its
+        server's name that say which house it is, so a request naming that
+        house ranks its tools above this one's namesakes (#848). The words
+        indexed are kept per API, so a renamed server is indexed again.
+        `remote_judged`: the remote APIs as judged this turn, if known.
 
         Failures are isolated per tool: one unserializable schema must not
         starve every later tool of its API (which would reproduce the very
         missing-tool bug the top-up exists to fix, and re-fire the top-up
         every turn for the healthy neighbors too).
         """
+        api_name = remote_house_name(api_id, api_instance, remote_judged)
+        house = remote_house_words(api_name) if api_name is not None else ""
+        runtime_data.tool_index_houses[api_id] = house
+        label = f" (at {house})" if house else ""
         for tool in api_instance.tools:
             # Recorded before the schema conversion below, which can raise: a
             # tool whose schema fails to serialize is still LIVE, and the
@@ -2287,7 +2300,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 raw_content = (
                     f"provider:{api_id}\nname:{tool.name}\n"
                     f"description:{tool.description}\nparameters:{schema_json}\n"
-                    f"actuation:{is_actuation}"
+                    f"actuation:{is_actuation}\nhouse:{house}"
                 )
                 content_hash = hashlib.sha256(raw_content.encode()).hexdigest()
 
@@ -2295,7 +2308,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 if runtime_data.tool_content_hashes.get(tool_key) != content_hash:
                     # Prep for embedding
                     embedding_text = strip_for_embedding(
-                        f"{tool.name}: {tool.description}"
+                        f"{tool.name}{label}: {tool.description}"
                     )
                     index_tasks.append(
                         runtime_data.store.aput(
@@ -2386,6 +2399,22 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("Failed to index local tool %s: %s", t_name, err)
 
+    @staticmethod
+    def _renamed_houses(llm_api: MultiLLMAPI, runtime_data: HGAData) -> set[str]:
+        """Return the indexed APIs whose house words changed since indexing."""
+        indexed = runtime_data.tool_index_houses
+        renamed: set[str] = set()
+        for api_id, instance in llm_api.apis.items():
+            if api_id not in indexed:
+                continue
+            api_name = remote_house_name(
+                api_id, instance, llm_api.remote_home_assistants
+            )
+            house = remote_house_words(api_name) if api_name is not None else ""
+            if indexed[api_id] != house:
+                renamed.add(api_id)
+        return renamed
+
     async def _async_index_tools(  # noqa: PLR0912, PLR0915
         self,
         llm_context: llm.LLMContext,
@@ -2426,6 +2455,13 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 for tool in api.tools
             }
             missing_keys = live_keys - runtime_data.tool_content_hashes.keys()
+            # A remote server renamed, or newly judged remote or not, since
+            # its tools were indexed: index them again under its house (#848).
+            missing_keys |= {
+                tool_index_key(api_id, tool.name)
+                for api_id in self._renamed_houses(llm_api, runtime_data)
+                for tool in llm_api.apis[api_id].tools
+            }
             if not missing_keys:
                 return
             inline_delta = True
@@ -2452,7 +2488,12 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 for api_id, api_instance in llm_api.apis.items():
                     try:
                         self._queue_api_instance_tools(
-                            api_id, api_instance, runtime_data, index_tasks, new_hashes
+                            api_id,
+                            api_instance,
+                            runtime_data,
+                            index_tasks,
+                            new_hashes,
+                            remote_judged=llm_api.remote_home_assistants,
                         )
                     except Exception as err:  # noqa: BLE001
                         _LOGGER.warning(

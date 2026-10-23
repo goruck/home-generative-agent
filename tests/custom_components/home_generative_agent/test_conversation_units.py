@@ -825,6 +825,7 @@ def _index_runtime_data(**overrides: Any) -> Any:
         tool_indexing_in_progress=False,
         tool_index_failed=False,
         tool_content_hashes={},
+        tool_index_houses={},
         store=MagicMock(),
         pool=MagicMock(closed=False),
     )
@@ -3274,3 +3275,85 @@ async def test_a_turn_with_no_reply_and_no_prompt_still_apologizes(
     assert [c.content for c in chat_log.content] == [
         "I'm sorry, I was unable to respond. Please try again."
     ]
+
+
+def _indexed_rows(
+    api_id: str, api_name: str, judged: frozenset[str] | None = None
+) -> dict[str, Any]:
+    """Index one API's HassTurnOn; return the row written and its hash."""
+    entity = _index_entity()
+    rd = _index_runtime_data()
+    instance: Any = types.SimpleNamespace(
+        api=types.SimpleNamespace(name=api_name),
+        tools=[
+            types.SimpleNamespace(
+                name="intent__HassTurnOn",
+                description="Turns on a device",
+                parameters={"type": "object", "properties": {}},
+            )
+        ],
+        custom_serializer=None,
+    )
+    hashes: dict[str, str] = {}
+    entity._queue_api_instance_tools(
+        api_id, instance, rd, [], hashes, remote_judged=judged
+    )
+    value = rd.store.aput.call_args.kwargs["value"]
+    return {"content": value["content"], "hash": next(iter(hashes.values()))}
+
+
+def test_a_remote_houses_tool_is_indexed_with_its_server_name() -> None:
+    """Tool search can tell the houses' namesakes apart (#848)."""
+    remote = _indexed_rows("mcp-cabin", "Cabin")
+    assert remote["content"] == "intent__HassTurnOn (at Cabin): Turns on a device"
+    local = _indexed_rows(ha_llm.LLM_API_ASSIST, "Assist")
+    assert local["content"] == "intent__HassTurnOn: Turns on a device"
+    # A generic name says nothing about which house, so it is not indexed.
+    plain = _indexed_rows("mcp-cabin", "home-assistant")
+    assert plain["content"] == "intent__HassTurnOn: Turns on a device"
+    # Renaming the server re-indexes its tools.
+    assert _indexed_rows("mcp-cabin", "Lake")["hash"] != remote["hash"]
+
+
+def test_the_top_up_indexes_by_this_turns_remote_judgement() -> None:
+    """An API judged local this turn is indexed without a server name."""
+    row = _indexed_rows("mcp-cabin", "Cabin", judged=frozenset())
+    assert row["content"] == "intent__HassTurnOn: Turns on a device"
+    row = _indexed_rows("mcp-other", "Cabin", judged=frozenset({"mcp-other"}))
+    assert "(at Cabin)" in row["content"]
+
+
+@pytest.mark.asyncio
+async def test_a_renamed_remote_server_is_indexed_again() -> None:
+    """Renaming a remote MCP entry re-indexes its tools on the next turn."""
+    entity = _index_entity()
+    instance: Any = types.SimpleNamespace(
+        api=types.SimpleNamespace(name="home-assistant"),
+        tools=[
+            types.SimpleNamespace(
+                name="intent__HassTurnOn",
+                description="Turns on a device",
+                parameters={"type": "object", "properties": {}},
+            )
+        ],
+        custom_serializer=None,
+    )
+    llm_api = MultiLLMAPI(
+        {"mcp-cabin": instance},
+        routing_map={},
+        remote_home_assistants=frozenset({"mcp-cabin"}),
+    )
+    rd = _index_runtime_data(
+        tool_content_hashes={"mcp-cabin::intent__HassTurnOn": "h1"},
+        tool_index_houses={"mcp-cabin": ""},
+    )
+    with patch(f"{_CONV}.async_dispatcher_send"):
+        await entity._async_index_tools(MagicMock(), rd, llm_api)
+    rd.store.aput.assert_not_called()
+
+    instance.api.name = "Cabin"
+    with patch(f"{_CONV}.async_dispatcher_send"):
+        await entity._async_index_tools(MagicMock(), rd, llm_api)
+    value = rd.store.aput.call_args.kwargs["value"]
+    assert value["content"] == "intent__HassTurnOn (at Cabin): Turns on a device"
+    assert rd.tool_index_houses == {"mcp-cabin": "Cabin"}

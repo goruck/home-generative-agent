@@ -89,11 +89,10 @@
 
 **Why:** Adversarial review of #843, cycle 2 (2026-10-23): by design, since both houses' tools must stay reachable, but it costs slots. The ranking cannot yet tell which house a request means (#848), which would let it pick one house's namesakes.
 
-**How to apply:** Once ranking reads the server name, count namesakes of the house the request does not name against a separate, smaller share of the cap.
+**How to apply:** Ranking now reads the server name (#848: index text and keyword fallback), so count namesakes of the house the request does not name against a separate, smaller share of the cap.
 
 **Effort:** S
 **Priority:** P3
-**Depends on:** #848
 
 ---
 
