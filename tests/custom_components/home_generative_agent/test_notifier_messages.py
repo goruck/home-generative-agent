@@ -145,6 +145,18 @@ def test_region_suffix_resolves_base_language():
     assert notif_msg(hass, "severity_title_high") == "Bezpečnostní výstraha"
 
 
+@pytest.mark.parametrize("language", ["zh-Hans", "zh-CN", "zh-SG", "zh"])
+def test_simplified_chinese_resolves_chinese_string(language: str):
+    hass = _fake_hass(language)
+    assert notif_msg(hass, "severity_title_high") == "安全警报"
+
+
+@pytest.mark.parametrize("language", ["zh-Hant", "zh-TW", "zh-HK"])
+def test_traditional_chinese_falls_back_to_english(language: str):
+    hass = _fake_hass(language)
+    assert notif_msg(hass, "severity_title_high") == "Security Alert"
+
+
 def test_unknown_key_returns_the_key_itself():
     assert notif_msg(None, "no_such_message_id") == "no_such_message_id"
 

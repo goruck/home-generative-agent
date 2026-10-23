@@ -458,9 +458,195 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "action_hint_medium": "Zkontrolujte brzy a zajistěte, pokud je to neobvyklé.",
         "action_hint_low": "Projděte si to, až budete mít čas.",
     },
+    # Simplified Chinese (zh-Hans); _resolve_language maps HA's zh-Hans,
+    # zh-CN and zh-SG here and leaves zh-Hant on English. Chinese has no
+    # plural forms, so the one/few/many variants share one text.
+    "zh": {
+        "severity_title_high": "安全警报",
+        "severity_title_medium": "家庭提醒",
+        "severity_title_low": "家庭动态",
+        "type_open_entry_while_away": "离家时有门窗开着",
+        "type_open_entry_at_night": "夜间有门窗开着",
+        "type_open_any_window_at_night_while_away": "夜间有窗户开着",
+        "type_motion_detected_at_night_while_away": "离家时夜间检测到运动",
+        "type_motion_detected_while_away": "离家时检测到运动",
+        "type_unlocked_lock_at_night": "门锁未锁",
+        "type_camera_entry_unsecured": "未关好的门窗附近有动静",
+        "type_alarm_disarmed_during_external_threat": "警报解除时室外有动静",
+        "type_appliance_power_duration": "电器功率持续时间",
+        "type_low_battery_sensors": "电池电量低",
+        "type_entity_state_duration": "长时间未变化",
+        "type_motion_detected_at_night_while_alarm_disarmed": (
+            "夜间检测到运动，警报已解除"
+        ),
+        "type_unlabeled_rule": "Sentinel 提醒",
+        "type_ha_sensitive_entity_exposed_without_pin": (
+            "敏感实体在没有 PIN 的情况下被公开"
+        ),
+        "type_ha_new_admin_or_token": "新的管理员或访问令牌",
+        "type_ha_long_lived_token_stale": "过旧的长期访问令牌",
+        "type_ha_failed_logins": "登录尝试失败",
+        "type_ha_cloud_remote_ui_enabled": "已启用云端远程访问",
+        "type_ha_addon_exposed_port": "加载项端口暴露在主机上",
+        "type_ha_addon_unprotected": "加载项保护模式已关闭",
+        "type_ha_webhook_automation_public": "公开的 Webhook 自动化",
+        "type_ha_trusted_networks_bypass_login": "受信任网络可绕过登录",
+        "type_ha_http_proxy_misconfigured": "IP 封禁已禁用",
+        "type_security_device_unavailable": "安全设备不可用",
+        "type_network_unconfigured_discovered_device": "发现未配置的设备",
+        "type_network_router_update_pending": "路由器有可用更新",
+        "type_network_upnp_enabled": "路由器已启用 UPnP",
+        "type_network_public_ip_changed": "公网 IP 地址已变化",
+        "type_network_upnp_port_mapping_added": "新的 UPnP 端口映射",
+        "type_radio_new_device_joined": "有新的无线设备加入",
+        "type_network_unknown_device_joined": "网络中出现新设备",
+        "type_network_guest_client_present": "访客 Wi-Fi 上有不受信任的设备",
+        "type_network_client_usage_anomaly": "某设备的数据流量远超平常",
+        "type_network_client_present_when": "某设备在不该出现的时候在网络上",
+        "type_network_client_absent_when": "某设备不在网络上",
+        "type_network_posture_equals": "某项路由器设置处于你关注的值",
+        "type_network_guest_network_idle": "访客 Wi-Fi 开着但没人用",
+        "type_network_wpa3_disabled": "WPA3 已关闭",
+        "type_network_protection_disabled": "路由器威胁拦截已关闭",
+        "type_network_ddns_enabled": "动态 DNS 已开启",
+        "type_zwave_insecure_security_class": "Z-Wave 设备没有 S2 安全",
+        "type_zigbee_permit_join_open": "Zigbee 配对已开放",
+        "type_zwave_inclusion_active": "Z-Wave 控制器正处于配对状态",
+        "type_radio_coordinator_update_pending": "无线协调器有可用更新",
+        "type_alarm_state_mismatch": "警报状态不一致",
+        "type_alarm_disarmed_open_entry": "门窗开着，警报已解除",
+        "type_baseline_deviation": "数值异常",
+        "type_time_of_day_anomaly": "在这个时段不寻常",
+        "type_entity_staleness": "数据没有更新",
+        "type_lambda": "自定义规则提醒",
+        "type_motion_while_alarm_disarmed_and_home_present": (
+            "检测到运动，警报已解除，有人在家"
+        ),
+        "type_motion_without_camera_activity": "检测到运动但摄像头无动静",
+        "type_multiple_entries_open_count": "多个门窗开着",
+        "type_open_entry_when_home": "在家时有门窗开着",
+        "type_sensor_threshold_condition": "传感器超过阈值",
+        "type_unavailable_sensors": "传感器不可用",
+        "type_unavailable_sensors_while_home": "在家时传感器不可用",
+        "type_unknown_person_camera_no_home": "离家时摄像头拍到陌生人",
+        "type_unknown_person_camera_when_home": "在家时摄像头拍到陌生人",
+        "type_unlocked_lock_when_home": "在家时门锁未锁",
+        "type_unlocked_lock_while_away": "离家时门锁未锁",
+        "subtitle_appliance_finished": "{appliance}已完成",
+        "subtitle_appliance_cycle_complete": "电器运行周期已完成",
+        "subtitle_entry_open_alarm_disarmed": "{entry_name}开着，警报已解除",
+        "subtitle_power_deviation": "{appliance}：功率比预期{direction}",
+        "subtitle_reading_deviation": "{appliance}：读数比预期{direction}",
+        "subtitle_entry_open": "{entity}开着",
+        "subtitle_state_open_for": "{entity}已开着 {duration}",
+        "subtitle_state_unlocked_for": "{entity}已未锁 {duration}",
+        "subtitle_state_unchanged_for": "{entity}已 {duration} 未变化",
+        "duration_hours_short": "{hours} 小时",
+        "duration_minutes_short": "{minutes} 分钟",
+        "direction_lower": "低",
+        "direction_higher": "高",
+        "fallback_entry": "门窗",
+        "fallback_sensor": "传感器",
+        "fallback_unknown_entity": "未知实体",
+        "fallback_message": "{summary}：{entity}。{action_hint}",
+        "persistent_fallback": (
+            "{summary}（严重级别：{severity}），涉及 {entities}。{hint}"
+        ),
+        "batch_title": "家庭动态",
+        "batch_message": "{count} 条家庭动态：{type_summary}。",
+        "batch_more": "…以及另外 {count} 条",
+        "also_line": "另外：{names}",
+        "canary_would_run": "试运行：Sentinel 本会对 {targets} 执行 {actions}。",
+        "also_more": "另有 {count} 个",
+        "condition_open_while_away": "离家时开着",
+        "condition_open_while_home": "在家时开着",
+        "condition_open_at_night": "夜间开着",
+        "condition_alarm_disarmed": "警报已解除",
+        "condition_open_too_long": "开着太久",
+        "condition_unlocked_too_long": "未锁太久",
+        "digest_title": "Sentinel 每日摘要",
+        "digest_message": (
+            "Sentinel：过去 24 小时共有 {count} 条提醒（{sev_summary}）。"
+        ),
+        "audit_report_title": "安全审计报告",
+        "trust_several": "认识的设备可以用 Sentinel 的信任设备服务标记为可信。",
+        "audit_report_not_run": "未能运行的检查",
+        "audit_report_notes": "备注",
+        "audit_report_other": "其他",
+        "audit_report_truncated": "已截断；其余内容请运行 run_network_audit 服务查看。",
+        "severity_word_high": "高",
+        "severity_word_medium": "中",
+        "severity_word_low": "低",
+        "snooze_confirm_title": "确认不再提醒",
+        "snooze_confirm_message": "以后不再提醒“{friendly}”？之后只能在设置中撤销。",
+        "body_a_camera": "一个摄像头",
+        "body_an_entry": "一处门窗",
+        "body_appliance_power": (
+            "{appliance}{duration}功率{power}，{threshold}。请检查。"
+        ),
+        "body_power_watts": "约 {watts} W",
+        "body_power_unknown": "较高",
+        "body_duration_min": "持续 {minutes} 分钟",
+        "body_duration_unknown": "长时间",
+        "body_threshold_min": "超过 {minutes} 分钟的阈值",
+        "body_threshold_unknown": "超过设定的阈值",
+        "body_alarm_camera_seen_ago": "{camera}在 {minutes} 分钟前拍到一个未识别的人。",
+        "body_alarm_camera_seen": "{camera}拍到一个未识别的人。",
+        "body_alarm_disarmed_since": "警报自 {since} 起处于解除状态。",
+        "body_alarm_disarmed_now": "警报当前处于解除状态。",
+        "body_alarm_cta": "请布防警报或查看摄像头。",
+        "body_entry_alarm_since": "警报自 {since} 起已解除。",
+        "body_entry_alarm_now": "警报已解除。",
+        "body_entry_open_alarm": (
+            "{entry}开着。{alarm}请把它关上；如果是预期内的，可以暂停提醒。"
+        ),
+        "disarm_since_other_day": "{date} {time}",
+        "body_baseline_values": (
+            "{appliance}：当前 {cur}{unit}，平时 {base}{unit}{pct}。{cta}"
+        ),
+        "body_baseline_pct_above": "（比正常高 {pct}%）",
+        "body_baseline_pct_below": "（比正常低 {pct}%）",
+        "body_baseline_noval": "{appliance}的{noun}{direction}正常水平。{cta}",
+        "body_baseline_noval_pct": (
+            "{appliance}的{noun}{direction}正常水平 {pct}%。{cta}"
+        ),
+        "body_dir_above": "高于",
+        "body_dir_below": "低于",
+        "body_noun_power": "功率",
+        "body_noun_reading": "读数",
+        "body_cta_appliance": "请检查电器。",
+        "body_cta_worth": "值得检查一下。",
+        "body_stale_person": (
+            "{name}的位置追踪已经{age}没有更新。请检查其手机是否开机并能连上网络。"
+        ),
+        "body_stale_sensor": "{name}的数据已经{age}没有更新。请检查传感器。",
+        "age_unknown": "很长时间",
+        "age_day_one": "约 1 天",
+        "age_days_few": "约 {count} 天",
+        "age_days_many": "约 {count} 天",
+        "age_hour_one": "约 1 小时",
+        "age_hours_few": "约 {count} 小时",
+        "age_hours_many": "约 {count} 小时",
+        "summary_device_minutes": "{name}（{minutes} 分钟）",
+        "summary_security_devices_one": (
+            "{count} 个安全设备不可用已超过 {minutes} 分钟：{listed}。"
+        ),
+        "summary_security_devices_few": (
+            "{count} 个安全设备不可用已超过 {minutes} 分钟：{listed}。"
+        ),
+        "summary_security_devices_many": (
+            "{count} 个安全设备不可用已超过 {minutes} 分钟：{listed}。"
+        ),
+        "action_hint_high": "紧急：请立即检查并确保安全。",
+        "action_hint_medium": "请尽快检查；如果不是预期内的，请确保安全。",
+        "action_hint_low": "方便时查看一下。",
+    },
 }
 
 _DEFAULT_LANGUAGE = "en"
+# HA names Chinese by script (zh-Hans, zh-Hant); only Simplified has a
+# table, so Traditional must not fall into it by its base language.
+_ZH_HANS_PREFIXES = ("zh-hans", "zh-cn", "zh-sg")
 
 
 def _resolve_language(hass: HomeAssistant | None) -> str:
@@ -472,7 +658,11 @@ def _resolve_language(hass: HomeAssistant | None) -> str:
     # test doubles may not carry a config object at all.
     config = getattr(hass, "config", None)
     language = getattr(config, "language", None) or _DEFAULT_LANGUAGE
-    base = language.split("-", 1)[0].lower()
+    code = language.lower()
+    base = code.split("-", 1)[0]
+    if base == "zh":
+        simplified = code == "zh" or code.startswith(_ZH_HANS_PREFIXES)
+        return "zh" if simplified else _DEFAULT_LANGUAGE
     return base if base in _MESSAGES else _DEFAULT_LANGUAGE
 
 

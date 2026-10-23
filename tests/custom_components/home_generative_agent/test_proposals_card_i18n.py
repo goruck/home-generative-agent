@@ -109,7 +109,7 @@ def _run_card(hass: object, calls: list[tuple[str, list[object]]]) -> dict:
     return json.loads(proc.stdout)
 
 
-@pytest.mark.parametrize("lang", ["cs"])
+@pytest.mark.parametrize("lang", ["cs", "zh"])
 def test_card_i18n_keys_and_placeholders_match_en(lang: str) -> None:
     """Every language mirrors ``en`` key for key, with the same placeholders."""
     table = _table()
@@ -162,6 +162,11 @@ def test_card_language_resolution_and_fallbacks() -> None:
     assert _run_card({"language": "cs-CZ"}, [])["lang"] == "cs"
     assert _run_card({"language": "de"}, [])["lang"] == "en"
     assert _run_card({"locale": {"language": "cs"}}, [])["lang"] == "cs"
+    # Only Simplified Chinese has a table; Traditional stays on English.
+    assert _run_card({"language": "zh-Hans"}, [])["lang"] == "zh"
+    assert _run_card({"language": "zh-CN"}, [])["lang"] == "zh"
+    assert _run_card({"language": "zh-Hant"}, [])["lang"] == "en"
+    assert _run_card({"language": "zh-HK"}, [])["lang"] == "en"
     out = _run_card(
         {"language": "cs"},
         [

@@ -1,0 +1,557 @@
+{
+  "common": {
+    "feature_overwrite_warning": "⚠️ 功能已经配置过。选择**基础设置**会用推荐的默认值覆盖你当前的模型提供商分配。",
+    "sentinel_overwrite_warning": "⚠️ Sentinel 已经配置过。选择**基础设置**会用推荐的默认值覆盖你当前的设置。实体排除项和摄像头与门窗的关联会保留。",
+    "no_model_provider_notice": "尚未配置模型提供商。有可用的提供商后会自动分配一个默认模型。",
+    "no_capable_model_provider_notice": "你的模型提供商都不支持此功能。请再添加一个受支持类型的模型提供商——你使用的每个服务都可以单独添加一个提供商，每个功能也可以指向不同的提供商。",
+    "supported_provider_types_label": "此处支持："
+  },
+  "config": {
+    "step": {
+      "user": {
+        "title": "Home Generative Agent",
+        "description": "正在创建默认功能。接下来请运行**设置**来启用和配置各项功能及数据库，然后添加一个**模型提供商**。"
+      }
+    },
+    "error": {
+      "cannot_connect": "无法连接到服务。请检查密钥和 URL 后重试。",
+      "invalid_auth": "API 密钥无效。",
+      "invalid_pin": "PIN 必须是 4 到 10 位数字。",
+      "tool_excluded_and_included": "同一个工具不能既被排除又被始终包含。请从其中一个列表中移除它。",
+      "unknown": "意外错误。"
+    }
+  },
+  "config_subentries": {
+    "database": {
+      "entry_type": "服务",
+      "abort": {
+        "reconfigure_successful": "数据库配置已更新。"
+      },
+      "initiate_flow": {
+        "reconfigure": "重新配置数据库",
+        "user": "设置数据库"
+      },
+      "step": {
+        "set_options": {
+          "title": "数据库设置",
+          "description": "输入数据库所需的参数",
+          "data": {
+            "username": "数据库用户名",
+            "password": "数据库密码",
+            "host": "数据库主机",
+            "port": "数据库端口（可选）",
+            "db_name": "数据库名称",
+            "db_params": "数据库连接参数（可选）"
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "无法连接到数据库。请检查数据库设置后重试。",
+        "invalid_auth": "认证无效。",
+        "invalid_uri": "无法生成 URI。",
+        "unknown": "意外错误。"
+      }
+    },
+    "model_provider": {
+      "entry_type": "服务",
+      "abort": {
+        "reconfigure_successful": "模型提供商已更新。"
+      },
+      "initiate_flow": {
+        "reconfigure": "重新配置模型提供商",
+        "user": "添加模型提供商"
+      },
+      "step": {
+        "deployment": {
+          "title": "部署方式",
+          "description": "选择此提供商运行的位置。**Edge**（本地）是自托管在你自己网络中的服务（Ollama、OpenAI 兼容服务）。**Cloud**（云端）是托管的 API（OpenAI、Gemini、Anthropic）。这个选择只决定下一步提供哪些提供商类型——两种都可以添加任意多个提供商，每个功能也可以指向不同的提供商。",
+          "data": {
+            "deployment": "部署方式"
+          }
+        },
+        "provider": {
+          "title": "提供商",
+          "description": "选择提供商类型并命名。你想使用的每个服务都要单独添加一个提供商——例如对话用 Anthropic、Embedding 用 Gemini，因为 Anthropic 没有 Embedding 接口。",
+          "data": {
+            "provider_type": "提供商",
+            "name": "提供商名称"
+          },
+          "data_description": {
+            "name": "留空则以所选的提供商类型命名。"
+          }
+        },
+        "settings": {
+          "title": "提供商设置",
+          "description": "配置提供商的接口地址或凭据。",
+          "data": {
+            "base_url": "Base URL",
+            "api_key": "API 密钥",
+            "gemini_api_key": "Gemini API 密钥",
+            "anthropic_api_key": "Anthropic API 密钥"
+          },
+          "data_description": {
+            "api_key": "OpenAI 必填。对于 OpenAI 兼容的提供商，如果接口不需要认证，可留空或填写 'none'。"
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "无法连接到提供商。",
+        "invalid_auth": "凭据无效。",
+        "unknown": "意外错误。"
+      }
+    },
+    "stt_provider": {
+      "entry_type": "服务",
+      "abort": {
+        "reconfigure_successful": "语音转文本提供商已更新。"
+      },
+      "initiate_flow": {
+        "reconfigure": "重新配置语音转文本提供商",
+        "user": "添加语音转文本提供商"
+      },
+      "step": {
+        "provider": {
+          "title": "语音转文本提供商",
+          "description": "选择提供商类型并命名。",
+          "data": {
+            "provider_type": "提供商",
+            "name": "提供商名称"
+          }
+        },
+        "credentials": {
+          "title": "凭据",
+          "description": "选择语音转文本提供商的认证方式。本地提供商则改为连接 OpenAI 兼容的服务器 URL。",
+          "data": {
+            "openai_provider_subentry_id": "复用 OpenAI 模型提供商",
+            "api_key": "API 密钥",
+            "base_url": "服务器 URL"
+          },
+          "data_description": {
+            "api_key": "OpenAI 必填。不需要认证的本地服务器可不填。",
+            "base_url": "本地语音转文本服务器的 OpenAI 兼容接口，例如一个 Speaches 实例。缺少的 /v1 后缀会自动补上。"
+          }
+        },
+        "model": {
+          "title": "模型和高级选项",
+          "description": "选择模型以及可选的高级设置。",
+          "data": {
+            "model_name": "模型",
+            "language": "语言（可选）",
+            "prompt": "提示词（可选）",
+            "temperature": "温度（可选）",
+            "translate": "翻译为英文",
+            "response_format": "响应格式",
+            "request_format": "请求格式",
+            "extra_body": "额外请求体（JSON，可选）"
+          },
+          "data_description": {
+            "request_format": "音频的发送方式。分段上传是 OpenAI 自己的格式，到处都能用。带 base64 音频的 JSON 是 OpenRouter 原生的转写格式——只有你的服务器文档说明支持时才选它。它没有翻译接口，也会忽略上面的提示词字段。",
+            "extra_body": "一个合并进请求体的 JSON 对象，用于 HGA 没有提供的字段。在 OpenRouter 上，关键词偏置等提供商选项就写在这里，而且需要使用 JSON 请求格式。完整示例见文档的 STT 部分。不确定就留空。"
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "无法连接到提供商。",
+        "invalid_auth": "凭据无效。",
+        "invalid_model": "请选择一个有效的模型。",
+        "not_supported": "暂不支持该提供商。",
+        "unknown": "意外错误。",
+        "invalid_extra_body": "额外请求体必须是一个 JSON 对象。",
+        "reserved_extra_body_key": "额外请求体不能设置 stream、file 或 input_audio——这些由 Home Generative Agent 控制。"
+      }
+    },
+    "tts_provider": {
+      "entry_type": "服务",
+      "abort": {
+        "reconfigure_successful": "文本转语音提供商已更新。"
+      },
+      "initiate_flow": {
+        "reconfigure": "重新配置文本转语音提供商",
+        "user": "添加文本转语音提供商"
+      },
+      "step": {
+        "provider": {
+          "title": "文本转语音提供商",
+          "description": "选择提供商类型并命名。",
+          "data": {
+            "provider_type": "提供商",
+            "name": "提供商名称"
+          }
+        },
+        "credentials": {
+          "title": "凭据",
+          "description": "选择文本转语音提供商的认证方式。本地提供商则改为连接 OpenAI 兼容的服务器 URL。",
+          "data": {
+            "openai_provider_subentry_id": "复用 OpenAI 模型提供商",
+            "api_key": "API 密钥",
+            "base_url": "服务器 URL"
+          },
+          "data_description": {
+            "api_key": "OpenAI 必填。不需要认证的本地服务器可不填。",
+            "base_url": "本地文本转语音服务器的 OpenAI 兼容接口，例如一个 Speaches 实例。缺少的 /v1 后缀会自动补上。"
+          }
+        },
+        "model": {
+          "title": "模型、声音和高级选项",
+          "description": "选择模型和声音，以及可选的高级设置。",
+          "data": {
+            "model_name": "模型",
+            "voice": "声音类型",
+            "speed": "语速",
+            "instructions": "声音要求（可选）"
+          },
+          "data_description": {
+            "voice": "OpenAI：alloy、ash、ballad、cedar、coral、echo、fable、marin、nova、onyx、sage、shimmer 或 verse。本地：服务器模型提供的声音 ID，例如 Kokoro 的 af_heart。",
+            "speed": "播放速度倍数，0.25 到 4.0。1.0 为正常速度。",
+            "instructions": "声音听起来应该是什么样，例如语气或节奏。仅 OpenAI 的 gpt-4o-mini-tts 模型使用，其他模型会忽略。"
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "无法连接到提供商。",
+        "invalid_auth": "凭据无效。",
+        "invalid_model": "请选择一个有效的模型。",
+        "not_supported": "暂不支持该提供商。",
+        "unknown": "意外错误。"
+      }
+    },
+    "sentinel": {
+      "entry_type": "服务",
+      "abort": {
+        "reconfigure_successful": "Sentinel 配置已更新。"
+      },
+      "error": {
+        "invalid_camera_entry_links": "必须是一个 JSON 对象，把摄像头实体 ID 映射到门窗实体 ID 列表，例如键为 \"camera.driveway\"、值为 [\"lock.front_door\"]。",
+        "invalid_pin": "PIN 必须是 4 到 10 位数字。",
+        "pin_required": "请输入 PIN，或取消勾选“提高权限等级时需要 PIN”。当前没有保存 PIN，因此每次提高等级都会被拒绝。",
+        "quiet_hours_incomplete": "请同时设置免打扰时段的开始和结束时间（或都设为已禁用）。",
+        "invalid_quiet_hours": "免打扰时段必须是 0 到 23 之间的本地小时数。",
+        "invalid_rule_entity_exclusions": "必须是一个 JSON 对象，把异常类型（或 \"*\" 表示所有类型）映射到实体 ID 或通配模式的列表（只能用 * 和 ? 通配符，以及实体 ID 允许的小写字符），每项都要包含一个点和至少一个非通配字符，例如键为 \"appliance_power_duration\"、值为 [\"sensor.ac_power\"]，或键为 \"camera_entry_unsecured\"、值为 [\"camera.map_*\"]。不允许 \"*\" 或 \"*.*\" 这类匹配全部的条目——请改用 \"*\" 类型键。"
+      },
+      "initiate_flow": {
+        "reconfigure": "重新配置 Sentinel",
+        "user": "配置 Sentinel"
+      },
+      "step": {
+        "setup_mode": {
+          "title": "Sentinel 设置",
+          "description": "选择配置 Sentinel 监控的方式。{overwrite_warning}",
+          "data": {
+            "setup_mode": "设置类型"
+          }
+        },
+        "basic_settings": {
+          "title": "Sentinel",
+          "description": "配置 Sentinel 的基本设置。其他选项都使用推荐的默认值。",
+          "data": {
+            "sentinel_enabled": "启用异常提醒",
+            "sentinel_daily_digest_enabled": "启用每日摘要通知",
+            "sentinel_daily_digest_time": "每日摘要时间（HH:MM:SS）",
+            "critical_action_pin": "提高等级用的 PIN（可选，4 到 10 位数字）",
+            "notify_service": "通知服务（可选）"
+          }
+        },
+        "settings": {
+          "title": "Sentinel",
+          "description": "配置 Sentinel 的主动监控和新自动提议。",
+          "data": {
+            "sentinel_enabled": "启用异常提醒",
+            "sentinel_interval_seconds": "Sentinel 运行间隔（秒）",
+            "sentinel_cooldown_minutes": "Sentinel 按类型冷却时间（分钟）",
+            "sentinel_entity_cooldown_minutes": "Sentinel 按实体冷却时间（分钟）",
+            "sentinel_pending_prompt_ttl_minutes": "待处理提示的有效期（分钟）",
+            "sentinel_discovery_enabled": "启用新自动提议（需要开启异常提醒）",
+            "sentinel_discovery_interval_seconds": "新自动提议间隔（秒）",
+            "sentinel_discovery_max_records": "最多保留的新自动提议记录数",
+            "sentinel_triage_enabled": "启用 LLM 对异常的过滤",
+            "sentinel_triage_timeout_seconds": "过滤超时（秒）",
+            "sentinel_response_language": "异常说明的语言（可选）",
+            "sentinel_baseline_enabled": "启用基线采集（需要开启异常提醒）",
+            "sentinel_baseline_update_interval_minutes": "基线更新间隔（分钟）",
+            "sentinel_baseline_freshness_threshold_seconds": "基线新鲜度阈值（秒）",
+            "sentinel_baseline_weekly_patterns": "启用按星期区分的基线（减少周末误报）",
+            "sentinel_baseline_dow_min_samples": "按星期基线的最少样本数（每个时段所需的周数）",
+            "sentinel_baseline_min_samples": "触发偏离提醒前所需的最少基线样本数",
+            "sentinel_baseline_sustained_minutes": "周期性负载门槛：超过阈值多少分钟后才提醒（0 = 禁用）",
+            "sentinel_appliance_power_threshold_w": "电器功率规则：功率阈值（W）",
+            "sentinel_appliance_duration_min": "电器功率规则：持续多久后提醒（分钟）",
+            "sentinel_network_enabled": "启用网络和 Home Assistant 安全审计",
+            "sentinel_network_offline_device_min": "安全设备离线阈值（分钟）",
+            "sentinel_network_unknown_device_grace_min": "新网络设备宽限期（分钟）",
+            "sentinel_network_guest_idle_days": "访客 Wi-Fi 空闲阈值（天）",
+            "sentinel_network_audit_share_details": "与聊天模型共享安全审计详情",
+            "sentinel_ha_token_stale_days": "长期访问令牌过旧阈值（天）",
+            "sentinel_auth_ip_retention_days": "认证清单中地址的保留时间（天）",
+            "explain_enabled": "启用 LLM 为 Sentinel 异常撰写说明",
+            "sentinel_require_pin_for_level_increase": "提高权限等级时需要 PIN",
+            "sentinel_autonomy_level": "权限等级",
+            "sentinel_runtime_override_ttl_minutes": "权限等级临时覆盖时长（分钟）",
+            "sentinel_daily_digest_enabled": "启用每日摘要通知",
+            "sentinel_daily_digest_time": "每日摘要时间（HH:MM:SS）",
+            "sentinel_quiet_hours_start": "免打扰开始时间（屏蔽所选的严重级别）",
+            "sentinel_quiet_hours_end": "免打扰结束时间",
+            "sentinel_quiet_hours_severities": "免打扰时段屏蔽的严重级别",
+            "sentinel_camera_entry_links": "摄像头与门窗的关联（JSON，可选）",
+            "sentinel_rule_entity_exclusions_all": "从所有 Sentinel 规则中排除的实体（可选）",
+            "sentinel_rule_entity_exclusions": "高级：按规则排除实体（JSON，可选）",
+            "critical_action_pin": "Sentinel 提高等级用的 PIN（可选）",
+            "notify_service": "Sentinel 通知服务（可选）"
+          },
+          "data_description": {
+            "explain_enabled": "让模型撰写每条提醒的措辞，而不是使用规则自带的固定摘要。这只改变提醒的写法——不影响你是否会收到提醒，那是上面的 LLM 过滤决定的。每条实际发出的提醒会多一次模型调用；它在过滤之后运行，所以被屏蔽的异常不会走到这一步。Home Assistant 与网络安全提醒、以及警报解除相关的提醒始终保持原有的确切措辞，不受影响。在下面设置异常说明的语言，即可让这些措辞用其他语言撰写。默认关闭。",
+            "sentinel_response_language": "通知中由 LLM 撰写的异常说明所用的语言，例如 'Chinese'。留空则为英文。新自动提议候选的标题/摘要，以及过滤的 decision/reason_code/summary 不受影响——这些由代码解析，始终保持英文。",
+            "sentinel_rule_entity_exclusions_all": "选择 Sentinel 在任何地方都应忽略的实体——例如触控面板上只是镜像另一个实体状态的模板锁。被排除的实体会从所有规则的异常中去掉，也不再唤醒 Sentinel，因此涉及它们的真实异常只会在下一次轮询时（默认 5 分钟）被发现。不要排除你仍希望即时收到提醒的摄像头、锁或报警面板。",
+            "sentinel_rule_entity_exclusions": "用于只从某一条规则（而不是全部规则）中排除实体，以及上面的选择器无法填写的通配模式，例如 camera.map_*。需要一个 JSON 对象，键是异常类型，值是实体 ID 列表；\"*\" 键表示所有规则。示例见 Sentinel 文档。大多数人用不到这个——请改用上面的选择器。",
+            "sentinel_triage_enabled": "每个异常额外调用一次 LLM，可能会屏蔽价值不高的提醒。需要已配置的聊天模型，且 Sentinel 权限等级为 1 或更高——等级为 0 时此开关不起作用。模型只能屏蔽或放行异常——绝不会修改、创建或据此执行操作，任何错误或超时都会直接放行。默认关闭。",
+            "sentinel_triage_timeout_seconds": "等待过滤调用多久后，原样放行异常。",
+            "sentinel_network_enabled": "在每次 Sentinel 运行时执行 Home Assistant 与网络安全规则，并允许聊天助手按需运行它们：管理员账户和访问令牌、对语音助手公开的实体、加载项端口、无线配对、路由器上的 UPnP，以及在有路由器集成时你网络中的设备。不会扫描网络——所有信息都来自 Home Assistant 已经知道的内容。关闭时，这些规则在健康传感器上显示为未启用，审计工具会报告它们已关闭。默认开启。",
+            "sentinel_network_offline_device_min": "锁、报警面板或摄像头不可用多久后 Sentinel 才报告。默认 30 分钟。",
+            "sentinel_network_unknown_device_grace_min": "网络中首次出现新设备后等待多少分钟 Sentinel 才报告，这样来了又走的设备仍会被报告，但不会在它出现的那一刻就报。需要路由器集成。默认 5；0 表示首次出现就报告。",
+            "sentinel_network_guest_idle_days": "访客 Wi-Fi 在没有访客连接的情况下保持开启多少天后，Sentinel 会建议关闭它。需要能报告访客网络的路由器集成（目前为 eero）。默认 7。",
+            "sentinel_network_audit_share_details": "开启时，聊天助手的安全审计会把异常的详情（设备名称、端口、令牌名称）提供给聊天模型，以便它解释。关闭时，模型只拿到数量、严重级别和固定标题，完整报告会在管理员请求时发送为 Home Assistant 持久通知（语音设备或非管理员账户只会收到摘要）。无论开关与否，网络地址都会被隐去。默认开启。",
+            "sentinel_ha_token_stale_days": "长期访问令牌超过多少天会被报告。Home Assistant 不会记录长期令牌的使用时间，所以只能依据令牌年龄，提醒会建议轮换旧令牌。默认 90。",
+            "sentinel_auth_ip_retention_days": "使用过访问令牌的地址在安全审计清单中保留多久。地址以单向哈希存储，绝不以明文保存，每个令牌最多保留 20 个。默认 90 天。",
+            "sentinel_autonomy_level": "没有临时覆盖时 Sentinel 运行的等级，重启和基础设置后都会保留。0 为被动：停止异常提醒和每日摘要，但异常仍会被记录。在此期间出现的变化（新设备、新管理员或令牌、公网 IP 或端口映射变化）会在你提高等级后提醒，仍然成立的状况会在冷却结束后再次提醒。基线和一次性的设置提示仍会出现。1 为通知。等级 2 和 3 预留给自动操作，目前尚不可用；现阶段它们的通知行为与等级 1 完全相同。Sentinel 健康传感器的 autonomy_level 属性显示当前生效的等级。用 sentinel_set_autonomy_level 服务设置的等级会在覆盖时长到期、重启或修改此设置后结束。",
+            "sentinel_runtime_override_ttl_minutes": "用 sentinel_set_autonomy_level 服务设置的等级持续多久后，Sentinel 恢复到配置的权限等级。重启也会使其结束。"
+          }
+        }
+      }
+    },
+    "feature": {
+      "entry_type": "服务",
+      "abort": {
+        "reconfigure_successful": "功能已更新。",
+        "setup_complete": "设置完成。",
+        "no_provider_for_basic_setup": "尚未配置模型提供商。请先添加一个**模型提供商**，然后重新运行设置。"
+      },
+      "error": {
+        "no_providers": "尚未配置任何模型提供商。",
+        "cannot_connect": "无法连接到数据库。请检查设置后重试。",
+        "invalid_auth": "认证无效。",
+        "invalid_uri": "无法生成 URI。",
+        "unknown": "意外错误。",
+        "ollama_model_not_installed": "位于 {url} 的 Ollama 上没有安装模型 {model}。请在那台服务器上运行 `ollama pull {model}`，或选择一个已安装的模型。如果服务器上它用的是别的名字，或者你马上就要拉取它，再提交一次即可强制保存。",
+        "ollama_embedding_dims_mismatch": "模型 {model} 在位于 {url} 的 Ollama 上生成 {dims} 维的 Embedding，但记忆存储保存的是 {expected} 维向量，因此它的 Embedding 将无法保存。请选择一个生成 {expected} 维向量的 Embedding 模型（配置文档列出了常用的模型）。如果你确定服务器报告的维度有误，再提交一次即可强制保存。",
+        "ollama_fallback_embedding_dims_mismatch": "位于 {url} 的 Ollama 用 {model} 生成 {dims} 维的 Embedding，但记忆存储保存的是 {expected} 维向量，因此这个备用提供商的 Embedding 将无法保存。如果主提供商上的 {model} 维度正确，说明那台服务器上的是另一个构建版本：请在那里运行 `ollama pull {model}`。否则，请把那台服务器从备用提供商中移除。如果你确定服务器报告的维度有误，再提交一次即可强制保存。"
+      },
+      "initiate_flow": {
+        "reconfigure": "重新配置功能",
+        "user": "设置"
+      },
+      "step": {
+        "setup_mode": {
+          "title": "设置",
+          "description": "选择设置类型。基础设置会用推荐的默认值启用所有功能。高级设置让你完全控制每项功能。{overwrite_warning}",
+          "data": {
+            "setup_mode": "设置类型"
+          }
+        },
+        "setup_status": {
+          "title": "设置完成",
+          "description": "设置已完成。\n\n**已启用的功能：**{features_enabled}{skipped_section}\n\n**数据库：**{database_status}\n\n**下一步：**\n- 运行**配置 Sentinel** 以启用异常监控。\n- 添加一个**语音转文本提供商**以支持语音输入。\n- 前往**设置 → 语音助手**，把 Home Generative Agent 添加为你的语音助手。"
+        },
+        "feature_enable": {
+          "title": "功能设置",
+          "description": "**对话**始终启用。在下面启用或禁用可选功能。",
+          "data": {
+            "camera_image_analysis": "摄像头图像分析",
+            "conversation_summary": "对话摘要",
+            "embedding": "Embedding"
+          },
+          "data_description": {
+            "embedding": "用于语义记忆和工具搜索的 Embedding 模型。关闭时会自动选择提供商（如果对话提供商支持 Embedding，则使用它）。"
+          }
+        },
+        "feature_provider": {
+          "title": "选择模型提供商",
+          "description": "为{feature_name}选择一个模型提供商。",
+          "data": {
+            "model_provider_id": "模型提供商"
+          }
+        },
+        "feature_model": {
+          "title": "{feature_name}",
+          "description": "配置此功能的模型设置。{provider_notice}",
+          "data": {
+            "model_name": "模型",
+            "fallback_provider_ids": "备用提供商",
+            "temperature": "温度",
+            "keepalive_s": "Ollama 保持运行（秒，或永不卸载 (-1)）",
+            "context_size": "Ollama 上下文大小（token）",
+            "reasoning": "思考 / 推理",
+            "reasoning_budget": "思考预算（token）"
+          },
+          "data_description": {
+            "fallback_provider_ids": "备用提供商的有序列表。主提供商失败时，使用第一个可用的提供商。",
+            "reasoning": "控制所选聊天模型的思考行为。提供商默认会保持服务器/模型原有的行为；关闭和开启会显式设置；强度等级会传给支持它的提供商。设置按模型名称记住，切换模型时会恢复各模型自己的配置。",
+            "reasoning_budget": "可选的思考 token 预算，用于支持该设置的提供商（llama.cpp 等 OpenAI 兼容服务器、Gemini、Anthropic）。留空则使用提供商的默认值。"
+          }
+        },
+        "database": {
+          "title": "数据库设置",
+          "description": "输入数据库所需的参数。",
+          "data": {
+            "username": "数据库用户名",
+            "password": "数据库密码",
+            "host": "数据库主机",
+            "port": "数据库端口（可选）",
+            "db_name": "数据库名称",
+            "db_params": "数据库连接参数（可选）"
+          }
+        },
+        "instructions": {
+          "title": "添加模型提供商",
+          "description": "还没有配置模型提供商。请通过**模型提供商**添加一个。"
+        }
+      }
+    }
+  },
+  "selector": {
+    "setup_mode": {
+      "options": {
+        "basic": "基础设置",
+        "advanced": "高级设置"
+      }
+    },
+    "db_params": {
+      "fields": {
+        "key": {
+          "name": "键",
+          "description": "连接参数名（例如：sslmode、connect_timeout）"
+        },
+        "value": {
+          "name": "值",
+          "description": "连接参数值（例如：disable、30）"
+        }
+      }
+    },
+    "stt_request_format": {
+      "options": {
+        "multipart": "分段上传（默认）",
+        "json_base64": "带 base64 音频的 JSON"
+      }
+    },
+    "voice_ack_timing": {
+      "options": {
+        "turn_start": "助手一开始处理就说",
+        "tool_call": "第一次调用工具之前说"
+      }
+    },
+    "sentinel_autonomy_level": {
+      "options": {
+        "0": "0 – 被动（不发送异常提醒）",
+        "1": "1 – 通知（默认）",
+        "2": "2 – 通知（自动操作：未来提供）",
+        "3": "3 – 通知（自动操作：未来提供）"
+      }
+    }
+  },
+  "exceptions": {
+    "invalid_config_entry": {
+      "message": "提供的配置条目无效。收到 {config_entry}"
+    },
+    "pgvector_not_permitted": {
+      "message": "PostgreSQL 数据库 {database} 中没有启用 pgvector 扩展，而用户 {user} 没有权限启用它。请以超级用户身份连接到 {database} 执行一次：CREATE EXTENSION IF NOT EXISTS vector; 然后重新加载集成。{user} 本身不需要是超级用户。如果你已经启用了 pgvector，请确认是在 {database} 中启用的：扩展只对创建它的那个数据库生效。"
+    },
+    "pgvector_not_available": {
+      "message": "存放数据库 {database} 的 PostgreSQL 服务器没有安装 pgvector 扩展。请运行带 pgvector 的 PostgreSQL（PostgreSQL with pgvector 应用，或 pgvector/pgvector 之类的镜像），然后重新加载集成。"
+    },
+    "database_unreachable": {
+      "message": "暂时无法连接到 PostgreSQL 数据库：{error}。Home Assistant 会持续重试；请检查数据库是否在运行，以及数据库设置（主机、端口、用户、密码、数据库名称）是否正确。"
+    },
+    "database_invalid_settings": {
+      "message": "数据库设置在连接前就被拒绝：{error}。请在数据库子条目中修正额外的连接参数（或其他数据库设置）；保存后集成会重新加载。"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Home Generative Agent 选项",
+        "description": "配置全局行为和提示词。",
+        "data": {
+          "face_api_url": "人脸识别 API URL（可选）",
+          "prompt": "系统指令",
+          "vlm_response_language": "摄像头描述语言（可选）",
+          "vlm_prompt_extra": "额外的摄像头分析指令（可选）",
+          "llm_hass_api": "控制 Home Assistant",
+          "video_analyzer_mode": "视频分析模式",
+          "video_analyzer_uniqueness_enabled": "启用感知哈希帧过滤（dHash）",
+          "video_analyzer_event_recording_enabled": "分析 Ring 事件录像（ring-mqtt，Ring Protect）",
+          "video_analyzer_motion_camera_map": "运动传感器 → 摄像头的手动映射（可选）",
+          "notify_service": "视频分析通知服务（可选）",
+          "video_analyzer_notification_cooldown_s": "摄像头通知冷却时间（秒）",
+          "video_analyzer_house_notification_cooldown_s": "全屋通知冷却时间（秒）",
+          "face_recognition": "启用人脸识别",
+          "manage_context_with_tokens": "上下文管理方式",
+          "max_tokens_in_context": "聊天上下文最大 token 数",
+          "max_messages_in_context": "聊天上下文最大消息数",
+          "critical_action_pin_enabled": "关键操作需要 PIN",
+          "critical_action_pin": "关键操作 PIN（解锁、布防或打开敏感设备时需要）",
+          "schema_first_yaml": "YAML 请求使用 schema 优先的 JSON",
+          "stt_filters_section": "语音输入过滤",
+          "stt_hallucination_patterns": "忽略的语音转文本子串",
+          "stt_hallucination_exact_patterns": "忽略的语音转文本完整短语",
+          "voice_tool_acknowledgement": "语音应答（仅语音）",
+          "voice_tool_acknowledgement_timing": "何时说出应答",
+          "tool_retrieval_limit": "工具检索数量上限",
+          "tool_relevance_threshold": "工具相关度阈值",
+          "tool_exclusions": "排除的工具",
+          "tool_inclusions": "始终包含的工具"
+        },
+        "data_description": {
+          "prompt": "指导 LLM 如何回答的说明，每次对话都会先发给模型。可以使用模板。",
+          "vlm_response_language": "VLM 摄像头图像描述所用的语言，例如 'Chinese'。留空则为英文。内部使用的 'Scene unchanged.' 回复始终保持英文。",
+          "vlm_prompt_extra": "追加到 VLM 摄像头分析提示词后面的额外指令，例如“忽略车道上的汽车”。它们不会替换内置规则。",
+          "video_analyzer_notification_cooldown_s": "0 表示关闭。某个摄像头的通知响起后，该摄像头在这么多秒内（最多 600）的后续通知会静默替换同一条通知，换成最新的描述和图片，而不会再次响铃。开启人脸识别时，这段时间内第一次出现的陌生人仍会响铃。仅当通知服务是某一部手机的 HA App 推送服务（notify.mobile_app_ 开头）时有效，不能是通知组。",
+          "video_analyzer_house_notification_cooldown_s": "0 表示关闭。同一事件被多个摄像头看到时，每个摄像头都会发通知。某个摄像头的通知响起后，任何摄像头在这么多秒内（最多 60）发出的通知仍会显示自己的卡片，但不响铃，并且该摄像头随后会在它自己的摄像头通知冷却时间内保持静默（如果此值更长则按此值），从那次响铃算起。如果关闭了摄像头冷却，所有摄像头（包括刚响铃的那个）都会在这么多秒内保持静默。开启人脸识别时，这段时间内第一次出现的陌生人仍会响铃。建议从 15 秒左右开始：每个摄像头的视频是分开分析的，同一事件到达各个摄像头可能相差 10 到 30 秒。仅当通知服务是某一部手机的 HA App 推送服务（notify.mobile_app_ 开头）时有效，不能是通知组；仅在 iOS 上验证过。",
+          "schema_first_yaml": "开启后，YAML 请求会先用严格的 JSON 回答，再转换成 YAML。",
+          "stt_hallucination_patterns": "每行一个子串。如果语音转文本的结果包含其中任意一项，会在 LLM 运行前被忽略。匹配不区分大小写。",
+          "stt_hallucination_exact_patterns": "每行一个短语。如果语音转文本的完整结果等于其中任意一项，会在 LLM 运行前被忽略。匹配不区分大小写。",
+          "voice_tool_acknowledgement": "助手处理请求时由语音设备说出的话，这样较慢的问题不会以沉默回应（例如“请稍等。”）。只在语音对话中使用，每次回复最多说一次；下一个选项决定何时说。需要 HGA 的文本转语音引擎或其他流式引擎。请用你的助手所用的语言填写。留空则关闭。",
+          "voice_tool_acknowledgement_timing": "“助手一开始处理就说”能覆盖整个等待过程，包括本地模型说出第一个字之前的时间，但在不需要工具的回复之前也会说（所以最好用“请稍等。”这类中性的措辞）。“第一次调用工具之前说”只在使用工具的对话中、模型开始处理之后才说。",
+          "tool_retrieval_limit": "根据与用户问题的语义相似度检索的最大工具数量。",
+          "tool_relevance_threshold": "工具被检索到所需的最低语义相似度分数（0.0 到 1.0）。",
+          "tool_exclusions": "勾选的工具永远不会提供给模型，也永远不会被执行，即使模型按名称请求也不行。留空则公开所选 API 的所有工具。服务器之后新增的工具默认可用。",
+          "tool_inclusions": "勾选的工具始终提供给模型：它们会在基于向量的工具检索之后追加，不受检索数量上限限制。适合网页搜索这类相似度搜索未必会选中的通用工具。是否使用仍由模型决定。同一个工具不能既被排除又被始终包含。",
+          "video_analyzer_uniqueness_enabled": "在 VLM 分析之前跳过视觉上几乎相同的帧。警告：开启后会失去帧与帧之间的运动上下文，而摘要模型要靠它来描述移动。只有在静态场景产生过多重复、并且你接受可能失去运动连贯性时才开启。",
+          "video_analyzer_event_recording_enabled": "当 ring-mqtt 的 event_select 实体发布带有新 eventId 的已签名 recordingUrl 时，下载该事件的 MP4，用 ffmpeg 抽取最多 8 帧并分析这些帧，而不是分析保留的定时快照——在电池供电的摄像头上，定时快照可能比事件早多达 10 分钟。需要 Ring Protect 订阅（没有 recordingUrl 的摄像头继续使用快照），以及官方 Home Assistant 镜像自带的 ffmpeg 程序。",
+          "video_analyzer_motion_camera_map": "每行一条映射：binary_sensor.X_motion: camera.Y——当自动匹配选错摄像头时使用。留空则依靠基于设备和名称的自动匹配。"
+        }
+      }
+    }
+  },
+  "issues": {
+    "database_not_configured": {
+      "title": "Home Generative Agent 正在没有数据库的情况下运行",
+      "description": "此条目没有数据库子条目，因此只使用内存存储运行。每次重新加载或重启都会丢失对话历史，长期记忆（对话摘要、摄像头活动回顾、布防确认）和人脸识别（人员图库）不可用，Sentinel 基线异常检测也处于关闭状态。Sentinel 规则、通知和审计记录仍正常工作。\n\n数据库子条目由集成页面上的 **+ 设置** 创建：**基础**会用推荐的默认值创建它，**高级**最后有一个**数据库设置**步骤，会在保存前测试连接。出现这种状态，要么是添加集成后没有运行 **+ 设置**，要么是在高级向导的最后一步关闭了它（功能在那之前已经保存，所以条目仍能加载）。\n\n解决方法：打开**设置 → 设备与服务 → Home Generative Agent**，点击 **+ 设置**，选择**高级**，逐步完成各项功能，并填完**数据库设置**表单。如果使用自带的 PostgreSQL with pgvector 应用，默认值（`localhost`、端口 `5432`、数据库 `ha_db`、用户 `ha_user`）就是正确的。条目带着数据库子条目加载后，此问题会立即消失。"
+    },
+    "pin_bypassed_by_local_intents": {
+      "title": "关键操作 PIN 没有保护语音命令",
+      "description": "受影响的语音助手管道：{pipelines}。\n\n这些管道使用 Home Generative Agent 作为对话代理，并开启了**优先本地处理命令**。这时 Home Assistant 会先用自己内置的语句匹配简单命令并直接执行（包括开锁），根本不会调用代理。代理看不到这条命令，所以关键操作 PIN 无法拦下它等待确认。\n\n解决方法：打开**设置 → 语音助手**，编辑上面列出的每个流程，关闭**优先本地处理命令**。\n\n如果某把锁或某个卷帘根本不应该被语音操作，还应在**设置 → 语音助手 → 公开**中停止公开它。只有这个设置能同时覆盖语句触发器和不经过代理的其他途径。"
+    },
+    "unknown_person_rules_inert_no_face": {
+      "title": "Sentinel 的陌生人规则无法触发",
+      "description": "受影响的规则：\n\n{rules}\n\n**为什么会出现：**人脸识别已关闭，所以没有任何东西能产生这些规则需要的结果。\n\n**开启方法：**在集成的选项中设置人脸服务 URL 并启用人脸识别，确保条目有数据库子条目（人员图库存放在那里），并设置一个视频分析模式——只有在分析器处理快照时才会识别人脸。正常工作后，下一次重新加载时此提示会消失。\n\n这些规则只在人脸识别结果表明看到了某人但未能识别时触发，而只有人脸识别流程会产生这种结果。缺少它时不会报错，也不会记录日志，这些规则在 `sentinel_health` 传感器上仍算作启用，因为从 Sentinel 的角度看，它们只是从未匹配。\n\nSentinel 的其他规则不受影响：未上锁的锁、敞开的门窗、电器和电池检查，以及 Home Assistant 与网络安全审计。\n\n**如果想在没有人脸识别的情况下覆盖摄像头**，可以在 Sentinel 的新自动提议中批准一条 `motion_detected_*` 规则——它们会在无人在家或夜间检测到运动时提醒，不需要人脸服务。\n\n如果你本来就打算不使用这些规则，忽略此提示即可——它说明的是覆盖范围，而不是故障。"
+    },
+    "unknown_person_rules_inert_no_gallery": {
+      "title": "Sentinel 的陌生人规则无法触发",
+      "description": "受影响的规则：\n\n{rules}\n\n**为什么会出现：**人脸识别已开启，但此条目没有数据库，因此没有可以用来识别的人员图库。人脸识别因此在启动时被禁用。\n\n**解决方法：**在集成页面上用 **+ 设置** 添加一个数据库子条目。基线异常检测也因为同样的原因处于关闭状态，届时也会恢复工作。下一次重新加载时此提示会消失。\n\n这些规则只在人脸识别结果表明看到了某人但未能识别时触发，而只有人脸识别流程会产生这种结果。缺少它时不会报错，也不会记录日志，这些规则在 `sentinel_health` 传感器上仍算作启用，因为从 Sentinel 的角度看，它们只是从未匹配。\n\nSentinel 的其他规则不受影响：未上锁的锁、敞开的门窗、电器和电池检查，以及 Home Assistant 与网络安全审计。\n\n**如果想在没有人脸识别的情况下覆盖摄像头**，可以在 Sentinel 的新自动提议中批准一条 `motion_detected_*` 规则——它们会在无人在家或夜间检测到运动时提醒，不需要人脸服务。\n\n如果你本来就打算不使用这些规则，忽略此提示即可——它说明的是覆盖范围，而不是故障。"
+    },
+    "unknown_person_rules_inert_no_analyzer": {
+      "title": "Sentinel 的陌生人规则无法触发",
+      "description": "受影响的规则：\n\n{rules}\n\n**为什么会出现：**人脸识别已开启，数据库也存在，但视频分析器处于关闭状态。只有在分析器处理摄像头快照时才会识别人脸，所以永远不会产生所需的结果。\n\n**解决方法：**在集成的选项中把视频分析模式设为 *disable* 以外的值。下一次重新加载时此提示会消失。\n\n这些规则只在人脸识别结果表明看到了某人但未能识别时触发，而只有人脸识别流程会产生这种结果。缺少它时不会报错，也不会记录日志，这些规则在 `sentinel_health` 传感器上仍算作启用，因为从 Sentinel 的角度看，它们只是从未匹配。\n\nSentinel 的其他规则不受影响：未上锁的锁、敞开的门窗、电器和电池检查，以及 Home Assistant 与网络安全审计。\n\n**如果想在没有人脸识别的情况下覆盖摄像头**，可以在 Sentinel 的新自动提议中批准一条 `motion_detected_*` 规则——它们会在无人在家或夜间检测到运动时提醒，不需要人脸服务。\n\n如果你本来就打算不使用这些规则，忽略此提示即可——它说明的是覆盖范围，而不是故障。"
+    },
+    "ollama_embedding_model_missing": {
+      "title": "Ollama Embedding 模型 {model} 未安装",
+      "description": "Home Generative Agent 在 Ollama 上用 **{model}** 生成 Embedding，但位于 {url} 的 Ollama 没有这个模型，所以发往那里的 Embedding 请求会失败。如果配置了备用链，每个请求会转到链中的下一个 Embedding 提供商；使用不同 Embedding 模型的备用提供商会让记忆搜索变得不那么准确。如果那台服务器是主提供商，又没有其他提供商能生成 Embedding，长期记忆搜索将没有结果，工具检索会退回到关键词匹配，因此助手可能会说它看不到你已公开给它的工具或脚本。如果是备用服务器，备用链会跳过它，所以主提供商宕机时它起不到兜底作用。\n\n解决方法：在列出的每台服务器上运行 `ollama pull {model}`。如果 Ollama 是**Embedding**功能的提供商（**设置 → 设备与服务 → Home Generative Agent**），也可以改选一个那里已安装的模型。然后重新加载集成；模型安装后的第一次重新加载就会清除此问题。"
+    },
+    "ollama_embedding_dims_mismatch": {
+      "title": "Ollama Embedding 模型 {model} 的向量维度不对",
+      "description": "Home Generative Agent 在 Ollama 上用 **{model}** 生成 Embedding，它在 {url} 上生成 {dims} 维向量。记忆存储是为 {expected} 维向量创建的，并会保持这个维度，所以每次写入 Embedding 都会失败。长期记忆搜索将没有结果，工具检索会退回到关键词匹配，因此助手可能会说它看不到你已公开给它的工具或脚本。\n\n解决方法：在**Embedding**功能（**设置 → 设备与服务 → Home Generative Agent**）中选择一个生成 {expected} 维向量的 Embedding 模型，并在服务器上拉取它；配置文档按维度列出了常用的 Ollama Embedding 模型。然后重新加载集成；修改后的第一次重新加载就会清除此问题。"
+    },
+    "ollama_fallback_embedding_dims_mismatch": {
+      "title": "Ollama 备用 Embedding 模型 {model} 的向量维度不对",
+      "description": "**Embedding**功能会回退到位于 {url} 的 Ollama，它用 **{model}** 生成 Embedding，在那里生成 {dims} 维向量。记忆存储是为 {expected} 维向量创建的，并会保持这个维度，所以如果这个备用提供商接手，它的 Embedding 写入会失败，长期记忆搜索和工具检索会停止工作，直到主提供商恢复。\n\n如果 Ollama 也是主提供商，那么主提供商上的 **{model}** 维度是正确的，说明那台服务器上的是另一个构建版本：请在那里运行 `ollama pull {model}`，让两边一致。否则，请从**Embedding**功能（**设置 → 设备与服务 → Home Generative Agent**）的备用提供商中移除那台服务器，因为它排在另一个主提供商后面时，那个表单里无法设置它的模型。然后重新加载集成；修改后的第一次重新加载就会清除此问题。"
+    }
+  }
+}

@@ -168,6 +168,86 @@ const HGA_PROPOSALS_I18N = {
     status_not_found: "nenalezeno",
     status_error: "chyba",
   },
+  zh: {
+    pipeline_title: "HGA 规则流水线",
+    refresh: "刷新",
+    refreshing: "正在刷新…",
+    refreshing_all: "正在刷新候选和提案…",
+    sec_discovery: "新自动提议的候选",
+    sec_filtered: "已过滤的候选",
+    sec_pending: "提案草稿（待处理）",
+    sec_history: "提案历史",
+    load_fail_discovery: "加载候选失败。",
+    load_fail_filtered: "加载已过滤候选的元数据失败。",
+    load_fail_pending: "加载待处理草稿失败。",
+    load_fail_history: "加载提案历史失败。",
+    refresh_failed: "刷新失败：{msg}",
+    unknown_error: "未知错误",
+    no_discovery: "没有候选。",
+    no_filtered: "没有已过滤的候选。",
+    no_pending: "没有待处理的提案草稿。",
+    no_history: "没有提案历史。",
+    candidate_id: "候选 ID",
+    type: "类型",
+    unspecified: "未指定",
+    status: "状态",
+    rule_id: "规则 ID",
+    covered_rule: "已覆盖的规则",
+    rule_state: "规则状态",
+    reason: "原因",
+    semantic_key: "语义键",
+    promote: "升级为草稿",
+    promoting: "正在升级 {id}…",
+    promote_result: "升级结果：{r}",
+    promote_failed: "升级失败：{msg}",
+    reject_candidate: "拒绝候选",
+    rejected_discovery: "已拒绝候选 {id}",
+    approve: "批准",
+    approving: "正在批准 {id}…",
+    approve_result: "批准结果：{r}",
+    approve_failed: "批准失败：{msg}",
+    reject: "拒绝",
+    rejecting: "正在拒绝 {id}…",
+    reject_result: "拒绝结果：{r}",
+    reject_failed: "拒绝失败：{msg}",
+    unsupported_warn: "不支持：此提案目前还无法对应到已有的确定性模板。",
+    template_recorded: "已为此候选记录模板请求。",
+    request_template: "请求新模板",
+    template_requested: "已请求模板",
+    template_marked: "已为 {id} 标记模板请求。",
+    reactivate: "重新启用",
+    reactivating: "正在重新启用 {id}…",
+    reactivate_result: "重新启用结果：{r}",
+    reactivate_failed: "重新启用失败：{msg}",
+    deactivate: "停用",
+    deactivating: "正在停用 {id}…",
+    deactivate_result: "停用结果：{r}",
+    deactivate_failed: "停用失败：{msg}",
+    active: "已启用",
+    inactive: "已停用",
+    loaded:
+      "已加载 {c} 个候选、{f} 个已过滤候选、{p} 个待处理草稿、{h} 个历史草稿（{t}）",
+    dedupe_batch_duplicate: "与本批次新自动提议中的另一项重复",
+    dedupe_existing_semantic_key: "已被启用中、待处理或近期的规则提案覆盖",
+    dedupe_existing_identity_hash:
+      "已被启用中、待处理或近期的规则提案覆盖（按身份匹配）",
+    dedupe_derived_only_paths: "只引用了派生值，没有具体实体",
+    dedupe_entity_text_mismatch: "文字中提到的实体不在其证据中",
+    dedupe_cumulative_energy_sensor: "累计能耗传感器（kWh 总量），不能成为规则",
+    dedupe_unknown_network_key: "引用了路由器数据中不存在的网络设备或设置",
+    dedupe_novel: "新候选",
+    dedupe_unknown: "未知",
+    status_draft: "草稿",
+    status_approved: "已批准",
+    status_rejected: "已拒绝",
+    status_unsupported: "不支持",
+    status_covered_by_existing_rule: "已被现有规则覆盖",
+    status_ok: "成功",
+    status_already_active: "已在启用中",
+    status_exists: "已存在",
+    status_not_found: "未找到",
+    status_error: "错误",
+  },
 };
 
 class HgaProposalsCard extends HTMLElement {
@@ -1494,7 +1574,13 @@ class HgaProposalsCard extends HTMLElement {
 
   _lang() {
     const raw = this._hass?.language || this._hass?.locale?.language || "en";
-    const lang = String(raw).toLowerCase().split("-")[0];
+    const code = String(raw).toLowerCase();
+    const lang = code.split("-")[0];
+    // HA names Chinese by script; only Simplified (zh-Hans) has a table,
+    // so Traditional (zh-Hant, zh-HK) stays on English.
+    if (lang === "zh" && code !== "zh" && !/^zh-(hans|cn|sg)/.test(code)) {
+      return "en";
+    }
     return HGA_PROPOSALS_I18N[lang] ? lang : "en";
   }
 

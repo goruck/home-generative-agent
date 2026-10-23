@@ -112,7 +112,7 @@ You can now open the HA Assist panel and start talking to your home.
 | Guide | Contents |
 | --- | --- |
 | [Installation](docs/installation.md) | HACS install, manual install, optional apps (Ollama, face recognition, local speech server for STT/TTS) |
-| [Configuration](docs/configuration.md) | Model providers, features, per-model thinking/reasoning & budget, Tool Retrieval (RAG), per-tool exclusions & always-included tools, LLM API, STT and TTS (OpenAI or local, streaming replies, spoken acknowledgement), YAML mode, Critical Action PIN, prompt caching, camera description language & extra VLM instructions, UI languages (en/cs/ru/tr) |
+| [Configuration](docs/configuration.md) | Model providers, features, per-model thinking/reasoning & budget, Tool Retrieval (RAG), per-tool exclusions & always-included tools, LLM API, STT and TTS (OpenAI or local, streaming replies, spoken acknowledgement), YAML mode, Critical Action PIN, prompt caching, camera description language & extra VLM instructions, UI languages (en/cs/ru/tr/zh-Hans) |
 | [Sentinel](docs/sentinel.md) | Anomaly detection pipeline, built-in rules, the Home Assistant & network security audit (router and eero setup notes), triage, baseline, discovery templates, blueprints, notification quiet hours, services API, health sensor |
 | [Camera Entities](docs/camera-entities.md) | Image and sensor entities, dashboards, automations, proactive video analysis, face recognition |
 | [Architecture](docs/architecture.md) | LangGraph agent, model tiers, context management, streaming, latency, tools, the home-state snapshot and network audit adapters |
