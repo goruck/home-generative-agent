@@ -48,7 +48,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.core import State
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers import intent
+from homeassistant.helpers import intent, llm
 from homeassistant.helpers.group import get_entity_ids
 from slugify import slugify
 
@@ -64,6 +64,7 @@ from .helpers import (
     BUILTIN_INTENT,
     NOT_AN_INTENT,
     OTHER_INTENT,
+    REMOTE_TOOL,
     TOOL_NAMESPACE_SEP,
     base_tool_name,
     is_intent_tool,
@@ -222,7 +223,68 @@ def bare_script_tool_entity_id(
     return entity_id if states.get(entity_id) is not None else None
 
 
-def tool_args_kind(hass: HomeAssistant | None, tool_name: str) -> str:  # noqa: PLR0911
+@dataclass(frozen=True)
+class ToolOrigin:
+    """The API a tool call goes to, and whether its name can be read here."""
+
+    api_id: str | None = None
+    api_name: str | None = None
+    # Named like one of Home Assistant's own intent or script tools, but run
+    # by another kind of tool (#840).
+    remote: bool = False
+
+
+def tool_origin(
+    ha_llm_api: Any, tool_name: str, api_id: str | None = None
+) -> ToolOrigin:
+    """
+    Return the API that runs a tool, and whether it is a remote look-alike.
+
+    The routing map names the API each offered tool is sent to (or `api_id`,
+    the one a held call was sent to). A remote Home Assistant reached over
+    MCP offers its intents and scripts under the same names as this one's
+    (`intent__HassTurnOn`, `script__open_door`), so the name alone reads them
+    as this Home Assistant's own. Only an intent or action tool is (#840).
+    With no API or routing to read, nothing is known and the name is read as
+    before.
+    """
+    if api_id is None:
+        routing = getattr(ha_llm_api, "routing_map", None)
+        api_id = routing.get(tool_name) if isinstance(routing, Mapping) else None
+    apis = getattr(ha_llm_api, "apis", None)
+    if api_id is None or not isinstance(apis, Mapping):
+        return ToolOrigin()
+    instance = apis.get(api_id)
+    if instance is None:
+        return ToolOrigin(api_id=api_id)
+    api_name = str(getattr(getattr(instance, "api", None), "name", "") or api_id)
+    tool = next(
+        (t for t in getattr(instance, "tools", None) or [] if t.name == tool_name),
+        None,
+    )
+    while isinstance(tool, llm.NamespacedTool):
+        tool = tool.tool
+    remote = (
+        tool is not None
+        and not isinstance(tool, llm.IntentTool | llm.ActionTool)
+        and _named_like_ha_tool(tool_name)
+    )
+    return ToolOrigin(api_id=api_id, api_name=api_name, remote=remote)
+
+
+def _named_like_ha_tool(tool_name: str) -> bool:
+    """Return True for a name Home Assistant gives its intent or script tools."""
+    parts = tool_name.split(TOOL_NAMESPACE_SEP)
+    return (
+        is_intent_tool(tool_name)
+        or script_tool_entity_id(tool_name) is not None
+        or (len(parts) >= _SCRIPT_TOOL_PARTS and parts[-2] == _INTENT_SCRIPT)
+    )
+
+
+def tool_args_kind(  # noqa: PLR0911
+    hass: HomeAssistant | None, tool_name: str, *, remote: bool = False
+) -> str:
     """
     Return how a tool's arguments are prepared before it runs (#836).
 
@@ -231,12 +293,16 @@ def tool_args_kind(hass: HomeAssistant | None, tool_name: str) -> str:  # noqa: 
     over a built-in intent's name) or another integration's intent, which
     keeps its own slots but matches its targets the way the built-ins do.
     `NOT_AN_INTENT`: a script, service or other tool, run as given.
+    `REMOTE_TOOL`: a tool named like this Home Assistant's own that another
+    API runs (`tool_origin`), run as given (#840).
 
     A built-in intent's name counts as an intent script's only when the
     intent script has that exact name, the one HA registers it under: one
     whose name only slugifies to it ("HassTurnOn!") leaves the built-in in
     place (#836 review).
     """
+    if remote:
+        return REMOTE_TOOL
     if script_tool_entity_id(tool_name) is not None:
         return NOT_AN_INTENT
     parts = tool_name.split(TOOL_NAMESPACE_SEP)

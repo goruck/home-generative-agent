@@ -1358,6 +1358,10 @@ def _alarm_payload(tool_args: Mapping[str, Any]) -> dict[str, Any]:
 BUILTIN_INTENT = "builtin_intent"
 OTHER_INTENT = "other_intent"
 NOT_AN_INTENT = "not_an_intent"
+# A tool named like one of Home Assistant's own intent or script tools that
+# another API runs, such as a remote Home Assistant over MCP (#840): its
+# arguments go as given, and this Home Assistant's devices say nothing of it.
+REMOTE_TOOL = "remote_tool"
 
 
 def is_intent_tool(tool_name: str) -> bool:

@@ -193,6 +193,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         # The devices a call names, when it also reaches others it does not.
         "target_and_others": "{targets} and other devices",
         "target_unnamed_devices": "devices it does not name",
+        "target_remote": 'devices through "{api}"',
         # What the agent passed to a script's device fields (#787).
         "action_script_targets": "{action} ({targets})",
         "action_unnamed_target": "an unnamed device",
@@ -330,6 +331,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "target_to_state": "{target} na {state}",
         "target_and_others": "{targets} a další zařízení",
         "target_unnamed_devices": "zařízení, která nejmenuje",
+        "target_remote": "zařízení přes „{api}“",
         "action_script_targets": "{action} ({targets})",
         "action_unnamed_target": "nepojmenované zařízení",
         "target_named": "„{name}“",
@@ -737,7 +739,11 @@ def describe_pending_action(
             )
             + ")"
         )
-    if hass is None or str(action.get("tool_name") or "") == "add_automation":
+    if (
+        hass is None
+        or str(action.get("tool_name") or "") == "add_automation"
+        or action.get("remote")
+    ):
         return line
     try:
         effects = _relay_effects(hass, action)
@@ -812,6 +818,26 @@ def _describe_line(  # noqa: PLR0911
     tool_name = str(action.get("tool_name") or "")
     if tool_name == "add_automation":
         return _describe_automation(hass, action)
+
+    if action.get("remote"):
+        # A remote Home Assistant's tool (#840): its devices cannot be named
+        # from here, and the model's words are not repeated, so the line names
+        # the tool and the API that runs it.
+        return pin_msg(
+            hass,
+            "action_service",
+            service=sanitize_tool_text(
+                base_tool_name(tool_name), limit=_ACTION_SERVICE_MAX_LEN
+            ),
+            target=pin_msg(
+                hass,
+                "target_remote",
+                api=_one_line(
+                    action.get("api_name") or action.get("api_id") or "",
+                    _ACTION_TARGET_MAX_LEN,
+                ),
+            ),
+        )
 
     raw_args = action.get("tool_args")
     tool_args: dict[str, Any] = dict(raw_args) if isinstance(raw_args, Mapping) else {}

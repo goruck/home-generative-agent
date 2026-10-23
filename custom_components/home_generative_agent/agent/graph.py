@@ -96,6 +96,8 @@ from .helpers import (
     CONFIRM_TOOL_NAME,
     INTENT_NAME_ALL,
     PIN_REFUSAL_ENDS_TURN,
+    READ_ONLY_INTENTS,
+    REMOTE_TOOL,
     active_llm_api_ids,
     base_tool_name,
     declared_domains,
@@ -138,6 +140,7 @@ from .indirect_pin import (
     SCENE_DOMAIN,
     SCRIPT_DOMAIN,
     StoredActionCheck,
+    ToolOrigin,
     bare_script_tool_entity_id,
     call_service_names,
     call_target_domains,
@@ -153,6 +156,7 @@ from .indirect_pin import (
     service_runs_critical_action,
     stored_actions_are_critical,
     tool_args_kind,
+    tool_origin,
 )
 from .on_off_direction import (
     is_bare_yes,
@@ -481,12 +485,13 @@ def _code_hints_alarm(
     return bool(calls) and all(call.domain == ALARM_DOMAIN for call in calls)
 
 
-def _critical_action_guard(
+def _critical_action_guard(  # noqa: PLR0913
     tool_name: str,
     tool_args: dict[str, Any],
     ctx: ToolExecutionContext,
     tool_call: dict[str, Any],
     args_kind: str | None = None,
+    origin: ToolOrigin | None = None,
 ) -> ToolMessage | None:
     """Enforce critical-action PIN flow when needed."""
     if not ctx.pin_enabled:
@@ -495,7 +500,13 @@ def _critical_action_guard(
     # see rule_entities).
     rules = expand_critical_rules(ctx.hass, ctx.critical_actions)
     with collect_started_automations() as started:
-        critical = _is_critical_action(tool_args, rules, tool_name, ctx.hass)
+        critical = _is_critical_action(
+            tool_args,
+            rules,
+            tool_name,
+            ctx.hass,
+            remote=origin is not None and origin.remote,
+        )
     if not critical:
         return None
     if not ctx.pin_hash or not ctx.pin_salt:
@@ -524,6 +535,12 @@ def _critical_action_guard(
         # The domains the rules name, so the PIN line reads a tool's name as
         # the gate did (#837 review).
         "rule_domains": sorted(rule_domains(rules)),
+        # The API the call goes to: the confirmation sends it there, whatever
+        # tools the reply's turn offers, and a remote one's line names it
+        # (#840).
+        "api_id": origin.api_id if origin is not None else None,
+        "api_name": origin.api_name if origin is not None else None,
+        "remote": origin is not None and origin.remote,
     }
     action_id = register_pending_action(ctx.pending_actions, action)
     if action_id is None:
@@ -587,8 +604,10 @@ def _prepare_tool_args(
 ) -> tuple[ToolMessage | None, dict[str, Any]]:
     """Normalize, guard, and sanitize arguments before calling HA."""
     # Only HA's own intents are reshaped: a script, intent script or service
-    # tool reads its own arguments, and runs with them as given (#836).
-    kind = tool_args_kind(ctx.hass, tool_name)
+    # tool reads its own arguments, and runs with them as given (#836). So
+    # does one only named like HA's own, such as a remote HA's (#840).
+    origin = tool_origin(getattr(ctx, "ha_llm_api", None), tool_name)
+    kind = tool_args_kind(ctx.hass, tool_name, remote=origin.remote)
     builtin = kind == BUILTIN_INTENT
     if builtin:
         tool_args = normalize_intent_for_alarm(tool_name, tool_args, ctx.hass)
@@ -615,7 +634,8 @@ def _prepare_tool_args(
     else:
         tool_args = drop_empty_args(tool_args)
 
-    redirect = _route_alarm_intent_to_tool(
+    # The alarm tool acts on this Home Assistant's panels, not a remote one's.
+    redirect = kind != REMOTE_TOOL and _route_alarm_intent_to_tool(
         tool_name, tool_args, ctx.hass, tool_call, read_code=builtin
     )
     if redirect:
@@ -644,6 +664,7 @@ def _prepare_tool_args(
         ctx=ctx,
         tool_call=tool_call,
         args_kind=kind,
+        origin=origin,
     )
     if critical_guard:
         return critical_guard, tool_args
@@ -3614,11 +3635,13 @@ def _coerce_entity_ids(args: dict[str, Any]) -> list[str]:
     return entity_ids
 
 
-def _is_critical_action(  # noqa: PLR0911
+def _is_critical_action(  # noqa: PLR0911, PLR0912
     tool_args: dict[str, Any],
     critical_actions: list[dict[str, str]],
     tool_name: str,
     hass: HomeAssistant | None = None,
+    *,
+    remote: bool = False,
 ) -> bool:
     """
     Return True if the call could do a critical action.
@@ -3644,6 +3667,12 @@ def _is_critical_action(  # noqa: PLR0911
     # A null or blank domain names none: the entities' own domain is read.
     domain_given = domain_val is not None and bool(str(domain_val).strip())
     entities = [e.lower() for e in _coerce_entity_ids(tool_args)]
+
+    # A remote Home Assistant's intent or script tool (#840): its devices,
+    # scripts and automations cannot be seen from here, so any call that can
+    # change something is held. Only a read-only intent is not.
+    if remote:
+        return base_tool_name(tool_name) not in READ_ONLY_INTENTS
 
     # An intent script's tool names no domain or service, and one may take
     # over a built-in intent's tool; what it runs is checked first, and only

@@ -136,13 +136,14 @@ from .indirect_pin import (
     OTHER_INTENT,
     stored_action_calls,
     tool_args_kind,
+    tool_origin,
 )
 from .on_off_direction import with_action_performed
 from .pin_messages import describe_pending_action, pin_msg
 from .rule_entities import expand_critical_rules
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Mapping
+    from collections.abc import Generator
 
     from homeassistant.core import HomeAssistant
     from langchain_core.language_models import BaseMessage, LanguageModelInput
@@ -1341,7 +1342,22 @@ def _spend_pin_reply(cfg: Mapping[str, Any]) -> None:
         pin_reply.spent = True
 
 
-async def _execute_pending_action(  # noqa: PLR0911
+def _held_api(ha_llm_api: Any, held_api: object) -> Any | None:
+    """
+    Return the API a held call goes to, or None if it is no longer there.
+
+    The call goes to the API it was held for, not the one the reply's turn
+    routes it to (or a fallback through every API): a local and a remote Home
+    Assistant offer the same tool names (#840). A call held with no API on
+    record goes through the wrapper, as before.
+    """
+    apis = getattr(ha_llm_api, "apis", None)
+    if not isinstance(held_api, str) or not isinstance(apis, Mapping):
+        return ha_llm_api
+    return apis.get(held_api)
+
+
+async def _execute_pending_action(  # noqa: PLR0911, PLR0912
     resolved_action_id: str,
     action: dict[str, Any],
     cfg: Mapping[str, Any],
@@ -1374,7 +1390,11 @@ async def _execute_pending_action(  # noqa: PLR0911
     # read name/area/floor and ignore an entity id, so a held lock call with
     # only an entity id would otherwise act on every exposed lock. Any other
     # tool runs with its arguments as held (#836).
-    kind = tool_args_kind(cfg.get("hass"), tool_name)
+    held_api = action.get("api_id")
+    origin = tool_origin(
+        ha_llm_api, tool_name, held_api if isinstance(held_api, str) else None
+    )
+    kind = tool_args_kind(cfg.get("hass"), tool_name, remote=origin.remote)
     if action.get("args_kind") not in (None, kind):
         # An intent script took over the tool, or gave it back, since the
         # PIN was asked for: the line no longer names what would run, so the
@@ -1392,6 +1412,12 @@ async def _execute_pending_action(  # noqa: PLR0911
     else:
         tool_args = drop_empty_args(tool_args)
 
+    target_api = _held_api(ha_llm_api, held_api)
+    if target_api is None:
+        # The API that would have run it is gone.
+        cfg.get("pending_actions", {}).pop(resolved_action_id, None)
+        return None, pin_msg(cfg.get("hass"), "pending_action_not_found_or_expired")
+
     if not _claim_pending_action(cfg, resolved_action_id):
         return None, pin_msg(cfg.get("hass"), "pending_action_not_found_or_expired")
 
@@ -1399,7 +1425,7 @@ async def _execute_pending_action(  # noqa: PLR0911
     try:
         tool_input = llm.ToolInput(tool_name=tool_name, tool_args=tool_args)
         async with asyncio.timeout_at(deadline):
-            response = tool_call_data(await ha_llm_api.async_call_tool(tool_input))
+            response = tool_call_data(await target_api.async_call_tool(tool_input))
         # A tool that reports failure in its payload (success: false, a
         # warning) did not act, the same as the normal path reads it. Inside
         # the try: after the claim, even reading the reply must not raise.
