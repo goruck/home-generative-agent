@@ -350,9 +350,119 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "kind_domain": "všechna zařízení typu {domain}",
         "kind_device": "všechna zařízení",
     },
+    # Simplified Chinese (zh-Hans); _resolve_language maps HA's zh-Hans,
+    # zh-CN and zh-SG here and leaves zh-Hant on English.
+    "zh": {
+        "automation_pin_unset": (
+            "这个自动化会执行关键操作，但关键操作 PIN 已启用却没有设置 PIN，"
+            "因此无法确认。请在集成选项中设置 PIN 后重试。"
+        ),
+        "automation_pending_store_unavailable": ("现在无法确认这个自动化，请重试。"),
+        "automation_requires_pin_reason": (
+            "这个自动化需要 PIN 确认，因为{reason}：{calls}。"
+        ),
+        "direct_requires_pin_reason": "关键操作需要 PIN 确认。",
+        "pending_action_not_found_or_expired": "未找到待确认的操作，或它已过期。",
+        "pending_action_not_found": "未找到待确认的操作。",
+        "pending_action_wrong_user": ("待确认的操作属于另一位用户，请重新发出请求。"),
+        "pending_action_invalid": "待确认的操作无效，请重试。",
+        "pending_action_expired": "待确认的操作已过期，请重新发出请求。",
+        "pin_not_configured": "未配置 PIN，无法确认此操作。",
+        "pin_invalid_format": "PIN 无效。请使用 {min_len} 到 {max_len} 位数字。",
+        "pin_too_many_attempts": "错误次数过多，请重新发出请求。",
+        "pin_incorrect": "PIN 错误。操作未执行。",
+        "confirmation_unable_to_process": "无法处理此确认。",
+        "pending_action_missing_tool_name": "待确认的操作无效：缺少工具名称。",
+        "ha_llm_api_unavailable": "Home Assistant LLM API 不可用。",
+        "pin_awaiting_user_reply": "未确认：PIN 必须出现在用户当前这条消息中。",
+        "pin_retry_next_message": "用户可以在下一条消息中再说一次 PIN。",
+        "pin_say_digits": "请用户在下一条消息中逐位说出 PIN 的数字。",
+        "pin_request_again": (
+            "这已经是这次 PIN 提示接受的最后一次回复；用户需要重新发出请求。"
+        ),
+        "pin_reply_used": (
+            "未确认：用户当前消息中的 PIN 已经用过了。"
+            "告诉用户发生了什么；他们可以重新请求。"
+        ),
+        "action_execute_failed": (
+            "执行操作失败：{err}。"
+            "这次确认已用掉；告诉用户操作失败了，他们可以重新请求。"
+        ),
+        "pending_automation_invalid": "待确认的自动化无效，请重新发出请求。",
+        "action_outcome_unknown": (
+            "操作可能已经执行，但以意外错误结束：{err}。这次确认已用掉。"
+            "不要重复执行此操作；告诉用户先检查设备，再决定是否重新请求。"
+        ),
+        "automation_outcome_unknown": (
+            "自动化可能已经安装，但安装以意外错误结束：{err}。这次确认已用掉。"
+            "不要重复执行；告诉用户先检查他们的自动化。"
+        ),
+        "pin_reply_next_message": (
+            "未确认：只接受用户对这个操作的 PIN 提示所作回复中的 PIN。"
+            "现在正在向用户索要 PIN；他们的下一条消息就是回复。"
+            "请用那条消息中的 PIN 来确认。"
+        ),
+        "pin_reply_to_prompt_only": (
+            "未确认：只接受用户对这个操作的 PIN 提示所作回复中的 PIN。"
+            "现在请向用户索要 PIN。"
+        ),
+        "pin_one_action_at_a_time": (
+            "未发起请求：已有另一个受保护的操作正在等待用户的 PIN。"
+            "请先索要那个 PIN；用户之后可以再请求这一个。"
+        ),
+        "pin_confirm_line": "你的 PIN 将确认：{action}。",
+        "pin_incorrect_line": "PIN 不正确。",
+        "pin_request_again_line": "请重新发出请求。",
+        "pin_done_line": "PIN 已接受：{action}。",
+        "pin_failed_line": "PIN 已接受，但{action}失败了。",
+        "pin_unknown_line": "PIN 已接受；{action}可能已经执行。请检查设备。",
+        "pin_ask_line": "你的 PIN 是多少？",
+        "action_lock": "锁上{target}",
+        "action_unlock": "解锁{target}",
+        "action_open": "打开{target}",
+        "action_relay_controls": "控制{target}",
+        "action_close": "关闭{target}",
+        "action_turn_on": "开启{target}",
+        "action_turn_off": "关闭{target}",
+        "action_set_position": "将{target}设为 {position}%",
+        "action_press": "按下{target}",
+        "action_intent_script": "运行语音命令{target}",
+        "action_starts_automation": "启动自动化{automations}",
+        "action_stop": "停止{target}",
+        "action_service": "{service} {target}",
+        "action_remote": "在“{api}”上运行 {tool}",
+        "action_remote_args": "在“{api}”上运行 {tool}（{args}）",
+        "action_automation": "添加自动化{target}",
+        "action_unnamed_automation": "添加一个未命名的自动化",
+        "action_automation_runs": "{action}，它会执行{calls}",
+        "action_calls_more": "{calls}以及另外 {count} 项",
+        "action_set_state": "将{target}设为{state}",
+        "action_change": "更改{target}",
+        "action_create_scene": "创建场景{scene}，将{states}",
+        "target_to_state": "{target}设为{state}",
+        "target_and_others": "{targets}以及其他设备",
+        "target_unnamed_devices": "它没有点名的设备",
+        "action_script_targets": "{action}（{targets}）",
+        "action_unnamed_target": "一个未命名的设备",
+        "target_named": "“{name}”",
+        "target_entity": "“{name}”（{entity_id}）",
+        "target_every": "{kind}",
+        "target_every_in_area": "{area}区域的{kind}",
+        "target_every_on_floor": "{floor}楼层的{kind}",
+        "target_in_area": "{area}区域的{target}",
+        "target_on_floor": "{floor}楼层的{target}",
+        "kind_lock": "所有锁",
+        "kind_cover": "所有卷帘类设备（含窗帘、百叶窗、遮阳篷、电动大门、车库门等）",
+        "kind_valve": "所有阀门",
+        "kind_domain": "所有 {domain} 设备",
+        "kind_device": "所有设备",
+    },
 }
 
 _DEFAULT_LANGUAGE = "en"
+# HA names Chinese by script (zh-Hans, zh-Hant); only Simplified has a
+# table, so Traditional must not fall into it by its base language.
+_ZH_HANS_PREFIXES = ("zh-hans", "zh-cn", "zh-sg")
 
 
 def _resolve_language(hass: HomeAssistant | None) -> str:
@@ -362,7 +472,11 @@ def _resolve_language(hass: HomeAssistant | None) -> str:
     language = getattr(hass.config, "language", None) or _DEFAULT_LANGUAGE
     # HA language codes may include a region suffix (e.g. "cs-CZ"); the
     # message table is keyed by the base language only.
-    base = language.split("-", 1)[0].lower()
+    code = language.lower()
+    base = code.split("-", 1)[0]
+    if base == "zh":
+        simplified = code == "zh" or code.startswith(_ZH_HANS_PREFIXES)
+        return "zh" if simplified else _DEFAULT_LANGUAGE
     return base if base in _MESSAGES else _DEFAULT_LANGUAGE
 
 

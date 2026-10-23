@@ -2486,6 +2486,20 @@ def test_persistent_fallback_localizes_severity_word() -> None:
     assert "(severity medium)" in en_msg
 
 
+def test_disarm_since_other_day_reads_chinese_month_and_day() -> None:
+    """A zh-Hans install reads an older disarm date as 10月18日, not 18. 10."""
+    from datetime import timedelta
+
+    dt_util = _notifier_mod.dt_util
+    parsed = dt_util.now() - timedelta(days=3)
+    local = dt_util.as_local(parsed)
+    zh_hass = SimpleNamespace(config=SimpleNamespace(language="zh-Hans"))
+
+    out = _notifier_mod._format_disarm_since(parsed, zh_hass)  # type: ignore[arg-type]
+
+    assert out == f"{local.month}月{local.day}日 {local.hour}:{local.minute:02d}"
+
+
 # ---------------------------------------------------------------------------
 # baseline_deviation / time_of_day_anomaly — metric-aware copy
 # ---------------------------------------------------------------------------

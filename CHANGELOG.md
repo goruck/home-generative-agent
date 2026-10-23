@@ -9,6 +9,7 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ### Added
 
+- **Simplified Chinese (zh-Hans) translation.** The configuration UI, the Critical Action PIN lines, Sentinel notification titles, labels and fixed message bodies, and the proposals card now follow a Home Assistant set to Simplified Chinese (`zh-Hans`, also `zh-CN` and `zh-SG`). An older disarm date reads `10月18日` instead of `18. 10.`. Traditional Chinese (`zh-Hant`, `zh-HK`, `zh-TW`) is not covered and stays in English rather than falling into the Simplified text.
 - Sentinel's autonomy level can now be set in Sentinel's Advanced setup ([#783](https://github.com/goruck/home-generative-agent/issues/783)).
   - Before, Sentinel ran at level 1 (notify only) unless `sentinel_set_autonomy_level` raised it, which lasted only an hour. The setting the engine read for its normal level could not be set anywhere.
   - **Autonomy level** (0–3, default 1) is now kept across restarts and Basic setup re-runs.

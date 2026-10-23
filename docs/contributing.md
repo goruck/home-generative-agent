@@ -98,7 +98,7 @@ python scripts/gen_manifest_requirements.py
 
 ## Translations
 
-The configuration UI is translated via the standard Home Assistant mechanism. `custom_components/home_generative_agent/strings.json` is the English source of truth; `translations/en.json` must be an exact copy of it. Localized files (currently `cs.json`, `ru.json`, `tr.json`) live alongside it.
+The configuration UI is translated via the standard Home Assistant mechanism. `custom_components/home_generative_agent/strings.json` is the English source of truth; `translations/en.json` must be an exact copy of it. Localized files (currently `cs.json`, `ru.json`, `tr.json`, `zh-Hans.json`) live alongside it.
 
 To add a language, copy `translations/en.json` to `translations/<code>.json` and translate the values. Rules, enforced by `tests/custom_components/home_generative_agent/test_translations.py`:
 

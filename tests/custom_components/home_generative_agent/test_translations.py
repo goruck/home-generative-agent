@@ -97,14 +97,15 @@ def test_en_json_matches_strings_json() -> None:
     assert en == strings
 
 
-def test_cs_json_has_full_key_parity_with_en() -> None:
-    """cs.json is a complete translation: exact key parity with en.json."""
+@pytest.mark.parametrize("name", ["cs.json", "zh-Hans.json"])
+def test_complete_translation_has_full_key_parity_with_en(name: str) -> None:
+    """cs.json and zh-Hans.json are complete: exact key parity with en.json."""
     en = _load(TRANSLATIONS_DIR / "en.json")
-    cs = _load(TRANSLATIONS_DIR / "cs.json")
-    missing = set(en) - set(cs)
-    extra = set(cs) - set(en)
-    assert not missing, f"cs.json missing keys: {sorted(missing)}"
-    assert not extra, f"cs.json has unknown keys: {sorted(extra)}"
+    other = _load(TRANSLATIONS_DIR / name)
+    missing = set(en) - set(other)
+    extra = set(other) - set(en)
+    assert not missing, f"{name} missing keys: {sorted(missing)}"
+    assert not extra, f"{name} has unknown keys: {sorted(extra)}"
 
 
 @pytest.mark.parametrize("path", _translation_files(), ids=lambda p: p.name)

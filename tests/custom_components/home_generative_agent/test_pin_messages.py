@@ -5,6 +5,8 @@ from string import Formatter
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from custom_components.home_generative_agent.agent.pin_messages import (
     _DEFAULT_LANGUAGE,
     _MESSAGES,
@@ -101,6 +103,18 @@ def test_czech_language_resolves_czech_string():
 def test_region_suffix_resolves_base_language():
     hass = _fake_hass("cs-CZ")
     assert pin_msg(hass, "pin_incorrect").startswith("Nesprávný PIN.")
+
+
+@pytest.mark.parametrize("language", ["zh-Hans", "zh-CN", "zh-SG", "zh"])
+def test_simplified_chinese_resolves_chinese_string(language: str):
+    hass = _fake_hass(language)
+    assert pin_msg(hass, "pin_incorrect") == "PIN 错误。操作未执行。"
+
+
+@pytest.mark.parametrize("language", ["zh-Hant", "zh-TW", "zh-HK"])
+def test_traditional_chinese_falls_back_to_english(language: str):
+    hass = _fake_hass(language)
+    assert pin_msg(hass, "pin_incorrect").startswith("Incorrect PIN.")
 
 
 def test_unknown_key_returns_the_key_itself():

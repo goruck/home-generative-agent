@@ -17,6 +17,9 @@ ignore = [
     "PLR0917", # Allow positional arguments beyond the default cap
 ]
 
+# Full-width punctuation the Simplified Chinese message tables use.
+allowed-confusables = ["，", "：", "；", "（", "）", "？"]
+
 [lint.per-file-ignores]
 "tests/**/*.py" = [
     "ANN001", # Allow untyped pytest fixture args

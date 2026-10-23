@@ -1296,13 +1296,17 @@ def _format_disarm_since(parsed: datetime, hass: HomeAssistant | None = None) ->
     """
     local = dt_util.as_local(parsed)
     local_now = dt_util.now()
-    if notif_language(hass) == "en":
+    language = notif_language(hass)
+    if language == "en":
         time_str = local.strftime("%-I:%M %p")
         date_str = local.strftime("%-d %b")
     else:
         # No platform-specific strftime flags and no English month names.
         time_str = f"{local.hour}:{local.minute:02d}"
-        date_str = f"{local.day}. {local.month}."
+        if language == "zh":
+            date_str = f"{local.month}月{local.day}日"
+        else:
+            date_str = f"{local.day}. {local.month}."
     if local.date() == local_now.date():
         return time_str
     return notif_msg(hass, "disarm_since_other_day", date=date_str, time=time_str)
