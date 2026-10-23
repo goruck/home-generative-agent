@@ -60,7 +60,16 @@ from .automation_pin import (
     iter_service_calls,
     step_targets,
 )
-from .helpers import TOOL_NAMESPACE_SEP, matches_critical_rule, rule_entity_matches
+from .helpers import (
+    BUILTIN_INTENT,
+    NOT_AN_INTENT,
+    OTHER_INTENT,
+    TOOL_NAMESPACE_SEP,
+    base_tool_name,
+    is_intent_tool,
+    matches_critical_rule,
+    rule_entity_matches,
+)
 from .rule_entities import read_switch_wrappers
 from .template_actions import (
     INLINE_STATE_KEYS,
@@ -211,6 +220,45 @@ def bare_script_tool_entity_id(
         object_id = object_id[1:]
     entity_id = f"{SCRIPT_DOMAIN}.{object_id}"
     return entity_id if states.get(entity_id) is not None else None
+
+
+def tool_args_kind(hass: HomeAssistant | None, tool_name: str) -> str:  # noqa: PLR0911
+    """
+    Return how a tool's arguments are prepared before it runs (#836).
+
+    `BUILTIN_INTENT`: one of Home Assistant's own intents, reduced to the
+    slots it reads. `OTHER_INTENT`: an intent script (including one that took
+    over a built-in intent's name) or another integration's intent, which
+    keeps its own slots but matches its targets the way the built-ins do.
+    `NOT_AN_INTENT`: a script, service or other tool, run as given.
+
+    A built-in intent's name counts as an intent script's only when the
+    intent script has that exact name, the one HA registers it under: one
+    whose name only slugifies to it ("HassTurnOn!") leaves the built-in in
+    place (#836 review).
+    """
+    if script_tool_entity_id(tool_name) is not None:
+        return NOT_AN_INTENT
+    parts = tool_name.split(TOOL_NAMESPACE_SEP)
+    if len(parts) >= _SCRIPT_TOOL_PARTS and parts[-2] == _INTENT_SCRIPT:
+        return OTHER_INTENT  # an intent script's own tool, whatever its name
+    base = base_tool_name(tool_name)
+    handlers = intent_script_handlers(hass, tool_name)
+    if is_intent_tool(tool_name):
+        if any(str(getattr(h, "intent_type", "")) == base for h in handlers):
+            return OTHER_INTENT
+        return BUILTIN_INTENT
+    if handlers:
+        return OTHER_INTENT
+    if _has_entities(hass):
+        try:
+            handlers = list(intent.async_get(cast("HomeAssistant", hass)))
+        except Exception:
+            LOGGER.exception("Could not read the intents")
+            handlers = []
+        if any(str(getattr(h, "intent_type", "")) == base for h in handlers):
+            return OTHER_INTENT
+    return NOT_AN_INTENT
 
 
 def intent_script_handlers(hass: HomeAssistant | None, tool_name: str) -> list[Any]:

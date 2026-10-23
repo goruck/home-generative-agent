@@ -380,5 +380,7 @@ async def test_the_pin_line_names_what_ha_will_run(
 
 def test_a_lock_call_keeps_floor_zero_in_the_payload() -> None:
     """HA reads floor 0 as the floor "0"; without it every lock would act."""
-    payload = helpers.minimal_payload_for_domain({"domain": ["lock"], "floor": 0})
+    payload = helpers.minimal_payload_for_domain(
+        {"domain": ["lock"], "floor": 0}, "HassTurnOff"
+    )
     assert payload["floor"] == 0

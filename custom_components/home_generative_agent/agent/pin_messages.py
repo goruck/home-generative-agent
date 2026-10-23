@@ -54,6 +54,7 @@ from .helpers import (
     intent_service_calls,
     is_actuating_intent,
     is_device_intent,
+    is_intent_tool,
     is_on_off_intent,
     minimal_payload_for_domain,
     normalize_intent_for_lock,
@@ -515,7 +516,10 @@ def _entity_friendly_name(hass: HomeAssistant | None, raw_name: Any) -> str:
 
 
 def _intent_target(
-    hass: HomeAssistant | None, tool_args: Mapping[str, Any], domain: str
+    hass: HomeAssistant | None,
+    tool_name: str,
+    tool_args: Mapping[str, Any],
+    domain: str,
 ) -> str:
     """
     Name what Home Assistant will act on for an actuating intent.
@@ -529,7 +533,7 @@ def _intent_target(
     given, and the line says so rather than naming a device it will not
     single out.
     """
-    payload = minimal_payload_for_domain(dict(tool_args))
+    payload = minimal_payload_for_domain(dict(tool_args), tool_name)
     raw_name = payload.get("name")
     name = "" if raw_name == INTENT_NAME_ALL else _slot_line(raw_name)
     area = _place(hass, payload.get("area"), "area")
@@ -664,6 +668,15 @@ def _intent_script_line(
     device.
     """
     handlers = [h for h in intent_script_handlers(hass, tool_name) if h]
+    if (
+        is_intent_tool(tool_name)
+        and TOOL_NAMESPACE_SEP + "intent_script" + (TOOL_NAMESPACE_SEP)
+        not in TOOL_NAMESPACE_SEP + tool_name
+    ):
+        # A built-in intent's tool runs an intent script only of exactly its
+        # name ("HassTurnOff!" leaves the built-in in place, #836 review).
+        base = base_tool_name(tool_name)
+        handlers = [h for h in handlers if getattr(h, "intent_type", None) == base]
     if not handlers or script_tool_entity_id(tool_name) is not None:
         return None
     # A tool another API offers under the same name is a service tool when
@@ -826,7 +839,7 @@ def _describe_line(  # noqa: PLR0911
             hass,
             "action_set_position",
             target=_intent_target(
-                hass, tool_args, _single_kind(hass, tool_name, tool_args)
+                hass, tool_name, tool_args, _single_kind(hass, tool_name, tool_args)
             ),
             position=_position_text(tool_args.get("position")),
         )
@@ -835,7 +848,7 @@ def _describe_line(  # noqa: PLR0911
             hass,
             "action_stop",
             target=_intent_target(
-                hass, tool_args, _single_kind(hass, tool_name, tool_args)
+                hass, tool_name, tool_args, _single_kind(hass, tool_name, tool_args)
             ),
         )
     if is_on_off_intent(tool_name):
@@ -847,7 +860,7 @@ def _describe_line(  # noqa: PLR0911
                 pin_msg(
                     hass,
                     on_key if turns_on else off_key,
-                    target=_intent_target(hass, tool_args, kind),
+                    target=_intent_target(hass, tool_name, tool_args, kind),
                 )
             )
         return ", ".join(parts)
@@ -865,6 +878,7 @@ def _describe_line(  # noqa: PLR0911
             ),
             target=_intent_target(
                 hass,
+                tool_name,
                 tool_args,
                 _single_kind(hass, tool_name, tool_args) or _SEVERAL_KINDS,
             ),
@@ -878,7 +892,7 @@ def _describe_line(  # noqa: PLR0911
         lines.append(_service_line(hass, tool_args, base_tool_name(tool_name)))
     line = ", ".join(dict.fromkeys(lines))
     if bare_script is not None:
-        return ", ".join([_script_line(hass, bare_script), line])
+        return ", ".join([_script_line(hass, bare_script, tool_args), line])
     return line
 
 
@@ -1208,11 +1222,10 @@ def _script_line(
     )
     if hass is None or not tool_args:
         return line
-    # The arguments as they are sent: the normal path and the confirmation
-    # both reduce them first (`minimal_payload_for_domain`).
-    sent = minimal_payload_for_domain(dict(tool_args))
+    # A script's tool is sent the arguments as given: only an intent's are
+    # reduced (#836).
     try:
-        names, others = _script_field_targets(hass, script_id, sent)
+        names, others = _script_field_targets(hass, script_id, tool_args)
     except Exception:
         # The names only add to the line: they must never cost the prompt.
         LOGGER.exception("Critical Action PIN: could not name a script's targets")

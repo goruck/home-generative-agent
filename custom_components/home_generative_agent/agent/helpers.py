@@ -902,7 +902,7 @@ def pending_action_expired(action: Mapping[str, Any], now: datetime) -> bool:
         return True
 
 
-def _request_key(action: Mapping[str, Any]) -> tuple[Any, Any, Any]:
+def _request_key(action: Mapping[str, Any]) -> tuple[Any, Any, Any, Any]:
     """
     Return what makes two pending actions the same request.
 
@@ -915,18 +915,31 @@ def _request_key(action: Mapping[str, Any]) -> tuple[Any, Any, Any]:
     if isinstance(tool_name, str) and isinstance(tool_args, dict):
         # Without hass: both actions compared were held after normalizing
         # with hass, so their stored arguments already carry the domain.
-        tool_args = normalize_intent_for_alarm(tool_name, tool_args, None)
-        tool_args = sanitize_tool_args(
-            normalize_intent_for_lock(tool_name, tool_args, None)
-        )
-        tool_args = {
-            key: value.casefold() if key == "name" and isinstance(value, str) else value
-            for key, value in tool_args.items()
-        }
+        # Read as it was held (`args_kind`): an intent script that took
+        # over a built-in's name runs its arguments as given.
+        kind = action.get("args_kind")
+        if (kind == BUILTIN_INTENT) if kind else is_intent_tool(tool_name):
+            tool_args = normalize_intent_for_alarm(tool_name, tool_args, None)
+            tool_args = sanitize_tool_args(
+                normalize_intent_for_lock(tool_name, tool_args, None)
+            )
+            tool_args = {
+                key: value.casefold()
+                if key == "name" and isinstance(value, str)
+                else value
+                for key, value in tool_args.items()
+            }
+        else:
+            # Any other tool runs with its arguments as given: a string and a
+            # list `domain`, or two spellings of a name, may run differently
+            # (#836 review).
+            tool_args = drop_empty_args(tool_args)
     automation = action.get("automation_config")
     if isinstance(automation, dict):
         automation = {key: value for key, value in automation.items() if key != "id"}
-    return tool_name, tool_args, automation
+    # The kind too: the same arguments run differently once an intent script
+    # takes over a built-in intent (#836 review).
+    return tool_name, action.get("args_kind"), tool_args, automation
 
 
 def _same_request(existing: Mapping[str, Any], action: Mapping[str, Any]) -> bool:
@@ -1340,14 +1353,48 @@ def _alarm_payload(tool_args: Mapping[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def minimal_payload_for_domain(tool_args: dict[str, Any]) -> dict[str, Any]:
+# How a tool's arguments are prepared before it runs (#836): see
+# `indirect_pin.tool_args_kind`.
+BUILTIN_INTENT = "builtin_intent"
+OTHER_INTENT = "other_intent"
+NOT_AN_INTENT = "not_an_intent"
+
+
+def is_intent_tool(tool_name: str) -> bool:
+    """Return True for one of Home Assistant's built-in intent tools."""
+    return base_tool_name(tool_name).startswith("Hass")
+
+
+def narrow_intent_args(tool_args: dict[str, Any]) -> dict[str, Any]:
     """
-    Return a reduced payload for HA services to avoid extra keys.
+    Send an entity id as the name for an intent that is not a built-in one.
+
+    An intent script matches its targets from the name, area, floor and
+    domain slots as the built-in intents do, and ignores an entity id: with a
+    domain and no name, every device of the domain matched. Its other slots
+    are its own and are kept (#836 review).
+    """
+    name, entity_id = _payload_target(tool_args)
+    if declared_domains(tool_args) and not name and entity_id:
+        return {**tool_args, "name": entity_id}
+    return tool_args
+
+
+def minimal_payload_for_domain(
+    tool_args: dict[str, Any], tool_name: str
+) -> dict[str, Any]:
+    """
+    Return the payload an intent tool is sent with, reduced to its slots.
 
     The normal tool path applies this after the critical-action guard, and
     the PIN confirmation applies it to the held call before running it, so
     the two send the same payload (the fixed line names what this sends).
+    Only Home Assistant's own intents are reduced: a script, intent script
+    or service tool reads its own arguments, and one with a `domain: lock`
+    argument lost the rest of them (#836).
     """
+    if not is_intent_tool(tool_name):
+        return tool_args
     domains = tool_args.get("domain") or []
     domains = domains if isinstance(domains, list) else [domains]
     domain = str(domains[0]).lower() if domains else ""
@@ -1439,8 +1486,8 @@ def parse_tool_response(
     return content_str, status
 
 
-def sanitize_tool_args(tool_args: dict[str, Any]) -> dict[str, Any]:
-    """Remove empty/None slot values for HA intent tools to avoid validation errors."""
+def drop_empty_args(tool_args: dict[str, Any]) -> dict[str, Any]:
+    """Remove empty/None argument values, which HA's tool schemas reject."""
     cleaned: dict[str, Any] = {}
     for key, val in tool_args.items():
         if val is None:
@@ -1450,6 +1497,12 @@ def sanitize_tool_args(tool_args: dict[str, Any]) -> dict[str, Any]:
         if isinstance(val, list) and all((not v and v != 0) for v in val):
             continue
         cleaned[key] = val
+    return cleaned
+
+
+def sanitize_tool_args(tool_args: dict[str, Any]) -> dict[str, Any]:
+    """Remove empty/None slot values for HA intent tools to avoid validation errors."""
+    cleaned = drop_empty_args(tool_args)
     if "domain" in cleaned and isinstance(cleaned["domain"], str):
         cleaned["domain"] = [cleaned["domain"]]
     return cleaned
@@ -1876,7 +1929,7 @@ def intent_target_states(
     None when the gate cannot tell (a slot it cannot read, a matcher that
     raised); empty when nothing matches or the call names no target.
     """
-    payload = minimal_payload_for_domain(dict(tool_args))
+    payload = minimal_payload_for_domain(dict(tool_args), tool_name)
     try:
         name = _slot_text(payload.get("name"))
         area = _slot_text(payload.get("area"))
