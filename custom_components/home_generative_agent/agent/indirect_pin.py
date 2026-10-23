@@ -234,6 +234,9 @@ class ToolOrigin:
     remote: bool = False
     # The remote server marks the tool read-only (MCP `readOnlyHint`).
     read_only: bool = False
+    # Offered by several APIs, a remote Home Assistant among them, with no
+    # routing to say which runs it: held, whatever it reads as (#840 review).
+    ambiguous: bool = False
 
 
 def tool_origin(
@@ -276,12 +279,19 @@ def tool_origin(
         if len(origins) == 1 or not any(o.remote for o in origins):
             return origins[0]
         remote = next(o for o in origins if o.remote)
-        return ToolOrigin(api_id=remote.api_id, api_name=remote.api_name, remote=True)
+        return ToolOrigin(
+            api_id=remote.api_id,
+            api_name=remote.api_name,
+            remote=True,
+            ambiguous=True,
+        )
     instance = apis.get(api_id)
     if instance is None:
         return ToolOrigin(api_id=api_id)
     api_name = str(getattr(getattr(instance, "api", None), "name", "") or api_id)
     tool = _find_tool(instance, tool_name)
+    # Judged once per turn on every tool each API offers; a wrapper built
+    # without that judgement (a test) is judged on the tools it offers now.
     judged = getattr(ha_llm_api, "remote_home_assistants", None)
     remote_api = (
         api_id in judged
@@ -312,8 +322,11 @@ def _is_ha_tool(tool: Any) -> bool:
 
 
 # Tools only Home Assistant offers that are neither intent nor action tools:
-# on another API, a sign of a remote Home Assistant too (#840 review).
+# from an MCP server, a sign of a remote Home Assistant too (#840 review).
+# Another local API may offer HA's own (llm_intents does), so not from one.
 _HA_ONLY_TOOL_NAMES = frozenset({"GetLiveContext", "GetDateTime"})
+# The integration Home Assistant's MCP client gives the tools it offers.
+_MCP_INTEGRATION = "mcp"
 
 
 def is_remote_home_assistant(api_id: str, instance: Any) -> bool:
@@ -321,7 +334,7 @@ def is_remote_home_assistant(api_id: str, instance: Any) -> bool:
     Return True for an API that is a remote Home Assistant (#840).
 
     One offering a tool named like Home Assistant's own intent or script
-    tools that is not one, or HA's live-context or date tool. Judged on every
+    tools that is not one, or HA's live-context or date tool over MCP. Judged on every
     tool it offers, before the user's exclusions: hiding its intents must not
     make the rest of a remote Home Assistant's tools read as this one's.
     This Home Assistant's own Assist API never is.
@@ -335,7 +348,10 @@ def is_remote_home_assistant(api_id: str, instance: Any) -> bool:
         if _is_ha_tool(inner):
             continue
         name = str(tool.name)
-        if _named_like_ha_tool(name) or base_tool_name(name) in _HA_ONLY_TOOL_NAMES:
+        if _named_like_ha_tool(name) or (
+            base_tool_name(name) in _HA_ONLY_TOOL_NAMES
+            and getattr(inner, "integration", None) == _MCP_INTEGRATION
+        ):
             return True
     return False
 

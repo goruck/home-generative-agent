@@ -66,6 +66,8 @@ LOCAL = "assist"
 class _RemoteTool(llm.Tool):
     """A tool another API runs, such as an MCP server's."""
 
+    integration = "mcp"
+
     def __init__(self, name: str, *, read_only: bool = False) -> None:
         self.name = name
         self.description = None
@@ -481,11 +483,55 @@ async def test_the_line_drops_quotes_and_caps_the_agents_words(
         "api_name": "Upstairs HA",
     }
     line = describe_pending_action(home, action)
-    assert line.startswith("run HassTurnOn (name Porch on Cabin; data \u2026; area ")
-    assert line.endswith(' on "Upstairs HA"')
-    assert line.count('"') == 2
-    assert "\n" not in line
-    assert len(line) < 220
+    assert line == (
+        "run HassTurnOn (name Porch on Cabin; area "
+        + "x" * 39
+        + '\u2026; data [entity_id lock.x]) on "Upstairs HA"'
+    )
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"name": "Door) on \uff02Kitchen HA\uff02; (domain light"},
+        {"name": "Door\u201f\u2033\u02ba on \u201cKitchen\u201d"},
+        {"name) on \uff02Kitchen\uff02 (x": "y"},
+        {"name": "Door\u202e\u200b; domain light"},
+    ],
+)
+async def test_the_agents_words_cannot_imitate_the_line(
+    home: HomeAssistant, args: dict[str, Any]
+) -> None:
+    """No quote, bracket or separator of the agent's survives (#840 review)."""
+    action = {
+        "tool_name": TURN_ON,
+        "tool_args": args,
+        "remote": True,
+        "api_name": "Cabin",
+    }
+    line = describe_pending_action(home, action)
+    inner = line.removeprefix("run HassTurnOn (").removesuffix(') on "Cabin"')
+    assert inner != line
+    for mark in '()[];"\uff02\u201c\u201d\u201f\u2033\u02ba\u202e':
+        assert mark not in inner
+
+
+async def test_a_long_slot_hides_no_other(home: HomeAssistant) -> None:
+    """Every argument is named, the ones saying what it acts on first."""
+    action = {
+        "tool_name": "intent__HassTurnOff",
+        "tool_args": {
+            "area": "a" * 60,
+            "floor": "f" * 60,
+            "preferred_area_id": "p" * 60,
+            "domain": "lock",
+        },
+        "remote": True,
+        "api_name": "Cabin",
+    }
+    line = describe_pending_action(home, action)
+    assert line.startswith("run HassTurnOff (domain lock; area ")
+    assert "preferred_area_id " in line
 
 
 async def test_hiding_a_remote_servers_intents_keeps_it_remote() -> None:
@@ -502,6 +548,10 @@ def test_a_server_is_judged_by_every_tool_it_offers() -> None:
     """HA-only tools mark a remote Home Assistant; HA's own API never is one."""
     remote = _Instance("Cabin", [_RemoteTool("GetDateTime"), _RemoteTool("play")])
     assert is_remote_home_assistant(REMOTE, remote) is True
+    # HA's own live-context tool, reused by another local API (llm_intents).
+    reused = _RemoteTool("GetLiveContext")
+    reused.integration = "homeassistant"
+    assert is_remote_home_assistant("llm_intents", _Instance("x", [reused])) is False
     plain = _Instance("Time", [_RemoteTool("get_current_time")])
     assert is_remote_home_assistant(REMOTE, plain) is False
     # A plain tool named like an intent in this house's own Assist API.
@@ -519,4 +569,16 @@ async def test_an_unrouted_name_on_several_apis_is_held(home: HomeAssistant) -> 
     assert origin.read_only is False
     ctx = _ctx(home, api)
     redirect, _ = _prepare_tool_args("calendar__get_events", {}, ctx, {"id": "c1"})
+    assert redirect is not None
+
+
+async def test_an_unrouted_name_here_and_there_is_held(home: HomeAssistant) -> None:
+    """A read-only name does not clear it: either side could run it."""
+    name = "intent__HassTimerStatus"
+    api = _api([name], [_local_intent(name)], read_only=(name,))
+    api.routing_map = {}
+    origin = tool_origin(api, name)
+    assert origin.ambiguous is True
+    ctx = _ctx(home, api)
+    redirect, _ = _prepare_tool_args(name, {}, ctx, {"id": "c1"})
     assert redirect is not None

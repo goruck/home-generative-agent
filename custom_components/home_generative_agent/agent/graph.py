@@ -3699,6 +3699,8 @@ def _is_critical_action(  # noqa: PLR0911, PLR0912
     # A remote Home Assistant's tool (#840): its devices, scripts and
     # automations cannot be seen from here, so any call that can change
     # something is held.
+    if origin is not None and origin.ambiguous:
+        return True
     if origin is not None and origin.remote:
         return not _remote_call_is_read_only(
             tool_name, tool_args, read_only_hint=origin.read_only

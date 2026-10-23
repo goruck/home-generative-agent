@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
@@ -411,40 +412,66 @@ _SEVERAL_KINDS = "*"
 _KIND_KEYS = {"lock": "kind_lock", "cover": "kind_cover", "valve": "kind_valve"}
 
 
-# Longest argument value, and all arguments, a remote call's line repeats.
+# Longest argument value a remote call's line repeats.
 _REMOTE_ARG_MAX_LEN = 40
-_REMOTE_ARGS_MAX_LEN = 160
-# Quote marks are dropped from a value the agent wrote, so it cannot close the
-# quoted server name or fake another part of the line.
-_QUOTES = str.maketrans("", "", "\"'`\u201c\u201d\u201e\u2018\u2019\u00ab\u00bb")
+# The slots that say what a call acts on, shown first in a remote call's line.
+_REMOTE_FIRST_SLOTS = ("name", "domain", "device_class", "area", "floor")
+# Marks kept in a remote call's arguments besides letters, digits and spaces:
+# none can quote, bracket or separate, so the agent's text cannot imitate the
+# line around it (#840 review).
+_REMOTE_ARG_MARKS = frozenset("-_.:/+%#@&")
+# Modifier letters that read as quote marks (MODIFIER LETTER DOUBLE PRIME and
+# the like): letters to Unicode, dropped all the same.
+_QUOTE_LIKE_LETTERS = frozenset("\u02b9\u02ba\u02bb\u02bc\u02bd\u02c8\u02ee")
+
+
+def _is_plain_letter(ch: str) -> bool:
+    """Return True for a letter or digit that cannot read as a quote mark."""
+    return unicodedata.category(ch)[0] in "LN" and ch not in _QUOTE_LIKE_LETTERS
+
+
+def _remote_text(value: Any) -> str:
+    """Return agent-written text with only letters, digits, spaces and marks."""
+    kept = "".join(
+        ch if ch in _REMOTE_ARG_MARKS or _is_plain_letter(ch) else " "
+        for ch in str(value)
+    )
+    return _one_line(kept, _REMOTE_ARG_MAX_LEN, mark_cut=True)
+
+
+def _remote_value(value: Any, *, depth: int = 0) -> str:
+    """Return one argument's value; a nested one one level down, then a cut."""
+    if isinstance(value, Mapping):
+        if depth:
+            return _ELLIPSIS
+        inner = ", ".join(
+            f"{_remote_text(k)} {_remote_value(v, depth=1)}" for k, v in value.items()
+        )
+        return f"[{inner}]"
+    if isinstance(value, list | tuple):
+        if depth and any(isinstance(v, Mapping | list | tuple) for v in value):
+            return _ELLIPSIS
+        return ", ".join(_remote_value(v, depth=depth + 1) for v in value)
+    return _remote_text(value)
 
 
 def _remote_args_text(tool_args: Mapping[str, Any]) -> str:
     """
-    Return a remote call's arguments as one bounded line: `name Front Door`.
+    Return a remote call's arguments as one line: `name Front Door; domain lock`.
 
-    The agent wrote them, so quotes and control characters are dropped and
-    each value and the whole line are capped, a cut marked with an ellipsis.
-    A nested value reads as an ellipsis: what it holds is not shown.
+    The agent wrote them, so only letters, digits, spaces and a few marks are
+    kept (no quotes, brackets or semicolons), each value is capped with an
+    ellipsis, and every argument is named, the ones saying what the call acts
+    on first, so none is hidden behind a long one (#840 review).
     """
-    parts: list[str] = []
-    for key, value in tool_args.items():
-        if value is None or value in ("", []):
-            continue
-        flat = value
-        if isinstance(value, list) and not any(
-            isinstance(v, Mapping | list) for v in value
-        ):
-            flat = ", ".join(str(v) for v in value)
-        if isinstance(flat, Mapping | list):
-            text = _ELLIPSIS
-        else:
-            text = _one_line(
-                str(flat).translate(_QUOTES), _REMOTE_ARG_MAX_LEN, mark_cut=True
-            )
-        label = _one_line(str(key).translate(_QUOTES), _REMOTE_ARG_MAX_LEN)
-        parts.append(f"{label} {text}")
-    return _one_line("; ".join(parts), _REMOTE_ARGS_MAX_LEN, mark_cut=True)
+    keys = [k for k in _REMOTE_FIRST_SLOTS if k in tool_args]
+    keys += [k for k in tool_args if k not in keys]
+    parts = [
+        f"{_remote_text(key)} {_remote_value(tool_args[key])}"
+        for key in keys
+        if tool_args[key] not in (None, "", [], {})
+    ]
+    return "; ".join(parts)
 
 
 def _one_line(value: Any, limit: int, *, mark_cut: bool = False) -> str:
