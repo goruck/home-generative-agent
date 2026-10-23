@@ -15,6 +15,7 @@ from urllib.parse import unquote
 
 import aiofiles
 import httpx
+import psycopg
 import voluptuous as vol
 from homeassistant.components import media_source
 from homeassistant.components.camera.const import DOMAIN as CAMERA_DOMAIN
@@ -250,6 +251,21 @@ from .core.db_utils import parse_postgres_uri
 from .core.embedding_model_guard import (
     async_clear_ollama_embedding_model_issue,
     async_sync_ollama_embedding_model_issue,
+)
+from .core.embedding_store import (
+    CHECKPOINT_MIGRATIONS,
+    CHECKPOINT_TABLES,
+    MIGRATION_RECORDS,
+    STORE_MIGRATIONS,
+    STORE_TABLES,
+    VECTOR_MIGRATIONS,
+    VECTOR_TABLES,
+    async_clear_embedding_size_issue,
+    async_forget_migrations,
+    async_store_tables,
+    async_sync_embedding_size_issue,
+    embedding_chain_providers,
+    missing_tables,
 )
 from .core.face_guard import (
     async_check_unknown_person_rules,
@@ -1465,9 +1481,30 @@ async def _bootstrap_db_once(
     entry: ConfigEntry,
     store: AsyncPostgresStore,
     checkpointer: AsyncPostgresSaver,
+    pool: AsyncConnectionPool[AsyncConnection[DictRow]],
 ) -> None:
-    """Bootstrap database if needed."""
+    """
+    Bootstrap database if needed.
+
+    Again when its tables are gone after it was bootstrapped, such as a
+    Database subentry pointed at a fresh database or a dropped table (#760).
+    """
     if entry.data.get(CONF_DB_BOOTSTRAPPED):
+        tables = await async_store_tables(pool)
+        missing = missing_tables(tables, (*STORE_TABLES, *CHECKPOINT_TABLES))
+        if tables is None or not missing:
+            return
+        LOGGER.warning(
+            "Memory store tables %s are missing (a new or reset database?); "
+            "creating them again.",
+            ", ".join(missing),
+        )
+        await _async_rebuild_tables(
+            pool,
+            tables,
+            (STORE_MIGRATIONS, CHECKPOINT_MIGRATIONS),
+            (store.setup, checkpointer.setup),
+        )
         return
 
     await store.setup()
@@ -1482,11 +1519,29 @@ async def _bootstrap_vectors_once(
     hass: HomeAssistant,
     entry: ConfigEntry,
     store: AsyncPostgresStore,
+    pool: AsyncConnectionPool[AsyncConnection[DictRow]],
 ) -> None:
-    """Bootstrap vector index if needed."""
+    """
+    Bootstrap vector index if needed.
+
+    Again when the vector table is gone after it was bootstrapped, such as
+    one dropped to change its size (#760): it is created at the configured
+    size. langgraph skips the vector migrations it has recorded, so they are
+    forgotten first.
+    """
     if not store.index_config:
         return
     if entry.data.get(CONF_VECTORS_BOOTSTRAPPED):
+        tables = await async_store_tables(pool)
+        if tables is None or not missing_tables(tables, VECTOR_TABLES):
+            return
+        LOGGER.warning(
+            "The memory store's vector table is missing; creating it again for "
+            "%s-dimension vectors. Memories saved before it was removed are "
+            "kept but are not found by memory search until saved again.",
+            store.index_config.get("dims"),
+        )
+        await _async_rebuild_tables(pool, tables, (VECTOR_MIGRATIONS,), (store.setup,))
         return
 
     await store.setup()
@@ -1494,6 +1549,47 @@ async def _bootstrap_vectors_once(
     hass.config_entries.async_update_entry(
         entry, data={**entry.data, CONF_VECTORS_BOOTSTRAPPED: True}
     )
+
+
+async def _async_rebuild_tables(
+    pool: AsyncConnectionPool[AsyncConnection[DictRow]],
+    tables: frozenset[str],
+    records: tuple[str, ...],
+    setups: tuple[Callable[[], Awaitable[None]], ...],
+) -> None:
+    """
+    Create missing memory store tables again (#760).
+
+    A setup that fails is logged and the next one still runs, so a store that
+    cannot be rebuilt (a vector size its index cannot hold) does not keep the
+    checkpointer's tables from coming back, and the integration still loads:
+    a missing table only ever failed the writes to it. A lost connection is
+    raised, for setup's retry.
+    """
+    names = tuple(name for record in records for name in MIGRATION_RECORDS[record])
+    steps: tuple[Callable[[], Awaitable[None]], ...] = (
+        partial(async_forget_migrations, pool, tables, records),
+        *setups,
+    )
+    for step in steps:
+        try:
+            await step()
+        except psycopg.Error as err:
+            if is_connection_failure(err):
+                raise
+            LOGGER.error(  # noqa: TRY400
+                "Could not create memory store tables again, so writes to them "
+                "fail: %s",
+                err,
+            )
+            if step is steps[0]:
+                return
+    if missing := missing_tables(await async_store_tables(pool), names):
+        LOGGER.error(
+            "Memory store tables %s are still missing after setup, so writes "
+            "to them fail.",
+            ", ".join(missing),
+        )
 
 
 class NullChat:
@@ -2665,6 +2761,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         else:
             embedding_model = None
 
+    # Read by the embedding-size repair check at the end of setup (#760).
+    embedding_size_providers = embedding_chain_providers(
+        _emb_fb,
+        _embedding_instance_for_provider,
+        primary_type=embedding_provider,
+        primary_embeddings=embedding_model,
+    )
+
     embedding_dims = _configured_embedding_dims(options)
     if embedding_model is None:
         LOGGER.warning(
@@ -2710,8 +2814,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             # The schema needs pgvector in this database (#756).
             await async_ensure_pgvector(pool)
             # First-time setup (if needed)
-            await _bootstrap_db_once(hass, entry, store, checkpointer)
-            await _bootstrap_vectors_once(hass, entry, store)
+            await _bootstrap_db_once(hass, entry, store, checkpointer, pool)
+            await _bootstrap_vectors_once(hass, entry, store, pool)
 
             # Migrate person gallery DB schema (if needed)
             try:
@@ -4371,6 +4475,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         ),
         name="hga_ollama_embedding_model_check",
     )
+    # Same placement, same reason, for the other embedding providers: one
+    # embedding from an OpenAI-compatible server, the others' size is fixed
+    # (#760).
+    entry.async_create_background_task(
+        hass,
+        async_sync_embedding_size_issue(
+            hass,
+            entry.entry_id,
+            providers=embedding_size_providers,
+            pool=pool,
+        ),
+        name="hga_embedding_size_check",
+    )
 
     # Same placement, same reason: four Sentinel rule ids (five evaluators) key
     # on a positive "Unknown Person" label that only the face pipeline writes,
@@ -4528,6 +4645,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
     # setup re-raises it if the database is still missing.
     async_clear_database_issue(hass, entry.entry_id)
     async_clear_ollama_embedding_model_issue(hass, entry.entry_id)
+    async_clear_embedding_size_issue(hass, entry.entry_id)
     # A disabled entry runs no rules at all, so singling four out is wrong the
     # same way. A reload (every Sentinel config save) keeps it: deleting it
     # would also delete the user's dismissal, so a dismissed notice came back
@@ -4547,6 +4665,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> None
     """
     async_clear_database_issue(hass, entry.entry_id)
     async_clear_ollama_embedding_model_issue(hass, entry.entry_id)
+    async_clear_embedding_size_issue(hass, entry.entry_id)
     async_clear_pin_pipeline_issue(hass, entry.entry_id)
     async_clear_unknown_person_issue(hass, entry.entry_id)
 
