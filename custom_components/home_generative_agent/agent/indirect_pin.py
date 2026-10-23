@@ -262,28 +262,33 @@ def tool_origin(
         routing = getattr(ha_llm_api, "routing_map", None)
         api_id = routing.get(tool_name) if isinstance(routing, Mapping) else None
     if api_id is None:
-        # The wrapper tries each API offering the name in turn, so the call
-        # is read as the first one's, and as remote if any of them is.
-        holders = [
-            key
+        # The wrapper tries each API offering the name in turn, until one
+        # runs it, so which one runs it is not known ahead. The call is read
+        # as the first one's; if any of them is a remote Home Assistant, as a
+        # remote call that is never read-only (#840 review).
+        origins = [
+            tool_origin(ha_llm_api, tool_name, key)
             for key, instance in apis.items()
             if _find_tool(instance, tool_name) is not None
         ]
-        if not holders:
+        if not origins:
             return ToolOrigin()
-        origins = [tool_origin(ha_llm_api, tool_name, key) for key in holders]
-        remote = next((o for o in origins if o.remote), None)
-        return remote or origins[0]
+        if len(origins) == 1 or not any(o.remote for o in origins):
+            return origins[0]
+        remote = next(o for o in origins if o.remote)
+        return ToolOrigin(api_id=remote.api_id, api_name=remote.api_name, remote=True)
     instance = apis.get(api_id)
     if instance is None:
         return ToolOrigin(api_id=api_id)
     api_name = str(getattr(getattr(instance, "api", None), "name", "") or api_id)
     tool = _find_tool(instance, tool_name)
-    remote = (
-        tool is not None
-        and not _is_ha_tool(tool)
-        and _is_remote_home_assistant(instance)
+    judged = getattr(ha_llm_api, "remote_home_assistants", None)
+    remote_api = (
+        api_id in judged
+        if isinstance(judged, frozenset | set)
+        else is_remote_home_assistant(api_id, instance)
     )
+    remote = tool is not None and not _is_ha_tool(tool) and remote_api
     read_only = bool(getattr(getattr(tool, "annotations", None), "read_only", False))
     return ToolOrigin(
         api_id=api_id, api_name=api_name, remote=remote, read_only=read_only
@@ -306,13 +311,31 @@ def _is_ha_tool(tool: Any) -> bool:
     return isinstance(tool, llm.IntentTool | llm.ActionTool)
 
 
-def _is_remote_home_assistant(instance: Any) -> bool:
-    """Return True for an API offering a Home Assistant tool it does not run."""
+# Tools only Home Assistant offers that are neither intent nor action tools:
+# on another API, a sign of a remote Home Assistant too (#840 review).
+_HA_ONLY_TOOL_NAMES = frozenset({"GetLiveContext", "GetDateTime"})
+
+
+def is_remote_home_assistant(api_id: str, instance: Any) -> bool:
+    """
+    Return True for an API that is a remote Home Assistant (#840).
+
+    One offering a tool named like Home Assistant's own intent or script
+    tools that is not one, or HA's live-context or date tool. Judged on every
+    tool it offers, before the user's exclusions: hiding its intents must not
+    make the rest of a remote Home Assistant's tools read as this one's.
+    This Home Assistant's own Assist API never is.
+    """
+    if api_id == llm.LLM_API_ASSIST:
+        return False
     for tool in getattr(instance, "tools", None) or []:
         inner = tool
         while isinstance(inner, llm.NamespacedTool):
             inner = inner.tool
-        if not _is_ha_tool(inner) and _named_like_ha_tool(str(tool.name)):
+        if _is_ha_tool(inner):
+            continue
+        name = str(tool.name)
+        if _named_like_ha_tool(name) or base_tool_name(name) in _HA_ONLY_TOOL_NAMES:
             return True
     return False
 

@@ -194,6 +194,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "target_and_others": "{targets} and other devices",
         "target_unnamed_devices": "devices it does not name",
         "action_remote": 'run {tool} on "{api}"',
+        "action_remote_args": 'run {tool} ({args}) on "{api}"',
         # What the agent passed to a script's device fields (#787).
         "action_script_targets": "{action} ({targets})",
         "action_unnamed_target": "an unnamed device",
@@ -332,6 +333,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "target_and_others": "{targets} a další zařízení",
         "target_unnamed_devices": "zařízení, která nejmenuje",
         "action_remote": "spustit {tool} na „{api}“",
+        "action_remote_args": "spustit {tool} ({args}) na „{api}“",
         "action_script_targets": "{action} ({targets})",
         "action_unnamed_target": "nepojmenované zařízení",
         "target_named": "„{name}“",
@@ -407,6 +409,42 @@ _DEFAULT_VERBS = ("action_turn_on", "action_turn_off")
 # The kind of an action over several kinds of device, named "every device".
 _SEVERAL_KINDS = "*"
 _KIND_KEYS = {"lock": "kind_lock", "cover": "kind_cover", "valve": "kind_valve"}
+
+
+# Longest argument value, and all arguments, a remote call's line repeats.
+_REMOTE_ARG_MAX_LEN = 40
+_REMOTE_ARGS_MAX_LEN = 160
+# Quote marks are dropped from a value the agent wrote, so it cannot close the
+# quoted server name or fake another part of the line.
+_QUOTES = str.maketrans("", "", "\"'`\u201c\u201d\u201e\u2018\u2019\u00ab\u00bb")
+
+
+def _remote_args_text(tool_args: Mapping[str, Any]) -> str:
+    """
+    Return a remote call's arguments as one bounded line: `name Front Door`.
+
+    The agent wrote them, so quotes and control characters are dropped and
+    each value and the whole line are capped, a cut marked with an ellipsis.
+    A nested value reads as an ellipsis: what it holds is not shown.
+    """
+    parts: list[str] = []
+    for key, value in tool_args.items():
+        if value is None or value in ("", []):
+            continue
+        flat = value
+        if isinstance(value, list) and not any(
+            isinstance(v, Mapping | list) for v in value
+        ):
+            flat = ", ".join(str(v) for v in value)
+        if isinstance(flat, Mapping | list):
+            text = _ELLIPSIS
+        else:
+            text = _one_line(
+                str(flat).translate(_QUOTES), _REMOTE_ARG_MAX_LEN, mark_cut=True
+            )
+        label = _one_line(str(key).translate(_QUOTES), _REMOTE_ARG_MAX_LEN)
+        parts.append(f"{label} {text}")
+    return _one_line("; ".join(parts), _REMOTE_ARGS_MAX_LEN, mark_cut=True)
 
 
 def _one_line(value: Any, limit: int, *, mark_cut: bool = False) -> str:
@@ -821,14 +859,18 @@ def _describe_line(  # noqa: PLR0911
 
     if action.get("remote"):
         # A remote Home Assistant's tool (#840): its devices cannot be named
-        # from here, and the model's words are not repeated, so the line names
-        # the tool and the API that runs it.
+        # from here, so the line names the tool, the server that runs it, and
+        # the arguments the call sends there, as the agent wrote them (#840
+        # review): the user sees what the PIN approves.
+        raw = action.get("tool_args")
+        args = _remote_args_text(raw if isinstance(raw, Mapping) else {})
         return pin_msg(
             hass,
-            "action_remote",
+            "action_remote_args" if args else "action_remote",
             tool=sanitize_tool_text(
                 base_tool_name(tool_name), limit=_ACTION_SERVICE_MAX_LEN
             ),
+            args=args,
             api=_one_line(
                 action.get("api_name") or action.get("api_id") or "",
                 _ACTION_TARGET_MAX_LEN,

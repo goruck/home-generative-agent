@@ -36,6 +36,7 @@ from custom_components.home_generative_agent.agent.helpers import (
 )
 from custom_components.home_generative_agent.agent.indirect_pin import (
     ToolOrigin,
+    is_remote_home_assistant,
     tool_args_kind,
     tool_origin,
 )
@@ -215,6 +216,12 @@ async def _answer_pin(home: HomeAssistant, ctx: Any, api: Any) -> str:
         # Not marked read-only, whatever its name: no shortcut past the check.
         ("GetLiveContext", {}),
         ("intent_script__GetLiveContext", {}),
+        # Changes on the remote side, though this house lets its own through.
+        ("todo__HassListAddItem", {"name": "Groceries", "item": "Milk"}),
+        ("todo__HassListRemoveItem", {"name": "Groceries", "item": "Milk"}),
+        ("assist_satellite__HassBroadcast", {"message": "Hello"}),
+        ("intent__HassCancelAllTimers", {}),
+        ("intent__HassStartTimer", {"minutes": 5}),
     ],
 )
 async def test_a_remote_change_is_held(
@@ -233,9 +240,8 @@ async def test_a_remote_change_is_held(
     line = describe_pending_action(home, action)
     assert ' on "Upstairs HA"' in line
     assert line.startswith("run ")
-    # The model's words are not repeated, and this house's devices not named.
-    assert "Front Door" not in line
-    assert "Garage Door" not in line
+    # This house's devices are not named: the light here is not the door.
+    assert "light.garage_door" not in line
 
 
 @pytest.mark.parametrize(
@@ -244,7 +250,7 @@ async def test_a_remote_change_is_held(
         ("intent__HassGetState", {"name": "Front Door"}),
         ("HassGetWeather", {}),
         ("intent__HassNevermind", {}),
-        ("intent__HassStartTimer", {"minutes": 5}),
+        ("intent__HassTimerStatus", {}),
         # Marked read-only by the remote server.
         ("GetLiveContext", {}),
         ("calendar__get_events", {"calendar": "Home"}),
@@ -443,3 +449,74 @@ async def test_a_request_sent_to_another_home_assistant_is_another_request(
             assert action.get("disclosed") is not True
             assert action.get("reply_turn") != "turn2"
     assert down.calls == []
+
+
+async def test_the_line_shows_what_the_call_sends(home: HomeAssistant) -> None:
+    """The user sees the arguments the remote side gets (#840 review)."""
+    ctx = _ctx(home, _api(["intent__HassTurnOff"]))
+    _prepare_tool_args(
+        "intent__HassTurnOff",
+        {"name": "Front Door", "domain": ["lock"]},
+        ctx,
+        {"id": "c1"},
+    )
+    (action,) = ctx.pending_actions.values()
+    assert describe_pending_action(home, action) == (
+        'run HassTurnOff (name Front Door; domain lock) on "Upstairs HA"'
+    )
+
+
+async def test_the_line_drops_quotes_and_caps_the_agents_words(
+    home: HomeAssistant,
+) -> None:
+    """Text the agent wrote cannot close the server's name or run on."""
+    action = {
+        "tool_name": TURN_ON,
+        "tool_args": {
+            "name": 'Porch" on "Cabin\u201d\n',
+            "data": {"entity_id": "lock.x"},
+            "area": "x" * 200,
+        },
+        "remote": True,
+        "api_name": "Upstairs HA",
+    }
+    line = describe_pending_action(home, action)
+    assert line.startswith("run HassTurnOn (name Porch on Cabin; data \u2026; area ")
+    assert line.endswith(' on "Upstairs HA"')
+    assert line.count('"') == 2
+    assert "\n" not in line
+    assert len(line) < 220
+
+
+async def test_hiding_a_remote_servers_intents_keeps_it_remote() -> None:
+    """The server is judged before the user's exclusions (#840 review)."""
+    api = _api(["open_garage_door"], ha_server=False)
+    # Judged on its full list, which offered an intent the user then hid.
+    api.remote_home_assistants = frozenset({REMOTE})
+    assert tool_origin(api, "open_garage_door").remote is True
+    api.remote_home_assistants = frozenset()
+    assert tool_origin(api, "open_garage_door").remote is False
+
+
+def test_a_server_is_judged_by_every_tool_it_offers() -> None:
+    """HA-only tools mark a remote Home Assistant; HA's own API never is one."""
+    remote = _Instance("Cabin", [_RemoteTool("GetDateTime"), _RemoteTool("play")])
+    assert is_remote_home_assistant(REMOTE, remote) is True
+    plain = _Instance("Time", [_RemoteTool("get_current_time")])
+    assert is_remote_home_assistant(REMOTE, plain) is False
+    # A plain tool named like an intent in this house's own Assist API.
+    assist = _Instance(LOCAL, [_RemoteTool("custom__HassPing")])
+    assert is_remote_home_assistant(llm.LLM_API_ASSIST, assist) is False
+
+
+async def test_an_unrouted_name_on_several_apis_is_held(home: HomeAssistant) -> None:
+    """Which API runs it is not known, so a read-only mark does not count."""
+    api = _api(["calendar__get_events"], read_only=("calendar__get_events",))
+    api.apis[LOCAL].tools = [_RemoteTool("calendar__get_events")]
+    api.routing_map = {}
+    origin = tool_origin(api, "calendar__get_events")
+    assert origin.remote is True
+    assert origin.read_only is False
+    ctx = _ctx(home, api)
+    redirect, _ = _prepare_tool_args("calendar__get_events", {}, ctx, {"id": "c1"})
+    assert redirect is not None

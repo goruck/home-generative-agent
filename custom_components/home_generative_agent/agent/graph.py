@@ -96,7 +96,6 @@ from .helpers import (
     CONFIRM_TOOL_NAME,
     INTENT_NAME_ALL,
     PIN_REFUSAL_ENDS_TURN,
-    READ_ONLY_INTENTS,
     REMOTE_TOOL,
     active_llm_api_ids,
     base_tool_name,
@@ -692,6 +691,23 @@ def _is_live_context_tool(name: str) -> bool:
     return base_tool_name(name) == LIVE_CONTEXT_TOOL
 
 
+# The intents that only read, on a remote Home Assistant: a call to one that
+# sends no read-only mark is not held. Narrower than READ_ONLY_INTENTS, which
+# lets this Home Assistant's lists, timers and broadcasts through: on a remote
+# one, every change is held (#840 review).
+_REMOTE_READ_ONLY_INTENTS = frozenset(
+    {
+        "HassGetState",
+        "HassGetWeather",
+        "HassGetCurrentDate",
+        "HassGetCurrentTime",
+        "HassClimateGetTemperature",
+        "HassTimerStatus",
+        "HassShoppingListLastItems",
+        "HassNevermind",
+        "HassRespond",
+    }
+)
 # A timer's slot holding a command the timer runs when it finishes.
 _START_TIMER_INTENT = "HassStartTimer"
 _TIMER_COMMAND_SLOT = "conversation_command"
@@ -3779,7 +3795,9 @@ def _remote_call_is_read_only(
         and str(tool_args.get(_TIMER_COMMAND_SLOT) or "").strip()
     ):
         return False
-    return read_only_hint or (is_intent_tool(tool_name) and base in READ_ONLY_INTENTS)
+    return read_only_hint or (
+        is_intent_tool(tool_name) and base in _REMOTE_READ_ONLY_INTENTS
+    )
 
 
 def _bare_service_is_critical(  # noqa: PLR0913

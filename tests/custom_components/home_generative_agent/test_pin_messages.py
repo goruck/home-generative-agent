@@ -41,6 +41,7 @@ _DUMMY_KWARGS: dict[str, Any] = {
     "states": "states",
     "api": "api",
     "tool": "tool",
+    "args": "args",
 }
 
 
