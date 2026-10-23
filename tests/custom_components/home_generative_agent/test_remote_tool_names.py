@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import homeassistant.util.dt as dt_util
 import pytest
+import voluptuous as vol
 from homeassistant.components.homeassistant.exposed_entities import (
     async_expose_entity,
 )
@@ -29,11 +30,15 @@ from langchain_core.messages import HumanMessage
 
 from custom_components.home_generative_agent.agent.graph import (
     RawTool,
+    _append_history_tool,
     _append_included_tools,
     _format_and_dedupe_tools,
     _get_held_action_tools,
+    _get_rag_retrieved_tools,
+    _get_tool_by_name,
     _is_critical_action,
     _open_state_args,
+    _open_state_live_context_normalization_context,
     _prepare_tool_args,
     _retrieve_tools,
 )
@@ -461,3 +466,170 @@ def test_the_server_name_in_a_description_is_one_clean_line() -> None:
     )
     description = selected[0]["function"]["description"]
     assert description.startswith("[Up stairs? HA, another Home Assistant]")
+
+
+# ----- Review cycle 2 -----
+
+
+async def test_a_remote_only_setup_still_gets_turn_on_and_live_context() -> None:
+    """With no Assist API, the remote house's own are force-bound, renamed."""
+    names = [TURN_ON, "intent__HassTurnOff", "intent__HassMediaPause", LIVE_CTX]
+    api = _two_houses([], names)
+    del api.apis[LOCAL]
+    api.tool_aliases = build_remote_aliases(api)
+    rows = [_Item(n, REMOTE) for n in names]
+    config = _retrieval_config(api)
+    config["configurable"]["options"]["llm_hass_api"] = [REMOTE]
+    result = await _retrieve_tools(
+        _state("open the study shade"),
+        config,
+        store=cast("Any", _Store([_Item("intent__HassMediaPause", REMOTE)], rows)),
+    )
+    routing = result["tool_routing_map"]
+    assert routing.get(REMOTE_TURN_ON) == REMOTE
+    assert routing.get(f"upstairs_ha__{LIVE_CTX}") == REMOTE
+
+
+async def test_two_plain_servers_namesakes_take_one_slot() -> None:
+    """Without a remote Home Assistant, a shared name still takes one slot."""
+    api = _Wrapper()
+    api.remote_home_assistants = frozenset()
+    shared = ["search", "fetch", "a", "b", "c", "d"]
+    api.apis = {
+        "mcp-x": _Instance("X", [_RemoteTool(n) for n in shared]),
+        "mcp-y": _Instance("Y", [_RemoteTool(n) for n in shared]),
+    }
+    found = [_Item(n, a, 0.9 - i / 100) for i, n in enumerate(shared) for a in api.apis]
+    config = _retrieval_config(api)
+    config["configurable"]["options"]["llm_hass_api"] = list(api.apis)
+    tools, _ = await _get_rag_retrieved_tools(
+        cast("Any", _Store(found, found)), config, "query", set(api.apis), None
+    )
+    assert len({t["name"] for t in tools}) == len(tools) == 5
+
+
+async def test_a_held_call_runs_by_its_own_name_after_a_rename(
+    hass: HomeAssistant,
+) -> None:
+    """A second server named alike changes the alias; the held call still runs."""
+    assert await async_setup_component(hass, "homeassistant", {})
+    api = _wrapper()
+    api.tool_aliases = build_remote_aliases(api)
+    ctx = cast(
+        "Any",
+        SimpleNamespace(
+            hass=hass,
+            config={"configurable": {"thread_id": "t1"}},
+            critical_actions=RECOMMENDED_CRITICAL_ACTIONS,
+            pin_enabled=True,
+            pin_hash="hash",
+            pin_salt="salt",
+            pending_actions={},
+            ha_llm_api=api,
+        ),
+    )
+    redirect, _ = _prepare_tool_args(
+        REMOTE_TURN_ON, {"name": "Porch"}, ctx, {"id": "c1"}
+    )
+    assert redirect is not None
+    ((action_id, action),) = ctx.pending_actions.items()
+    action.update(user="u1", thread_id="conv1", reply_turn="turn2")
+    # Before the reply, a second "Upstairs HA" joins: every alias changes.
+    api.apis["mcp-upstairs-2"] = _Instance("Upstairs HA", [_RemoteTool(TURN_ON)])
+    api.remote_home_assistants = frozenset({REMOTE, "mcp-upstairs-2"})
+    api.tool_aliases = build_remote_aliases(api)
+    assert api.tool_aliases[(REMOTE, TURN_ON)] != REMOTE_TURN_ON
+    hashed, salt = hash_pin("1234")
+    result = await confirm_tool(
+        action_id,
+        "1234",
+        config={
+            "configurable": {
+                "options": {
+                    CONF_CRITICAL_ACTION_PIN_HASH: hashed,
+                    CONF_CRITICAL_ACTION_PIN_SALT: salt,
+                },
+                "pending_actions": ctx.pending_actions,
+                "user_id": "u1",
+                "thread_id": "conv1",
+                "pin_reply": PinReply("1234", turn_id="turn2"),
+                "ha_llm_api": api,
+                "hass": hass,
+            }
+        },
+        store=None,
+    )
+    assert json.loads(result).get("status") == "completed"
+    assert cast("_Instance", api.apis[REMOTE]).calls == [(TURN_ON, {"name": "Porch"})]
+
+
+async def test_hgas_own_history_tool_is_bound_beside_a_remote_namesake() -> None:
+    """A remote server's get_entity_history does not stand in for HGA's."""
+    api = _two_houses([], ["get_entity_history"])
+    local = _Item("get_entity_history", "hga_local")
+    remote = _Item("get_entity_history", REMOTE)
+    config = _retrieval_config(api)
+    config["configurable"]["options"]["llm_hass_api"] = [REMOTE]
+    candidates = await _append_history_tool(
+        [cast("Any", dict(remote.value))],
+        cast("Any", _Store([], [local, remote])),
+        config,
+        "what happened to the porch light yesterday",
+        [HumanMessage(content="what happened to the porch light yesterday")],
+        None,
+    )
+    assert ("get_entity_history", "hga_local") in {
+        (t["name"], t["api_id"]) for t in candidates
+    }
+
+
+def test_a_renamed_tool_never_lands_on_a_taken_name() -> None:
+    """Even the hashed name is retried until it is free."""
+    taken = remote_tool_name("Intent", "HassTurnOn", REMOTE)
+    api = _Wrapper()
+    api.apis[LOCAL].tools = [_local_intent(TURN_ON), _local_intent(taken)]
+    api.apis[REMOTE] = _Instance("Intent", [_RemoteTool("HassTurnOn")])
+    alias = build_remote_aliases(api)[(REMOTE, "HassTurnOn")]
+    assert alias not in {TURN_ON, taken}
+
+
+def test_the_open_state_rewrite_takes_this_houses_call() -> None:
+    """A remote GetLiveContext call first does not take this house's turn."""
+    api = _two_houses([LIVE_CTX], [LIVE_CTX])
+    remote_name = build_remote_aliases(api)[(REMOTE, LIVE_CTX)]
+    api.routing_map = {remote_name: REMOTE, LIVE_CTX: LOCAL}
+    remote_call = {"name": remote_name, "args": {"name": "Window"}, "id": "r"}
+    local_call = {"name": LIVE_CTX, "args": {"name": "Window"}, "id": "l"}
+    _, first = _open_state_live_context_normalization_context(
+        [HumanMessage(content="which windows are open?")],
+        [remote_call, local_call],
+        api,
+    )
+    assert first is local_call
+
+
+async def test_a_tool_is_found_by_its_exact_name_first() -> None:
+    """script__morning and intent_script__morning share a base name."""
+    api = _Wrapper()
+    api.remote_home_assistants = frozenset()
+    api.apis = {
+        "mcp-x": _Instance(
+            "X",
+            [
+                cast(
+                    "Any",
+                    SimpleNamespace(name=n, description=n, parameters=vol.Schema({})),
+                )
+                for n in ("script__morning", "intent_script__morning")
+            ],
+        )
+    }
+    found = await _get_tool_by_name(
+        cast("Any", _Store([], [])),
+        _retrieval_config(api),
+        "intent_script__morning",
+        {"mcp-x"},
+        None,
+    )
+    assert found is not None
+    assert found["name"] == "intent_script__morning"

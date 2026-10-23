@@ -1391,8 +1391,13 @@ async def _execute_pending_action(  # noqa: PLR0911, PLR0912
     # only an entity id would otherwise act on every exposed lock. Any other
     # tool runs with its arguments as held (#836).
     held_api = action.get("api_id")
+    # The tool's own name, stored when it was held: the name the agent saw
+    # for a remote one may differ by now (#843 review).
+    held_name = action.get("api_tool_name")
     origin = tool_origin(
-        ha_llm_api, tool_name, held_api if isinstance(held_api, str) else None
+        ha_llm_api,
+        held_name if isinstance(held_name, str) and held_name else tool_name,
+        held_api if isinstance(held_api, str) else None,
     )
     kind = tool_args_kind(cfg.get("hass"), tool_name, remote=origin.remote)
     if action.get("args_kind") not in (None, kind):

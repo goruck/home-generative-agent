@@ -369,8 +369,10 @@ def build_remote_aliases(ha_llm_api: Any) -> dict[tuple[str, str], str]:
             _warn_alias_clash(remote, alike)
         for own in _tool_names(apis[api_id]):
             alias = remote_tool_name(api_name, own, api_id if clash else None)
-            if alias in used:
-                alias = remote_tool_name(api_name, own, api_id)
+            attempt = 0
+            while alias in used:
+                attempt += 1
+                alias = remote_tool_name(api_name, own, f"{api_id}#{attempt}")
             used.add(alias)
             aliases[(api_id, own)] = alias
     return aliases
