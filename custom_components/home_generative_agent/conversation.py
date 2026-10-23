@@ -66,7 +66,11 @@ from .agent.helpers import (
     tool_exclusions,
     tool_index_key,
 )
-from .agent.indirect_pin import api_tool_name, is_remote_home_assistant
+from .agent.indirect_pin import (
+    api_tool_name,
+    build_remote_aliases,
+    is_remote_home_assistant,
+)
 from .agent.pin_messages import describe_pending_action, pin_msg
 from .agent.rag_embedding_text import (
     strip_for_embedding,
@@ -1036,6 +1040,9 @@ class MultiLLMAPI:
         # The APIs that are a remote Home Assistant, judged on every tool they
         # offer, before the user's exclusions (#840 review). None: not judged.
         self.remote_home_assistants = remote_home_assistants
+        # The name the agent sees for each remote tool, fixed for the request
+        # so no two clash (#843).
+        self.tool_aliases = build_remote_aliases(self)
 
     @property
     def api_prompt(self) -> str:

@@ -894,8 +894,10 @@ def _describe_line(  # noqa: PLR0911
         return pin_msg(
             hass,
             "action_remote_args" if args else "action_remote",
+            # The tool's own name: the agent's may be cut short (#843 review).
             tool=sanitize_tool_text(
-                base_tool_name(tool_name), limit=_ACTION_SERVICE_MAX_LEN
+                base_tool_name(str(action.get("api_tool_name") or tool_name)),
+                limit=_ACTION_SERVICE_MAX_LEN,
             ),
             args=args,
             api=_one_line(

@@ -1674,29 +1674,35 @@ _REMOTE_NAME_HASH_LEN = 8
 _REMOTE_PREFIX_MAX_LEN = 16
 
 
-def remote_tool_name(api_name: str, name: str) -> str:
+def remote_tool_prefix(api_name: str) -> str:
+    """Return the prefix a remote Home Assistant's tool names start with."""
+    prefix = re.sub(r"[^a-z0-9]+", "_", api_name.casefold()).strip("_")
+    if not prefix:
+        prefix = _REMOTE_PREFIX_FALLBACK
+    if not prefix[0].isalpha():
+        prefix = f"r_{prefix}"
+    return prefix
+
+
+def remote_tool_name(api_name: str, name: str, salt: str | None = None) -> str:
     """
     Return the name the agent sees for a remote Home Assistant's tool (#843).
 
     A remote Home Assistant offers its tools under this one's names
     (`intent__HassTurnOn`), and the agent can be given one tool per name, so
     the remote one is named after its server (`upstairs_ha__intent__HassTurnOn`):
-    the same name every time, and never one of this Home Assistant's or HGA's
-    own. Letters, digits and `_` only, starting with a letter, at most 64
-    characters. A name that does not fit, or had other characters, gets a
-    short hash of the whole in its prefix and keeps its own end, the base name
-    the PIN check reads.
+    the same name every time. Letters, digits and `_` only, starting with a
+    letter, at most 64 characters. A name that does not fit, had other
+    characters, or is given a `salt` (the API's id, when two servers' names
+    read alike or the name is taken) gets a short hash in its prefix and keeps
+    its own end.
     """
-    prefix = re.sub(r"[^a-z0-9]+", "_", api_name.casefold()).strip("_")
-    if not prefix:
-        prefix = _REMOTE_PREFIX_FALLBACK
-    if not prefix[0].isalpha():
-        prefix = f"r_{prefix}"
+    prefix = remote_tool_prefix(api_name)
     safe = re.sub(r"[^A-Za-z0-9_]+", "_", name)
     full = f"{prefix}{TOOL_NAMESPACE_SEP}{safe}"
-    if len(full) <= _TOOL_NAME_MAX_LEN and safe == name:
+    if salt is None and len(full) <= _TOOL_NAME_MAX_LEN and safe == name:
         return full
-    digest = hashlib.sha256(f"{api_name}\0{name}".encode()).hexdigest()
+    digest = hashlib.sha256(f"{api_name}\0{salt or ''}\0{name}".encode()).hexdigest()
     prefix = f"{prefix[:_REMOTE_PREFIX_MAX_LEN]}_{digest[:_REMOTE_NAME_HASH_LEN]}"
     room = _TOOL_NAME_MAX_LEN - len(prefix) - len(TOOL_NAMESPACE_SEP)
     return f"{prefix}{TOOL_NAMESPACE_SEP}{safe[-room:]}"

@@ -151,6 +151,7 @@ from .indirect_pin import (
     intent_scripts_are_critical,
     is_script_like_tool,
     named_services,
+    remote_aliases,
     remote_api_names,
     rule_domains,
     runs_critical_action,
@@ -543,6 +544,8 @@ def _critical_action_guard(  # noqa: PLR0913
         # (#840).
         "api_id": origin.api_id if origin is not None else None,
         "api_name": origin.api_name if origin is not None else None,
+        # The tool's own name there, which a remote one's differs from (#843).
+        "api_tool_name": origin.tool_name if origin is not None else None,
         "remote": origin is not None and origin.remote,
     }
     action_id = register_pending_action(ctx.pending_actions, action)
@@ -1045,7 +1048,7 @@ async def _get_rag_retrieved_tools(  # noqa: PLR0912, PLR0915
     sub_queries = _split_query_intents(query)
 
     # best_score[tool_key] -> (score, SearchItem)
-    best: dict[str, tuple[float, Any]] = {}
+    best: dict[tuple[str, str], tuple[float, Any]] = {}
     total_results = 0
     allowed_results = 0
     below_threshold = 0
@@ -1117,8 +1120,11 @@ async def _get_rag_retrieved_tools(  # noqa: PLR0912, PLR0915
             # score is (1 - distance) for pgvector cosine; None when no embedding
             score = getattr(item, "score", None) or 0.0
             top_seen.append((name, score))
-            if score >= threshold and (name not in best or score > best[name][0]):
-                best[name] = (score, item)
+            # By API and name: a remote Home Assistant offers this one's tool
+            # names, and both houses' tools must stay eligible (#843 review).
+            key = (api_id, name)
+            if score >= threshold and (key not in best or score > best[key][0]):
+                best[key] = (score, item)
             else:
                 below_threshold += 1
 
@@ -1156,6 +1162,15 @@ async def _get_rag_retrieved_tools(  # noqa: PLR0912, PLR0915
         )
 
     return raw_tools, dead_hits
+
+
+def _has_local_tool(
+    candidates: Sequence[RawTool],
+    remote_ids: set[str],
+    matches: Callable[[str], bool],
+) -> bool:
+    """Return True if a candidate of this house's own APIs matches by name."""
+    return any(matches(t["name"]) and t["api_id"] not in remote_ids for t in candidates)
 
 
 def _is_referential_follow_up(query: str) -> bool:
@@ -1594,8 +1609,11 @@ async def _append_turn_on_tool(  # noqa: PLR0913
             and bool(re.search(ACTUATION_KEYWORDS_REGEX, _offer_text(messages[:-1])))
         )
     )
-    if not wants_action or any(
-        base_tool_name(t["name"]) in _ON_OFF_PARTNER for t in candidates
+    # This house's own: a remote Home Assistant's turn on or off does not
+    # answer for it (#843 review).
+    remote_ids = set(remote_api_names(config.get("configurable", {}).get("ha_llm_api")))
+    if not wants_action or _has_local_tool(
+        candidates, remote_ids, lambda name: base_tool_name(name) in _ON_OFF_PARTNER
     ):
         return candidates
     excluded_names = tool_exclusions(config.get("configurable", {}).get("options", {}))
@@ -1608,7 +1626,11 @@ async def _append_turn_on_tool(  # noqa: PLR0913
         if any(base_tool_name(n) == _TURN_ON_TOOL for n in names)
     }
     fetched = await _get_tool_by_name(
-        store, config, _TURN_ON_TOOL, allowed_api_ids - excluded_apis, live_tool_ids
+        store,
+        config,
+        _TURN_ON_TOOL,
+        allowed_api_ids - excluded_apis - remote_ids,
+        live_tool_ids,
     )
     if fetched is None:
         return candidates
@@ -2443,14 +2465,16 @@ def _format_and_dedupe_tools(
     raw_tools: list[RawTool],
     provider: str | None = None,
     remote_apis: Mapping[str, str] | None = None,
+    aliases: Mapping[tuple[str, str], str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """
     Convert raw tools to output format and deduplicate (first-seen wins).
 
     A remote Home Assistant's tools (`remote_apis`: id to name) are named
-    after their server, and their description says so: it offers its tools
-    under this Home Assistant's names, and the agent can be given one tool
-    per name, so a command could reach the wrong house (#843).
+    after their server (`aliases`, by API id and own name), and their
+    description says so: it offers its tools under this Home Assistant's
+    names, and the agent can be given one tool per name, so a command could
+    reach the wrong house (#843).
     """
     selected_tools: list[dict[str, Any]] = []
     routing_map: dict[str, str] = {}
@@ -2460,8 +2484,11 @@ def _format_and_dedupe_tools(
         description = tool["description"]
         api_name = (remote_apis or {}).get(tool["api_id"])
         if api_name is not None:
-            name = remote_tool_name(api_name, name)
-            description = f"[{api_name}, another Home Assistant] {description}"
+            name = (aliases or {}).get((tool["api_id"], name)) or remote_tool_name(
+                api_name, name
+            )
+            server = sanitize_tool_text(" ".join(api_name.split()), limit=60)
+            description = f"[{server}, another Home Assistant] {description}"
         if name in routing_map:
             continue
 
@@ -2688,9 +2715,16 @@ async def _get_held_action_tools(
     if not thread_id:
         return []
     now = dt_util.utcnow()
-    names = sorted(
+    # Each held tool by its own name at the API it was held for: a remote
+    # Home Assistant's tool reaches the agent under its server's name, and
+    # looking that name up anywhere else found this house's namesake (#843
+    # review).
+    held = sorted(
         {
-            str(action["tool_name"])
+            (
+                str(action.get("api_tool_name") or action["tool_name"]),
+                str(action["api_id"]) if action.get("api_id") else "",
+            )
             for action in cfg.get("pending_actions", {}).values()
             if action.get("thread_id") == thread_id
             and action.get("tool_name")
@@ -2698,16 +2732,17 @@ async def _get_held_action_tools(
             and not pending_action_expired(action, now)
         }
     )
-    if not names:
+    if not held:
         return []
     allowed_api_ids = _get_allowed_api_ids(config)
     live_tool_ids = _get_live_tool_ids(config)
     excluded_names = tool_exclusions(config.get("configurable", {}).get("options", {}))
     tools: list[RawTool] = []
-    for name in names:
-        fetched = await _get_tool_by_name(
-            store, config, name, allowed_api_ids, live_tool_ids
-        )
+    for name, api_id in held:
+        apis = {api_id} & allowed_api_ids if api_id else allowed_api_ids
+        if not apis:
+            continue
+        fetched = await _get_tool_by_name(store, config, name, apis, live_tool_ids)
         if fetched is not None and not is_tool_excluded(
             fetched["name"], excluded_names.get(fetched["api_id"], ())
         ):
@@ -2836,6 +2871,10 @@ async def _append_included_tools(
     allowed_api_ids = _get_allowed_api_ids(config)
     excluded_names = tool_exclusions(opts)
     bound_api_by_name = {t["name"]: t["api_id"] for t in all_candidates}
+    bound = {(t["api_id"], t["name"]) for t in all_candidates}
+    # A remote Home Assistant's tools reach the agent under their server's
+    # name, so one never shadows a same-named tool of another API (#843).
+    remote_ids = set(remote_api_names(config.get("configurable", {}).get("ha_llm_api")))
     inclusions = tool_inclusions(opts)
     if len(inclusions) > TOOL_INCLUSIONS_MAX_PER_TURN:
         # Only a programmatic options write can get here — the picker offers
@@ -2855,14 +2894,19 @@ async def _append_included_tools(
             name, excluded_names.get(api_id, ())
         ):
             continue
-        # Dedupe by bare name, not (api_id, name): _format_and_dedupe_tools
+        # Dedupe by bare name between this house's APIs: _format_and_dedupe_tools
         # routes by name (first seen wins), so a same-named tool from another
-        # API would be dropped there anyway — skipping saves the store fetch.
+        # of them would be dropped there anyway — skipping saves the store
+        # fetch. A remote Home Assistant's tools are renamed there (#843), so
+        # one never shadows a same-named tool of another API.
         # A SAME-api duplicate is the normal case (RAG already selected the
         # pinned tool) and stays quiet; a DIFFERENT api holding the name means
         # that other server's tool will answer calls meant for the pinned one,
         # which the operator cannot otherwise see — say so at warning level.
-        if (bound_api := bound_api_by_name.get(name)) is not None:
+        if (api_id, name) in bound:
+            continue
+        bound_api = bound_api_by_name.get(name)
+        if bound_api is not None and not remote_ids & {api_id, bound_api}:
             if bound_api != api_id:
                 LOGGER.warning(
                     "Always-included tool %s (api %s) is shadowed by a "
@@ -2884,6 +2928,7 @@ async def _append_included_tools(
             continue
         all_candidates.append(fetched)
         bound_api_by_name[name] = api_id
+        bound.add((api_id, name))
     return all_candidates
 
 
@@ -2902,6 +2947,10 @@ async def _retrieve_tools(  # noqa: PLR0915
     ranking_query = _retrieval_query(state["messages"])
 
     allowed_api_ids = _get_allowed_api_ids(config)
+    # A remote Home Assistant's tools never stand in for this house's own
+    # when a tool is force-bound (#843 review).
+    remote_ids = set(remote_api_names(config.get("configurable", {}).get("ha_llm_api")))
+    local_api_ids = allowed_api_ids - remote_ids
     opts = config.get("configurable", {}).get("options", {})
     limit = int(opts.get(CONF_TOOL_RETRIEVAL_LIMIT, 5))
 
@@ -2941,14 +2990,15 @@ async def _retrieve_tools(  # noqa: PLR0915
     #
     # pin_tools are force-injected outside the limit — they must always be present
     # when a PIN confirmation is pending, regardless of RAG scores.
-    pin_names = {t["name"] for t in pin_tools}
+    # By API and name: the same name on another API is another tool (#843).
+    pin_keys = {(t["api_id"], t["name"]) for t in pin_tools}
     safety_cap = min(len(safety_tools), max(1, limit * 3 // 4))
-    safety_capped = [t for t in safety_tools[:safety_cap] if t["name"] not in pin_names]
-    safety_names = {t["name"] for t in safety_capped}
+    safety_capped = [
+        t for t in safety_tools[:safety_cap] if (t["api_id"], t["name"]) not in pin_keys
+    ]
+    safety_keys = {(t["api_id"], t["name"]) for t in safety_capped}
     rag_only = [
-        t
-        for t in rag_tools
-        if t["name"] not in safety_names and t["name"] not in pin_names
+        t for t in rag_tools if (t["api_id"], t["name"]) not in safety_keys | pin_keys
     ]
     effective_limit = min(safety_cap + len(rag_only), safety_cap + limit)
     all_candidates = pin_tools + (safety_capped + rag_only)[:effective_limit]
@@ -3013,9 +3063,9 @@ async def _retrieve_tools(  # noqa: PLR0915
             for t in all_candidates
             if not t["is_actuation"] or _is_live_context_tool(t["name"])
         ]
-        if not any(_is_live_context_tool(t["name"]) for t in all_candidates):
+        if not _has_local_tool(all_candidates, remote_ids, _is_live_context_tool):
             fetched_live_ctx = await _get_tool_by_name(
-                store, config, LIVE_CONTEXT_TOOL, allowed_api_ids, live_tool_ids
+                store, config, LIVE_CONTEXT_TOOL, local_api_ids, live_tool_ids
             )
             if fetched_live_ctx is not None:
                 all_candidates = [fetched_live_ctx, *all_candidates]
@@ -3027,9 +3077,11 @@ async def _retrieve_tools(  # noqa: PLR0915
     # model can evaluate any conditional clause, verify state before acting, and
     # respond accurately regardless of phrasing. Step 3b already injects it for
     # read-only open-state queries, so the deduplication check prevents doubling.
-    if not any(_is_live_context_tool(t["name"]) for t in all_candidates):
+    # This house's own: a remote Home Assistant's does not answer for it
+    # (#843 review).
+    if not _has_local_tool(all_candidates, remote_ids, _is_live_context_tool):
         fetched_live_ctx = await _get_tool_by_name(
-            store, config, LIVE_CONTEXT_TOOL, allowed_api_ids, live_tool_ids
+            store, config, LIVE_CONTEXT_TOOL, local_api_ids, live_tool_ids
         )
         if fetched_live_ctx is not None:
             all_candidates = [*all_candidates, fetched_live_ctx]
@@ -3110,10 +3162,12 @@ async def _retrieve_tools(  # noqa: PLR0915
     # (_flatten_top_level_union) and the Gemini anyOf-required sanitizer
     # (_sanitize_any_of_required).
     provider_raw = opts.get(CONF_CHAT_MODEL_PROVIDER)
+    ha_llm_api = config.get("configurable", {}).get("ha_llm_api")
     selected_tools, routing_map = _format_and_dedupe_tools(
         all_candidates,
         str(provider_raw) if provider_raw else None,
-        remote_api_names(config.get("configurable", {}).get("ha_llm_api")),
+        remote_api_names(ha_llm_api),
+        remote_aliases(ha_llm_api),
     )
 
     LOGGER.debug(
@@ -3719,8 +3773,10 @@ def _is_critical_action(  # noqa: PLR0911, PLR0912
     if origin is not None and origin.ambiguous:
         return True
     if origin is not None and origin.remote:
+        # Read by the tool's own name: the name the agent sees may be cut
+        # short (#843 review).
         return not _remote_call_is_read_only(
-            tool_name, tool_args, read_only_hint=origin.read_only
+            origin.tool_name or tool_name, tool_args, read_only_hint=origin.read_only
         )
 
     # An intent script's tool names no domain or service, and one may take
@@ -4056,6 +4112,28 @@ def _live_context_args(tool_args: dict[str, Any]) -> dict[str, Any]:
     return {key: tool_args[key] for key in _LIVE_CONTEXT_KEYS if tool_args.get(key)}
 
 
+def _open_state_args(
+    ha_llm_api: Any,
+    tool_name: str,
+    tool_args: dict[str, Any],
+    open_state_query: Any,
+    *,
+    force_broad: bool,
+) -> tuple[bool, dict[str, Any]]:
+    """
+    Return whether a call goes to a remote Home Assistant, and its arguments.
+
+    The open-state rewrite and reply filter are for this house's
+    GetLiveContext, not a remote Home Assistant's, whose call keeps its
+    arguments (#843 review).
+    """
+    if tool_origin(ha_llm_api, tool_name).remote:
+        return True, tool_args
+    return False, _normalize_live_context_args_for_open_state(
+        tool_name, tool_args, open_state_query, force_broad=force_broad
+    )
+
+
 async def _call_tools(
     state: State, config: RunnableConfig, *, store: BaseStore
 ) -> dict[str, Any]:
@@ -4098,7 +4176,8 @@ async def _call_tools(
         """Execute a single tool call and return its ToolMessage."""
         tool_name = tool_call.get("name", "")
         tool_args = tool_call.get("args", {}) or {}
-        normalized_args = _normalize_live_context_args_for_open_state(
+        remote_call, normalized_args = _open_state_args(
+            ha_llm_api,
             tool_name,
             tool_args,
             open_state_query,
@@ -4164,7 +4243,8 @@ async def _call_tools(
         tool_response = _maybe_filter_open_state_tool_response(
             tool_response,
             tool_call,
-            first_open_state_live_context_call,
+            # A remote Home Assistant's reply is not filtered (#843 review).
+            None if remote_call else first_open_state_live_context_call,
             tool_name,
             open_state_query,
         )

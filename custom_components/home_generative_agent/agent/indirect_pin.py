@@ -70,7 +70,9 @@ from .helpers import (
     is_intent_tool,
     matches_critical_rule,
     remote_tool_name,
+    remote_tool_prefix,
     rule_entity_matches,
+    sanitize_tool_text,
 )
 from .rule_entities import read_switch_wrappers
 from .template_actions import (
@@ -295,7 +297,7 @@ def tool_origin(
     api_name = _api_name(instance, api_id)
     remote_api = _is_judged_remote(ha_llm_api, api_id, instance)
     own_name = (
-        _own_tool_name(instance, api_name, tool_name) if remote_api else tool_name
+        _own_tool_name(ha_llm_api, api_id, tool_name) if remote_api else tool_name
     )
     tool = _find_tool(instance, own_name)
     remote = tool is not None and not _is_ha_tool(tool) and remote_api
@@ -324,11 +326,85 @@ def _is_judged_remote(ha_llm_api: Any, api_id: str, instance: Any) -> bool:
     return is_remote_home_assistant(api_id, instance)
 
 
-def _own_tool_name(instance: Any, api_name: str, name: str) -> str:
+def remote_aliases(ha_llm_api: Any) -> dict[tuple[str, str], str]:
+    """
+    Return the name the agent sees for each remote Home Assistant tool (#843).
+
+    Keyed by (API id, the tool's own name). Built once per request for every
+    remote server together (`MultiLLMAPI.tool_aliases`), so the names never
+    clash: two servers whose names read alike (each remote Home Assistant is
+    "home-assistant" until renamed) get their API id hashed in, and so does a
+    name one of this Home Assistant's tools already has.
+    """
+    cached = getattr(ha_llm_api, "tool_aliases", None)
+    if isinstance(cached, dict):
+        return cast("dict[tuple[str, str], str]", cached)
+    return build_remote_aliases(ha_llm_api)
+
+
+_warned_alias_clashes: set[frozenset[str]] = set()
+
+
+def build_remote_aliases(ha_llm_api: Any) -> dict[tuple[str, str], str]:
+    """Build `remote_aliases`; see there."""
+    apis = getattr(ha_llm_api, "apis", None)
+    if not isinstance(apis, Mapping):
+        return {}
+    remote = remote_api_names(ha_llm_api)
+    used = {
+        name
+        for api_id, instance in apis.items()
+        if api_id not in remote
+        for name in _tool_names(instance)
+    }
+    by_prefix: dict[str, list[str]] = {}
+    for api_id, api_name in remote.items():
+        by_prefix.setdefault(remote_tool_prefix(api_name), []).append(api_id)
+    aliases: dict[tuple[str, str], str] = {}
+    for api_id in sorted(remote):
+        api_name = remote[api_id]
+        alike = by_prefix[remote_tool_prefix(api_name)]
+        clash = len(alike) > 1
+        if clash:
+            _warn_alias_clash(remote, alike)
+        for own in _tool_names(apis[api_id]):
+            alias = remote_tool_name(api_name, own, api_id if clash else None)
+            if alias in used:
+                alias = remote_tool_name(api_name, own, api_id)
+            used.add(alias)
+            aliases[(api_id, own)] = alias
+    return aliases
+
+
+def _tool_names(instance: Any) -> list[str]:
+    """Return the string names of the tools an API instance offers."""
+    return [
+        name
+        for tool in getattr(instance, "tools", None) or []
+        if isinstance(name := getattr(tool, "name", None), str)
+    ]
+
+
+def _warn_alias_clash(remote: Mapping[str, str], api_ids: list[str]) -> None:
+    """Warn once that remote servers' names read alike."""
+    key = frozenset(api_ids)
+    if key in _warned_alias_clashes:
+        return
+    _warned_alias_clashes.add(key)
+    LOGGER.warning(
+        "Remote Home Assistant servers %s have names that read alike, so the "
+        "agent cannot tell them apart by name; rename their MCP entries "
+        "(Settings > Devices & services) so each says which house it is",
+        ", ".join(
+            f'"{sanitize_tool_text(remote[a], limit=60)}" ({a})' for a in sorted(key)
+        ),
+    )
+
+
+def _own_tool_name(ha_llm_api: Any, api_id: str, name: str) -> str:
     """Return the name a remote tool has at its API, from the agent's name."""
-    for tool in getattr(instance, "tools", None) or []:
-        own = getattr(tool, "name", None)
-        if isinstance(own, str) and remote_tool_name(api_name, own) == name:
+    for (alias_api, own), alias in remote_aliases(ha_llm_api).items():
+        if alias_api == api_id and alias == name:
             return own
     return name
 
@@ -351,7 +427,7 @@ def api_tool_name(ha_llm_api: Any, api_id: str, name: str) -> str:
     instance = apis.get(api_id) if isinstance(apis, Mapping) else None
     if instance is None or not _is_judged_remote(ha_llm_api, api_id, instance):
         return name
-    return _own_tool_name(instance, _api_name(instance, api_id), name)
+    return _own_tool_name(ha_llm_api, api_id, name)
 
 
 def _find_tool(instance: Any, tool_name: str) -> Any | None:

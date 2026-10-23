@@ -18,17 +18,24 @@ import re
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
+import homeassistant.util.dt as dt_util
 import pytest
 from homeassistant.components.homeassistant.exposed_entities import (
     async_expose_entity,
 )
 from homeassistant.helpers import llm
 from homeassistant.setup import async_setup_component
+from langchain_core.messages import HumanMessage
 
 from custom_components.home_generative_agent.agent.graph import (
     RawTool,
+    _append_included_tools,
     _format_and_dedupe_tools,
+    _get_held_action_tools,
+    _is_critical_action,
+    _open_state_args,
     _prepare_tool_args,
+    _retrieve_tools,
 )
 from custom_components.home_generative_agent.agent.helpers import (
     PinReply,
@@ -36,6 +43,7 @@ from custom_components.home_generative_agent.agent.helpers import (
 )
 from custom_components.home_generative_agent.agent.indirect_pin import (
     api_tool_name,
+    build_remote_aliases,
     remote_api_names,
     tool_origin,
 )
@@ -86,6 +94,8 @@ class _Instance:
     def __init__(self, name: str, tools: list[llm.Tool]) -> None:
         self.api = SimpleNamespace(name=name, id=name)
         self.tools = tools
+        self.custom_serializer = None
+        self.api_prompt = ""
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     async def async_call_tool(self, tool_input: Any) -> dict[str, object]:
@@ -106,6 +116,7 @@ class _Wrapper:
         }
         self.routing_map = {TURN_ON: LOCAL, REMOTE_TURN_ON: REMOTE}
         self.remote_home_assistants = frozenset({REMOTE})
+        self.tool_aliases: dict[tuple[str, str], str] | None = None
 
 
 def _wrapper() -> _Wrapper:
@@ -237,3 +248,216 @@ async def test_a_confirmed_remote_call_uses_the_tools_own_name(
     local, remote = (cast("_Instance", api.apis[k]) for k in (LOCAL, REMOTE))
     assert remote.calls == [(TURN_ON, {"name": "Porch"})]
     assert local.calls == []
+
+
+# ----- Review cycle 1: every step that binds a tool keeps both houses apart -----
+
+LIVE_CTX = "homeassistant__GetLiveContext"
+
+
+class _Item:
+    """A tool index row."""
+
+    def __init__(self, name: str, api_id: str, score: float = 0.9) -> None:
+        self.value = {
+            "name": name,
+            "api_id": api_id,
+            "description": f"{name} of {api_id}",
+            "parameters": "{}",
+            "is_actuation": "Hass" in name,
+        }
+        self.score = score
+
+
+class _Store:
+    """A tool index: search returns `found`; get reads every row by key."""
+
+    def __init__(self, found: list[_Item], rows: list[_Item]) -> None:
+        self.found = found
+        self.rows = {f"{r.value['api_id']}::{r.value['name']}": r for r in rows}
+
+    async def asearch(self, *_: Any, **__: Any) -> list[_Item]:
+        return self.found
+
+    async def aget(self, _namespace: Any, key: str) -> _Item | None:
+        return self.rows.get(key)
+
+
+def _two_houses(local: list[str], remote: list[str]) -> _Wrapper:
+    api = _Wrapper()
+    api.apis[LOCAL].tools = [_local_intent(n) for n in local]
+    api.apis[REMOTE].tools = [_RemoteTool(n) for n in remote]
+    api.routing_map = {}
+    api.tool_aliases = build_remote_aliases(api)
+    return api
+
+
+def _retrieval_config(api: Any, **configurable: Any) -> Any:
+    return {
+        "configurable": {
+            "options": {
+                "llm_hass_api": [LOCAL, REMOTE],
+                "tool_relevance_threshold": 0.1,
+                "tool_retrieval_limit": 5,
+            },
+            "tool_index_ready": True,
+            "langchain_tools": {},
+            "ha_llm_api": api,
+            **configurable,
+        }
+    }
+
+
+def _state(text: str) -> Any:
+    return {
+        "messages": [HumanMessage(content=text)],
+        "summary": "",
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+    }
+
+
+async def test_search_keeps_both_houses_namesakes() -> None:
+    """Both houses' HassTurnOn reach the agent, whichever ranks first."""
+    names = [TURN_ON, "intent__HassTurnOff"]
+    api = _two_houses(names, names)
+    rows = [_Item(n, a) for n in names for a in (REMOTE, LOCAL)]
+    result = await _retrieve_tools(
+        _state("turn on the porch light"),
+        _retrieval_config(api),
+        store=cast("Any", _Store(rows, rows)),
+    )
+    routing = result["tool_routing_map"]
+    assert routing.get(TURN_ON) == LOCAL
+    assert routing.get(REMOTE_TURN_ON) == REMOTE
+
+
+async def test_this_houses_live_context_is_bound_beside_a_remote_one() -> None:
+    """A remote GetLiveContext does not stand in for this house's own."""
+    api = _two_houses([LIVE_CTX], [LIVE_CTX])
+    remote_ctx, local_ctx = _Item(LIVE_CTX, REMOTE), _Item(LIVE_CTX, LOCAL)
+    result = await _retrieve_tools(
+        _state("is the garage door open"),
+        _retrieval_config(api),
+        store=cast("Any", _Store([remote_ctx], [remote_ctx, local_ctx])),
+    )
+    assert result["tool_routing_map"].get(LIVE_CTX) == LOCAL
+
+
+async def test_this_houses_turn_on_is_bound_beside_a_remote_one() -> None:
+    """A remote turn off does not stand in for this house's turn on (#795)."""
+    off = "intent__HassTurnOff"
+    api = _two_houses([TURN_ON, off], [TURN_ON, off])
+    found = [_Item(off, REMOTE)]
+    rows = [_Item(n, a) for n in (TURN_ON, off) for a in (REMOTE, LOCAL)]
+    result = await _retrieve_tools(
+        _state("open the study shade"),
+        _retrieval_config(api),
+        store=cast("Any", _Store(found, rows)),
+    )
+    assert result["tool_routing_map"].get(TURN_ON) == LOCAL
+
+
+async def test_a_held_remote_tool_is_bound_from_its_own_house() -> None:
+    """The PIN reply turn offers the held remote tool, not this house's."""
+    api = _two_houses([TURN_ON], [TURN_ON])
+    rows = [_Item(TURN_ON, LOCAL), _Item(TURN_ON, REMOTE)]
+    cfg = {
+        "thread_id": "t1",
+        "pending_actions": {
+            "a1": {
+                "tool_name": REMOTE_TURN_ON,
+                "api_id": REMOTE,
+                "api_tool_name": TURN_ON,
+                "thread_id": "t1",
+                "created_at": dt_util.utcnow().isoformat(),
+            }
+        },
+    }
+    tools = await _get_held_action_tools(
+        cast("Any", _Store([], rows)), _retrieval_config(api, **cfg), cfg
+    )
+    assert [(t["name"], t["api_id"]) for t in tools] == [(TURN_ON, REMOTE)]
+
+
+async def test_an_always_included_remote_namesake_is_bound() -> None:
+    """A pinned remote tool is not shadowed by this house's namesake."""
+    api = _two_houses([TURN_ON], [TURN_ON])
+    rows = [_Item(TURN_ON, LOCAL), _Item(TURN_ON, REMOTE)]
+    config = _retrieval_config(api)
+    config["configurable"]["options"]["tool_inclusions"] = {REMOTE: [TURN_ON]}
+    candidates = await _append_included_tools(
+        [cast("Any", dict(_Item(TURN_ON, LOCAL).value))],
+        cast("Any", _Store([], rows)),
+        config,
+        None,
+    )
+    assert {(t["name"], t["api_id"]) for t in candidates} == {
+        (TURN_ON, LOCAL),
+        (TURN_ON, REMOTE),
+    }
+
+
+def test_two_servers_with_the_same_name_get_distinct_names(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Each remote Home Assistant is "home-assistant" until renamed."""
+    api = _Wrapper()
+    api.apis[REMOTE].api.name = "home-assistant"
+    api.apis["mcp-cabin"] = _Instance("home-assistant", [_RemoteTool(TURN_ON)])
+    api.remote_home_assistants = frozenset({REMOTE, "mcp-cabin"})
+    aliases = build_remote_aliases(api)
+    first, second = aliases[(REMOTE, TURN_ON)], aliases[("mcp-cabin", TURN_ON)]
+    assert first != second
+    assert first.endswith("__intent__HassTurnOn")
+    assert second.endswith("__intent__HassTurnOn")
+    assert "read alike" in caplog.text
+
+
+def test_a_remote_name_never_takes_one_of_this_houses() -> None:
+    """A server named "Intent" offering HassTurnOn is not intent__HassTurnOn."""
+    api = _Wrapper()
+    api.apis[REMOTE] = _Instance("Intent", [_RemoteTool("HassTurnOn")])
+    alias = build_remote_aliases(api)[(REMOTE, "HassTurnOn")]
+    assert alias != TURN_ON
+    assert alias.endswith("__HassTurnOn")
+
+
+async def test_a_cut_short_remote_script_is_still_held(hass: HomeAssistant) -> None:
+    """The PIN check reads the tool's own name, not the cut-short one."""
+    long_script = "script__" + "a" * 60
+    api = _Wrapper()
+    api.apis[REMOTE] = _Instance("abcdefghijklmnop", [_RemoteTool(long_script)])
+    api.apis[REMOTE].tools[0].annotations = llm.ToolAnnotations(read_only=True)
+    api.tool_aliases = build_remote_aliases(api)
+    alias = api.tool_aliases[(REMOTE, long_script)]
+    assert "script__" not in alias  # cut short to fit 64 characters
+    api.routing_map = {alias: REMOTE}
+    origin = tool_origin(api, alias)
+    assert origin.tool_name == long_script
+    assert _is_critical_action(
+        {}, RECOMMENDED_CRITICAL_ACTIONS, alias, hass, origin=origin
+    )
+
+
+def test_a_remote_live_context_call_keeps_its_arguments() -> None:
+    """The open-state rewrite is for this house's GetLiveContext only."""
+    api = _two_houses([LIVE_CTX], [LIVE_CTX])
+    remote_name = build_remote_aliases(api)[(REMOTE, LIVE_CTX)]
+    api.routing_map = {remote_name: REMOTE, LIVE_CTX: LOCAL}
+    args = {"name": "Window", "area": "Bedroom"}
+    assert _open_state_args(api, remote_name, dict(args), "x", force_broad=True) == (
+        True,
+        args,
+    )
+
+
+def test_the_server_name_in_a_description_is_one_clean_line() -> None:
+    """A server's name cannot break the description it is put in."""
+    selected, _ = _format_and_dedupe_tools(
+        [_raw(TURN_ON, REMOTE)], remote_apis={REMOTE: "Up\nstairs\u202e HA"}
+    )
+    description = selected[0]["function"]["description"]
+    assert description.startswith("[Up stairs? HA, another Home Assistant]")
