@@ -1489,15 +1489,103 @@ async def test_stop_cancels_a_deferred_flush(va: VideoAnalyzer) -> None:
     va._event_recording_tasks[f"{CAMERA}:222"] = ingest  # type: ignore[attr-defined]
     va._event_recording_task_gen[f"{CAMERA}:222"] = 0  # type: ignore[attr-defined]
     va._stop_motion_loop_and_flush(CAMERA)  # type: ignore[attr-defined]
-    (flush,) = va._deferred_flush_tasks  # type: ignore[attr-defined]
+    (flush,) = va._flush_tasks  # type: ignore[attr-defined]
     va._cancel_track = MagicMock()  # type: ignore[attr-defined]
     va._cancel_listen = MagicMock()  # type: ignore[attr-defined]
 
     await va.stop()
 
     assert flush.done()
-    assert va._deferred_flush_tasks == set()  # type: ignore[attr-defined]
+    assert va._flush_tasks == set()  # type: ignore[attr-defined]
     assert va._analyze_and_finalize.await_count == 0  # type: ignore[attr-defined]
+
+
+async def _end_motion_window(va: VideoAnalyzer, _tmp_path: Path) -> None:
+    va._active_motion_cameras[CAMERA] = MagicMock()  # type: ignore[attr-defined]
+    va._stop_motion_loop_and_flush(CAMERA)  # type: ignore[attr-defined]
+
+
+async def _end_recording(va: VideoAnalyzer, _tmp_path: Path) -> None:
+    event = MagicMock()
+    event.data = {
+        "entity_id": CAMERA,
+        "old_state": MagicMock(state="recording"),
+        "new_state": MagicMock(state="idle"),
+    }
+    va._handle_camera_recording_state_change(event)  # type: ignore[attr-defined]
+
+
+async def _land_recording_frames(va: VideoAnalyzer, tmp_path: Path) -> None:
+    await va._admit_recording_frames(CAMERA, [_clip_frame(tmp_path, 0)], 0)  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "end_window",
+    [_end_motion_window, _end_recording, _land_recording_frames],
+    ids=["motion_off", "recording_off", "recording_frames"],
+)
+async def test_stop_cancels_an_analysis_a_window_started(
+    va: VideoAnalyzer, tmp_path: Path, end_window: Any
+) -> None:
+    """An analysis in flight at unload never reads the removed runtime_data (#777)."""
+    created: list[asyncio.Task[Any]] = []
+
+    def _spawn(coro: Any, _name: str) -> asyncio.Task[Any]:
+        task = asyncio.ensure_future(coro)
+        created.append(task)
+        return task
+
+    va._create_background_task = _spawn  # type: ignore[method-assign]
+    analyzing = asyncio.Event()
+    read_runtime_data = MagicMock()
+
+    async def _analyze(_camera_id: str, _batch: Any) -> None:
+        analyzing.set()
+        await asyncio.sleep(3600)
+        read_runtime_data()
+
+    va._analyze_and_finalize = _analyze  # type: ignore[method-assign]
+    va._event_snapshot_buffers[CAMERA] = deque(  # type: ignore[attr-defined]
+        [tmp_path / "snapshot_20260928_100000.jpg"]
+    )
+    await end_window(va, tmp_path)
+    (flush,) = created
+    await analyzing.wait()
+    va._cancel_track = MagicMock()  # type: ignore[attr-defined]
+    va._cancel_listen = MagicMock()  # type: ignore[attr-defined]
+
+    await va.stop()
+
+    assert flush.cancelled()
+    assert va._flush_tasks == set()  # type: ignore[attr-defined]
+    read_runtime_data.assert_not_called()
+
+
+async def test_a_finished_window_analysis_is_forgotten(
+    va: VideoAnalyzer, tmp_path: Path
+) -> None:
+    va._create_background_task = lambda coro, _name: asyncio.ensure_future(coro)  # type: ignore[method-assign,assignment]
+    va._analyze_and_finalize = AsyncMock()  # type: ignore[method-assign]
+    await _land_recording_frames(va, tmp_path)
+    (flush,) = va._flush_tasks  # type: ignore[attr-defined]
+
+    await flush
+    await asyncio.sleep(0)
+
+    assert va._flush_tasks == set()  # type: ignore[attr-defined]
+
+
+async def test_no_window_analysis_starts_after_stop(va: VideoAnalyzer) -> None:
+    """A caller resuming after stop() cleared the set starts nothing untracked."""
+    spawn = _stub_bg_task(va)
+    va._stopped = True  # type: ignore[attr-defined]
+    coro = va._process_snapshot_queue(CAMERA)  # type: ignore[attr-defined]
+
+    va._create_flush_task(coro, "hga video process motion queue")  # type: ignore[attr-defined]
+
+    spawn.assert_not_called()
+    assert coro.cr_frame is None  # closed, so no "never awaited" warning
+    assert va._flush_tasks == set()  # type: ignore[attr-defined]
 
 
 def test_ingest_keeps_the_generation_read_before_the_window_cap(

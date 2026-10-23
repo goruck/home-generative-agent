@@ -920,6 +920,11 @@ class VideoAnalyzer:
         self._initialized_dirs: set[str] = set()
         self._active_motion_cameras: dict[str, asyncio.Task[Any]] = {}
         self._active_recording_cameras: dict[str, asyncio.Task[Any]] = {}
+        # One-off analyses started when a capture window ends (motion off,
+        # recording off, a deferred flush, a recording's frames); stop()
+        # cancels them so none reads entry.runtime_data after the unload
+        # removed it (issue #777).
+        self._flush_tasks: set[asyncio.Task[Any]] = set()
         # Frames captured during a motion/recording window, held out of the
         # live worker queue until the event ends and they flush as one batch.
         self._event_snapshot_buffers: dict[str, deque[Path]] = {}
@@ -959,7 +964,6 @@ class VideoAnalyzer:
         self._event_recording_tasks: dict[str, asyncio.Task[Any]] = {}
         self._event_recording_task_gen: dict[str, int] = {}
         self._deferred_flush: dict[tuple[str, int], list[Path]] = {}
-        self._deferred_flush_tasks: set[asyncio.Task[Any]] = set()
         self._event_recording_recent: dict[str, deque[str]] = {}
         self._event_recording_locks: dict[str, asyncio.Lock] = {}
         # Notification cooldown state (issue #672), keyed by camera entity id
@@ -1155,6 +1159,22 @@ class VideoAnalyzer:
         if not isinstance(task, asyncio.Task):
             target.close()
         return cast("asyncio.Task[Any]", task)
+
+    def _create_flush_task(
+        self,
+        target: Coroutine[Any, Any, object],
+        name: str,
+    ) -> None:
+        """Start a one-off analysis that stop() cancels with the rest."""
+        # A caller that resumed after stop() cleared the set must not start
+        # an analysis nothing will cancel.
+        if self._stopped:
+            target.close()
+            return
+        task = self._create_background_task(target, name)
+        if isinstance(task, asyncio.Task):
+            self._flush_tasks.add(task)
+            task.add_done_callback(self._flush_tasks.discard)
 
     async def _get_batch(
         self,
@@ -3464,17 +3484,14 @@ class VideoAnalyzer:
                 camera_id,
                 RECORDING_FLUSH_GRACE_SEC,
             )
-            flush = self._create_background_task(
+            # Tracked so stop() cancels it through analysis, not only while
+            # it waits.
+            self._create_flush_task(
                 self._flush_after_recordings(camera_id, closing, pending),
                 f"hga video deferred flush {camera_id}",
             )
-            # Tracked so stop() cancels it through analysis, not only while
-            # it waits.
-            if isinstance(flush, asyncio.Task):
-                self._deferred_flush_tasks.add(flush)
-                flush.add_done_callback(self._deferred_flush_tasks.discard)
             return
-        self._create_background_task(
+        self._create_flush_task(
             self._process_snapshot_queue(camera_id),
             f"hga video process motion queue {camera_id}",
         )
@@ -3961,7 +3978,7 @@ class VideoAnalyzer:
         elif parked is not None:
             parked[:] = self._displace_snapshots(camera_id, parked) + admitted
         else:
-            self._create_background_task(
+            self._create_flush_task(
                 self._analyze_and_finalize(camera_id, order_batch(admitted)),
                 f"hga video event recording batch {camera_id}",
             )
@@ -4066,7 +4083,7 @@ class VideoAnalyzer:
             # A motion/event_select loop owns the camera's lifecycle; don't
             # flush its held frames mid-window when recording stops early.
             if entity_id not in self._active_motion_cameras:
-                self._create_background_task(
+                self._create_flush_task(
                     self._process_snapshot_queue(entity_id),
                     f"hga video process recording queue {entity_id}",
                 )
@@ -4181,10 +4198,10 @@ class VideoAnalyzer:
                 task.cancel()
                 tasks_to_await.append(task)
             task_dict.clear()
-        for task in self._deferred_flush_tasks:
+        for task in self._flush_tasks:
             task.cancel()
             tasks_to_await.append(task)
-        self._deferred_flush_tasks.clear()
+        self._flush_tasks.clear()
 
         self._event_snapshot_buffers.clear()
 
