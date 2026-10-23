@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
@@ -193,6 +194,8 @@ _MESSAGES: dict[str, dict[str, str]] = {
         # The devices a call names, when it also reaches others it does not.
         "target_and_others": "{targets} and other devices",
         "target_unnamed_devices": "devices it does not name",
+        "action_remote": 'run {tool} on "{api}"',
+        "action_remote_args": 'run {tool} ({args}) on "{api}"',
         # What the agent passed to a script's device fields (#787).
         "action_script_targets": "{action} ({targets})",
         "action_unnamed_target": "an unnamed device",
@@ -330,6 +333,8 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "target_to_state": "{target} na {state}",
         "target_and_others": "{targets} a další zařízení",
         "target_unnamed_devices": "zařízení, která nejmenuje",
+        "action_remote": "spustit {tool} na „{api}“",
+        "action_remote_args": "spustit {tool} ({args}) na „{api}“",
         "action_script_targets": "{action} ({targets})",
         "action_unnamed_target": "nepojmenované zařízení",
         "target_named": "„{name}“",
@@ -405,6 +410,68 @@ _DEFAULT_VERBS = ("action_turn_on", "action_turn_off")
 # The kind of an action over several kinds of device, named "every device".
 _SEVERAL_KINDS = "*"
 _KIND_KEYS = {"lock": "kind_lock", "cover": "kind_cover", "valve": "kind_valve"}
+
+
+# Longest argument value a remote call's line repeats.
+_REMOTE_ARG_MAX_LEN = 40
+# The slots that say what a call acts on, shown first in a remote call's line.
+_REMOTE_FIRST_SLOTS = ("name", "domain", "device_class", "area", "floor")
+# Marks kept in a remote call's arguments besides letters, digits and spaces:
+# none can quote, bracket or separate, so the agent's text cannot imitate the
+# line around it (#840 review).
+_REMOTE_ARG_MARKS = frozenset("-_.:/+%#@&")
+# Modifier letters that read as quote marks (MODIFIER LETTER DOUBLE PRIME and
+# the like): letters to Unicode, dropped all the same.
+_QUOTE_LIKE_LETTERS = frozenset("\u02b9\u02ba\u02bb\u02bc\u02bd\u02c8\u02ee")
+
+
+def _is_plain_letter(ch: str) -> bool:
+    """Return True for a letter or digit that cannot read as a quote mark."""
+    return unicodedata.category(ch)[0] in "LN" and ch not in _QUOTE_LIKE_LETTERS
+
+
+def _remote_text(value: Any) -> str:
+    """Return agent-written text with only letters, digits, spaces and marks."""
+    kept = "".join(
+        ch if ch in _REMOTE_ARG_MARKS or _is_plain_letter(ch) else " "
+        for ch in str(value)
+    )
+    return _one_line(kept, _REMOTE_ARG_MAX_LEN, mark_cut=True)
+
+
+def _remote_value(value: Any, *, depth: int = 0) -> str:
+    """Return one argument's value; a nested one one level down, then a cut."""
+    if isinstance(value, Mapping):
+        if depth:
+            return _ELLIPSIS
+        inner = ", ".join(
+            f"{_remote_text(k)} {_remote_value(v, depth=1)}" for k, v in value.items()
+        )
+        return f"[{inner}]"
+    if isinstance(value, list | tuple):
+        if depth and any(isinstance(v, Mapping | list | tuple) for v in value):
+            return _ELLIPSIS
+        return ", ".join(_remote_value(v, depth=depth + 1) for v in value)
+    return _remote_text(value)
+
+
+def _remote_args_text(tool_args: Mapping[str, Any]) -> str:
+    """
+    Return a remote call's arguments as one line: `name Front Door; domain lock`.
+
+    The agent wrote them, so only letters, digits, spaces and a few marks are
+    kept (no quotes, brackets or semicolons), each value is capped with an
+    ellipsis, and every argument is named, the ones saying what the call acts
+    on first, so none is hidden behind a long one (#840 review).
+    """
+    keys = [k for k in _REMOTE_FIRST_SLOTS if k in tool_args]
+    keys += [k for k in tool_args if k not in keys]
+    parts = [
+        f"{_remote_text(key)} {_remote_value(tool_args[key])}"
+        for key in keys
+        if tool_args[key] not in (None, "", [], {})
+    ]
+    return "; ".join(parts)
 
 
 def _one_line(value: Any, limit: int, *, mark_cut: bool = False) -> str:
@@ -737,7 +804,11 @@ def describe_pending_action(
             )
             + ")"
         )
-    if hass is None or str(action.get("tool_name") or "") == "add_automation":
+    if (
+        hass is None
+        or str(action.get("tool_name") or "") == "add_automation"
+        or action.get("remote")
+    ):
         return line
     try:
         effects = _relay_effects(hass, action)
@@ -812,6 +883,26 @@ def _describe_line(  # noqa: PLR0911
     tool_name = str(action.get("tool_name") or "")
     if tool_name == "add_automation":
         return _describe_automation(hass, action)
+
+    if action.get("remote"):
+        # A remote Home Assistant's tool (#840): its devices cannot be named
+        # from here, so the line names the tool, the server that runs it, and
+        # the arguments the call sends there, as the agent wrote them (#840
+        # review): the user sees what the PIN approves.
+        raw = action.get("tool_args")
+        args = _remote_args_text(raw if isinstance(raw, Mapping) else {})
+        return pin_msg(
+            hass,
+            "action_remote_args" if args else "action_remote",
+            tool=sanitize_tool_text(
+                base_tool_name(tool_name), limit=_ACTION_SERVICE_MAX_LEN
+            ),
+            args=args,
+            api=_one_line(
+                action.get("api_name") or action.get("api_id") or "",
+                _ACTION_TARGET_MAX_LEN,
+            ),
+        )
 
     raw_args = action.get("tool_args")
     tool_args: dict[str, Any] = dict(raw_args) if isinstance(raw_args, Mapping) else {}

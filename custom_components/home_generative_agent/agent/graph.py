@@ -96,6 +96,7 @@ from .helpers import (
     CONFIRM_TOOL_NAME,
     INTENT_NAME_ALL,
     PIN_REFUSAL_ENDS_TURN,
+    REMOTE_TOOL,
     active_llm_api_ids,
     base_tool_name,
     declared_domains,
@@ -108,6 +109,7 @@ from .helpers import (
     is_actuating_intent,
     is_actuation_tool,
     is_device_intent,
+    is_intent_tool,
     is_on_off_intent,
     is_tool_excluded,
     langchain_tool_parameters_json,
@@ -138,6 +140,7 @@ from .indirect_pin import (
     SCENE_DOMAIN,
     SCRIPT_DOMAIN,
     StoredActionCheck,
+    ToolOrigin,
     bare_script_tool_entity_id,
     call_service_names,
     call_target_domains,
@@ -145,6 +148,7 @@ from .indirect_pin import (
     collect_started_automations,
     has_service,
     intent_scripts_are_critical,
+    is_script_like_tool,
     named_services,
     rule_domains,
     runs_critical_action,
@@ -153,6 +157,7 @@ from .indirect_pin import (
     service_runs_critical_action,
     stored_actions_are_critical,
     tool_args_kind,
+    tool_origin,
 )
 from .on_off_direction import (
     is_bare_yes,
@@ -481,12 +486,13 @@ def _code_hints_alarm(
     return bool(calls) and all(call.domain == ALARM_DOMAIN for call in calls)
 
 
-def _critical_action_guard(
+def _critical_action_guard(  # noqa: PLR0913
     tool_name: str,
     tool_args: dict[str, Any],
     ctx: ToolExecutionContext,
     tool_call: dict[str, Any],
     args_kind: str | None = None,
+    origin: ToolOrigin | None = None,
 ) -> ToolMessage | None:
     """Enforce critical-action PIN flow when needed."""
     if not ctx.pin_enabled:
@@ -495,7 +501,13 @@ def _critical_action_guard(
     # see rule_entities).
     rules = expand_critical_rules(ctx.hass, ctx.critical_actions)
     with collect_started_automations() as started:
-        critical = _is_critical_action(tool_args, rules, tool_name, ctx.hass)
+        critical = _is_critical_action(
+            tool_args,
+            rules,
+            tool_name,
+            ctx.hass,
+            origin=origin,
+        )
     if not critical:
         return None
     if not ctx.pin_hash or not ctx.pin_salt:
@@ -524,6 +536,12 @@ def _critical_action_guard(
         # The domains the rules name, so the PIN line reads a tool's name as
         # the gate did (#837 review).
         "rule_domains": sorted(rule_domains(rules)),
+        # The API the call goes to: the confirmation sends it there, whatever
+        # tools the reply's turn offers, and a remote one's line names it
+        # (#840).
+        "api_id": origin.api_id if origin is not None else None,
+        "api_name": origin.api_name if origin is not None else None,
+        "remote": origin is not None and origin.remote,
     }
     action_id = register_pending_action(ctx.pending_actions, action)
     if action_id is None:
@@ -587,14 +605,22 @@ def _prepare_tool_args(
 ) -> tuple[ToolMessage | None, dict[str, Any]]:
     """Normalize, guard, and sanitize arguments before calling HA."""
     # Only HA's own intents are reshaped: a script, intent script or service
-    # tool reads its own arguments, and runs with them as given (#836).
-    kind = tool_args_kind(ctx.hass, tool_name)
+    # tool reads its own arguments, and runs with them as given (#836). So
+    # does one only named like HA's own, such as a remote HA's (#840).
+    origin = tool_origin(getattr(ctx, "ha_llm_api", None), tool_name)
+    kind = tool_args_kind(ctx.hass, tool_name, remote=origin.remote)
     builtin = kind == BUILTIN_INTENT
     if builtin:
         tool_args = normalize_intent_for_alarm(tool_name, tool_args, ctx.hass)
         tool_args = normalize_intent_for_lock(tool_name, tool_args, ctx.hass)
-    if _is_live_context_tool(tool_name) and not intent_scripts_are_critical(
-        ctx.hass, tool_name, expand_critical_rules(ctx.hass, ctx.critical_actions)
+    # A remote Home Assistant's tool is never taken for this one's
+    # GetLiveContext, whatever its name (#840 review).
+    if (
+        not origin.remote
+        and _is_live_context_tool(tool_name)
+        and not intent_scripts_are_critical(
+            ctx.hass, tool_name, expand_critical_rules(ctx.hass, ctx.critical_actions)
+        )
     ):
         # Read-only, and HA's schema is name/domain/area only. The lock
         # rewriting below exists for lock/unlock commands; applied to a state
@@ -615,7 +641,8 @@ def _prepare_tool_args(
     else:
         tool_args = drop_empty_args(tool_args)
 
-    redirect = _route_alarm_intent_to_tool(
+    # The alarm tool acts on this Home Assistant's panels, not a remote one's.
+    redirect = kind != REMOTE_TOOL and _route_alarm_intent_to_tool(
         tool_name, tool_args, ctx.hass, tool_call, read_code=builtin
     )
     if redirect:
@@ -644,6 +671,7 @@ def _prepare_tool_args(
         ctx=ctx,
         tool_call=tool_call,
         args_kind=kind,
+        origin=origin,
     )
     if critical_guard:
         return critical_guard, tool_args
@@ -662,6 +690,27 @@ def _is_live_context_tool(name: str) -> bool:
     """Return True when `name` is HA's live-context tool, namespaced or not."""
     return base_tool_name(name) == LIVE_CONTEXT_TOOL
 
+
+# The intents that only read, on a remote Home Assistant: a call to one that
+# sends no read-only mark is not held. Narrower than READ_ONLY_INTENTS, which
+# lets this Home Assistant's lists, timers and broadcasts through: on a remote
+# one, every change is held (#840 review).
+_REMOTE_READ_ONLY_INTENTS = frozenset(
+    {
+        "HassGetState",
+        "HassGetWeather",
+        "HassGetCurrentDate",
+        "HassGetCurrentTime",
+        "HassClimateGetTemperature",
+        "HassTimerStatus",
+        "HassShoppingListLastItems",
+        "HassNevermind",
+        "HassRespond",
+    }
+)
+# A timer's slot holding a command the timer runs when it finishes.
+_START_TIMER_INTENT = "HassStartTimer"
+_TIMER_COMMAND_SLOT = "conversation_command"
 
 # ----- Alarm helpers -----
 
@@ -3614,11 +3663,13 @@ def _coerce_entity_ids(args: dict[str, Any]) -> list[str]:
     return entity_ids
 
 
-def _is_critical_action(  # noqa: PLR0911
+def _is_critical_action(  # noqa: PLR0911, PLR0912
     tool_args: dict[str, Any],
     critical_actions: list[dict[str, str]],
     tool_name: str,
     hass: HomeAssistant | None = None,
+    *,
+    origin: ToolOrigin | None = None,
 ) -> bool:
     """
     Return True if the call could do a critical action.
@@ -3644,6 +3695,16 @@ def _is_critical_action(  # noqa: PLR0911
     # A null or blank domain names none: the entities' own domain is read.
     domain_given = domain_val is not None and bool(str(domain_val).strip())
     entities = [e.lower() for e in _coerce_entity_ids(tool_args)]
+
+    # A remote Home Assistant's tool (#840): its devices, scripts and
+    # automations cannot be seen from here, so any call that can change
+    # something is held.
+    if origin is not None and origin.ambiguous:
+        return True
+    if origin is not None and origin.remote:
+        return not _remote_call_is_read_only(
+            tool_name, tool_args, read_only_hint=origin.read_only
+        )
 
     # An intent script's tool names no domain or service, and one may take
     # over a built-in intent's tool; what it runs is checked first, and only
@@ -3714,6 +3775,30 @@ def _is_critical_action(  # noqa: PLR0911
             service, tool_args, given, critical_actions, hass, known_only=True
         )
         for service in names.bare_actions
+    )
+
+
+def _remote_call_is_read_only(
+    tool_name: str, tool_args: dict[str, Any], *, read_only_hint: bool
+) -> bool:
+    """
+    Return True if a remote Home Assistant's tool call only reads (#840).
+
+    A script or intent script may do anything, whatever it is called. A timer
+    given a command runs it later through the remote side's conversation
+    agent. Otherwise one of Home Assistant's read-only intents, or a tool the
+    remote server marks read-only, only reads.
+    """
+    if is_script_like_tool(tool_name):
+        return False
+    base = base_tool_name(tool_name)
+    if (
+        base == _START_TIMER_INTENT
+        and str(tool_args.get(_TIMER_COMMAND_SLOT) or "").strip()
+    ):
+        return False
+    return read_only_hint or (
+        is_intent_tool(tool_name) and base in _REMOTE_READ_ONLY_INTENTS
     )
 
 

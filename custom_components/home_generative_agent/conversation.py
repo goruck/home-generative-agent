@@ -66,6 +66,7 @@ from .agent.helpers import (
     tool_exclusions,
     tool_index_key,
 )
+from .agent.indirect_pin import is_remote_home_assistant
 from .agent.pin_messages import describe_pending_action, pin_msg
 from .agent.rag_embedding_text import (
     strip_for_embedding,
@@ -1024,11 +1025,17 @@ class MultiLLMAPI:
     """Wrapper to route tool calls across multiple LLM APIs."""
 
     def __init__(
-        self, apis: dict[str, llm.APIInstance], routing_map: dict[str, str]
+        self,
+        apis: dict[str, llm.APIInstance],
+        routing_map: dict[str, str],
+        remote_home_assistants: frozenset[str] | None = None,
     ) -> None:
         """Initialize the wrapper."""
         self.apis = apis
         self.routing_map = routing_map
+        # The APIs that are a remote Home Assistant, judged on every tool they
+        # offer, before the user's exclusions (#840 review). None: not judged.
+        self.remote_home_assistants = remote_home_assistants
 
     @property
     def api_prompt(self) -> str:
@@ -1325,6 +1332,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         excluded = tool_exclusions(options)
 
         active_apis: dict[str, llm.APIInstance] = {}
+        remote_home_assistants: set[str] = set()
         failed_apis: list[str] = []
         for api_id in active_api_ids:
             try:
@@ -1333,6 +1341,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 _LOGGER.warning("Could not load LLM API: %s", api_id)
                 failed_apis.append(api_id)
                 continue
+            if is_remote_home_assistant(api_id, api):
+                remote_home_assistants.add(api_id)
             api, dropped = filter_excluded_tools(api_id, api, excluded)
             if dropped:
                 _LOGGER.debug(
@@ -1351,7 +1361,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             )
             raise HomeAssistantError(msg)
 
-        return MultiLLMAPI(active_apis, {})
+        return MultiLLMAPI(active_apis, {}, frozenset(remote_home_assistants))
 
     def _network_audit_available(self) -> bool:
         """

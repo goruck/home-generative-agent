@@ -902,7 +902,7 @@ def pending_action_expired(action: Mapping[str, Any], now: datetime) -> bool:
         return True
 
 
-def _request_key(action: Mapping[str, Any]) -> tuple[Any, Any, Any, Any]:
+def _request_key(action: Mapping[str, Any]) -> tuple[Any, Any, Any, Any, Any]:
     """
     Return what makes two pending actions the same request.
 
@@ -938,8 +938,16 @@ def _request_key(action: Mapping[str, Any]) -> tuple[Any, Any, Any, Any]:
     if isinstance(automation, dict):
         automation = {key: value for key, value in automation.items() if key != "id"}
     # The kind too: the same arguments run differently once an intent script
-    # takes over a built-in intent (#836 review).
-    return tool_name, action.get("args_kind"), tool_args, automation
+    # takes over a built-in intent (#836 review). And the API: the same call
+    # sent to another Home Assistant is another request, and a PIN asked for
+    # one must not run it on the other (#840 review).
+    return (
+        tool_name,
+        action.get("args_kind"),
+        action.get("api_id"),
+        tool_args,
+        automation,
+    )
 
 
 def _same_request(existing: Mapping[str, Any], action: Mapping[str, Any]) -> bool:
@@ -1358,6 +1366,10 @@ def _alarm_payload(tool_args: Mapping[str, Any]) -> dict[str, Any]:
 BUILTIN_INTENT = "builtin_intent"
 OTHER_INTENT = "other_intent"
 NOT_AN_INTENT = "not_an_intent"
+# A tool named like one of Home Assistant's own intent or script tools that
+# another API runs, such as a remote Home Assistant over MCP (#840): its
+# arguments go as given, and this Home Assistant's devices say nothing of it.
+REMOTE_TOOL = "remote_tool"
 
 
 def is_intent_tool(tool_name: str) -> bool:
