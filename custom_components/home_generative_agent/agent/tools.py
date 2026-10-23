@@ -1342,19 +1342,30 @@ def _spend_pin_reply(cfg: Mapping[str, Any]) -> None:
         pin_reply.spent = True
 
 
-def _held_api(ha_llm_api: Any, held_api: object) -> Any | None:
+def _held_api(ha_llm_api: Any, held_api: object, tool_name: str) -> Any | None:
     """
     Return the API a held call goes to, or None if it is no longer there.
 
     The call goes to the API it was held for, not the one the reply's turn
     routes it to (or a fallback through every API): a local and a remote Home
     Assistant offer the same tool names (#840). A call held with no API on
-    record goes through the wrapper, as before.
+    record goes to the one API offering its tool; with several, it is not
+    run, since the wrapper's fallback could run it on two (#843 review).
     """
     apis = getattr(ha_llm_api, "apis", None)
-    if not isinstance(held_api, str) or not isinstance(apis, Mapping):
+    if not isinstance(apis, Mapping):
         return ha_llm_api
-    return apis.get(held_api)
+    if isinstance(held_api, str):
+        return apis.get(held_api)
+    owners = [
+        instance
+        for instance in apis.values()
+        if any(
+            getattr(tool, "name", None) == tool_name
+            for tool in getattr(instance, "tools", None) or []
+        )
+    ]
+    return owners[0] if len(owners) == 1 else None
 
 
 async def _execute_pending_action(  # noqa: PLR0911, PLR0912
@@ -1391,8 +1402,15 @@ async def _execute_pending_action(  # noqa: PLR0911, PLR0912
     # only an entity id would otherwise act on every exposed lock. Any other
     # tool runs with its arguments as held (#836).
     held_api = action.get("api_id")
+    # The tool's own name, stored when it was held: the name the agent saw
+    # for a remote one may differ by now (#843 review).
+    held_name = action.get("api_tool_name")
+    stored = isinstance(held_name, str) and bool(held_name)
     origin = tool_origin(
-        ha_llm_api, tool_name, held_api if isinstance(held_api, str) else None
+        ha_llm_api,
+        str(held_name) if stored else tool_name,
+        held_api if isinstance(held_api, str) else None,
+        own_name=stored,
     )
     kind = tool_args_kind(cfg.get("hass"), tool_name, remote=origin.remote)
     if action.get("args_kind") not in (None, kind):
@@ -1412,7 +1430,7 @@ async def _execute_pending_action(  # noqa: PLR0911, PLR0912
     else:
         tool_args = drop_empty_args(tool_args)
 
-    target_api = _held_api(ha_llm_api, held_api)
+    target_api = _held_api(ha_llm_api, held_api, origin.tool_name or tool_name)
     if target_api is None:
         # The API that would have run it is gone.
         cfg.get("pending_actions", {}).pop(resolved_action_id, None)
@@ -1423,7 +1441,15 @@ async def _execute_pending_action(  # noqa: PLR0911, PLR0912
 
     reply_key, outcome = "action_execute_failed", PIN_OUTCOME_FAILED
     try:
-        tool_input = llm.ToolInput(tool_name=tool_name, tool_args=tool_args)
+        # Sent to the held API itself, under the name it knows the tool by: a
+        # remote Home Assistant's tools reach the agent under their server's
+        # name (#843).
+        own_name = (
+            origin.tool_name
+            if target_api is not ha_llm_api and origin.tool_name
+            else tool_name
+        )
+        tool_input = llm.ToolInput(tool_name=own_name, tool_args=tool_args)
         async with asyncio.timeout_at(deadline):
             response = tool_call_data(await target_api.async_call_tool(tool_input))
         # A tool that reports failure in its payload (success: false, a

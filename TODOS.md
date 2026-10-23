@@ -83,17 +83,17 @@
 
 ---
 
-### A confirmed action can run on two LLM APIs when its tool is missing from the routing map
+### Both houses' namesake tools share one retrieval budget
 
-**What:** `MultiLLMAPI.async_call_tool` (`conversation.py`) falls back to trying every API in turn when the tool name is not in this turn's routing map, and moves on after `HomeAssistantError` or `vol.Invalid`. A PIN reply's retrieved tools may not include the original actuation tool, so its confirmed execution can take that path; if two APIs expose a tool of that name, the first can actuate and then raise, and the second actuates again. The pending action is already claimed, so this is the one way a single confirmation can still act twice.
+**What:** With a remote Home Assistant over MCP, this house's and the remote house's same-named tools (`intent__HassTurnOn`, `intent__HassTurnOff`, ...) are both eligible in `_get_rag_retrieved_tools` and the safety merge in `_retrieve_tools` (`agent/graph.py`), so at a small `tool_retrieval_limit` the two houses' on/off tools can fill the safety cap and push out other actuation tools of this house (HassLightSet). Turn on/off and GetLiveContext are force-bound back; the rest are not.
 
-**Why:** Codex P1 in the full review of PR #769 (2026-10-14), confirmed against the code; pre-existing, and needs two APIs exposing the same tool name. Left out of that PR by the maintainer's scope choice.
+**Why:** Adversarial review of #843, cycle 2 (2026-10-23): by design, since both houses' tools must stay reachable, but it costs slots. The ranking cannot yet tell which house a request means (#848), which would let it pick one house's namesakes.
 
-**How to apply:** Record the owning `api_id` on the pending action when `_critical_action_guard` registers it (from the turn's routing map), and have `_execute_pending_action` call that API directly. Never fall through to another API after an execution error.
+**How to apply:** Once ranking reads the server name, count namesakes of the house the request does not name against a separate, smaller share of the cap.
 
-**Effort:** M
-**Priority:** P2
-**Depends on:** None
+**Effort:** S
+**Priority:** P3
+**Depends on:** #848
 
 ---
 

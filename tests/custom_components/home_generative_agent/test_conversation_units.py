@@ -219,6 +219,44 @@ async def test_multi_llm_api_empty_routing_map_all_fail_raises() -> None:
 
 
 @pytest.mark.asyncio
+async def test_multi_llm_api_sends_a_remote_tool_under_its_own_name() -> None:
+    """A remote Home Assistant's tool is renamed for the agent only (#843)."""
+    remote_tool = MagicMock()
+    remote_tool.name = "intent__HassTurnOn"
+    remote = MagicMock()
+    remote.api.name = "Upstairs HA"
+    remote.tools = [remote_tool]
+    remote.async_call_tool = AsyncMock(return_value="from_remote")
+    local = MagicMock()
+    local.tools = []
+    local.async_call_tool = AsyncMock(return_value="from_local")
+    multi = MultiLLMAPI(
+        {"assist": local, "mcp-up": remote},
+        routing_map={
+            "intent__HassTurnOn": "assist",
+            "upstairs_ha__intent__HassTurnOn": "mcp-up",
+        },
+        remote_home_assistants=frozenset({"mcp-up"}),
+    )
+
+    result = await multi.async_call_tool(
+        ha_llm.ToolInput(
+            tool_name="upstairs_ha__intent__HassTurnOn", tool_args={"name": "Porch"}
+        )
+    )
+    assert result == "from_remote"
+    (sent,) = remote.async_call_tool.call_args.args
+    assert sent.tool_name == "intent__HassTurnOn"
+    assert sent.tool_args == {"name": "Porch"}
+
+    await multi.async_call_tool(
+        ha_llm.ToolInput(tool_name="intent__HassTurnOn", tool_args={})
+    )
+    (sent,) = local.async_call_tool.call_args.args
+    assert sent.tool_name == "intent__HassTurnOn"
+
+
+@pytest.mark.asyncio
 async def test_multi_llm_api_routes_to_correct_api() -> None:
     """With a populated routing_map, calls go directly to the mapped API."""
     api1 = MagicMock()
