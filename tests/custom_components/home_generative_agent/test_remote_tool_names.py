@@ -32,6 +32,7 @@ from custom_components.home_generative_agent.agent.graph import (
     RawTool,
     _append_history_tool,
     _append_included_tools,
+    _append_security_audit_tool,
     _format_and_dedupe_tools,
     _get_held_action_tools,
     _get_rag_retrieved_tools,
@@ -53,6 +54,7 @@ from custom_components.home_generative_agent.agent.indirect_pin import (
     tool_origin,
 )
 from custom_components.home_generative_agent.agent.tools import (
+    _held_api,
     confirm_sensitive_action,
 )
 from custom_components.home_generative_agent.const import (
@@ -633,3 +635,136 @@ async def test_a_tool_is_found_by_its_exact_name_first() -> None:
     )
     assert found is not None
     assert found["name"] == "intent_script__morning"
+
+
+# ----- Review cycle 3 -----
+
+
+async def test_a_confirmed_call_runs_its_own_name_verbatim(
+    hass: HomeAssistant,
+) -> None:
+    """A tool named like another's alias is not run as the other tool."""
+    assert await async_setup_component(hass, "homeassistant", {})
+    lookalike = "upstairs_ha__intent__HassTurnOn"
+    api = _wrapper()
+    api.apis[REMOTE].tools.append(_RemoteTool(lookalike))
+    api.tool_aliases = build_remote_aliases(api)
+    alias = api.tool_aliases[(REMOTE, lookalike)]
+    api.routing_map = {alias: REMOTE}
+    ctx = cast(
+        "Any",
+        SimpleNamespace(
+            hass=hass,
+            config={"configurable": {"thread_id": "t1"}},
+            critical_actions=RECOMMENDED_CRITICAL_ACTIONS,
+            pin_enabled=True,
+            pin_hash="hash",
+            pin_salt="salt",
+            pending_actions={},
+            ha_llm_api=api,
+        ),
+    )
+    redirect, _ = _prepare_tool_args(alias, {"name": "Porch"}, ctx, {"id": "c1"})
+    assert redirect is not None
+    ((action_id, action),) = ctx.pending_actions.items()
+    assert action["api_tool_name"] == lookalike
+    action.update(user="u1", thread_id="conv1", reply_turn="turn2")
+    hashed, salt = hash_pin("1234")
+    result = await confirm_tool(
+        action_id,
+        "1234",
+        config={
+            "configurable": {
+                "options": {
+                    CONF_CRITICAL_ACTION_PIN_HASH: hashed,
+                    CONF_CRITICAL_ACTION_PIN_SALT: salt,
+                },
+                "pending_actions": ctx.pending_actions,
+                "user_id": "u1",
+                "thread_id": "conv1",
+                "pin_reply": PinReply("1234", turn_id="turn2"),
+                "ha_llm_api": api,
+                "hass": hass,
+            }
+        },
+        store=None,
+    )
+    assert json.loads(result).get("status") == "completed"
+    assert cast("_Instance", api.apis[REMOTE]).calls == [(lookalike, {"name": "Porch"})]
+
+
+async def test_hgas_own_audit_tool_is_bound_whatever_a_remote_offers() -> None:
+    """An API id sorting before hga_local does not win the lookup."""
+    api = _Wrapper()
+    api.apis = {"a-cabin": _Instance("Cabin", [_RemoteTool("audit_home_security")])}
+    api.remote_home_assistants = frozenset({"a-cabin"})
+    rows = [
+        _Item("audit_home_security", "a-cabin"),
+        _Item("audit_home_security", "hga_local"),
+    ]
+    config = _retrieval_config(api)
+    config["configurable"]["options"]["llm_hass_api"] = ["a-cabin"]
+    candidates = await _append_security_audit_tool(
+        [],
+        cast("Any", _Store([], rows)),
+        config,
+        "is my home secure",
+        {"a-cabin", "hga_local"},
+        None,
+    )
+    assert [(t["name"], t["api_id"]) for t in candidates] == [
+        ("audit_home_security", "hga_local")
+    ]
+
+
+def test_a_call_held_with_no_api_runs_only_on_its_one_owner() -> None:
+    """Two APIs offering the tool: which would run it is unknown, so none."""
+    api = _wrapper()
+    assert _held_api(api, None, TURN_ON) is None  # both houses offer it
+    api.apis[REMOTE].tools = []
+    assert _held_api(api, None, TURN_ON) is api.apis[LOCAL]
+    assert _held_api(api, LOCAL, TURN_ON) is api.apis[LOCAL]
+
+
+async def test_a_bare_name_still_prefers_this_houses_namespaced_tool() -> None:
+    """With the index empty, HassTurnOn finds intent__HassTurnOn first, as before."""
+
+    def plain(name: str) -> Any:
+        return SimpleNamespace(name=name, description=name, parameters=vol.Schema({}))
+
+    api = _Wrapper()
+    api.remote_home_assistants = frozenset()
+    api.apis = {
+        LOCAL: _Instance("Assist", [plain(TURN_ON)]),
+        "mcp-x": _Instance("X", [plain("HassTurnOn")]),
+    }
+    found = await _get_tool_by_name(
+        cast("Any", _Store([], [])),
+        _retrieval_config(api),
+        "HassTurnOn",
+        {LOCAL, "mcp-x"},
+        None,
+    )
+    assert found is not None
+    assert (found["name"], found["api_id"]) == (TURN_ON, LOCAL)
+
+
+def test_a_remote_only_house_gets_the_open_state_rewrite() -> None:
+    """With only a remote Home Assistant, its GetLiveContext is the house's."""
+    api = _two_houses([], [LIVE_CTX])
+    del api.apis[LOCAL]
+    remote_name = build_remote_aliases(api)[(REMOTE, LIVE_CTX)]
+    api.routing_map = {remote_name: REMOTE}
+    call = {"name": remote_name, "args": {"name": "Window"}, "id": "r"}
+    _, first = _open_state_live_context_normalization_context(
+        [HumanMessage(content="which windows are open?")], [call], api
+    )
+    assert first is call
+    remote_call, _ = _open_state_args(
+        api,
+        remote_name,
+        {"name": "Window"},
+        "which windows are open?",
+        force_broad=True,
+    )
+    assert remote_call is False  # its reply is filtered like this house's

@@ -8,6 +8,7 @@ import json
 import logging
 import re
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import partial
 from typing import (
@@ -174,7 +175,7 @@ from .template_actions import entities_of
 from .token_counter import count_tokens_cross_provider
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Sequence
 
     from homeassistant.core import HomeAssistant
     from langchain_core.runnables import RunnableConfig
@@ -1196,8 +1197,9 @@ async def _get_local_first(
     Fetch this house's tool by name; a remote one's only if none is bound.
 
     A remote Home Assistant's tool does not stand in for this house's own,
-    but with only remote ones offering it, theirs is bound as before (#843
-    review), renamed and held for the PIN.
+    but when this house offers none it may use (none, or it is excluded) and
+    no tool of that name is bound, a remote one's is bound as before (#843
+    review), renamed, described as another house's, and held for the PIN.
     """
     allowed = _get_allowed_api_ids(config)
     remote_ids = _remote_ids(config)
@@ -1500,7 +1502,11 @@ async def _append_security_audit_tool(  # noqa: PLR0913
     ):
         return candidates
     fetched = await _get_tool_by_name(
-        store, config, "audit_home_security", allowed_api_ids, live_tool_ids
+        store,
+        config,
+        "audit_home_security",
+        {"hga_local"} & allowed_api_ids,
+        live_tool_ids,
     )
     return candidates if fetched is None else [*candidates, fetched]
 
@@ -1686,8 +1692,9 @@ async def _append_turn_on_tool(  # noqa: PLR0913
     if fetched is None and not any(
         base_tool_name(t["name"]) in _ON_OFF_PARTNER for t in candidates
     ):
-        # Only remote Home Assistants offer it: bind theirs, as before (#843
-        # review). It reaches the agent renamed and held for the PIN.
+        # This house offers none it may use (none, or it is excluded): bind
+        # a remote Home Assistant's, as before (#843 review). It reaches the
+        # agent renamed, described as another house's, and held for the PIN.
         fetched = await _get_tool_by_name(
             store,
             config,
@@ -1814,7 +1821,10 @@ def _open_state_live_context_normalization_context(
             tc
             for tc in tool_calls
             if _is_live_context_tool(str(tc.get("name", "")))
-            and not tool_origin(ha_llm_api, str(tc.get("name", ""))).remote
+            and not (
+                tool_origin(ha_llm_api, str(tc.get("name", ""))).remote
+                and _has_local_ha_api(ha_llm_api)
+            )
         ),
         None,
     )
@@ -2918,9 +2928,10 @@ async def _get_tool_by_name(
         for tool in _get_fallback_tools(config, allowed_api_ids)
         if tool["api_id"] in allowed_api_ids
     ]
-    for tool in fallback:
-        if tool["name"] == name:
-            return tool
+    if name != base_tool_name(name):
+        for tool in fallback:
+            if tool["name"] == name:
+                return tool
     for tool in fallback:
         if base_tool_name(tool["name"]) == base_tool_name(name):
             return tool
@@ -3192,7 +3203,11 @@ async def _retrieve_tools(  # noqa: PLR0915
         )
     ):
         fetched_add_automation = await _get_tool_by_name(
-            store, config, "add_automation", allowed_api_ids, live_tool_ids
+            store,
+            config,
+            "add_automation",
+            {"hga_local"} & allowed_api_ids,
+            live_tool_ids,
         )
         if fetched_add_automation is not None:
             all_candidates = [*all_candidates, fetched_add_automation]
@@ -4198,6 +4213,20 @@ def _live_context_args(tool_args: dict[str, Any]) -> dict[str, Any]:
     return {key: tool_args[key] for key in _LIVE_CONTEXT_KEYS if tool_args.get(key)}
 
 
+def _has_local_ha_api(ha_llm_api: Any) -> bool:
+    """
+    Return True if an API of this house (not a remote Home Assistant) is on.
+
+    With only remote Home Assistants, the user's house is the remote one, and
+    its GetLiveContext gets the open-state rewrite as before (#843 review).
+    """
+    apis = getattr(ha_llm_api, "apis", None)
+    if not isinstance(apis, Mapping):
+        return True
+    remote = remote_api_names(ha_llm_api)
+    return any(api_id not in remote for api_id in apis)
+
+
 def _open_state_args(
     ha_llm_api: Any,
     tool_name: str,
@@ -4213,7 +4242,7 @@ def _open_state_args(
     GetLiveContext, not a remote Home Assistant's, whose call keeps its
     arguments (#843 review).
     """
-    if tool_origin(ha_llm_api, tool_name).remote:
+    if tool_origin(ha_llm_api, tool_name).remote and _has_local_ha_api(ha_llm_api):
         return True, tool_args
     return False, _normalize_live_context_args_for_open_state(
         tool_name, tool_args, open_state_query, force_broad=force_broad

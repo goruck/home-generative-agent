@@ -246,7 +246,11 @@ class ToolOrigin:
 
 
 def tool_origin(
-    ha_llm_api: Any, tool_name: str, api_id: str | None = None
+    ha_llm_api: Any,
+    tool_name: str,
+    api_id: str | None = None,
+    *,
+    own_name: bool = False,
 ) -> ToolOrigin:
     """
     Return the API that runs a tool, and whether it is a remote Home Assistant.
@@ -296,10 +300,14 @@ def tool_origin(
         return ToolOrigin(api_id=api_id)
     api_name = _api_name(instance, api_id)
     remote_api = _is_judged_remote(ha_llm_api, api_id, instance)
-    own_name = (
-        _own_tool_name(ha_llm_api, api_id, tool_name) if remote_api else tool_name
+    # `own_name`: the name is the tool's own already (a held call's), and is
+    # never read as an alias of another tool (#843 review).
+    own = (
+        _own_tool_name(ha_llm_api, api_id, tool_name)
+        if remote_api and not own_name
+        else tool_name
     )
-    tool = _find_tool(instance, own_name)
+    tool = _find_tool(instance, own)
     remote = tool is not None and not _is_ha_tool(tool) and remote_api
     read_only = bool(getattr(getattr(tool, "annotations", None), "read_only", False))
     return ToolOrigin(
@@ -307,7 +315,7 @@ def tool_origin(
         api_name=api_name,
         remote=remote,
         read_only=read_only,
-        tool_name=own_name,
+        tool_name=own,
     )
 
 
