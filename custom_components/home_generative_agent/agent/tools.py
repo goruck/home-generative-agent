@@ -1423,7 +1423,15 @@ async def _execute_pending_action(  # noqa: PLR0911, PLR0912
 
     reply_key, outcome = "action_execute_failed", PIN_OUTCOME_FAILED
     try:
-        tool_input = llm.ToolInput(tool_name=tool_name, tool_args=tool_args)
+        # Sent to the held API itself, under the name it knows the tool by: a
+        # remote Home Assistant's tools reach the agent under their server's
+        # name (#843).
+        own_name = (
+            origin.tool_name
+            if target_api is not ha_llm_api and origin.tool_name
+            else tool_name
+        )
+        tool_input = llm.ToolInput(tool_name=own_name, tool_args=tool_args)
         async with asyncio.timeout_at(deadline):
             response = tool_call_data(await target_api.async_call_tool(tool_input))
         # A tool that reports failure in its payload (success: false, a

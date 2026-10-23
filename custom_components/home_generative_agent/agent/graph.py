@@ -124,6 +124,7 @@ from .helpers import (
     pin_lines_follow,
     pin_refusal,
     register_pending_action,
+    remote_tool_name,
     resolve_critical_action_policy,
     sanitize_tool_args,
     sanitize_tool_text,
@@ -150,6 +151,7 @@ from .indirect_pin import (
     intent_scripts_are_critical,
     is_script_like_tool,
     named_services,
+    remote_api_names,
     rule_domains,
     runs_critical_action,
     script_rule_matches,
@@ -2440,13 +2442,26 @@ def _tools_for_chain_member(model: Any, tools: list[Any]) -> list[Any]:
 def _format_and_dedupe_tools(
     raw_tools: list[RawTool],
     provider: str | None = None,
+    remote_apis: Mapping[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
-    """Convert raw tools to output format and deduplicate (first-seen wins)."""
+    """
+    Convert raw tools to output format and deduplicate (first-seen wins).
+
+    A remote Home Assistant's tools (`remote_apis`: id to name) are named
+    after their server, and their description says so: it offers its tools
+    under this Home Assistant's names, and the agent can be given one tool
+    per name, so a command could reach the wrong house (#843).
+    """
     selected_tools: list[dict[str, Any]] = []
     routing_map: dict[str, str] = {}
 
     for tool in raw_tools:
         name = tool["name"]
+        description = tool["description"]
+        api_name = (remote_apis or {}).get(tool["api_id"])
+        if api_name is not None:
+            name = remote_tool_name(api_name, name)
+            description = f"[{api_name}, another Home Assistant] {description}"
         if name in routing_map:
             continue
 
@@ -2491,7 +2506,7 @@ def _format_and_dedupe_tools(
                 "type": "function",
                 "function": {
                     "name": name,
-                    "description": tool["description"],
+                    "description": description,
                     "parameters": parameters,
                 },
             }
@@ -3096,7 +3111,9 @@ async def _retrieve_tools(  # noqa: PLR0915
     # (_sanitize_any_of_required).
     provider_raw = opts.get(CONF_CHAT_MODEL_PROVIDER)
     selected_tools, routing_map = _format_and_dedupe_tools(
-        all_candidates, str(provider_raw) if provider_raw else None
+        all_candidates,
+        str(provider_raw) if provider_raw else None,
+        remote_api_names(config.get("configurable", {}).get("ha_llm_api")),
     )
 
     LOGGER.debug(

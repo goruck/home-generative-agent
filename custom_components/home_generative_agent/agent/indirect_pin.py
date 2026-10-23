@@ -69,6 +69,7 @@ from .helpers import (
     base_tool_name,
     is_intent_tool,
     matches_critical_rule,
+    remote_tool_name,
     rule_entity_matches,
 )
 from .rule_entities import read_switch_wrappers
@@ -237,6 +238,9 @@ class ToolOrigin:
     # Offered by several APIs, a remote Home Assistant among them, with no
     # routing to say which runs it: held, whatever it reads as (#840 review).
     ambiguous: bool = False
+    # The tool's own name at its API: a remote Home Assistant's tools reach
+    # the agent under their server's name (#843).
+    tool_name: str | None = None
 
 
 def tool_origin(
@@ -288,21 +292,66 @@ def tool_origin(
     instance = apis.get(api_id)
     if instance is None:
         return ToolOrigin(api_id=api_id)
-    api_name = str(getattr(getattr(instance, "api", None), "name", "") or api_id)
-    tool = _find_tool(instance, tool_name)
-    # Judged once per turn on every tool each API offers; a wrapper built
-    # without that judgement (a test) is judged on the tools it offers now.
-    judged = getattr(ha_llm_api, "remote_home_assistants", None)
-    remote_api = (
-        api_id in judged
-        if isinstance(judged, frozenset | set)
-        else is_remote_home_assistant(api_id, instance)
+    api_name = _api_name(instance, api_id)
+    remote_api = _is_judged_remote(ha_llm_api, api_id, instance)
+    own_name = (
+        _own_tool_name(instance, api_name, tool_name) if remote_api else tool_name
     )
+    tool = _find_tool(instance, own_name)
     remote = tool is not None and not _is_ha_tool(tool) and remote_api
     read_only = bool(getattr(getattr(tool, "annotations", None), "read_only", False))
     return ToolOrigin(
-        api_id=api_id, api_name=api_name, remote=remote, read_only=read_only
+        api_id=api_id,
+        api_name=api_name,
+        remote=remote,
+        read_only=read_only,
+        tool_name=own_name,
     )
+
+
+def _api_name(instance: Any, api_id: str) -> str:
+    """Return an API instance's name, or its id."""
+    return str(getattr(getattr(instance, "api", None), "name", "") or api_id)
+
+
+def _is_judged_remote(ha_llm_api: Any, api_id: str, instance: Any) -> bool:
+    """Return True if the API is a remote Home Assistant, as judged this turn."""
+    # Judged once per turn on every tool each API offers; a wrapper built
+    # without that judgement (a test) is judged on the tools it offers now.
+    judged = getattr(ha_llm_api, "remote_home_assistants", None)
+    if isinstance(judged, frozenset | set):
+        return api_id in judged
+    return is_remote_home_assistant(api_id, instance)
+
+
+def _own_tool_name(instance: Any, api_name: str, name: str) -> str:
+    """Return the name a remote tool has at its API, from the agent's name."""
+    for tool in getattr(instance, "tools", None) or []:
+        own = getattr(tool, "name", None)
+        if isinstance(own, str) and remote_tool_name(api_name, own) == name:
+            return own
+    return name
+
+
+def remote_api_names(ha_llm_api: Any) -> dict[str, str]:
+    """Return each remote Home Assistant API's id and name (#843)."""
+    apis = getattr(ha_llm_api, "apis", None)
+    if not isinstance(apis, Mapping):
+        return {}
+    return {
+        api_id: _api_name(instance, api_id)
+        for api_id, instance in apis.items()
+        if _is_judged_remote(ha_llm_api, api_id, instance)
+    }
+
+
+def api_tool_name(ha_llm_api: Any, api_id: str, name: str) -> str:
+    """Return the name a tool the agent calls has at the API that runs it."""
+    apis = getattr(ha_llm_api, "apis", None)
+    instance = apis.get(api_id) if isinstance(apis, Mapping) else None
+    if instance is None or not _is_judged_remote(ha_llm_api, api_id, instance):
+        return name
+    return _own_tool_name(instance, _api_name(instance, api_id), name)
 
 
 def _find_tool(instance: Any, tool_name: str) -> Any | None:

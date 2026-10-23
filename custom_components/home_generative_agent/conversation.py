@@ -66,7 +66,7 @@ from .agent.helpers import (
     tool_exclusions,
     tool_index_key,
 )
-from .agent.indirect_pin import is_remote_home_assistant
+from .agent.indirect_pin import api_tool_name, is_remote_home_assistant
 from .agent.pin_messages import describe_pending_action, pin_msg
 from .agent.rag_embedding_text import (
     strip_for_embedding,
@@ -1068,6 +1068,13 @@ class MultiLLMAPI:
             msg = f"API {api_id} not available for {tool_input.tool_name}"
             raise HomeAssistantError(msg)
 
+        # A remote Home Assistant's tool reaches the agent under its server's
+        # name; its API knows it by its own (#843).
+        own_name = api_tool_name(self, api_id, tool_input.tool_name)
+        if own_name != tool_input.tool_name:
+            tool_input = llm.ToolInput(
+                tool_name=own_name, tool_args=tool_input.tool_args, id=tool_input.id
+            )
         return await api.async_call_tool(tool_input)
 
 
