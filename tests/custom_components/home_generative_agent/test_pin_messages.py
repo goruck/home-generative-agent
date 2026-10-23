@@ -40,6 +40,7 @@ _DUMMY_KWARGS: dict[str, Any] = {
     "scene": "scene",
     "states": "states",
     "api": "api",
+    "tool": "tool",
 }
 
 

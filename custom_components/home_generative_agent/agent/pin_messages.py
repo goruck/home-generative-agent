@@ -193,7 +193,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         # The devices a call names, when it also reaches others it does not.
         "target_and_others": "{targets} and other devices",
         "target_unnamed_devices": "devices it does not name",
-        "target_remote": 'devices through "{api}"',
+        "action_remote": 'run {tool} on "{api}"',
         # What the agent passed to a script's device fields (#787).
         "action_script_targets": "{action} ({targets})",
         "action_unnamed_target": "an unnamed device",
@@ -331,7 +331,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "target_to_state": "{target} na {state}",
         "target_and_others": "{targets} a další zařízení",
         "target_unnamed_devices": "zařízení, která nejmenuje",
-        "target_remote": "zařízení přes „{api}“",
+        "action_remote": "spustit {tool} na „{api}“",
         "action_script_targets": "{action} ({targets})",
         "action_unnamed_target": "nepojmenované zařízení",
         "target_named": "„{name}“",
@@ -825,17 +825,13 @@ def _describe_line(  # noqa: PLR0911
         # the tool and the API that runs it.
         return pin_msg(
             hass,
-            "action_service",
-            service=sanitize_tool_text(
+            "action_remote",
+            tool=sanitize_tool_text(
                 base_tool_name(tool_name), limit=_ACTION_SERVICE_MAX_LEN
             ),
-            target=pin_msg(
-                hass,
-                "target_remote",
-                api=_one_line(
-                    action.get("api_name") or action.get("api_id") or "",
-                    _ACTION_TARGET_MAX_LEN,
-                ),
+            api=_one_line(
+                action.get("api_name") or action.get("api_id") or "",
+                _ACTION_TARGET_MAX_LEN,
             ),
         )
 

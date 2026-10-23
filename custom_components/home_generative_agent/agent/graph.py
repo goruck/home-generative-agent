@@ -110,6 +110,7 @@ from .helpers import (
     is_actuating_intent,
     is_actuation_tool,
     is_device_intent,
+    is_intent_tool,
     is_on_off_intent,
     is_tool_excluded,
     langchain_tool_parameters_json,
@@ -148,6 +149,7 @@ from .indirect_pin import (
     collect_started_automations,
     has_service,
     intent_scripts_are_critical,
+    is_script_like_tool,
     named_services,
     rule_domains,
     runs_critical_action,
@@ -505,7 +507,7 @@ def _critical_action_guard(  # noqa: PLR0913
             rules,
             tool_name,
             ctx.hass,
-            remote=origin is not None and origin.remote,
+            origin=origin,
         )
     if not critical:
         return None
@@ -612,8 +614,14 @@ def _prepare_tool_args(
     if builtin:
         tool_args = normalize_intent_for_alarm(tool_name, tool_args, ctx.hass)
         tool_args = normalize_intent_for_lock(tool_name, tool_args, ctx.hass)
-    if _is_live_context_tool(tool_name) and not intent_scripts_are_critical(
-        ctx.hass, tool_name, expand_critical_rules(ctx.hass, ctx.critical_actions)
+    # A remote Home Assistant's tool is never taken for this one's
+    # GetLiveContext, whatever its name (#840 review).
+    if (
+        not origin.remote
+        and _is_live_context_tool(tool_name)
+        and not intent_scripts_are_critical(
+            ctx.hass, tool_name, expand_critical_rules(ctx.hass, ctx.critical_actions)
+        )
     ):
         # Read-only, and HA's schema is name/domain/area only. The lock
         # rewriting below exists for lock/unlock commands; applied to a state
@@ -683,6 +691,10 @@ def _is_live_context_tool(name: str) -> bool:
     """Return True when `name` is HA's live-context tool, namespaced or not."""
     return base_tool_name(name) == LIVE_CONTEXT_TOOL
 
+
+# A timer's slot holding a command the timer runs when it finishes.
+_START_TIMER_INTENT = "HassStartTimer"
+_TIMER_COMMAND_SLOT = "conversation_command"
 
 # ----- Alarm helpers -----
 
@@ -3641,7 +3653,7 @@ def _is_critical_action(  # noqa: PLR0911, PLR0912
     tool_name: str,
     hass: HomeAssistant | None = None,
     *,
-    remote: bool = False,
+    origin: ToolOrigin | None = None,
 ) -> bool:
     """
     Return True if the call could do a critical action.
@@ -3668,11 +3680,13 @@ def _is_critical_action(  # noqa: PLR0911, PLR0912
     domain_given = domain_val is not None and bool(str(domain_val).strip())
     entities = [e.lower() for e in _coerce_entity_ids(tool_args)]
 
-    # A remote Home Assistant's intent or script tool (#840): its devices,
-    # scripts and automations cannot be seen from here, so any call that can
-    # change something is held. Only a read-only intent is not.
-    if remote:
-        return base_tool_name(tool_name) not in READ_ONLY_INTENTS
+    # A remote Home Assistant's tool (#840): its devices, scripts and
+    # automations cannot be seen from here, so any call that can change
+    # something is held.
+    if origin is not None and origin.remote:
+        return not _remote_call_is_read_only(
+            tool_name, tool_args, read_only_hint=origin.read_only
+        )
 
     # An intent script's tool names no domain or service, and one may take
     # over a built-in intent's tool; what it runs is checked first, and only
@@ -3744,6 +3758,28 @@ def _is_critical_action(  # noqa: PLR0911, PLR0912
         )
         for service in names.bare_actions
     )
+
+
+def _remote_call_is_read_only(
+    tool_name: str, tool_args: dict[str, Any], *, read_only_hint: bool
+) -> bool:
+    """
+    Return True if a remote Home Assistant's tool call only reads (#840).
+
+    A script or intent script may do anything, whatever it is called. A timer
+    given a command runs it later through the remote side's conversation
+    agent. Otherwise one of Home Assistant's read-only intents, or a tool the
+    remote server marks read-only, only reads.
+    """
+    if is_script_like_tool(tool_name):
+        return False
+    base = base_tool_name(tool_name)
+    if (
+        base == _START_TIMER_INTENT
+        and str(tool_args.get(_TIMER_COMMAND_SLOT) or "").strip()
+    ):
+        return False
+    return read_only_hint or (is_intent_tool(tool_name) and base in READ_ONLY_INTENTS)
 
 
 def _bare_service_is_critical(  # noqa: PLR0913

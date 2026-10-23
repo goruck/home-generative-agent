@@ -35,6 +35,7 @@ from custom_components.home_generative_agent.agent.helpers import (
     PinReply,
 )
 from custom_components.home_generative_agent.agent.indirect_pin import (
+    ToolOrigin,
     tool_args_kind,
     tool_origin,
 )
@@ -64,10 +65,11 @@ LOCAL = "assist"
 class _RemoteTool(llm.Tool):
     """A tool another API runs, such as an MCP server's."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, *, read_only: bool = False) -> None:
         self.name = name
         self.description = None
         self.parameters = cast("Any", None)
+        self.annotations = llm.ToolAnnotations(read_only=read_only)
 
     async def async_call(self, hass: Any, tool_input: Any, llm_context: Any) -> Any:
         raise NotImplementedError
@@ -111,9 +113,24 @@ class _Wrapper:
         )
 
 
-def _api(remote_tools: list[str], local_tools: list[llm.Tool] | None = None) -> Any:
+# A tool only a Home Assistant offers: its server is a remote Home Assistant.
+HA_MARKER = "intent__HassNevermind"
+
+
+def _api(
+    remote_tools: list[str],
+    local_tools: list[llm.Tool] | None = None,
+    *,
+    ha_server: bool = True,
+    read_only: tuple[str, ...] = (),
+) -> Any:
     local = _Instance(LOCAL, local_tools or [])
-    remote = _Instance("Upstairs HA", [_RemoteTool(n) for n in remote_tools])
+    names = list(remote_tools)
+    if ha_server and HA_MARKER not in names:
+        names.append(HA_MARKER)
+    remote = _Instance(
+        "Upstairs HA", [_RemoteTool(n, read_only=n in read_only) for n in names]
+    )
     routing = {t.name: LOCAL for t in local.tools}
     routing.update(dict.fromkeys(remote_tools, REMOTE))
     return _Wrapper({LOCAL: local, REMOTE: remote}, routing)
@@ -182,6 +199,22 @@ async def _answer_pin(home: HomeAssistant, ctx: Any, api: Any) -> str:
         ("intent__HassLightSet", {"name": "Hall", "brightness": 50}),
         ("script__open_door", {}),
         ("intent_script__OpenDoor", {}),
+        # Named like a read-only intent, but a script may do anything.
+        ("intent_script__HassGetState", {}),
+        ("script__hassgetstate", {}),
+        # Names that say nothing, on a remote Home Assistant's server.
+        ("open_garage_door", {}),  # a script's tool before 2026.9
+        ("OpenGarage", {}),  # an intent script's tool before 2026.9
+        ("media_player__play_media", {"media_id": "x"}),
+        ("my_integration__open_gate", {}),
+        # The remote side runs the command when the timer ends.
+        (
+            "intent__HassStartTimer",
+            {"seconds": 1, "conversation_command": "open the garage door"},
+        ),
+        # Not marked read-only, whatever its name: no shortcut past the check.
+        ("GetLiveContext", {}),
+        ("intent_script__GetLiveContext", {}),
     ],
 )
 async def test_a_remote_change_is_held(
@@ -198,21 +231,42 @@ async def test_a_remote_change_is_held(
     assert action["remote"] is True
     assert action["args_kind"] == REMOTE_TOOL
     line = describe_pending_action(home, action)
-    assert 'through "Upstairs HA"' in line
+    assert ' on "Upstairs HA"' in line
+    assert line.startswith("run ")
     # The model's words are not repeated, and this house's devices not named.
     assert "Front Door" not in line
     assert "Garage Door" not in line
 
 
 @pytest.mark.parametrize(
-    "tool_name", ["intent__HassGetState", "HassGetWeather", "intent__HassNevermind"]
+    ("tool_name", "args"),
+    [
+        ("intent__HassGetState", {"name": "Front Door"}),
+        ("HassGetWeather", {}),
+        ("intent__HassNevermind", {}),
+        ("intent__HassStartTimer", {"minutes": 5}),
+        # Marked read-only by the remote server.
+        ("GetLiveContext", {}),
+        ("calendar__get_events", {"calendar": "Home"}),
+    ],
 )
-async def test_a_remote_read_is_not_held(home: HomeAssistant, tool_name: str) -> None:
-    """A read-only intent changes nothing, wherever it runs."""
-    ctx = _ctx(home, _api([tool_name]))
-    redirect, _ = _prepare_tool_args(tool_name, {"name": "Front Door"}, ctx, {})
+async def test_a_remote_read_is_not_held(
+    home: HomeAssistant, tool_name: str, args: dict[str, Any]
+) -> None:
+    """A read-only intent or tool changes nothing, wherever it runs."""
+    api = _api([tool_name], read_only=("GetLiveContext", "calendar__get_events"))
+    ctx = _ctx(home, api)
+    redirect, _ = _prepare_tool_args(tool_name, dict(args), ctx, {})
     assert redirect is None
     assert not ctx.pending_actions
+
+
+async def test_a_read_only_mark_does_not_clear_a_script(home: HomeAssistant) -> None:
+    """A script marked read-only by the server is held all the same."""
+    api = _api(["script__open_door"], read_only=("script__open_door",))
+    ctx = _ctx(home, api)
+    redirect, _ = _prepare_tool_args("script__open_door", {}, ctx, {"id": "c1"})
+    assert redirect is not None
 
 
 async def test_a_remote_alarm_call_is_held_not_sent_to_the_alarm_tool(
@@ -249,12 +303,40 @@ async def test_a_local_script_tool_is_not_remote() -> None:
     assert tool_origin(api, "script__open_door").remote is False
 
 
-async def test_an_unrelated_remote_tool_is_not_affected() -> None:
-    """Only names Home Assistant gives its own tools are read as remote ones."""
-    api = _api(["get_current_time"])
-    origin = tool_origin(api, "get_current_time")
+async def test_another_mcp_servers_tool_is_not_affected() -> None:
+    """A server offering no Home Assistant tool is not a remote one."""
+    api = _api(["get_current_time", "open_garage_door"], ha_server=False)
+    for name in ("get_current_time", "open_garage_door"):
+        origin = tool_origin(api, name)
+        assert origin.api_id == REMOTE
+        assert origin.remote is False
+
+
+async def test_this_home_assistants_api_is_never_remote() -> None:
+    """Its own intent and script tools make no API a remote one."""
+    tools = [
+        _local_intent(TURN_ON),
+        _local_script("script__open_door"),
+        _RemoteTool("GetLiveContext"),  # HA's own, neither intent nor action
+        _RemoteTool("calendar__get_events"),
+    ]
+    api = _api([], tools)
+    for tool in tools:
+        assert tool_origin(api, tool.name).remote is False
+
+
+async def test_an_unrouted_call_is_read_as_the_fallback_sends_it(
+    home: HomeAssistant,
+) -> None:
+    """With no routing entry, any API offering the name counts (#840 review)."""
+    api = _api([TURN_ON], [_local_intent(TURN_ON)])
+    api.routing_map = {}
+    origin = tool_origin(api, TURN_ON)
+    assert origin.remote is True
     assert origin.api_id == REMOTE
-    assert origin.remote is False
+    ctx = _ctx(home, api)
+    redirect, _ = _prepare_tool_args(TURN_ON, {"name": "Front Door"}, ctx, {"id": "c1"})
+    assert redirect is not None
 
 
 async def test_no_routing_reads_the_name_as_before(home: HomeAssistant) -> None:
@@ -265,7 +347,11 @@ async def test_no_routing_reads_the_name_as_before(home: HomeAssistant) -> None:
         {"name": "Front Door"}, RECOMMENDED_CRITICAL_ACTIONS, TURN_ON, home
     )
     assert _is_critical_action(
-        {"name": "Front Door"}, RECOMMENDED_CRITICAL_ACTIONS, TURN_ON, home, remote=True
+        {"name": "Front Door"},
+        RECOMMENDED_CRITICAL_ACTIONS,
+        TURN_ON,
+        home,
+        origin=ToolOrigin(remote=True),
     )
 
 
@@ -321,3 +407,39 @@ async def test_a_local_held_call_goes_to_the_local_api(home: HomeAssistant) -> N
     assert json.loads(result).get("status") == "completed"
     assert api.apis[REMOTE].calls == []
     assert [name for name, _ in api.apis[LOCAL].calls] == ["intent__HassTurnOff"]
+
+
+async def test_a_request_sent_to_another_home_assistant_is_another_request(
+    home: HomeAssistant,
+) -> None:
+    """A PIN asked for one remote Home Assistant never runs on another."""
+    down = _Instance("Downstairs HA", [_RemoteTool(TURN_ON), _RemoteTool(HA_MARKER)])
+    api = _api([TURN_ON])
+    api.apis["mcp-down"] = down
+    ctx = _ctx(home, api)
+    ctx.config = {
+        "configurable": {
+            "thread_id": "t1",
+            "pin_reply": PinReply("open the garage", turn_id="t1"),
+        }
+    }
+    redirect, _ = _prepare_tool_args(TURN_ON, {"name": "Garage"}, ctx, {"id": "c1"})
+    assert redirect is not None
+    ((_, held),) = ctx.pending_actions.items()
+    held.update(reply_turn="turn2", disclosed=True)
+    # The reply's turn routes the name to the other server, and the model
+    # issues the call again.
+    api.routing_map = {TURN_ON: "mcp-down"}
+    ctx.config = {
+        "configurable": {
+            "thread_id": "t1",
+            "pin_reply": PinReply("1234", turn_id="turn2"),
+        }
+    }
+    _prepare_tool_args(TURN_ON, {"name": "Garage"}, ctx, {"id": "c2"})
+    for action in ctx.pending_actions.values():
+        if action.get("api_id") == "mcp-down":
+            # Asked for anew: it does not take over the first one's prompt.
+            assert action.get("disclosed") is not True
+            assert action.get("reply_turn") != "turn2"
+    assert down.calls == []

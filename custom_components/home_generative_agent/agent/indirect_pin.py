@@ -229,57 +229,105 @@ class ToolOrigin:
 
     api_id: str | None = None
     api_name: str | None = None
-    # Named like one of Home Assistant's own intent or script tools, but run
-    # by another kind of tool (#840).
+    # A tool of a remote Home Assistant reached over MCP (#840): this Home
+    # Assistant's devices, scripts and automations say nothing of it.
     remote: bool = False
+    # The remote server marks the tool read-only (MCP `readOnlyHint`).
+    read_only: bool = False
 
 
 def tool_origin(
     ha_llm_api: Any, tool_name: str, api_id: str | None = None
 ) -> ToolOrigin:
     """
-    Return the API that runs a tool, and whether it is a remote look-alike.
+    Return the API that runs a tool, and whether it is a remote Home Assistant.
 
     The routing map names the API each offered tool is sent to (or `api_id`,
-    the one a held call was sent to). A remote Home Assistant reached over
-    MCP offers its intents and scripts under the same names as this one's
-    (`intent__HassTurnOn`, `script__open_door`), so the name alone reads them
-    as this Home Assistant's own. Only an intent or action tool is (#840).
-    With no API or routing to read, nothing is known and the name is read as
+    the one a held call was sent to). A name the routing map lacks goes to
+    the first API offering it, as the wrapper's fallback sends it. A remote
+    Home Assistant reached over MCP offers its intents and scripts under the
+    same names as this one's (`intent__HassTurnOn`, `script__open_door`), and
+    other tools under names that say nothing (a script named by its id alone
+    before 2026.9, `media_player__play_media`), so the whole server is judged:
+    an API offering any tool named like Home Assistant's own intent or script
+    tools that is not one is a remote Home Assistant, and every tool on it is
+    remote (#840 review). This Home Assistant's own are intent and action
+    tools. With no API to read, nothing is known and the name is read as
     before.
     """
+    apis = getattr(ha_llm_api, "apis", None)
+    if not isinstance(apis, Mapping):
+        return ToolOrigin()
     if api_id is None:
         routing = getattr(ha_llm_api, "routing_map", None)
         api_id = routing.get(tool_name) if isinstance(routing, Mapping) else None
-    apis = getattr(ha_llm_api, "apis", None)
-    if api_id is None or not isinstance(apis, Mapping):
-        return ToolOrigin()
+    if api_id is None:
+        # The wrapper tries each API offering the name in turn, so the call
+        # is read as the first one's, and as remote if any of them is.
+        holders = [
+            key
+            for key, instance in apis.items()
+            if _find_tool(instance, tool_name) is not None
+        ]
+        if not holders:
+            return ToolOrigin()
+        origins = [tool_origin(ha_llm_api, tool_name, key) for key in holders]
+        remote = next((o for o in origins if o.remote), None)
+        return remote or origins[0]
     instance = apis.get(api_id)
     if instance is None:
         return ToolOrigin(api_id=api_id)
     api_name = str(getattr(getattr(instance, "api", None), "name", "") or api_id)
+    tool = _find_tool(instance, tool_name)
+    remote = (
+        tool is not None
+        and not _is_ha_tool(tool)
+        and _is_remote_home_assistant(instance)
+    )
+    read_only = bool(getattr(getattr(tool, "annotations", None), "read_only", False))
+    return ToolOrigin(
+        api_id=api_id, api_name=api_name, remote=remote, read_only=read_only
+    )
+
+
+def _find_tool(instance: Any, tool_name: str) -> Any | None:
+    """Return the tool an API instance offers under a name, unwrapped."""
     tool = next(
         (t for t in getattr(instance, "tools", None) or [] if t.name == tool_name),
         None,
     )
     while isinstance(tool, llm.NamespacedTool):
         tool = tool.tool
-    remote = (
-        tool is not None
-        and not isinstance(tool, llm.IntentTool | llm.ActionTool)
-        and _named_like_ha_tool(tool_name)
+    return tool
+
+
+def _is_ha_tool(tool: Any) -> bool:
+    """Return True for one of this Home Assistant's intent or action tools."""
+    return isinstance(tool, llm.IntentTool | llm.ActionTool)
+
+
+def _is_remote_home_assistant(instance: Any) -> bool:
+    """Return True for an API offering a Home Assistant tool it does not run."""
+    for tool in getattr(instance, "tools", None) or []:
+        inner = tool
+        while isinstance(inner, llm.NamespacedTool):
+            inner = inner.tool
+        if not _is_ha_tool(inner) and _named_like_ha_tool(str(tool.name)):
+            return True
+    return False
+
+
+def is_script_like_tool(tool_name: str) -> bool:
+    """Return True for a script's or an intent script's tool name."""
+    parts = tool_name.split(TOOL_NAMESPACE_SEP)
+    return script_tool_entity_id(tool_name) is not None or (
+        len(parts) >= _SCRIPT_TOOL_PARTS and parts[-2] == _INTENT_SCRIPT
     )
-    return ToolOrigin(api_id=api_id, api_name=api_name, remote=remote)
 
 
 def _named_like_ha_tool(tool_name: str) -> bool:
     """Return True for a name Home Assistant gives its intent or script tools."""
-    parts = tool_name.split(TOOL_NAMESPACE_SEP)
-    return (
-        is_intent_tool(tool_name)
-        or script_tool_entity_id(tool_name) is not None
-        or (len(parts) >= _SCRIPT_TOOL_PARTS and parts[-2] == _INTENT_SCRIPT)
-    )
+    return is_intent_tool(tool_name) or is_script_like_tool(tool_name)
 
 
 def tool_args_kind(  # noqa: PLR0911
