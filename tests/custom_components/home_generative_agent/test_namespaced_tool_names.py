@@ -36,6 +36,7 @@ from custom_components.home_generative_agent.agent.helpers import (
 )
 
 LOCK_RULES = [{"domain": "lock", "service": "unlock"}]
+INTENT = "intent__HassTurnOff"
 
 
 @pytest.mark.parametrize(
@@ -125,25 +126,30 @@ def test_a_lock_named_only_by_its_entity_id_is_critical(tool_name: str) -> None:
 
 def test_lock_payload_keeps_the_area_or_floor_and_reads_all_as_no_name() -> None:
     """A lock call for a place acts on that place; "all" lets an entity id win."""
-    payload = _minimal_payload_for_domain({"domain": ["lock"], "area": "Garage"})
+    payload = _minimal_payload_for_domain(
+        {"domain": ["lock"], "area": "Garage"}, INTENT
+    )
     assert payload["area"] == "Garage"
     assert "name" not in payload
-    payload = _minimal_payload_for_domain({"domain": ["lock"], "floor": "Upstairs"})
+    payload = _minimal_payload_for_domain(
+        {"domain": ["lock"], "floor": "Upstairs"}, INTENT
+    )
     assert payload["floor"] == "Upstairs"
     payload = _minimal_payload_for_domain(
-        {"domain": ["lock"], "name": "all", "entity_id": "lock.front_door"}
+        {"domain": ["lock"], "name": "all", "entity_id": "lock.front_door"}, INTENT
     )
     assert payload["name"] == "lock.front_door"
     payload = _minimal_payload_for_domain(
-        {"domain": ["lock"], "entity_ids": ["lock.front_door", "lock.back_door"]}
+        {"domain": ["lock"], "entity_ids": ["lock.front_door", "lock.back_door"]},
+        INTENT,
     )
     assert payload["name"] == "lock.front_door"
     # Any other domain: an entity id with no name is sent as the name.
     payload = _minimal_payload_for_domain(
-        {"domain": ["cover"], "entity_id": "cover.garage"}
+        {"domain": ["cover"], "entity_id": "cover.garage"}, INTENT
     )
     assert payload["name"] == "cover.garage"
-    assert _minimal_payload_for_domain({"entity_id": "cover.garage"}) == {
+    assert _minimal_payload_for_domain({"entity_id": "cover.garage"}, INTENT) == {
         "entity_id": "cover.garage"
     }
 
@@ -255,7 +261,8 @@ def test_lock_payload_always_names_one_entity(
         _minimal_payload_for_domain(
             sanitize_tool_args(
                 normalize_intent_for_lock("intent__HassTurnOff", args, None)
-            )
+            ),
+            INTENT,
         )
     )
     assert out["domain"] == ["lock"]

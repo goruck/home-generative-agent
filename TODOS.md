@@ -342,6 +342,20 @@
 
 ---
 
+### Empty arguments are dropped from a script or service tool's call
+
+**What:** `drop_empty_args` (`agent/helpers.py`) removes `None`, blank strings and empty lists from every tool call before the PIN gate and before it runs. A script that treats an empty `doors: []` as "do nothing" but defaults an omitted `doors` to the garage is held, and after the PIN unlocks the garage.
+
+**Why:** Codex review of #836 (2026-10-22). Predates #836 (`sanitize_tool_args` did the same for every tool); dropping empties keeps HA's schema from rejecting a model's `null` for an optional field.
+
+**How to apply:** For a script or service tool, drop only `None` (or validate against the tool's own schema), and keep empty lists and strings. Test a script whose default differs from its empty value.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** #836
+
+---
+
 ### A remote tool named like a local script is screened against the local script
 
 **What:** `script_tool_entity_id` (`agent/indirect_pin.py`) treats any tool whose last two name parts are `script__<x>` as Home Assistant's tool for `script.<x>` and screens that local script. An MCP server that is itself a Home Assistant instance exposes its own `script__<x>` tools; if a harmless local script shares the object id, the remote one (which may unlock a door there) is screened against the local one and runs with no PIN. With no local twin it is held, which is safe.

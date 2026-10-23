@@ -100,6 +100,7 @@ from .helpers import (
     base_tool_name,
     declared_domains,
     declared_intent_service_calls,
+    drop_empty_args,
     entity_domain,
     format_tool,
     intent_service_calls,
@@ -113,6 +114,7 @@ from .helpers import (
     matches_critical_rule,
     maybe_fill_lock_entity,
     minimal_payload_for_domain,
+    narrow_intent_args,
     normalize_intent_for_alarm,
     normalize_intent_for_lock,
     parse_tool_response,
@@ -130,6 +132,8 @@ from .helpers import (
     tool_index_key,
 )
 from .indirect_pin import (
+    BUILTIN_INTENT,
+    OTHER_INTENT,
     RUN_SERVICES,
     SCENE_DOMAIN,
     SCRIPT_DOMAIN,
@@ -148,6 +152,7 @@ from .indirect_pin import (
     script_tool_entity_id,
     service_runs_critical_action,
     stored_actions_are_critical,
+    tool_args_kind,
 )
 from .on_off_direction import (
     is_bare_yes,
@@ -417,6 +422,8 @@ def _route_alarm_intent_to_tool(
     tool_args: dict[str, Any],
     hass: HomeAssistant,
     tool_call: dict[str, Any],
+    *,
+    read_code: bool = True,
 ) -> ToolMessage | None:
     """
     Redirect alarm-like HA intents to the dedicated alarm tool.
@@ -436,8 +443,11 @@ def _route_alarm_intent_to_tool(
     looks_like_alarm = ALARM_DOMAIN in declared or any(
         entity_domain(e) == ALARM_DOMAIN for e in entity_ids
     )
+    # A numeric code hints at the alarm only for HA's own intents: a script
+    # may take a code of its own (#836 review).
     if (
-        not looks_like_alarm
+        read_code
+        and not looks_like_alarm
         and not declared
         and not entity_ids
         and hass.states.async_entity_ids(ALARM_DOMAIN)
@@ -476,6 +486,7 @@ def _critical_action_guard(
     tool_args: dict[str, Any],
     ctx: ToolExecutionContext,
     tool_call: dict[str, Any],
+    args_kind: str | None = None,
 ) -> ToolMessage | None:
     """Enforce critical-action PIN flow when needed."""
     if not ctx.pin_enabled:
@@ -506,6 +517,10 @@ def _critical_action_guard(
         "turn_id": pin_reply.turn_id if pin_reply is not None else None,
         # The automations the change would start, for the PIN line (#814).
         "starts": list(started),
+        # How the arguments are prepared, fixed now: the confirmation and a
+        # repeated request read the call as it was held, even if an intent
+        # script is added or removed meanwhile (#836 review).
+        "args_kind": args_kind or tool_args_kind(ctx.hass, tool_name),
         # The domains the rules name, so the PIN line reads a tool's name as
         # the gate did (#837 review).
         "rule_domains": sorted(rule_domains(rules)),
@@ -571,8 +586,13 @@ def _prepare_tool_args(
     tool_call: dict[str, Any],
 ) -> tuple[ToolMessage | None, dict[str, Any]]:
     """Normalize, guard, and sanitize arguments before calling HA."""
-    tool_args = normalize_intent_for_alarm(tool_name, tool_args, ctx.hass)
-    tool_args = normalize_intent_for_lock(tool_name, tool_args, ctx.hass)
+    # Only HA's own intents are reshaped: a script, intent script or service
+    # tool reads its own arguments, and runs with them as given (#836).
+    kind = tool_args_kind(ctx.hass, tool_name)
+    builtin = kind == BUILTIN_INTENT
+    if builtin:
+        tool_args = normalize_intent_for_alarm(tool_name, tool_args, ctx.hass)
+        tool_args = normalize_intent_for_lock(tool_name, tool_args, ctx.hass)
     if _is_live_context_tool(tool_name) and not intent_scripts_are_critical(
         ctx.hass, tool_name, expand_critical_rules(ctx.hass, ctx.critical_actions)
     ):
@@ -581,16 +601,23 @@ def _prepare_tool_args(
         # query it added service/entity_id keys HA rejects (ExtraKeysInvalid),
         # so every "is the lock locked?" failed and looped since v2.8.0.
         return None, _live_context_args(sanitize_tool_args(tool_args))
-    tool_args = maybe_fill_lock_entity(tool_args, ctx.hass)
-    tool_args = sanitize_tool_args(tool_args)
+    if builtin:
+        tool_args = maybe_fill_lock_entity(tool_args, ctx.hass)
+        tool_args = sanitize_tool_args(tool_args)
+        # Normalize domains to a clean list for downstream consumers.
+        domains = tool_args.get("domain") or []
+        if isinstance(domains, str):
+            domains = [domains]
+        tool_args["domain"] = [str(d).strip() for d in domains if str(d).strip()]
+    elif kind == OTHER_INTENT:
+        # An intent script matches its targets as the built-ins do.
+        tool_args = narrow_intent_args(drop_empty_args(tool_args))
+    else:
+        tool_args = drop_empty_args(tool_args)
 
-    # Normalize domains to a clean list for downstream consumers.
-    domains = tool_args.get("domain") or []
-    if isinstance(domains, str):
-        domains = [domains]
-    tool_args["domain"] = [str(d).strip() for d in domains if str(d).strip()]
-
-    redirect = _route_alarm_intent_to_tool(tool_name, tool_args, ctx.hass, tool_call)
+    redirect = _route_alarm_intent_to_tool(
+        tool_name, tool_args, ctx.hass, tool_call, read_code=builtin
+    )
     if redirect:
         return redirect, tool_args
 
@@ -598,7 +625,8 @@ def _prepare_tool_args(
     # refused before the PIN check, so it is never queued for a PIN.
     state = getattr(ctx, "state", None)
     messages = state.get("messages", []) if isinstance(state, dict) else []
-    refusal = wrong_direction_refusal(
+    # An intent script that took over HassTurnOn may do anything (#836 review).
+    refusal = builtin and wrong_direction_refusal(
         tool_name,
         tool_args,
         _on_off_request_text(messages),
@@ -615,13 +643,15 @@ def _prepare_tool_args(
         tool_args=tool_args,
         ctx=ctx,
         tool_call=tool_call,
+        args_kind=kind,
     )
     if critical_guard:
         return critical_guard, tool_args
 
-    # Reduce payload to the minimal arguments HA expects (avoids extra-key errors).
-    tool_args = minimal_payload_for_domain(tool_args)
-    tool_args = sanitize_tool_args(tool_args)
+    if builtin:
+        # Reduce an intent's payload to the slots HA reads (avoids extra-key
+        # errors).
+        tool_args = sanitize_tool_args(minimal_payload_for_domain(tool_args, tool_name))
     return None, tool_args
 
 
@@ -3599,6 +3629,15 @@ def _is_critical_action(  # noqa: PLR0911
     by the steps the script runs; and a service tool's call is screened like
     an automation step, with any script or scene it runs opened.
     """
+    # A tool runs with its arguments as given (#836), so a blank entry in a
+    # list of domains is skipped here, never read as "no domain".
+    if isinstance(tool_args.get("domain"), list):
+        tool_args = {
+            **tool_args,
+            "domain": [
+                d for d in tool_args["domain"] if d is not None and str(d).strip()
+            ],
+        }
     domain_val = tool_args.get("domain", "")
     if isinstance(domain_val, list):
         domain_val = domain_val[0] if domain_val else ""
