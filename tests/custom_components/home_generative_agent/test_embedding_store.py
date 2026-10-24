@@ -21,12 +21,14 @@ from homeassistant.helpers import issue_registry as ir
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 import custom_components.home_generative_agent as hga_component
+from custom_components.home_generative_agent.agent.graph import _search_memories
 from custom_components.home_generative_agent.const import DOMAIN
 from custom_components.home_generative_agent.core import embedding_store
 from custom_components.home_generative_agent.core.embedding_store import (
     ISSUE_EMBEDDING_DIMS_MISMATCH,
     ISSUE_FALLBACK_EMBEDDING_DIMS_MISMATCH,
     EmbeddingProvider,
+    UnavailableEmbeddings,
     _issue_ids,
     async_clear_embedding_size_issue,
     async_forget_migrations,
@@ -489,3 +491,24 @@ async def test_a_known_size_needs_no_client(
 
     issue = cast("ir.IssueEntry", _issue(hass, fallback=True))
     assert (issue.translation_placeholders or {})["providers"] == "OpenAI"
+
+
+@pytest.mark.asyncio
+async def test_memory_search_without_embeddings_returns_recent_memories(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The stand-in fails at once; search falls back to recency, quietly."""
+    calls: list[Any] = []
+
+    class _Store:
+        async def asearch(self, _namespace: Any, **kwargs: Any) -> list[str]:
+            calls.append(kwargs.get("query"))
+            if kwargs.get("query") is not None:
+                await UnavailableEmbeddings("Ollama").aembed_query("q")
+            return ["recent"]
+
+    result = await _search_memories(cast("Any", _Store()), "user", "where are my keys")
+
+    assert result == ["recent"]
+    assert calls == ["where are my keys", None]
+    assert "Unexpected memory store search failure" not in caplog.text

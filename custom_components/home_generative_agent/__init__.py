@@ -260,10 +260,13 @@ from .core.embedding_store import (
     STORE_TABLES,
     VECTOR_MIGRATIONS,
     VECTOR_TABLES,
+    UnavailableEmbeddings,
     async_clear_embedding_size_issue,
+    async_clear_other_model_fallback_issue,
     async_forget_migrations,
     async_store_tables,
     async_sync_embedding_size_issue,
+    async_sync_other_model_fallback_issue,
     embedding_chain_providers,
     missing_tables,
 )
@@ -293,11 +296,13 @@ from .core.runtime import HGAConfigEntry, HGAData
 from .core.subentry_resolver import (
     build_database_uri_from_entry,
     build_model_deployments,
+    chosen_fallback_ids,
     legacy_feature_configs,
     legacy_model_provider_configs,
     resolve_fallback_chains,
     resolve_model_provider_configs,
     resolve_runtime_options,
+    split_embedding_chain,
 )
 from .core.utils import (
     anthropic_healthy,
@@ -2022,6 +2027,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     providers = resolve_model_provider_configs(entry, options)
     model_deployments = build_model_deployments(entry, providers, options)
     fallback_chains = resolve_fallback_chains(entry, providers, options)
+    # The store holds one model's vectors, so an embedding fallback of another
+    # provider type (another model) is left out of the chain (#751).
+    embedding_chain, embedding_left_out = split_embedding_chain(
+        fallback_chains.get("embedding", [])
+    )
+    if embedding_left_out:
+        fallback_chains["embedding"] = embedding_chain
+        chosen = chosen_fallback_ids(entry, providers, options, "embedding")
+        embedding_left_out_chosen = [
+            p.name for p in embedding_left_out if p.entry_id in chosen
+        ]
+        (LOGGER.warning if embedding_left_out_chosen else LOGGER.info)(
+            "Embedding fallback provider(s) %s left out: they embed with another "
+            "model than the primary provider %s, which would mix models in the "
+            "memory store.",
+            ", ".join(p.name for p in embedding_left_out),
+            embedding_chain[0].name,
+        )
+    else:
+        embedding_left_out_chosen = []
     notified_model_fallbacks: set[tuple[str, str]] = set()
     setup_model_fallbacks: list[tuple[str, str, str, str]] = []
 
@@ -2691,7 +2716,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             )
         for p in _emb_fb[1:]:
             m = _embedding_instance_for_provider(p)
-            if m is not None:
+            # One client serves every OpenAI, Gemini or OpenAI-compatible
+            # provider (#853), and an Ollama one at the primary's URL is the
+            # primary's: the same client twice is no failover, only a false
+            # "fell back" and a needless tool index rebuild (#751 review).
+            if m is not None and all(m is not c for c, _d, _p in _emb_chain):
                 _emb_chain.append((m, p.deployment, p.entry_id))
         if len(_emb_chain) > 1:
             active_provider_id = _emb_chain[0][2]
@@ -2768,6 +2797,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         primary_type=embedding_provider,
         primary_embeddings=embedding_model,
     )
+
+    if embedding_model is None and embedding_chain:
+        # Configured but nothing in the chain could be built (down at boot, or
+        # a client that failed to build): keep the store's index with a client
+        # that fails at once, so a memory or caption saved meanwhile fails
+        # (langgraph embeds before it writes) instead of being saved without a
+        # vector no search finds again, and memory search fails open without
+        # waiting on a stalled server. The provider re-check reloads once the
+        # primary answers (#751 review).
+        embedding_model = UnavailableEmbeddings(embedding_chain[0].name)
+        LOGGER.warning(
+            "Embedding provider %s is not available; saving memories and camera "
+            "captions fails until it answers and Home Generative Agent reloads.",
+            embedding_chain[0].name,
+        )
 
     embedding_dims = _configured_embedding_dims(options)
     if embedding_model is None:
@@ -4488,6 +4532,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         ),
         name="hga_embedding_size_check",
     )
+    async_sync_other_model_fallback_issue(
+        hass,
+        entry.entry_id,
+        primary=embedding_chain[0].name if embedding_chain else "",
+        left_out=embedding_left_out_chosen,
+    )
 
     # Same placement, same reason: four Sentinel rule ids (five evaluators) key
     # on a positive "Unknown Person" label that only the face pipeline writes,
@@ -4646,6 +4696,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
     async_clear_database_issue(hass, entry.entry_id)
     async_clear_ollama_embedding_model_issue(hass, entry.entry_id)
     async_clear_embedding_size_issue(hass, entry.entry_id)
+    # Same for the left-out embedding fallback: setup re-syncs it, so a reload
+    # keeps the user's dismissal; a disable drops it.
+    if entry.disabled_by is not None:
+        async_clear_other_model_fallback_issue(hass, entry.entry_id)
     # A disabled entry runs no rules at all, so singling four out is wrong the
     # same way. A reload (every Sentinel config save) keeps it: deleting it
     # would also delete the user's dismissal, so a dismissed notice came back
@@ -4666,6 +4720,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> None
     async_clear_database_issue(hass, entry.entry_id)
     async_clear_ollama_embedding_model_issue(hass, entry.entry_id)
     async_clear_embedding_size_issue(hass, entry.entry_id)
+    async_clear_other_model_fallback_issue(hass, entry.entry_id)
     async_clear_pin_pipeline_issue(hass, entry.entry_id)
     async_clear_unknown_person_issue(hass, entry.entry_id)
 
