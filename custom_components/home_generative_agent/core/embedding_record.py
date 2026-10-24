@@ -211,6 +211,10 @@ _EMBED_TIMEOUT_S = 180.0
 _RETRY_DELAYS_S = (60.0, 120.0, 300.0)
 _DIGEST_READ_TIMEOUT_S = 3.0
 _DIGEST_FETCH_TIMEOUT_S = 5.0
+# Waits before each re-read of a build setup could not read: setup reads it
+# with the short health-check timeout, which Home Assistant's busy startup
+# often runs past.
+_BUILD_REREAD_DELAYS_S = (0.0, 10.0, 30.0)
 _GEMINI_MODEL_PREFIX = "models/"
 _WHOLE_DOCUMENT = "$"
 
@@ -501,6 +505,10 @@ async def async_sync_embedding_record(hass: HomeAssistant, entry: ConfigEntry) -
     pool, current = rd.pool, rd.embedding_fingerprint
     if pool is None or current is None or entry.state not in ACTIVE_ENTRY_STATES:
         return
+    if current.undetermined and rd.embedding_digest_source is not None:
+        current = await _async_learn_primary_build(hass, entry, current)
+        if entry.state not in ACTIVE_ENTRY_STATES:
+            return
     issue_id = _changed_issue_id(entry.entry_id)
     try:
         decision, record = await _async_check_record(pool, current)
@@ -574,6 +582,28 @@ async def _async_primary_build(hass: HomeAssistant, entry: ConfigEntry) -> str |
     return await fetch_ollama_model_digest(
         hass, url, model, timeout_s=_DIGEST_FETCH_TIMEOUT_S
     )
+
+
+async def _async_learn_primary_build(
+    hass: HomeAssistant, entry: ConfigEntry, current: EmbeddingFingerprint
+) -> EmbeddingFingerprint:
+    """Read the Ollama primary's build setup missed; unchanged if still unread."""
+    for delay in _BUILD_REREAD_DELAYS_S:
+        if delay:
+            await asyncio.sleep(delay)
+        if entry.state not in ACTIVE_ENTRY_STATES:
+            return current
+        build = await _async_primary_build(hass, entry)
+        if build is not None:
+            learned = replace(current, digest=build)
+            entry.runtime_data.embedding_fingerprint = learned
+            return learned
+    LOGGER.warning(
+        "Could not read which build of %s the embedding primary serves; "
+        "the store's model record is checked at the next reload.",
+        current.model,
+    )
+    return current
 
 
 async def async_start_reembed(hass: HomeAssistant, entry: ConfigEntry) -> bool:

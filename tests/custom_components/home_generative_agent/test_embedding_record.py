@@ -715,6 +715,72 @@ async def test_no_current_model_checks_nothing(
     check.assert_not_called()
 
 
+def _unread_at_setup(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, builds: list[str | None]
+) -> tuple[MockConfigEntry, AsyncMock, list[float]]:
+    """Set up an Ollama primary whose build setup missed, then reads as `builds`."""
+    entry = _entry(
+        hass, record=None, fingerprint=OLLAMA_UNREAD, monkeypatch=monkeypatch
+    )
+    entry.runtime_data.embedding_digest_source = ("http://ollama", "mxbai-embed-large")
+    monkeypatch.setattr(er, "fetch_ollama_model_digest", AsyncMock(side_effect=builds))
+    check = AsyncMock(return_value=(er._Decision.MATCH, None))
+    monkeypatch.setattr(er, "_async_check_record", check)
+    waits: list[float] = []
+
+    async def _sleep(delay: float) -> None:
+        waits.append(delay)
+
+    monkeypatch.setattr(er.asyncio, "sleep", _sleep)
+    return entry, check, waits
+
+
+@pytest.mark.asyncio
+async def test_a_build_setup_missed_is_read_again_before_the_check(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A startup too busy to read the build no longer skips the check."""
+    entry, check, waits = _unread_at_setup(hass, monkeypatch, [None, "w:a1"])
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert waits == [10.0]
+    check.assert_awaited_once_with(entry.runtime_data.pool, OLLAMA_A)
+    assert entry.runtime_data.embedding_fingerprint == OLLAMA_A
+
+
+@pytest.mark.asyncio
+async def test_a_build_never_read_is_checked_as_unread_and_logged(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """After the last try the check runs as before, and the log says so."""
+    entry, check, waits = _unread_at_setup(hass, monkeypatch, [None, None, None])
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert waits == [10.0, 30.0]
+    check.assert_awaited_once_with(entry.runtime_data.pool, OLLAMA_UNREAD)
+    assert entry.runtime_data.embedding_fingerprint == OLLAMA_UNREAD
+    assert "Could not read which build of mxbai-embed-large" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_unload_while_reading_the_build_checks_nothing(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An entry unloaded during the wait neither reads nor checks again."""
+    entry, check, _waits = _unread_at_setup(hass, monkeypatch, [None, "w:a1"])
+
+    async def _unloaded(_delay: float) -> None:
+        entry.mock_state(hass, ConfigEntryState.NOT_LOADED)
+
+    monkeypatch.setattr(er.asyncio, "sleep", _unloaded)
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    check.assert_not_called()
+
+
 # --- Starting the re-embed -------------------------------------------------
 
 
