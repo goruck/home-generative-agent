@@ -482,6 +482,11 @@ async def test_another_model_returns_the_record() -> None:
     assert _written(cur) == []
 
 
+_REAL_CHECK = er._async_check_record
+_REAL_SLEEP = asyncio.sleep
+OLLAMA_SOURCE = ("http://ollama", "mxbai-embed-large")
+
+
 def _issue(hass: Any, key: str, entry_id: str = "entry1") -> ir.IssueEntry | None:
     return ir.async_get(hass).async_get_issue(DOMAIN, f"{key}_{entry_id}")
 
@@ -713,6 +718,157 @@ async def test_no_current_model_checks_nothing(
     await er.async_sync_embedding_record(hass, entry)
 
     check.assert_not_called()
+
+
+def _unread_at_setup(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, builds: list[str | None]
+) -> tuple[MockConfigEntry, AsyncMock, list[float]]:
+    """Set up an Ollama primary whose build setup missed, then reads as `builds`."""
+    entry = _entry(
+        hass, record=None, fingerprint=OLLAMA_UNREAD, monkeypatch=monkeypatch
+    )
+    entry.runtime_data.embedding_digest_source = OLLAMA_SOURCE
+    monkeypatch.setattr(er, "fetch_ollama_model_digest", AsyncMock(side_effect=builds))
+    check = AsyncMock(return_value=(er._Decision.MATCH, None))
+    monkeypatch.setattr(er, "_async_check_record", check)
+    waits: list[float] = []
+
+    async def _sleep(delay: float) -> None:
+        # asyncio.sleep is patched for the whole loop: still yield to it.
+        waits.append(delay)
+        await _REAL_SLEEP(0)
+
+    monkeypatch.setattr(er.asyncio, "sleep", _sleep)
+    return entry, check, waits
+
+
+@pytest.mark.asyncio
+async def test_a_build_setup_missed_is_read_again_before_the_check(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A startup too busy to read the build no longer skips the check."""
+    entry, check, waits = _unread_at_setup(hass, monkeypatch, [None, "w:a1"])
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert waits == [10.0]
+    check.assert_awaited_once_with(entry.runtime_data.pool, OLLAMA_A)
+    assert entry.runtime_data.embedding_fingerprint == OLLAMA_A
+
+
+@pytest.mark.asyncio
+async def test_a_build_never_read_is_checked_as_unread_and_logged(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """After the last try the check runs as before, and the log says so."""
+    entry, check, waits = _unread_at_setup(hass, monkeypatch, [None, None, None])
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert waits == [10.0, 30.0]
+    check.assert_awaited_once_with(entry.runtime_data.pool, OLLAMA_UNREAD)
+    assert entry.runtime_data.embedding_fingerprint == OLLAMA_UNREAD
+    assert "Could not read which build of mxbai-embed-large" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_unload_while_reading_the_build_checks_nothing(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An entry unloaded during the wait neither reads nor checks again."""
+    entry, check, _waits = _unread_at_setup(hass, monkeypatch, [None, "w:a1"])
+
+    async def _unloaded(_delay: float) -> None:
+        entry.mock_state(hass, ConfigEntryState.NOT_LOADED)
+
+    monkeypatch.setattr(er.asyncio, "sleep", _unloaded)
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert er.fetch_ollama_model_digest.await_count == 1  # type: ignore[attr-defined]
+    assert entry.runtime_data.embedding_fingerprint == OLLAMA_UNREAD
+    check.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_primary_down_at_setup_is_not_read_again(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fallback may be writing: the check waits for the reload, as before."""
+    entry, check, waits = _unread_at_setup(hass, monkeypatch, ["w:a1"])
+    entry.runtime_data.primary_embeddings = None
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert waits == []
+    er.fetch_ollama_model_digest.assert_not_called()  # type: ignore[attr-defined]
+    check.assert_awaited_once_with(entry.runtime_data.pool, OLLAMA_UNREAD)
+
+
+@pytest.mark.asyncio
+async def test_a_repair_confirmed_during_the_read_keeps_its_build(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read that lands after the repair read the build never replaces it."""
+    entry, check, _waits = _unread_at_setup(hass, monkeypatch, [])
+
+    async def _read_while_repaired(*_args: Any, **_kwargs: Any) -> str:
+        entry.runtime_data.embedding_fingerprint = OLLAMA_A
+        return "w:b2"
+
+    monkeypatch.setattr(er, "fetch_ollama_model_digest", _read_while_repaired)
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert entry.runtime_data.embedding_fingerprint == OLLAMA_A
+    check.assert_awaited_once_with(entry.runtime_data.pool, OLLAMA_A)
+
+
+@pytest.mark.asyncio
+async def test_a_late_build_unlike_the_record_raises_the_issue(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the real record check: the build pulled while down is flagged."""
+    entry, _check, _waits = _unread_at_setup(hass, monkeypatch, [None, "w:a1"])
+    cur = _Cursor(record=_row(OLLAMA_B))
+    entry.runtime_data.pool = _Pool(cur)
+    monkeypatch.setattr(er, "_async_check_record", _REAL_CHECK)
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    issue = _issue(hass, ISSUE_EMBEDDING_MODEL_CHANGED)
+    assert issue is not None
+    # The record also notes that the current build now writes into the store.
+    assert issue.translation_placeholders == {
+        "recorded": f"{OLLAMA_B.label} + {OLLAMA_A.label}",
+        "current": OLLAMA_A.label,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_repair_confirmed_during_the_wait_keeps_its_build(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The repair read the build meanwhile: the check uses that, read once."""
+    entry, check, _waits = _unread_at_setup(hass, monkeypatch, [None, "w:a1"])
+    starts = _capture_starts(monkeypatch)
+
+    repaired: list[bool] = []
+
+    async def _repair_meanwhile(_delay: float) -> None:
+        # asyncio.sleep is patched for everyone: repair on the first wait only.
+        if not repaired:
+            repaired.append(True)
+            await er.async_start_reembed(hass, entry)
+
+    monkeypatch.setattr(er.asyncio, "sleep", _repair_meanwhile)
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert starts == [True]
+    assert er.fetch_ollama_model_digest.await_count == 2  # type: ignore[attr-defined]
+    assert entry.runtime_data.embedding_fingerprint == OLLAMA_A
+    check.assert_awaited_once_with(entry.runtime_data.pool, OLLAMA_A)
 
 
 # --- Starting the re-embed -------------------------------------------------
