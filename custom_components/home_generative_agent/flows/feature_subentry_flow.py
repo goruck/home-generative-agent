@@ -202,15 +202,48 @@ def _provider_type_for_id(entry: ConfigEntry, provider_id: str | None) -> str | 
     return subentry.data.get("provider_type")
 
 
+def _subentry_ollama_url(subentry: Any) -> str | None:
+    """Return the Ollama URL a provider subentry embeds at, as setup keys it."""
+    if subentry is None:
+        return None
+    return ollama_provider_settings_url(subentry.data.get("settings") or {})
+
+
 def _fallback_provider_options(
     entry: ConfigEntry, category: str, primary_id: str | None
 ) -> list[SelectOptionDict]:
-    """Return provider options excluding the primary."""
+    """
+    Return provider options excluding the primary.
+
+    For embeddings, only another Ollama server behind an Ollama primary: the
+    store holds one model's vectors, each type embeds with one configured
+    model, and every other type has one client, so a second provider of it
+    is the primary again (#751, #853).
+    """
     options: list[SelectOptionDict] = []
+    if category == "embedding" and _provider_type_for_id(entry, primary_id) != (
+        "ollama"
+    ):
+        return options
+    primary = entry.subentries.get(primary_id) if primary_id else None
+    # As setup resolves it: the primary embeds at its base_url or the default.
+    primary_url = (
+        normalized_ollama_url(
+            (primary.data.get("settings") or {}).get("base_url") if primary else None
+        )
+        or RECOMMENDED_OLLAMA_URL
+        if category == "embedding"
+        else None
+    )
     for subentry in entry.subentries.values():
         if subentry.subentry_type != SUBENTRY_TYPE_MODEL_PROVIDER:
             continue
         if primary_id and subentry.subentry_id == primary_id:
+            continue
+        if category == "embedding" and (
+            subentry.data.get("provider_type") != "ollama"
+            or _subentry_ollama_url(subentry) == primary_url
+        ):
             continue
         caps = set(subentry.data.get("capabilities") or [])
         if caps and category not in caps:

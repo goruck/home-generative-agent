@@ -1214,3 +1214,38 @@ def resolve_fallback_chains(
         chains[cat] = chain
 
     return chains
+
+
+def split_embedding_chain(
+    chain: list[ModelProviderConfig],
+) -> tuple[list[ModelProviderConfig], list[ModelProviderConfig]]:
+    """
+    Split an embedding chain into the providers kept and those left out (#751).
+
+    The store holds vectors of one model, and every provider of a type embeds
+    with the one model configured for that type, so only fallbacks of the
+    primary's type embed with its model (a second Ollama server). Any other
+    fallback would mix models in the store: wrong search results when the
+    sizes match, every write failing when they differ.
+    """
+    if not chain:
+        return [], []
+    head = chain[0]
+    kept = [head, *(p for p in chain[1:] if p.provider_type == head.provider_type)]
+    left_out = [p for p in chain[1:] if p.provider_type != head.provider_type]
+    return kept, left_out
+
+
+def chosen_fallback_ids(
+    entry: ConfigEntry,
+    providers: Mapping[str, ModelProviderConfig],
+    options: Mapping[str, Any],
+    category: str,
+) -> set[str]:
+    """Return the fallback providers the user picked for a category's feature."""
+    return {
+        provider_id
+        for feature in resolve_feature_configs(entry, providers, options).values()
+        if FEATURE_CATEGORY_MAP.get(feature.feature_type) == category
+        for provider_id in feature.fallback_provider_ids or []
+    }

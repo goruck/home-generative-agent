@@ -559,7 +559,11 @@
     },
     "fallback_embedding_dims_mismatch": {
       "title": "Embedding fallback {providers} has the wrong vector size",
-      "description": "The **Embeddings** feature falls back to **{providers}**, which produces {dims}-dimension vectors. The memory store holds {expected}-dimension vectors, so if this fallback takes over, its embedding writes fail and long-term memory search and tool retrieval stop working until the primary provider is back.\n\nChoose the fallback providers in the **Embeddings** feature (**Settings → Devices & services → Home Generative Agent**) and leave this one out; without that feature set up, every provider that can embed is used as a fallback. Or give it a model that produces {expected}-dimension vectors. Changing the store's size would not help, since the store follows the primary provider. This issue clears on the first reload after the change."
+      "description": "The **Embeddings** feature falls back to **{providers}**, which produces {dims}-dimension vectors. The memory store holds {expected}-dimension vectors, so if this fallback takes over, its embedding writes fail and long-term memory search and tool retrieval stop working until the primary provider is back.\n\nRemove it from the fallback providers of the **Embeddings** feature (**Settings → Devices & services → Home Generative Agent**), or give it a model that produces {expected}-dimension vectors. Changing the store's size would not help, since the store follows the primary provider. This issue clears on the first reload after the change."
+    },
+    "embedding_fallback_other_model": {
+      "title": "Embedding fallback {providers} is not used",
+      "description": "The **Embeddings** feature lists **{providers}** as a fallback, but it embeds with a different model than the primary provider **{primary}**. The memory store holds one model's vectors, so a fallback of another model would make memory search return wrong results, or fail every write when the vector sizes differ. Home Generative Agent therefore leaves it out: if the primary provider is down, memory search and tool retrieval stop working until it is back.\n\nOnly another Ollama server, behind an Ollama primary, can be an embedding fallback: every Ollama server embeds with the same configured model. To clear this issue, open the **Embeddings** feature (**Settings → Devices & services → Home Generative Agent**) and save it: {providers} is no longer offered as a fallback, so saving removes it. This issue clears on the first reload after the change."
     }
   }
 }

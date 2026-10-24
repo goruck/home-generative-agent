@@ -76,6 +76,7 @@ from custom_components.home_generative_agent.const import (
     TOOL_INCLUSIONS_MAX_PER_TURN,
 )
 
+from ..core.embedding_store import EmbeddingsUnavailableError  # noqa: TID252
 from ..core.fallback import (  # noqa: TID252
     DROPPABLE_SAMPLING_PARAMS,
     FallbackChatModel,
@@ -3617,6 +3618,15 @@ def _bind_model_tools(
     return model.bind_tools(_tools_for_chain_member(model, selected_tools))
 
 
+async def _recent_memories(store: BaseStore, user_id: str) -> list:
+    """Return the most recent memories, without semantic search."""
+    try:
+        return await store.asearch((user_id, "memories"), limit=10)
+    except Exception:
+        LOGGER.exception("Memory recency search also failed; no memories injected")
+        return []
+
+
 async def _search_memories(store: BaseStore, user_id: str, query: str | None) -> list:
     """Search the memory store, falling back gracefully on embedding errors."""
     try:
@@ -3631,25 +3641,20 @@ async def _search_memories(store: BaseStore, user_id: str, query: str | None) ->
             "recency-based memory retrieval. Check the /v1/embeddings response "
             "format of your OpenAI-compatible server."
         )
-        try:
-            return await store.asearch((user_id, "memories"), limit=10)
-        except Exception:
-            LOGGER.exception("Memory recency search also failed; no memories injected")
-            return []
+    except EmbeddingsUnavailableError:
+        # Setup's stand-in while no embedding provider is up (#751): already
+        # logged once at setup, so recent memories without a warning per turn.
+        pass
     except psycopg.DataError as err:
         LOGGER.warning(
             "Memory semantic search failed due to vector store data mismatch: %s. "
             "Falling back to recency-based memory retrieval.",
             err,
         )
-        try:
-            return await store.asearch((user_id, "memories"), limit=10)
-        except Exception:
-            LOGGER.exception("Memory recency search also failed; no memories injected")
-            return []
     except Exception:
         LOGGER.exception("Unexpected memory store search failure; no memories injected")
         return []
+    return await _recent_memories(store, user_id)
 
 
 async def _call_model(

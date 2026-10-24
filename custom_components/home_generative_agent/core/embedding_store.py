@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 import psycopg
 from homeassistant.core import callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
 from psycopg import sql
 
@@ -59,7 +60,11 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 ISSUE_EMBEDDING_DIMS_MISMATCH = "embedding_dims_mismatch"
+# A fallback can only be of the primary's type (#751), and until each
+# OpenAI-compatible provider gets a client of its own (#853) one shares the
+# primary's, so this issue has nothing to report yet; it is kept for then.
 ISSUE_FALLBACK_EMBEDDING_DIMS_MISMATCH = "fallback_embedding_dims_mismatch"
+ISSUE_EMBEDDING_FALLBACK_OTHER_MODEL = "embedding_fallback_other_model"
 
 # Tables langgraph's PostgresStore and AsyncPostgresSaver create, and the
 # record table of each one's migrations.
@@ -170,20 +175,26 @@ def embedding_chain_providers(
     check, which names the model to pull. A provider whose client was not
     built (its health check failed at boot) is kept: OpenAI's and Gemini's
     size is known without it, and an OpenAI-compatible one is then unknown,
-    which leaves its issue as it is. Without a chain, the primary alone.
+    which leaves its issue as it is. A provider whose client is an earlier
+    one's (one client per type but Ollama, #853) is that provider again, so it
+    is measured once. Without a chain, the primary alone.
     """
     if chain:
-        return [
-            EmbeddingProvider(
-                p.entry_id,
-                p.name,
-                p.provider_type,
-                instance_for(p),
-                primary=index == 0,
+        providers: list[EmbeddingProvider] = []
+        for index, p in enumerate(chain):
+            if p.provider_type == OLLAMA:
+                continue
+            instance = instance_for(p)
+            if instance is not None and any(
+                instance is q.embeddings for q in providers
+            ):
+                continue
+            providers.append(
+                EmbeddingProvider(
+                    p.entry_id, p.name, p.provider_type, instance, primary=index == 0
+                )
             )
-            for index, p in enumerate(chain)
-            if p.provider_type != OLLAMA
-        ]
+        return providers
     if primary_embeddings is None or primary_type == OLLAMA:
         return []
     return [
@@ -318,8 +329,87 @@ async def async_sync_embedding_size_issue(
     )
 
 
+class EmbeddingsUnavailableError(HomeAssistantError):
+    """No embedding provider could be built at setup (#751)."""
+
+
+class UnavailableEmbeddings:
+    """
+    An embedding client that fails at once, for a provider that is down (#751).
+
+    Keeps the memory store's index while no provider in the embedding chain
+    could be built at setup, so a write fails instead of being saved without
+    a vector, and a search fails open without waiting on the provider.
+    """
+
+    def __init__(self, provider: str) -> None:
+        """Remember which provider is unavailable, for the error."""
+        self.provider = provider
+
+    def _error(self) -> EmbeddingsUnavailableError:
+        return EmbeddingsUnavailableError(
+            f"Embedding provider {self.provider} is not available; memory "
+            "search and saving are off until it answers."
+        )
+
+    async def aembed_documents(self, _texts: list[str]) -> list[list[float]]:
+        """Fail: the provider is unavailable."""
+        raise self._error()
+
+    async def aembed_query(self, _text: str) -> list[float]:
+        """Fail: the provider is unavailable."""
+        raise self._error()
+
+    def embed_documents(self, _texts: list[str]) -> list[list[float]]:
+        """Fail: the provider is unavailable."""
+        raise self._error()
+
+    def embed_query(self, _text: str) -> list[float]:
+        """Fail: the provider is unavailable."""
+        raise self._error()
+
+
+def _other_model_issue_id(entry_id: str) -> str:
+    """Per-entry id of the left-out fallbacks' issue."""
+    return f"{ISSUE_EMBEDDING_FALLBACK_OTHER_MODEL}_{entry_id}"
+
+
+@callback
+def async_sync_other_model_fallback_issue(
+    hass: HomeAssistant, entry_id: str, *, primary: str, left_out: Sequence[str]
+) -> None:
+    """
+    Raise or clear the issue naming chosen fallbacks left out of the chain (#751).
+
+    ``left_out`` are the embedding fallbacks the user picked whose provider
+    type differs from the primary's, so they would embed with another model.
+    """
+    issue_id = _other_model_issue_id(entry_id)
+    if not left_out:
+        ir.async_delete_issue(hass, DOMAIN, issue_id)
+        return
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        issue_id,
+        is_fixable=False,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key=ISSUE_EMBEDDING_FALLBACK_OTHER_MODEL,
+        translation_placeholders={
+            "providers": ", ".join(left_out),
+            "primary": primary,
+        },
+    )
+
+
 @callback
 def async_clear_embedding_size_issue(hass: HomeAssistant, entry_id: str) -> None:
-    """Drop both issues on unload and on entry removal."""
+    """Drop the size issues on unload and on entry removal."""
     for issue_id in _issue_ids(entry_id):
         ir.async_delete_issue(hass, DOMAIN, issue_id)
+
+
+@callback
+def async_clear_other_model_fallback_issue(hass: HomeAssistant, entry_id: str) -> None:
+    """Drop the left-out fallback issue on a disable and on entry removal."""
+    ir.async_delete_issue(hass, DOMAIN, _other_model_issue_id(entry_id))
