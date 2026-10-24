@@ -2772,6 +2772,32 @@ This is the same allowlist-omission class as #480 and as the triage options fixe
 
 ---
 
+### Two entries sharing a database can race when they rebuild a missing store table
+
+**What:** Since #760, `_bootstrap_db_once` and `_bootstrap_vectors_once` (`__init__.py`) forget the migration record of a missing table (`async_forget_migrations`, `core/embedding_store.py`) and run langgraph's `setup()` again. Each statement autocommits with no lock, so two config entries starting together on one database can both see the table missing, both clear the record, and both run setup. The second `INSERT INTO <record> (v)` hits the primary key, and that entry fails setup (a generic error, not retried) until the next reload.
+
+**Why:** Data-migration and adversarial review of the #760 branch (2026-10-23). Nothing is lost (every migration is `IF NOT EXISTS`), two entries on one database is rare, and the very first bootstrap has always had the same race.
+
+**How to apply:** Hold a session advisory lock (`pg_advisory_lock` on a fixed key, one pooled connection) around forget + `setup()` in both helpers, and read the tables again after taking it, skipping if another entry already rebuilt them.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
+### An interrupted vector index build is never repaired
+
+**What:** langgraph's last vector migration runs `CREATE INDEX CONCURRENTLY IF NOT EXISTS store_vectors_embedding_idx`. If it fails or Home Assistant stops mid-build, Postgres keeps an INVALID index (or none), `IF NOT EXISTS` skips it from then on, and `_bootstrap_vectors_once` only checks that `store_vectors` exists, so the index is never rebuilt. A table renamed rather than dropped keeps the index name, so a recreated table gets no index either. Search stays correct but scans sequentially. Related: `DROP TABLE store CASCADE` drops only the vector table's foreign key, so a rebuilt `store` leaves `store_vectors` without `ON DELETE CASCADE`, and deleted memories keep their vectors (unreachable, since search joins `store`).
+
+**Why:** Data-migration and adversarial review of the #760 branch (2026-10-23): #760 makes the vector migrations run on more startup paths (a dropped table, a fresh database), so this langgraph behavior is easier to reach.
+
+**How to apply:** When an ANN index is configured, also read `pg_index.indisvalid` for `to_regclass('store_vectors_embedding_idx')`; when it is missing or invalid, `DROP INDEX IF EXISTS` it and delete the index migration's row from `vector_migrations` so `setup()` builds it again. Bound the wait: `CREATE INDEX CONCURRENTLY` waits out every older open transaction.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
 ## Completed
 
 ### A PIN refusal that hits the action-round limit ends with a generic apology

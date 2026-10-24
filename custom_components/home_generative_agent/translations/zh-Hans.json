@@ -552,6 +552,14 @@
     "ollama_fallback_embedding_dims_mismatch": {
       "title": "Ollama 备用 Embedding 模型 {model} 的向量维度不对",
       "description": "**Embedding**功能会回退到位于 {url} 的 Ollama，它用 **{model}** 生成 Embedding，在那里生成 {dims} 维向量。记忆存储是为 {expected} 维向量创建的，并会保持这个维度，所以如果这个备用提供商接手，它的 Embedding 写入会失败，长期记忆搜索和工具检索会停止工作，直到主提供商恢复。\n\n如果 Ollama 也是主提供商，那么主提供商上的 **{model}** 维度是正确的，说明那台服务器上的是另一个构建版本：请在那里运行 `ollama pull {model}`，让两边一致。否则，请从**Embedding**功能（**设置 → 设备与服务 → Home Generative Agent**）的备用提供商中移除那台服务器，因为它排在另一个主提供商后面时，那个表单里无法设置它的模型。然后重新加载集成；修改后的第一次重新加载就会清除此问题。"
+    },
+    "embedding_dims_mismatch": {
+      "title": "嵌入提供方 {providers} 的向量维度不正确",
+      "description": "**嵌入**功能使用 **{providers}** 生成嵌入，它生成 {dims} 维向量。记忆存储是按 {expected} 维向量创建的，并会保持该维度，因此每次嵌入写入都会失败：长期记忆搜索不会返回任何结果，工具检索会退回到关键词匹配。\n\n修复方法（任选其一）：\n- 在**嵌入**功能（**设置 → 设备与服务 → Home Generative Agent**）中改用生成 {expected} 维向量的提供方或模型；或\n- 将记忆存储迁移到该提供方的维度（无法存储超过 2000 的维度）：如果是 OpenAI 兼容提供方，请先将其嵌入维度设置（`openai_compatible_embedding_dims`）设为 {dims}（其他提供方始终使用 {default_dims}）；然后在数据库中删除 `store_vectors` 表（`DROP TABLE store_vectors;`），再重新加载集成，它会按该维度重新创建此表。之前保存的记忆和摄像头描述仍会保留，但搜索不再能找到它们，因为不会重新为它们生成嵌入。\n\n更改后首次重新加载时，此问题会自动清除。"
+    },
+    "fallback_embedding_dims_mismatch": {
+      "title": "备用嵌入提供方 {providers} 的向量维度不正确",
+      "description": "**嵌入**功能的备用提供方是 **{providers}**，它生成 {dims} 维向量。记忆存储保存的是 {expected} 维向量，因此一旦该备用提供方接管，其嵌入写入就会失败，长期记忆搜索和工具检索会停止工作，直到主提供方恢复。\n\n请在**嵌入**功能（**设置 → 设备与服务 → Home Generative Agent**）中选择备用提供方并排除此提供方；未设置该功能时，所有能生成嵌入的提供方都会被用作备用。或为其选择生成 {expected} 维向量的模型。更改存储维度没有帮助，因为存储跟随主提供方。更改后首次重新加载时，此问题会自动清除。"
     }
   }
 }

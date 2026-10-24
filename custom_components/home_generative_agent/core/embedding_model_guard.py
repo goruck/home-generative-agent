@@ -63,7 +63,7 @@ ISSUE_OLLAMA_FALLBACK_EMBEDDING_DIMS_MISMATCH = (
 # unload hook (which clears the issue) before it cancels those tasks. A check
 # whose reply lands in that gap must not re-raise the issue for an entry that
 # is no longer running.
-_ACTIVE_STATES = frozenset(
+ACTIVE_ENTRY_STATES = frozenset(
     {ConfigEntryState.SETUP_IN_PROGRESS, ConfigEntryState.LOADED}
 )
 
@@ -213,7 +213,7 @@ async def async_sync_ollama_embedding_model_issue(  # noqa: PLR0913
     )
 
     entry = hass.config_entries.async_get_entry(entry_id)
-    if entry is None or entry.state not in _ACTIVE_STATES:
+    if entry is None or entry.state not in ACTIVE_ENTRY_STATES:
         return
     if expected is not None:
         _sync_dims_issues(
