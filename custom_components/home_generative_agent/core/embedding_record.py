@@ -210,10 +210,11 @@ _EMBED_TIMEOUT_S = 180.0
 # comes back so it can be started again.
 _RETRY_DELAYS_S = (60.0, 120.0, 300.0)
 _DIGEST_READ_TIMEOUT_S = 3.0
+# Quoted in docs/configuration.md, with the waits below.
 _DIGEST_FETCH_TIMEOUT_S = 5.0
 # Waits before each re-read of a build setup could not read: setup reads it
 # with the short health-check timeout, which Home Assistant's busy startup
-# often runs past.
+# often runs past. Quoted in docs/configuration.md.
 _BUILD_REREAD_DELAYS_S = (0.0, 10.0, 30.0)
 _GEMINI_MODEL_PREFIX = "models/"
 _WHOLE_DOCUMENT = "$"
@@ -499,13 +500,21 @@ async def async_sync_embedding_record(hass: HomeAssistant, entry: ConfigEntry) -
 
     Records the current model when there is no record or no vector yet, and
     raises the model-changed issue when they differ, unless a re-embed to the
-    current model was started, which this resumes.
+    current model was started, which this resumes. An Ollama primary's build
+    that setup could not read is read again first, and a build read then
+    becomes the entry's fingerprint.
     """
     rd = entry.runtime_data
     pool, current = rd.pool, rd.embedding_fingerprint
     if pool is None or current is None or entry.state not in ACTIVE_ENTRY_STATES:
         return
-    if current.undetermined and rd.embedding_digest_source is not None:
+    if (
+        current.undetermined
+        and rd.embedding_digest_source is not None
+        and _primary_built(entry)
+    ):
+        # Only for a primary that answered at setup: with it down, a fallback
+        # may be writing, and the reload once it is back runs this check.
         current = await _async_learn_primary_build(hass, entry, current)
         if entry.state not in ACTIVE_ENTRY_STATES:
             return
@@ -553,6 +562,12 @@ def _raise_changed_issue(
     )
 
 
+def _primary_built(entry: ConfigEntry) -> bool:
+    """Return True when setup built the embedding primary's own client."""
+    primary = entry.runtime_data.primary_embeddings
+    return primary is not None and not isinstance(primary, UnavailableEmbeddings)
+
+
 def _can_reembed(entry: ConfigEntry) -> bool:
     """
     Return True when this entry can re-embed with its configured primary.
@@ -568,8 +583,7 @@ def _can_reembed(entry: ConfigEntry) -> bool:
         and rd.pool is not None
         and rd.embedding_fingerprint is not None
         and not rd.embedding_fingerprint.undetermined
-        and rd.primary_embeddings is not None
-        and not isinstance(rd.primary_embeddings, UnavailableEmbeddings)
+        and _primary_built(entry)
     )
 
 
@@ -593,14 +607,20 @@ async def _async_learn_primary_build(
             await asyncio.sleep(delay)
         if entry.state not in ACTIVE_ENTRY_STATES:
             return current
+        if entry.runtime_data.embedding_fingerprint is not current:
+            # Confirming the repair meanwhile read the build itself.
+            return entry.runtime_data.embedding_fingerprint
         build = await _async_primary_build(hass, entry)
+        if entry.runtime_data.embedding_fingerprint is not current:
+            return entry.runtime_data.embedding_fingerprint
         if build is not None:
             learned = replace(current, digest=build)
             entry.runtime_data.embedding_fingerprint = learned
             return learned
     LOGGER.warning(
-        "Could not read which build of %s the embedding primary serves; "
-        "the store's model record is checked at the next reload.",
+        "Could not read which build of %s the embedding primary serves (it did "
+        "not answer, or does not name its weights); until it does, a change to "
+        "another build of this model is not detected.",
         current.model,
     )
     return current
