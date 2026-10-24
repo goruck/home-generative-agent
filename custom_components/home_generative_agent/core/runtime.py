@@ -46,6 +46,7 @@ if TYPE_CHECKING:
         SuppressionManager,
     )
 
+    from .embedding_record import EmbeddingFingerprint
     from .provider_stall import ProviderStallTracker
     from .video_analyzer import VideoAnalyzer
 
@@ -101,6 +102,16 @@ class HGAData:
     # (any options change) otherwise closes the pool under the write and the
     # task dies with PoolClosed, logged as a failed index.
     tool_index_task: asyncio.Task[None] | None = None
+    # The memory store's embedding client (the fallback chain), the primary's
+    # own client the re-embed uses, and the model the store should hold, for
+    # the store's model record (#855); and the re-embed in flight, which the
+    # unload cancels before the pool closes.
+    embeddings: Any = None
+    primary_embeddings: Any = None
+    embedding_fingerprint: EmbeddingFingerprint | None = None
+    # (server URL, model) for an Ollama primary, to read its build again.
+    embedding_digest_source: tuple[str, str] | None = None
+    reembed_task: asyncio.Task[None] | None = None
 
 
 type HGAConfigEntry = ConfigEntry[HGAData]

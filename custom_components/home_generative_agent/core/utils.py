@@ -913,7 +913,7 @@ _OLLAMA_DEFAULT_REGISTRY = "registry.ollama.ai/"
 _OLLAMA_DEFAULT_NAMESPACE = "library/"
 
 
-def _ollama_model_key(name: str) -> str:
+def ollama_model_key(name: str) -> str:
     """
     Spell a model name the way Ollama resolves it, for comparison only.
 
@@ -929,6 +929,54 @@ def _ollama_model_key(name: str) -> str:
     return key if ":" in key.rsplit("/", 1)[-1] else f"{key}:latest"
 
 
+# The weights layer of an Ollama model, as /api/show's modelfile names it
+# (a Windows server writes the path with backslashes).
+_OLLAMA_WEIGHTS_RE = re.compile(r"blobs[/\\]sha256[-:]([0-9a-f]{64})")
+
+
+def builds_differ(a: str | None, b: str | None) -> bool:
+    """Return True only for two known build digests that differ."""
+    return a is not None and b is not None and a != b
+
+
+async def fetch_ollama_model_digest(
+    hass: HomeAssistant, base_url: str, model: str, timeout_s: float = 5.0
+) -> str | None:
+    """
+    Return the digest of ``model``'s weights on an Ollama server, or None.
+
+    Two servers can hold the same tag in different builds (another pull, a
+    quantization), which embed differently (#855). The weights blob that
+    /api/show's modelfile names identifies the vectors; the manifest digest
+    is not used, since it also changes when only the template or parameters
+    do. None when the server cannot say: unknown, never another build.
+    """
+    shown = await _ollama_json(
+        hass,
+        base_url,
+        "api/show",
+        body={"model": model, "name": model},
+        timeout_s=timeout_s,
+    )
+    modelfile = shown.get("modelfile") if shown is not None else None
+    if not isinstance(modelfile, str):
+        return None
+    for line in modelfile.splitlines():
+        if line.startswith("FROM ") and (found := _OLLAMA_WEIGHTS_RE.search(line)):
+            return found.group(1)
+    return None
+
+
+async def ollama_model_digests(
+    hass: HomeAssistant, urls: Sequence[str], model: str, *, timeout_s: float = 5.0
+) -> dict[str, str]:
+    """Map each server that reports a digest for ``model`` to it."""
+    digests = await asyncio.gather(
+        *(fetch_ollama_model_digest(hass, url, model, timeout_s) for url in urls)
+    )
+    return {url: d for url, d in zip(urls, digests, strict=True) if d is not None}
+
+
 def ollama_model_installed(model: str, installed: list[str]) -> bool:
     """
     Return True if ``model`` is among the names /api/tags returned.
@@ -938,8 +986,8 @@ def ollama_model_installed(model: str, installed: list[str]) -> bool:
     """
     if "@" in model:
         return True
-    wanted = _ollama_model_key(model)
-    return any(_ollama_model_key(name) == wanted for name in installed)
+    wanted = ollama_model_key(model)
+    return any(ollama_model_key(name) == wanted for name in installed)
 
 
 async def validate_openai_key(
