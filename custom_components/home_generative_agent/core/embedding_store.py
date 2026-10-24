@@ -93,6 +93,7 @@ _SCHEMA_TIMEOUT_S = 5.0
 _FIXED_SIZE_PROVIDERS = frozenset({"openai", "gemini"})
 OPENAI_COMPATIBLE = "openai_compatible"
 OLLAMA = "ollama"
+GEMINI = "gemini"
 _PROBE_TEXT = "embedding size check"
 _PROBE_TIMEOUT_S = 15.0
 

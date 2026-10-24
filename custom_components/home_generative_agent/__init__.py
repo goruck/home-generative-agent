@@ -252,10 +252,20 @@ from .core.embedding_model_guard import (
     async_clear_ollama_embedding_model_issue,
     async_sync_ollama_embedding_model_issue,
 )
+from .core.embedding_record import (
+    async_clear_embedding_model_changed_issue,
+    async_clear_other_build_fallback_issue,
+    async_recorded_ollama_digest,
+    async_sync_embedding_record,
+    async_sync_other_build_fallback_issue,
+    embedding_fingerprint,
+)
 from .core.embedding_store import (
     CHECKPOINT_MIGRATIONS,
     CHECKPOINT_TABLES,
+    GEMINI,
     MIGRATION_RECORDS,
+    OPENAI_COMPATIBLE,
     STORE_MIGRATIONS,
     STORE_TABLES,
     VECTOR_MIGRATIONS,
@@ -306,6 +316,7 @@ from .core.subentry_resolver import (
 )
 from .core.utils import (
     anthropic_healthy,
+    builds_differ,
     configured_ollama_urls,
     dispatch_on_loop,
     ensure_http_url,
@@ -315,6 +326,7 @@ from .core.utils import (
     normalize_openai_compatible_base_url,
     normalized_ollama_url,
     ollama_healthy,
+    ollama_model_digests,
     ollama_provider_settings_url,
     ollama_url_for_category,
     openai_compatible_healthy,
@@ -1314,6 +1326,22 @@ def _configured_embedding_dims(options: Mapping[str, Any]) -> int:
             RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
         )
     return EMBEDDING_MODEL_DIMS
+
+
+def _configured_embedding_model(options: Mapping[str, Any], provider_type: str) -> str:
+    """Return the embedding model a provider type is configured with."""
+    keys = {
+        "openai": (CONF_OPENAI_EMBEDDING_MODEL, RECOMMENDED_OPENAI_EMBEDDING_MODEL),
+        GEMINI: (CONF_GEMINI_EMBEDDING_MODEL, RECOMMENDED_GEMINI_EMBEDDING_MODEL),
+        OPENAI_COMPATIBLE: (
+            CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
+            RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
+        ),
+    }
+    key, default = keys.get(
+        provider_type, (CONF_OLLAMA_EMBEDDING_MODEL, RECOMMENDED_OLLAMA_EMBEDDING_MODEL)
+    )
+    return str(options.get(key, default))
 
 
 def _ollama_embedding_urls_to_check(
@@ -2693,6 +2721,39 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         CONF_EMBEDDING_MODEL_PROVIDER, RECOMMENDED_EMBEDDING_MODEL_PROVIDER
     )
     index_config: PostgresIndexConfig | None = None
+    # Each Ollama embedding server's build of the model: a fallback holding
+    # another build embeds differently, and the primary's goes into the
+    # store's model record (#855). Asked only of servers that just answered.
+    ollama_embedding_digests: dict[str, str] = {}
+    if embedding_provider == "ollama" and db_uri is not None:
+        digest_urls = [
+            url
+            for url in (
+                ollama_embedding_url,
+                *fallback_ollama_urls.get("embedding", []),
+            )
+            if ollama_health.get(url)
+        ]
+        ollama_embedding_digests = await ollama_model_digests(
+            hass,
+            list(dict.fromkeys(digest_urls)),
+            ollama_embedding_model,
+            timeout_s=health_timeout,
+        )
+    primary_embedding_digest = ollama_embedding_digests.get(ollama_embedding_url)
+    # With the primary down there is nothing live to compare a fallback's build
+    # with, and the fallback is what writes then: compare it with the build
+    # the store's record names instead.
+    reference_embedding_digest = primary_embedding_digest
+    if (
+        reference_embedding_digest is None
+        and db_uri is not None
+        and any(url != ollama_embedding_url for url in ollama_embedding_digests)
+    ):
+        reference_embedding_digest = await async_recorded_ollama_digest(
+            db_uri, ollama_embedding_model
+        )
+    embedding_other_build: list[str] = []
     if embedding_provider == "openai":
         embedding_model = openai_embeddings
     elif embedding_provider == "openai_compatible":
@@ -2701,6 +2762,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         embedding_model = gemini_embeddings
     else:
         embedding_model = ollama_embeddings
+    # The store's re-embed (#855) runs on the primary's own client: a fallback
+    # in the chain may hold a build nobody read.
+    primary_embeddings = embedding_model
     # Read by the embedding-model repair check at the end of setup.
     ollama_embeddings_selected = embedding_model is not None and (
         embedding_model is ollama_embeddings
@@ -2720,8 +2784,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             # provider (#853), and an Ollama one at the primary's URL is the
             # primary's: the same client twice is no failover, only a false
             # "fell back" and a needless tool index rebuild (#751 review).
-            if m is not None and all(m is not c for c, _d, _p in _emb_chain):
-                _emb_chain.append((m, p.deployment, p.entry_id))
+            if m is None or any(m is c for c, _d, _p in _emb_chain):
+                continue
+            # Another build of the model on a fallback server embeds
+            # differently from the primary's; an unknown digest decides
+            # nothing (#855).
+            digest = (
+                ollama_embedding_digests.get(_ollama_provider_url(p))
+                if p.provider_type == "ollama"
+                else None
+            )
+            if builds_differ(digest, reference_embedding_digest):
+                embedding_other_build.append(p.name)
+                continue
+            _emb_chain.append((m, p.deployment, p.entry_id))
+        if embedding_other_build:
+            LOGGER.warning(
+                "Embedding fallback provider(s) %s left out: their server holds "
+                "another build of %s than the primary provider %s (or, while it "
+                "is down, than the memory store's record), which would mix "
+                "models in the memory store.",
+                ", ".join(embedding_other_build),
+                ollama_embedding_model,
+                _emb_fb[0].name,
+            )
         if len(_emb_chain) > 1:
             active_provider_id = _emb_chain[0][2]
             if active_provider_id != _emb_fb[0].entry_id:
@@ -2814,6 +2900,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         )
 
     embedding_dims = _configured_embedding_dims(options)
+    # The model the store's vectors should come from, compared with the
+    # store's record at the end of setup (#855).
+    current_embedding_fingerprint = (
+        embedding_fingerprint(
+            embedding_provider,
+            _configured_embedding_model(options, embedding_provider),
+            dims=embedding_dims,
+            digest=primary_embedding_digest if embedding_provider == "ollama" else None,
+        )
+        if embedding_model is not None
+        else None
+    )
     if embedding_model is None:
         LOGGER.warning(
             "No embeddings provider available; vector store will be limited.",
@@ -3766,6 +3864,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         network_inventory=network_inventory,
         openai_http_client=openai_http_client,
         stall_tracker=stall_tracker,
+        embeddings=embedding_model,
+        primary_embeddings=primary_embeddings,
+        embedding_fingerprint=current_embedding_fingerprint,
+        embedding_digest_source=(
+            (ollama_embedding_url, ollama_embedding_model)
+            if embedding_provider == "ollama"
+            else None
+        ),
     )
 
     # Registered once per Home Assistant run: aiohttp routes cannot be removed,
@@ -4538,6 +4644,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         primary=embedding_chain[0].name if embedding_chain else "",
         left_out=embedding_left_out_chosen,
     )
+    async_sync_other_build_fallback_issue(
+        hass,
+        entry.entry_id,
+        primary=embedding_chain[0].name if embedding_chain else "",
+        model=ollama_embedding_model,
+        left_out=embedding_other_build,
+    )
+    # Same placement, same reason: one read of the store's model record, and
+    # a write when there is none (#855). It also resumes a re-embed the
+    # repair started.
+    entry.async_create_background_task(
+        hass,
+        async_sync_embedding_record(hass, entry),
+        name="hga_embedding_record_check",
+    )
 
     # Same placement, same reason: four Sentinel rule ids (five evaluators) key
     # on a positive "Unknown Person" label that only the face pipeline writes,
@@ -4683,6 +4804,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
         await _cancel_and_wait(getattr(rd.store, "_task", None), "store batch worker")
 
     await _teardown("tool_index.cancel", _cancel_tool_index)
+
+    async def _cancel_reembed() -> None:
+        # Writes on the pool closed next; it resumes at the next setup (#855).
+        await _cancel_and_wait(rd.reembed_task, "memory store re-embed")
+        rd.reembed_task = None
+
+    await _teardown("reembed.cancel", _cancel_reembed)
     if rd.pool is not None:
         await _teardown("pool.close", rd.pool.close)
     # The OpenAI http client is NOT closed here — it is closed by the on-unload
@@ -4700,6 +4828,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
     # keeps the user's dismissal; a disable drops it.
     if entry.disabled_by is not None:
         async_clear_other_model_fallback_issue(hass, entry.entry_id)
+        async_clear_other_build_fallback_issue(hass, entry.entry_id)
+        async_clear_embedding_model_changed_issue(hass, entry.entry_id)
     # A disabled entry runs no rules at all, so singling four out is wrong the
     # same way. A reload (every Sentinel config save) keeps it: deleting it
     # would also delete the user's dismissal, so a dismissed notice came back
@@ -4721,6 +4851,8 @@ async def async_remove_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> None
     async_clear_ollama_embedding_model_issue(hass, entry.entry_id)
     async_clear_embedding_size_issue(hass, entry.entry_id)
     async_clear_other_model_fallback_issue(hass, entry.entry_id)
+    async_clear_other_build_fallback_issue(hass, entry.entry_id)
+    async_clear_embedding_model_changed_issue(hass, entry.entry_id)
     async_clear_pin_pipeline_issue(hass, entry.entry_id)
     async_clear_unknown_person_issue(hass, entry.entry_id)
 

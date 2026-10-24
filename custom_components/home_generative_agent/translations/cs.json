@@ -564,6 +564,24 @@
     "embedding_fallback_other_model": {
       "title": "Záložní poskytovatel embeddingů {providers} se nepoužívá",
       "description": "Funkce **Embeddingy** uvádí **{providers}** jako zálohu, ten ale vytváří embeddingy jiným modelem než primární poskytovatel **{primary}**. Úložiště paměti obsahuje vektory jednoho modelu, takže záloha s jiným modelem by způsobila chybné výsledky vyhledávání v paměti, nebo by při odlišné velikosti vektorů selhal každý zápis. Home Generative Agent ji proto vynechává: pokud primární poskytovatel nefunguje, vyhledávání v paměti a výběr nástrojů přestanou fungovat, dokud se nevrátí.\n\nZálohou pro embeddingy může být jen další server Ollama za primárním poskytovatelem Ollama: každý server Ollama vytváří embeddingy stejným nastaveným modelem. Problém odstraníte tak, že otevřete funkci **Embeddingy** (**Nastavení → Zařízení a služby → Home Generative Agent**) a uložíte ji: {providers} se již jako záloha nenabízí, takže se uložením odebere. Tento problém zmizí po prvním znovunačtení po změně."
+    },
+    "embedding_model_changed": {
+      "title": "Úložiště paměti obsahuje vektory jiného modelu embeddingů",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Znovu vytvořit embeddingy úložiště paměti modelem {current}",
+            "description": "Vektory v úložišti paměti (vzpomínky, popisky z kamer, index nástrojů) vznikly modelem **{recorded}**, ale Home Generative Agent nyní vytváří embeddingy modelem **{current}**. Vektory různých modelů nelze porovnávat, takže vyhledávání v paměti vrací chybné výsledky, dokud se embeddingy úložiště znovu nevytvoří.\n\nOdesláním znovu vytvoříte každý uložený vektor modelem {current}. Běží na pozadí a po každé dávce počká tak dlouho, jak dávka trvala, aby server měl čas na konverzace, takže u velkého úložiště může trvat mnoho hodin (zhruba jedno volání embeddingů na 64 uložených vzpomínek a popisků). Vyhledávání v paměti a ukládání mezitím fungují dál. Restart nebo znovunačtení v něm pokračuje tam, kde skončilo, protokol ukazuje jeho průběh, a pokud se zastaví (například poskytovatel zůstane nedostupný), tento problém se vrátí, abyste ho mohli spustit znovu. Po dokončení se úložiště zaznamená jako úložiště modelu {current}.\n\nPřepnutí funkce Embeddingy (nebo modelu embeddingů poskytovatele) zpět tento problém neodstraní: vzpomínky a popisky uložené od změny vznikly modelem {current}, takže úložiště je třeba převést tak jako tak. Chcete-li se vrátit, přepněte zpět, znovu načtěte integraci a teprve pak tuto opravu odešlete; úložiště se převede na model, ke kterému jste se vrátili."
+          }
+        },
+        "abort": {
+          "not_ready": "Nové vytvoření embeddingů nelze spustit: Home Generative Agent není načten nebo nemá databázi, jeho poskytovatel embeddingů neodpovídá, nebo jeho server Ollama neuvádí, které sestavení modelu poskytuje. Pokud má server Ollama nyní jiné sestavení než při spuštění Home Generative Agent, nejprve Home Generative Agent znovu načtěte. Pak to zkuste znovu."
+        }
+      }
+    },
+    "embedding_fallback_other_build": {
+      "title": "Záložní poskytovatel embeddingů {providers} má jiné sestavení modelu {model}",
+      "description": "Server Ollama záložního poskytovatele embeddingů **{providers}** má jiné sestavení modelu **{model}** (jiné stažení nebo kvantizaci) než primární poskytovatel **{primary}** (nebo, když primární nefunguje, než sestavení, kterým bylo úložiště paměti naplněno). Různá sestavení vytvářejí odlišné embeddingy, proto Home Generative Agent tuto zálohu vynechává: míchání jejich vektorů by způsobilo chybné výsledky vyhledávání v paměti.\n\nChcete-li ji znovu používat, stáhněte na oba servery stejné sestavení (například spusťte `ollama pull {model}` na každém z nich) a znovu načtěte Home Generative Agent. Tento problém zmizí po prvním znovunačtení, kdy se sestavení shodují."
     }
   }
 }

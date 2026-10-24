@@ -564,6 +564,24 @@
     "embedding_fallback_other_model": {
       "title": "Embedding fallback {providers} is not used",
       "description": "The **Embeddings** feature lists **{providers}** as a fallback, but it embeds with a different model than the primary provider **{primary}**. The memory store holds one model's vectors, so a fallback of another model would make memory search return wrong results, or fail every write when the vector sizes differ. Home Generative Agent therefore leaves it out: if the primary provider is down, memory search and tool retrieval stop working until it is back.\n\nOnly another Ollama server, behind an Ollama primary, can be an embedding fallback: every Ollama server embeds with the same configured model. To clear this issue, open the **Embeddings** feature (**Settings → Devices & services → Home Generative Agent**) and save it: {providers} is no longer offered as a fallback, so saving removes it. This issue clears on the first reload after the change."
+    },
+    "embedding_model_changed": {
+      "title": "Memory store holds another embedding model's vectors",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Re-embed the memory store with {current}",
+            "description": "The memory store's vectors (memories, camera captions, the tool index) were made with **{recorded}**, but Home Generative Agent now embeds with **{current}**. Vectors of different models cannot be compared, so memory search returns wrong results until the store is re-embedded.\n\nSubmit to re-embed every stored vector with {current}. It runs in the background and pauses after each batch for as long as the batch took, leaving the server time for conversations, so a large store can take many hours (about one embedding call per 64 stored memories and captions). Memory search and saving keep working meanwhile. A restart or reload resumes it where it stopped, the log shows its progress, and if it stops (the provider stays down, for example) this issue comes back so you can start it again. Once it finishes, the store is recorded as {current}'s.\n\nSwitching the Embeddings feature (or the provider's embedding model) back does not clear this issue: memories and captions saved since the change were embedded with {current}, so the store needs re-embedding either way. To go back, switch back, reload, and submit this repair then, which re-embeds the store with the model you switched back to."
+          }
+        },
+        "abort": {
+          "not_ready": "The re-embed cannot start: Home Generative Agent is not loaded or has no database, its embedding provider is not answering, or its Ollama server does not say which build of the model it serves. If the Ollama server now holds another build than when Home Generative Agent started, reload Home Generative Agent first. Then try again."
+        }
+      }
+    },
+    "embedding_fallback_other_build": {
+      "title": "Embedding fallback {providers} holds another build of {model}",
+      "description": "The Ollama server of the embedding fallback **{providers}** holds a different build of **{model}** (another pull or quantization) than the primary provider **{primary}** (or, while the primary is down, than the build the memory store was filled with). Different builds embed differently, so Home Generative Agent leaves this fallback out: mixing their vectors would make memory search return wrong results.\n\nTo use it again, pull the same build on both servers (for example run `ollama pull {model}` on each) and reload Home Generative Agent. This issue clears on the first reload after the builds match."
     }
   }
 }
