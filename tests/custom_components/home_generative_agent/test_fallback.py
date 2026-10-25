@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -342,6 +343,180 @@ async def test_fallback_embeddings_query() -> None:
     emb = FallbackEmbeddings(chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")])
     result = await emb.aembed_query("hello")
     assert result == [0.5, 0.6]
+
+
+def test_fallback_embeddings_remove_provider() -> None:
+    """A member is dropped by its provider id; an unknown id changes nothing."""
+    primary, fallback = AsyncMock(), AsyncMock()
+    emb = FallbackEmbeddings(chain=[(primary, "edge", "p1"), (fallback, "edge", "p2")])
+
+    assert emb.remove_provider("p2")
+    assert emb.chain == [(primary, "edge", "p1")]
+    assert not emb.remove_provider("p2")
+    assert emb.chain == [(primary, "edge", "p1")]
+
+
+@pytest.mark.asyncio
+async def test_fallback_embeddings_removing_the_active_provider_hands_back() -> None:
+    """The sticky fallback removed: the primary is first again, with no switch."""
+    primary, fallback = AsyncMock(), AsyncMock()
+    primary.aembed_documents.side_effect = [ConnectionError("emb down"), [[0.1]]]
+    fallback.aembed_documents.return_value = [[0.9]]
+    switch_callback, removed_callback = MagicMock(), MagicMock()
+    emb = FallbackEmbeddings(
+        chain=[(primary, "edge", "p1"), (fallback, "edge", "p2")],
+        switch_callback=switch_callback,
+        removed_callback=removed_callback,
+    )
+    assert await emb.aembed_documents(["hello"]) == [[0.9]]
+    switch_callback.assert_called_once_with("p1", "p2")
+    assert "p2" in emb.served
+
+    assert emb.remove_provider("p2")
+
+    # A "fell back" notice would be wrong: nothing failed, the chain went back.
+    removed_callback.assert_called_once_with("p2", "p1")
+    switch_callback.assert_called_once()
+    assert await emb.aembed_documents(["hello"]) == [[0.1]]
+    assert fallback.aembed_documents.await_count == 1
+    switch_callback.assert_called_once()
+
+
+def _call(emb: FallbackEmbeddings, method: str) -> Any:
+    """Start an embed call of either kind; the store saves through documents."""
+    if method == "aembed_documents":
+        return asyncio.create_task(emb.aembed_documents(["hello"]))
+    return asyncio.create_task(emb.aembed_query("hello"))
+
+
+@pytest.mark.parametrize("method", ["aembed_documents", "aembed_query"])
+@pytest.mark.asyncio
+async def test_fallback_embeddings_a_call_in_flight_skips_a_removed_provider(
+    method: str,
+) -> None:
+    """Removed while the primary was still answering: the fallback is not tried."""
+    gate = asyncio.Event()
+    primary, fallback = AsyncMock(), AsyncMock()
+
+    async def _slow_failure(*_args: Any) -> Any:
+        await gate.wait()
+        msg = "emb down"
+        raise ConnectionError(msg)
+
+    getattr(primary, method).side_effect = _slow_failure
+    getattr(fallback, method).return_value = [[0.9]]
+    emb = FallbackEmbeddings(chain=[(primary, "edge", "p1"), (fallback, "edge", "p2")])
+    call = _call(emb, method)
+    await asyncio.sleep(0)
+
+    assert emb.remove_provider("p2")
+    gate.set()
+
+    with pytest.raises(HomeAssistantError, match="All embedding providers failed"):
+        await call
+    getattr(fallback, method).assert_not_awaited()
+    assert emb._active_provider_id == "p1"
+
+
+@pytest.mark.parametrize("method", ["aembed_documents", "aembed_query"])
+@pytest.mark.asyncio
+async def test_fallback_embeddings_an_answer_from_a_removed_provider_is_dropped(
+    method: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Removed while it answered: its vectors are another build's, so not used."""
+    gate = asyncio.Event()
+    primary, fallback = AsyncMock(), AsyncMock()
+    getattr(primary, method).side_effect = ConnectionError("emb down")
+
+    async def _slow_answer(*_args: Any) -> Any:
+        await gate.wait()
+        return [[0.9]]
+
+    getattr(fallback, method).side_effect = _slow_answer
+    emb = FallbackEmbeddings(chain=[(primary, "edge", "p1"), (fallback, "edge", "p2")])
+    call = _call(emb, method)
+    await asyncio.sleep(0)
+
+    assert emb.remove_provider("p2")
+    gate.set()
+
+    with pytest.raises(HomeAssistantError, match="All embedding providers failed"):
+        await call
+    assert "removed from the embedding chain while it answered" in caplog.text
+    assert emb._active_provider_id == "p1"
+    assert "p2" not in emb.served
+
+
+@pytest.mark.parametrize("method", ["aembed_documents", "aembed_query"])
+@pytest.mark.asyncio
+async def test_fallback_embeddings_a_discarded_answer_is_not_called_a_failure(
+    method: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The next success does not list the removed provider as one that failed."""
+    gate = asyncio.Event()
+    primary, fallback, third = AsyncMock(), AsyncMock(), AsyncMock()
+    getattr(primary, method).side_effect = ConnectionError("emb down")
+
+    async def _slow_answer(*_args: Any) -> Any:
+        await gate.wait()
+        return [[0.9]]
+
+    getattr(fallback, method).side_effect = _slow_answer
+    getattr(third, method).return_value = [[0.7]]
+    emb = FallbackEmbeddings(
+        chain=[(primary, "edge", "p1"), (fallback, "edge", "p2"), (third, "edge", "p3")]
+    )
+    call = _call(emb, method)
+    await asyncio.sleep(0)
+    assert emb.remove_provider("p2")
+    gate.set()
+
+    assert await call == [[0.7]]
+    assert "after failed provider(s): p1" in caplog.text
+    assert "p2" not in caplog.text.split("after failed provider(s):")[1].splitlines()[0]
+
+
+@pytest.mark.parametrize("method", ["aembed_documents", "aembed_query"])
+@pytest.mark.asyncio
+async def test_fallback_embeddings_a_lone_member_ignores_its_open_breaker(
+    method: str,
+) -> None:
+    """Down to one provider, the chain is the unwrapped provider setup builds."""
+    primary, fallback = AsyncMock(), AsyncMock()
+    getattr(primary, method).return_value = [[0.1]]
+    breaker = MagicMock()
+    breaker.is_available.return_value = False
+    emb = FallbackEmbeddings(
+        chain=[(primary, "edge", "p1"), (fallback, "edge", "p2")],
+        circuit_breaker=breaker,
+    )
+    with pytest.raises(HomeAssistantError, match="circuit breaker is open for p1, p2"):
+        await _call(emb, method)
+
+    assert emb.remove_provider("p2")
+
+    assert await _call(emb, method) == [[0.1]]
+    breaker.record_success.assert_called_once_with("p1")
+
+
+@pytest.mark.asyncio
+async def test_fallback_embeddings_an_emptied_chain_says_so() -> None:
+    """Removing every member is allowed by the method; a call then names it."""
+    primary, fallback = AsyncMock(), AsyncMock()
+    removed_callback = MagicMock()
+    emb = FallbackEmbeddings(
+        chain=[(primary, "edge", "p1"), (fallback, "edge", "p2")],
+        removed_callback=removed_callback,
+    )
+
+    assert emb.remove_provider("p1")
+    assert emb.remove_provider("p2")
+
+    assert emb.chain == []
+    assert emb._active_provider_id is None
+    removed_callback.assert_called_once_with("p1", "p2")
+    with pytest.raises(HomeAssistantError, match="No embedding provider is left"):
+        await emb.aembed_query("hello")
 
 
 @pytest.mark.asyncio

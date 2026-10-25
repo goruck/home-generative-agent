@@ -581,7 +581,7 @@
     },
     "embedding_fallback_other_build": {
       "title": "Embedding fallback {providers} holds another build of {model}",
-      "description": "The Ollama server of the embedding fallback **{providers}** holds a different build of **{model}** (another pull or quantization) than the primary provider **{primary}** (or, while the primary is down, than the build the memory store was filled with). Different builds embed differently, so Home Generative Agent leaves this fallback out: mixing their vectors would make memory search return wrong results.\n\nTo use it again, pull the same build on both servers (for example run `ollama pull {model}` on each) and reload Home Generative Agent. This issue clears on the first reload after the builds match."
+      "description": "The Ollama server of the embedding fallback **{providers}** holds a different build of **{model}** (another pull or quantization) than the primary provider **{primary}** (or, while the primary is down, than the build the memory store was filled with). Different builds embed differently, so Home Generative Agent leaves this fallback out: mixing their vectors would make memory search return wrong results.\n\nTo use it again, pull the same build on both servers (for example run `ollama pull {model}` on each) and reload Home Generative Agent. This issue clears on a reload that reads both builds and finds them the same."
     }
   }
 }

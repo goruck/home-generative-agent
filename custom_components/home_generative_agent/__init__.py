@@ -253,6 +253,9 @@ from .core.embedding_model_guard import (
     async_sync_ollama_embedding_model_issue,
 )
 from .core.embedding_record import (
+    DIGEST_FETCH_TIMEOUT_S,
+    EmbeddingFallbackGate,
+    FallbackBuild,
     async_clear_embedding_model_changed_issue,
     async_clear_other_build_fallback_issue,
     async_recorded_ollama_digest,
@@ -2723,7 +2726,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     index_config: PostgresIndexConfig | None = None
     # Each Ollama embedding server's build of the model: a fallback holding
     # another build embeds differently, and the primary's goes into the
-    # store's model record (#855). Asked only of servers that just answered.
+    # store's model record (#855). Asked only of servers that just answered,
+    # with a longer wait than the health check's: Home Assistant's busy
+    # startup often ran past that one, and a build unread here leaves the
+    # fallback check below blind (#860).
     ollama_embedding_digests: dict[str, str] = {}
     if embedding_provider == "ollama" and db_uri is not None:
         digest_urls = [
@@ -2738,22 +2744,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             hass,
             list(dict.fromkeys(digest_urls)),
             ollama_embedding_model,
-            timeout_s=health_timeout,
+            timeout_s=DIGEST_FETCH_TIMEOUT_S,
         )
     primary_embedding_digest = ollama_embedding_digests.get(ollama_embedding_url)
     # With the primary down there is nothing live to compare a fallback's build
     # with, and the fallback is what writes then: compare it with the build
-    # the store's record names instead.
+    # the store's record names instead. A primary that answered but whose
+    # build read timed out is compared with later, once the record check has
+    # read it: the record may be stale after a pull on both servers (#860).
     reference_embedding_digest = primary_embedding_digest
     if (
         reference_embedding_digest is None
         and db_uri is not None
+        and ollama_embeddings is None
         and any(url != ollama_embedding_url for url in ollama_embedding_digests)
     ):
         reference_embedding_digest = await async_recorded_ollama_digest(
             db_uri, ollama_embedding_model
         )
     embedding_other_build: list[str] = []
+    # Kept Ollama fallbacks not compared with the primary's live build (theirs
+    # unread, or the primary's): checked again after setup (#860).
+    embedding_fallback_unchecked: list[FallbackBuild] = []
     if embedding_provider == "openai":
         embedding_model = openai_embeddings
     elif embedding_provider == "openai_compatible":
@@ -2797,6 +2809,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             if builds_differ(digest, reference_embedding_digest):
                 embedding_other_build.append(p.name)
                 continue
+            # Without a database no build was read and there is no store to
+            # protect, so there is nothing to check later either.
+            if (
+                p.provider_type == "ollama"
+                and db_uri is not None
+                and (digest is None or primary_embedding_digest is None)
+            ):
+                embedding_fallback_unchecked.append(
+                    FallbackBuild(p.entry_id, p.name, _ollama_provider_url(p), digest)
+                )
             _emb_chain.append((m, p.deployment, p.entry_id))
         if embedding_other_build:
             LOGGER.warning(
@@ -2824,9 +2846,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 )
 
             def _mark_tool_index_stale(
-                previous_provider_id: str, provider_id: str
+                previous_provider_id: str, provider_id: str, *, notify: bool = True
             ) -> None:
-                """Mark tool vectors stale after an embedding provider switch."""
+                """
+                Mark tool vectors stale after an embedding provider switch.
+
+                Without ``notify``, for a fallback removed from the chain for
+                its build (#860): nothing fell back, so no notice is sent.
+                """
                 runtime_data = getattr(entry, "runtime_data", None)
                 if runtime_data is None:
                     return
@@ -2839,12 +2866,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 if task is not None and not task.done():
                     task.cancel()
                 LOGGER.warning(
-                    "Tool index marked stale after embedding provider switch "
-                    "from %s to %s; it will be rebuilt on the next indexing pass.",
+                    "Tool index marked stale after embedding provider %s %s to "
+                    "%s; it will be rebuilt on the next indexing pass.",
                     previous_provider_id,
+                    "switched" if notify else "was removed, handing the chain",
                     provider_id,
                 )
                 async_dispatcher_send(hass, SIGNAL_TOOL_INDEX_UPDATED, "stale", 0)
+                if not notify:
+                    return
                 provider = providers.get(provider_id)
                 _schedule_model_fallback_notification(
                     "embedding",
@@ -2857,6 +2887,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 _emb_chain,
                 circuit_breaker=_emb_cb,
                 switch_callback=_mark_tool_index_stale,
+                removed_callback=partial(_mark_tool_index_stale, notify=False),
             )
         elif _emb_chain:
             active_provider_id = _emb_chain[0][2]
@@ -3872,6 +3903,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             if embedding_provider == "ollama"
             else None
         ),
+        embedding_fallback_gate=EmbeddingFallbackGate(
+            primary=embedding_chain[0].name if embedding_chain else "",
+            model=ollama_embedding_model,
+            left_out=tuple(embedding_other_build),
+            unchecked=tuple(embedding_fallback_unchecked),
+        ),
     )
 
     # Registered once per Home Assistant run: aiohttp routes cannot be removed,
@@ -4644,13 +4681,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         primary=embedding_chain[0].name if embedding_chain else "",
         left_out=embedding_left_out_chosen,
     )
-    async_sync_other_build_fallback_issue(
-        hass,
-        entry.entry_id,
-        primary=embedding_chain[0].name if embedding_chain else "",
-        model=ollama_embedding_model,
-        left_out=embedding_other_build,
-    )
+    # With kept fallbacks still to be judged, the record check syncs this
+    # issue itself once it knows (#860): syncing it here too would delete a
+    # standing, perhaps dismissed, issue on no evidence, only for the check to
+    # raise it again fresh, or, with the primary down and no check to come,
+    # for good while the fallback it names takes over unverified.
+    if embedding_other_build or not embedding_fallback_unchecked:
+        async_sync_other_build_fallback_issue(
+            hass,
+            entry.entry_id,
+            primary=embedding_chain[0].name if embedding_chain else "",
+            model=ollama_embedding_model,
+            left_out=embedding_other_build,
+        )
     # Same placement, same reason: one read of the store's model record, and
     # a write when there is none (#855). It also resumes a re-embed the
     # repair started.
