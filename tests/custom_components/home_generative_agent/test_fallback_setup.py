@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -212,6 +212,8 @@ class FallbackSetupData:
     fallback_chains: dict[str, list[ModelProviderConfig]]
     deployments: dict[str, str]
     captured_embedding_chain: dict[str, list[tuple[Any, str, str]]]
+    # The keyword arguments setup built the embedding chain with (callbacks).
+    captured_embedding_kwargs: dict[str, Any] = field(default_factory=dict)
     openai_available: bool = True
     openai_embeddings_available: bool = True
 
@@ -319,6 +321,7 @@ def _patch_setup_dependencies(
         chain: list[tuple[Any, str, str]], *args: Any, **kwargs: Any
     ) -> FallbackEmbeddings:
         data.captured_embedding_chain["chain"] = chain
+        data.captured_embedding_kwargs.update(kwargs)
         return real_fallback_embeddings(chain, *args, **kwargs)
 
     monkeypatch.setattr(hga_component, "_register_services", lambda *_args: None)

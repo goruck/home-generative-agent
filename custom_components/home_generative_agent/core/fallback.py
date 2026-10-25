@@ -1036,12 +1036,70 @@ class FallbackEmbeddings:
         chain: list[tuple[Any, str, str]],
         circuit_breaker: CircuitBreaker | None = None,
         switch_callback: Callable[[str, str], None] | None = None,
+        removed_callback: Callable[[str, str], None] | None = None,
     ) -> None:
-        """Initialize fallback embeddings wrapper."""
+        """
+        Initialize fallback embeddings wrapper.
+
+        ``switch_callback(previous, current)`` runs when a call succeeds on
+        another provider than the last one; ``removed_callback(removed,
+        current)`` when `remove_provider` drops the active one (#860), where
+        a "fell back" notice would be wrong.
+        """
         self.chain = chain
         self.circuit_breaker = circuit_breaker
         self.switch_callback = switch_callback
+        self.removed_callback = removed_callback
         self._active_provider_id = chain[0][2] if chain else None
+        # Providers that answered an embedding call: the store embeds a save
+        # and a search alike, so any of them may have written vectors (#860).
+        # gstack-shortcut(dec-f182f377): in memory only, so a reload inside the
+        # settle window loses it; upgrade when #857 designs the suspect-writer
+        # note at first success or the persist-at-unload.
+        self.served: set[str] = set()
+
+    def _is_member(self, provider_id: str) -> bool:
+        return any(item[2] == provider_id for item in self.chain)
+
+    def _is_open(self, provider_id: str) -> bool:
+        """
+        Return True if the circuit breaker holds `provider_id` out of a call.
+
+        A chain down to one member is the unwrapped provider setup would have
+        built (#860): it is tried every time, breaker or not, so a removal
+        does not leave a recovered primary skipped for the cooldown.
+        """
+        return (
+            len(self.chain) > 1
+            and self.circuit_breaker is not None
+            and not self.circuit_breaker.is_available(provider_id)
+        )
+
+    @staticmethod
+    def _all_failed(last_err: Exception | None, skipped: list[str]) -> str:
+        if last_err is not None:
+            return (
+                "All embedding providers failed. Last error: "
+                f"{_safe_err_summary(last_err)}"
+            )
+        if skipped:
+            return (
+                "No embedding provider was tried: the circuit breaker is open for "
+                + ", ".join(skipped)
+            )
+        return "No embedding provider is left in the chain"
+
+    def _removed_meanwhile(self, label: str, provider_id: str) -> bool:
+        """Return True, logging it, if the provider left the chain meanwhile (#860)."""
+        if self._is_member(provider_id):
+            return False
+        LOGGER.warning(
+            "%s: provider %s was removed from the embedding chain while it "
+            "answered; its result is discarded.",
+            label,
+            provider_id,
+        )
+        return True
 
     def _ordered_chain(self) -> list[tuple[Any, str, str]]:
         """Return chain with the active provider first."""
@@ -1058,8 +1116,29 @@ class FallbackEmbeddings:
             )
         return [*active, *inactive]
 
+    def remove_provider(self, provider_id: str) -> bool:
+        """
+        Drop a provider from the chain; True if it was in it.
+
+        For an embedding fallback found, after setup, to hold another build
+        of the model (#860). If it was the active provider, the chain goes
+        back to its first remaining member and the removed callback runs, so
+        the tool index its vectors filled is rebuilt. A call in flight on it
+        skips it from here on and discards an answer it already gave.
+        """
+        kept = [item for item in self.chain if item[2] != provider_id]
+        if len(kept) == len(self.chain):
+            return False
+        self.chain = kept
+        if self._active_provider_id == provider_id:
+            self._active_provider_id = kept[0][2] if kept else None
+            if self._active_provider_id is not None and self.removed_callback:
+                self.removed_callback(provider_id, self._active_provider_id)
+        return True
+
     def _record_success(self, provider_id: str) -> None:
         """Record the provider used successfully for future embedding calls."""
+        self.served.add(provider_id)
         previous_provider_id = self._active_provider_id
         self._active_provider_id = provider_id
         if previous_provider_id and previous_provider_id != provider_id:
@@ -1092,11 +1171,14 @@ class FallbackEmbeddings:
         """Embed documents through the fallback chain."""
         last_err: Exception | None = None
         failed_providers: list[str] = []
+        skipped: list[str] = []
         chain = self._ordered_chain()
         for i, (model, _deployment, provider_id) in enumerate(chain):
-            if self.circuit_breaker and not self.circuit_breaker.is_available(
-                provider_id
-            ):
+            # The chain can lose a member while this call runs (#860).
+            if not self._is_member(provider_id):
+                continue
+            if self._is_open(provider_id):
+                skipped.append(provider_id)
                 continue
             try:
                 result = await self._aembed_documents(model, texts)
@@ -1112,6 +1194,8 @@ class FallbackEmbeddings:
                     self.circuit_breaker.record_failure(provider_id)
                 continue
             else:
+                if self._removed_meanwhile("Embedding call", provider_id):
+                    continue
                 if failed_providers:
                     LOGGER.warning(
                         "Embedding fallback activated: provider %s succeeded "
@@ -1124,20 +1208,19 @@ class FallbackEmbeddings:
                 self._record_success(provider_id)
                 return result
 
-        msg = (
-            f"All embedding providers failed. Last error: {_safe_err_summary(last_err)}"
-        )
-        raise HomeAssistantError(msg) from last_err
+        raise HomeAssistantError(self._all_failed(last_err, skipped)) from last_err
 
     async def aembed_query(self, text: str) -> list[float]:
         """Embed a query through the fallback chain."""
         last_err: Exception | None = None
         failed_providers: list[str] = []
+        skipped: list[str] = []
         chain = self._ordered_chain()
         for i, (model, _deployment, provider_id) in enumerate(chain):
-            if self.circuit_breaker and not self.circuit_breaker.is_available(
-                provider_id
-            ):
+            if not self._is_member(provider_id):
+                continue
+            if self._is_open(provider_id):
+                skipped.append(provider_id)
                 continue
             try:
                 result = await self._aembed_query(model, text)
@@ -1153,6 +1236,8 @@ class FallbackEmbeddings:
                     self.circuit_breaker.record_failure(provider_id)
                 continue
             else:
+                if self._removed_meanwhile("Embedding query", provider_id):
+                    continue
                 if failed_providers:
                     LOGGER.warning(
                         "Embedding fallback activated: provider %s succeeded "
@@ -1165,10 +1250,7 @@ class FallbackEmbeddings:
                 self._record_success(provider_id)
                 return result
 
-        msg = (
-            f"All embedding providers failed. Last error: {_safe_err_summary(last_err)}"
-        )
-        raise HomeAssistantError(msg) from last_err
+        raise HomeAssistantError(self._all_failed(last_err, skipped)) from last_err
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         """Raise: synchronous embedding is not supported in async HA context."""

@@ -2772,6 +2772,20 @@ This is the same allowlist-omission class as #480 and as the triage options fixe
 
 ---
 
+### Two entries sharing a database can race on the first embedding model record row
+
+**What:** `_async_mark_writers` (`core/embedding_record.py`) inserts the record row with `_WRITE_RECORD_SQL` (`ON CONFLICT (id) DO UPDATE ... mixed_with = NULL`) when `SELECT ... FOR UPDATE` finds no row, then marks the writer. On an empty table the lock holds nothing, so a second entry's `_async_check_record` running the same INSERT at that moment blocks on the unique index until the first commits, then takes the `DO UPDATE` path and wipes the `mixed_with` the first entry just wrote: the only trace of a removed fallback's vectors, gone silently. `_async_check_record`'s side of this is pre-existing.
+
+**Why:** Found by the Claude adversarial pass (cycle 3) of the #860 review, 2026-10-25. Needs two entries on one database, the first entry's own record check having failed or timed out, and sub-second overlap, so it was filed rather than fixed in that PR.
+
+**How to apply:** `INSERT ... ON CONFLICT DO NOTHING` followed by a re-read `FOR UPDATE`, or `pg_advisory_xact_lock` around the first write, in both `_async_mark_writers` and `_async_check_record`. Add a two-connection test on the real pg17+pgvector container.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ### Two entries sharing a database can race when they rebuild a missing store table
 
 **What:** Since #760, `_bootstrap_db_once` and `_bootstrap_vectors_once` (`__init__.py`) forget the migration record of a missing table (`async_forget_migrations`, `core/embedding_store.py`) and run langgraph's `setup()` again. Each statement autocommits with no lock, so two config entries starting together on one database can both see the table missing, both clear the record, and both run setup. The second `INSERT INTO <record> (v)` hits the primary key, and that entry fails setup (a generic error, not retried) until the next reload.

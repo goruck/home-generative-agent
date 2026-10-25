@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from dataclasses import replace
+from dataclasses import asdict, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -36,7 +36,9 @@ from custom_components.home_generative_agent.core import utils
 from custom_components.home_generative_agent.core.embedding_record import (
     ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD,
     ISSUE_EMBEDDING_MODEL_CHANGED,
+    EmbeddingFallbackGate,
     EmbeddingFingerprint,
+    FallbackBuild,
     embedding_fingerprint,
     text_at_field,
 )
@@ -44,6 +46,7 @@ from custom_components.home_generative_agent.core.embedding_store import (
     EmbeddingsUnavailableError,
     UnavailableEmbeddings,
 )
+from custom_components.home_generative_agent.core.fallback import FallbackEmbeddings
 from custom_components.home_generative_agent.core.utils import configured_ollama_urls
 
 from .test_fallback_setup import (
@@ -51,6 +54,7 @@ from .test_fallback_setup import (
     _capture_recheck,
     _fallback_setup_data,
     _patch_setup_dependencies,
+    _register_capture_service,
     _second_ollama,
 )
 
@@ -345,9 +349,14 @@ async def test_back_on_the_recorded_model_keeps_a_partial_reembed() -> None:
     assert decision is er._Decision.MISMATCH
     assert _written(cur) == []
     # The re-embed's target wrote into the store; the place it kept no longer
-    # covers what the recorded model writes from now on.
+    # covers what the recorded model writes from now on. The recorded model is
+    # noted as a writer too: rows the run already did now hold it, so the run
+    # must not finish on the writers it started with (#860).
     (marked,) = cur.ran(er._MARK_MIXED_SQL)
-    assert [EmbeddingFingerprint.from_json(m) for m in marked["mixed"].obj] == [OPENAI]
+    assert [EmbeddingFingerprint.from_json(m) for m in marked["mixed"].obj] == [
+        OPENAI,
+        OLLAMA_A,
+    ]
     assert marked["cursor"] is None
     assert record.held_label == f"{OLLAMA_A.label} + {OPENAI.label}"
 
@@ -509,6 +518,7 @@ def _entry(  # noqa: PLR0913
         embeddings=client,
         primary_embeddings=client,
         embedding_digest_source=None,
+        embedding_fallback_gate=None,
         reembed_task=None,
     )
 
@@ -871,6 +881,793 @@ async def test_a_repair_confirmed_during_the_wait_keeps_its_build(
     check.assert_awaited_once_with(entry.runtime_data.pool, OLLAMA_A)
 
 
+# --- Kept fallbacks checked again after setup (#860) -----------------------
+
+FALLBACK_ID = "p2"
+FALLBACK_URL = "http://ollama-fallback:11434"
+SECONDARY = "Ollama Secondary"
+
+
+def _kept_unchecked(  # noqa: PLR0913
+    hass: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    builds: list[str | None],
+    *,
+    fingerprint: EmbeddingFingerprint = OLLAMA_A,
+    read_at_setup: str | None = None,
+    left_out: tuple[str, ...] = (),
+    answers: dict[str, list[str | None]] | None = None,
+) -> tuple[MockConfigEntry, FallbackEmbeddings, MagicMock, list[float]]:
+    """
+    Set up a two-server chain whose fallback setup kept without a full check.
+
+    `builds` answers each build read in turn, for one server's reads; when
+    both servers are read (concurrently), `answers` gives each URL its own
+    sequence instead. `read_at_setup` is the fallback's build as setup read
+    it. The returned mock is the chain's removed callback.
+    """
+    removed = MagicMock()
+    chain = FallbackEmbeddings(
+        [
+            (FakeEmbeddings("primary"), "edge", "p1"),
+            (FakeEmbeddings("f"), "edge", "p2"),
+        ],
+        switch_callback=MagicMock(),
+        removed_callback=removed,
+    )
+    entry = _entry(
+        hass,
+        record=None,
+        fingerprint=fingerprint,
+        embeddings=chain,
+        monkeypatch=monkeypatch,
+    )
+    entry.runtime_data.embedding_fallback_gate = EmbeddingFallbackGate(
+        primary="Ollama",
+        model="mxbai-embed-large",
+        left_out=left_out,
+        unchecked=(FallbackBuild(FALLBACK_ID, SECONDARY, FALLBACK_URL, read_at_setup),),
+    )
+    if answers is None:
+        fetch = AsyncMock(side_effect=builds)
+    else:
+        fetch = AsyncMock(side_effect=lambda _h, url, *_a, **_k: answers[url].pop(0))
+    monkeypatch.setattr(er, "fetch_ollama_model_digest", fetch)
+    waits: list[float] = []
+
+    async def _sleep(delay: float) -> None:
+        waits.append(delay)
+        await _REAL_SLEEP(0)
+
+    monkeypatch.setattr(er.asyncio, "sleep", _sleep)
+    return entry, chain, removed, waits
+
+
+def _chain_ids(chain: FallbackEmbeddings) -> list[str]:
+    return [provider_id for _m, _d, provider_id in chain.chain]
+
+
+@pytest.mark.asyncio
+async def test_a_kept_fallback_read_late_as_another_build_is_removed(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Setup missed its build: read now, it differs, so it leaves the chain."""
+    entry, chain, removed, waits = _kept_unchecked(
+        hass, monkeypatch, ["w:b2"], left_out=("Ollama Third",)
+    )
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert waits == []
+    er.fetch_ollama_model_digest.assert_awaited_once_with(  # type: ignore[attr-defined]
+        hass, FALLBACK_URL, "mxbai-embed-large", timeout_s=er.DIGEST_FETCH_TIMEOUT_S
+    )
+    assert _chain_ids(chain) == ["p1"]
+    removed.assert_not_called()
+    # It never answered a call, so nothing of its build is in the store.
+    assert _issue(hass, ISSUE_EMBEDDING_MODEL_CHANGED) is None
+    issue = _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD)
+    assert issue is not None
+    assert issue.translation_placeholders == {
+        "providers": f"Ollama Third, {SECONDARY}",
+        "primary": "Ollama",
+        "model": "mxbai-embed-large",
+    }
+    gate = entry.runtime_data.embedding_fallback_gate
+    assert gate.left_out == ("Ollama Third", SECONDARY)
+    assert gate.unchecked == ()
+    assert f"Embedding fallback provider(s) {SECONDARY} removed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_kept_fallback_read_late_as_the_same_build_stays(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read on the second try, the same build: the chain is left alone."""
+    entry, chain, _removed, waits = _kept_unchecked(hass, monkeypatch, [None, "w:a1"])
+    # An earlier boot left it out; the user has since pulled the same build.
+    _standing_issue(hass, entry, [SECONDARY])
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert waits == [10.0]
+    assert _chain_ids(chain) == ["p1", "p2"]
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD) is None
+    assert entry.runtime_data.embedding_fallback_gate.unchecked == ()
+
+
+@pytest.mark.asyncio
+async def test_a_fallback_judged_by_the_record_is_checked_against_the_late_primary(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The primary's build setup missed is read first; the fallback's is not reread."""
+    entry, chain, _switched, _waits = _kept_unchecked(
+        hass, monkeypatch, ["w:a1"], fingerprint=OLLAMA_UNREAD, read_at_setup="w:b2"
+    )
+    entry.runtime_data.embedding_digest_source = OLLAMA_SOURCE
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert er.fetch_ollama_model_digest.await_count == 1  # type: ignore[attr-defined]
+    assert entry.runtime_data.embedding_fingerprint == OLLAMA_A
+    assert _chain_ids(chain) == ["p1"]
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_fallback_build_never_read_is_kept_and_logged(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """After the last try an unknown build still decides nothing."""
+    entry, chain, _switched, waits = _kept_unchecked(
+        hass, monkeypatch, [None, None, None]
+    )
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert waits == [10.0, 30.0]
+    assert _chain_ids(chain) == ["p1", "p2"]
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD) is None
+    assert entry.runtime_data.embedding_fallback_gate.unchecked == ()
+    assert (
+        f"Could not read which build of mxbai-embed-large the embedding "
+        f"fallback(s) {SECONDARY} serve" in caplog.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_fallbacks_are_not_checked_while_the_primarys_build_is_unknown(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing to compare with: the primary's own warning covers it."""
+    entry, chain, _switched, _waits = _kept_unchecked(
+        hass, monkeypatch, [], fingerprint=OLLAMA_UNREAD, read_at_setup="w:b2"
+    )
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    er.fetch_ollama_model_digest.assert_not_called()  # type: ignore[attr-defined]
+    assert _chain_ids(chain) == ["p1", "p2"]
+    assert entry.runtime_data.embedding_fallback_gate.unchecked != ()
+
+
+@pytest.mark.asyncio
+async def test_fallbacks_are_not_checked_with_the_primary_down_at_setup(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Setup compared them with the record; the reload once it is back re-checks."""
+    entry, chain, _switched, _waits = _kept_unchecked(hass, monkeypatch, [])
+    entry.runtime_data.primary_embeddings = None
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    er.fetch_ollama_model_digest.assert_not_called()  # type: ignore[attr-defined]
+    assert _chain_ids(chain) == ["p1", "p2"]
+
+
+@pytest.mark.asyncio
+async def test_an_unload_during_the_fallback_read_removes_nothing(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An entry unloaded during the wait is not changed or given an issue."""
+    entry, chain, _switched, _waits = _kept_unchecked(hass, monkeypatch, [None, "w:b2"])
+
+    async def _unloaded(_delay: float) -> None:
+        entry.mock_state(hass, ConfigEntryState.NOT_LOADED)
+
+    monkeypatch.setattr(er.asyncio, "sleep", _unloaded)
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert er.fetch_ollama_model_digest.await_count == 1  # type: ignore[attr-defined]
+    assert _chain_ids(chain) == ["p1", "p2"]
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD) is None
+
+
+@pytest.mark.asyncio
+async def test_removing_the_active_fallback_hands_the_chain_back(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fallback already embedding for a failed primary: back to the primary."""
+    entry, chain, removed, _waits = _kept_unchecked(hass, monkeypatch, ["w:b2"])
+    chain._active_provider_id = FALLBACK_ID
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert _chain_ids(chain) == ["p1"]
+    removed.assert_called_once_with(FALLBACK_ID, "p1")
+    chain.switch_callback.assert_not_called()  # type: ignore[union-attr]
+
+
+def _served_by_the_fallback(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, record: dict[str, Any] | None
+) -> tuple[MockConfigEntry, _Cursor]:
+    """Set up a removed fallback that answered calls, over a store with this record."""
+    entry, chain, _removed, _waits = _kept_unchecked(hass, monkeypatch, ["w:b2"])
+    chain.served.add(FALLBACK_ID)
+    cur = _Cursor(record=record)
+    entry.runtime_data.pool = _Pool(cur)
+    return entry, cur
+
+
+@pytest.mark.asyncio
+async def test_a_removed_fallback_that_answered_is_noted_as_a_writer(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Its vectors may be in the store: the record notes it, the repair is raised."""
+    entry, cur = _served_by_the_fallback(hass, monkeypatch, _row(OLLAMA_A))
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    marked = cur.ran(er._MARK_MIXED_SQL)
+    assert len(marked) == 1
+    assert marked[0]["mixed"].obj == [asdict(OLLAMA_B)]
+    issue = _issue(hass, ISSUE_EMBEDDING_MODEL_CHANGED)
+    assert issue is not None
+    assert issue.translation_placeholders == {
+        "recorded": f"{OLLAMA_A.label} + {OLLAMA_B.label}",
+        "current": OLLAMA_A.label,
+    }
+    assert "may hold vectors of Ollama mxbai-embed-large:latest (w:b2)" in caplog.text
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD) is not None
+
+
+@pytest.mark.parametrize("row", [None, _row(None)], ids=["no_row", "junk_model"])
+@pytest.mark.asyncio
+async def test_a_writer_on_a_store_without_a_record_gets_one_to_be_noted_in(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, row: dict[str, Any] | None
+) -> None:
+    """No readable model yet: the current one is recorded, the writer noted."""
+    entry, cur = _served_by_the_fallback(hass, monkeypatch, row)
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert _written(cur) == [OLLAMA_A]
+    (marked,) = cur.ran(er._MARK_MIXED_SQL)
+    assert marked["mixed"].obj == [asdict(OLLAMA_B)]
+    issue = _issue(hass, ISSUE_EMBEDDING_MODEL_CHANGED)
+    assert issue is not None
+    assert issue.translation_placeholders == {
+        "recorded": f"{OLLAMA_A.label} + {OLLAMA_B.label}",
+        "current": OLLAMA_A.label,
+    }
+
+
+@pytest.mark.parametrize(
+    "failure", [psycopg.OperationalError("gone"), TimeoutError()], ids=["db", "timeout"]
+)
+@pytest.mark.asyncio
+async def test_a_writer_the_database_cannot_note_is_retried_then_logged(
+    hass: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure: Exception,
+) -> None:
+    """The note is the only trace of the vectors: tried again, then an error."""
+    entry, chain, _removed, waits = _kept_unchecked(hass, monkeypatch, ["w:b2"])
+    chain.served.add(FALLBACK_ID)
+    cur = _Cursor(record=_row(OLLAMA_A))
+    cur.execute = AsyncMock(side_effect=failure)  # type: ignore[method-assign]
+    entry.runtime_data.pool = _Pool(cur)
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert waits == [10.0, 30.0, 60.0]
+    assert _chain_ids(chain) == ["p1"]
+    assert _issue(hass, ISSUE_EMBEDDING_MODEL_CHANGED) is None
+    assert "Could not note Ollama mxbai-embed-large:latest (w:b2) as a writer" in (
+        caplog.text
+    )
+    assert "this could not be recorded; to clear them" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_writer_note_that_fails_once_is_noted_on_the_retry(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-embed holding the row for a batch releases it before the retry."""
+    entry, chain, _removed, waits = _kept_unchecked(hass, monkeypatch, ["w:b2"])
+    chain.served.add(FALLBACK_ID)
+    cur = _Cursor(record=_row(OLLAMA_A))
+    real_execute = cur.execute
+    attempts = 0
+
+    async def _busy_once(query: str, params: Any = None) -> None:
+        nonlocal attempts
+        if query == er._READ_RECORD_FOR_UPDATE_SQL:
+            attempts += 1
+            if attempts == 1:
+                raise TimeoutError
+        await real_execute(query, params)
+
+    cur.execute = _busy_once  # type: ignore[method-assign]
+    entry.runtime_data.pool = _Pool(cur)
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert waits == [10.0]
+    assert len(cur.ran(er._MARK_MIXED_SQL)) == 1
+    assert _issue(hass, ISSUE_EMBEDDING_MODEL_CHANGED) is not None
+
+
+@pytest.mark.asyncio
+async def test_an_unload_during_the_writer_note_raises_no_issue(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write already ran, so the record is marked; the unloaded entry gets no issue."""
+    entry, cur = _served_by_the_fallback(hass, monkeypatch, _row(OLLAMA_A))
+    real_execute = cur.execute
+
+    async def _unloads(query: str, params: Any = None) -> None:
+        await real_execute(query, params)
+        if query == er._MARK_MIXED_SQL:
+            entry.mock_state(hass, ConfigEntryState.NOT_LOADED)
+
+    cur.execute = _unloads  # type: ignore[method-assign]
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert len(cur.ran(er._MARK_MIXED_SQL)) == 1
+    assert _issue(hass, ISSUE_EMBEDDING_MODEL_CHANGED) is None
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD) is None
+
+
+@pytest.mark.asyncio
+async def test_a_writer_of_the_recorded_build_mid_reembed_is_noted_too(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Store recorded as the fallback's build B, re-embedding to A: B is a writer."""
+    entry, cur = _served_by_the_fallback(
+        hass,
+        monkeypatch,
+        _row(OLLAMA_B, target=OLLAMA_A, cursor=CURSOR, mixed=(OLLAMA_A,)),
+    )
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    (marked,) = cur.ran(er._MARK_MIXED_SQL)
+    # The writers list changes, so the run's finish guard refuses to certify.
+    assert marked["mixed"].obj == [asdict(OLLAMA_A), asdict(OLLAMA_B)]
+    assert marked["cursor"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_failing_fallback_read_is_logged_and_leaves_the_issue(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An unexpected error in the read half: nothing changes, and the log says so."""
+    entry, chain, _removed, _waits = _kept_unchecked(hass, monkeypatch, [])
+    _standing_issue(hass, entry, [SECONDARY])
+    monkeypatch.setattr(
+        er, "_async_read_fallback_builds", AsyncMock(side_effect=RuntimeError("boom"))
+    )
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert "fallbacks' build check failed: RuntimeError('boom')" in caplog.text
+    assert SECONDARY in caplog.text
+    assert _chain_ids(chain) == ["p1", "p2"]
+    assert entry.runtime_data.embedding_fallback_gate.unchecked != ()
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD) is not None
+
+
+def _standing_issue(hass: Any, entry: Any, names: list[str]) -> None:
+    """Raise the other-build issue as an earlier run of this entry would have."""
+    er.async_sync_other_build_fallback_issue(
+        hass,
+        entry.entry_id,
+        primary="Ollama",
+        model="mxbai-embed-large",
+        left_out=names,
+    )
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD, entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_a_fallback_never_read_keeps_a_standing_issue(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A known mismatch from the last boot is not forgotten on a bad read."""
+    entry, chain, _removed, _waits = _kept_unchecked(
+        hass, monkeypatch, [None, None, None]
+    )
+    _standing_issue(hass, entry, [SECONDARY])
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert _chain_ids(chain) == ["p1", "p2"]
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_fallback_never_read_beside_setups_left_out_keeps_their_issue(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Setup's positive evidence stays synced; the unread one adds nothing."""
+    entry, chain, _removed, _waits = _kept_unchecked(
+        hass, monkeypatch, [None, None, None], left_out=("Ollama Third",)
+    )
+    _standing_issue(hass, entry, ["Ollama Third"])
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert _chain_ids(chain) == ["p1", "p2"]
+    issue = _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD)
+    assert issue is not None
+    assert issue.translation_placeholders == {
+        "providers": "Ollama Third",
+        "primary": "Ollama",
+        "model": "mxbai-embed-large",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_chain_that_is_not_a_fallback_chain_is_left_alone(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing to remove from: the gate is left as setup wrote it."""
+    entry, _chain, _removed, _waits = _kept_unchecked(hass, monkeypatch, ["w:b2"])
+    entry.runtime_data.embeddings = FakeEmbeddings("alone")
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert entry.runtime_data.embedding_fallback_gate.unchecked != ()
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD) is None
+
+
+@pytest.mark.asyncio
+async def test_an_unload_during_the_note_retry_wait_logs_no_error(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A reload closed the pool under the try: no 'drop your vectors' error."""
+    entry, chain, _removed, waits = _kept_unchecked(hass, monkeypatch, ["w:b2"])
+    chain.served.add(FALLBACK_ID)
+    cur = _Cursor(record=_row(OLLAMA_A))
+    cur.execute = AsyncMock(side_effect=TimeoutError)  # type: ignore[method-assign]
+    entry.runtime_data.pool = _Pool(cur)
+
+    async def _unloads(delay: float) -> None:
+        waits.append(delay)
+        entry.mock_state(hass, ConfigEntryState.NOT_LOADED)
+
+    monkeypatch.setattr(er.asyncio, "sleep", _unloads)
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert waits == [10.0]
+    assert "could not be recorded" not in caplog.text
+    assert _issue(hass, ISSUE_EMBEDDING_MODEL_CHANGED) is None
+
+
+THIRD_URL = "http://ollama-third:11434"
+FOURTH_URL = "http://ollama-fourth:11434"
+
+
+def _kept_three(
+    hass: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    answers: dict[str, list[str | None]],
+    *,
+    left_out: tuple[str, ...] = (),
+) -> tuple[MockConfigEntry, FallbackEmbeddings]:
+    """Set up three kept fallbacks setup could not check, each with its own answers."""
+    chain = FallbackEmbeddings(
+        [
+            (FakeEmbeddings("primary"), "edge", "p1"),
+            (FakeEmbeddings("f2"), "edge", "p2"),
+            (FakeEmbeddings("f3"), "edge", "p3"),
+            (FakeEmbeddings("f4"), "edge", "p4"),
+        ],
+        removed_callback=MagicMock(),
+    )
+    entry = _entry(hass, record=None, embeddings=chain, monkeypatch=monkeypatch)
+    entry.runtime_data.embedding_fallback_gate = EmbeddingFallbackGate(
+        primary="Ollama",
+        model="mxbai-embed-large",
+        left_out=left_out,
+        unchecked=(
+            FallbackBuild("p2", SECONDARY, FALLBACK_URL),
+            FallbackBuild("p3", "Ollama Third", THIRD_URL),
+            FallbackBuild("p4", "Ollama Fourth", FOURTH_URL),
+        ),
+    )
+    monkeypatch.setattr(
+        er,
+        "fetch_ollama_model_digest",
+        AsyncMock(side_effect=lambda _h, url, *_a, **_k: answers[url].pop(0)),
+    )
+
+    async def _sleep(_delay: float) -> None:
+        await _REAL_SLEEP(0)
+
+    monkeypatch.setattr(er.asyncio, "sleep", _sleep)
+    return entry, chain
+
+
+@pytest.mark.asyncio
+async def test_three_fallbacks_are_judged_each_on_its_own_build(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One matches, one differs, one never answers: only the second leaves."""
+    entry, chain = _kept_three(
+        hass,
+        monkeypatch,
+        {
+            FALLBACK_URL: ["w:a1"],
+            THIRD_URL: [None, "w:b2"],
+            FOURTH_URL: [None, None, None],
+        },
+        left_out=("Ollama Prior",),
+    )
+    chain.served.update({"p3", "p4"})
+    cur = _Cursor(record=_row(OLLAMA_A))
+    entry.runtime_data.pool = _Pool(cur)
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert _chain_ids(chain) == ["p1", "p2", "p4"]
+    issue = _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD)
+    assert issue is not None
+    assert issue.translation_placeholders == {
+        "providers": "Ollama Prior, Ollama Third",
+        "primary": "Ollama",
+        "model": "mxbai-embed-large",
+    }
+    assert entry.runtime_data.embedding_fallback_gate.left_out == (
+        "Ollama Prior",
+        "Ollama Third",
+    )
+    assert "fallback(s) Ollama Fourth serve" in caplog.text
+    # Only the removed one that answered is a writer; the unread one stays.
+    (marked,) = cur.ran(er._MARK_MIXED_SQL)
+    assert marked["mixed"].obj == [asdict(OLLAMA_B)]
+
+
+@pytest.mark.asyncio
+async def test_a_removal_beside_an_unread_sibling_still_updates_the_issue(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Positive evidence is synced even while another build is still unknown."""
+    entry, chain = _kept_three(
+        hass,
+        monkeypatch,
+        {FALLBACK_URL: ["w:b2"], THIRD_URL: [None, None, None], FOURTH_URL: ["w:a1"]},
+    )
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert _chain_ids(chain) == ["p1", "p3", "p4"]
+    issue = _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD)
+    assert issue is not None
+    assert issue.translation_placeholders == {
+        "providers": SECONDARY,
+        "primary": "Ollama",
+        "model": "mxbai-embed-large",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_failing_record_check_does_not_skip_the_fallback_check(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An unexpected error in the record half is logged; the settle still runs."""
+    entry, chain, _removed, _waits = _kept_unchecked(hass, monkeypatch, ["w:b2"])
+    monkeypatch.setattr(
+        er, "_async_check_record", AsyncMock(side_effect=RuntimeError("boom"))
+    )
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert "embedding model check failed: RuntimeError('boom')" in caplog.text
+    assert _chain_ids(chain) == ["p1"]
+
+
+# --- The state matrix: both builds unread, the primary's unread --------------
+
+
+def _both_unread(
+    hass: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    primary: list[str | None],
+    fallback: list[str | None],
+) -> tuple[MockConfigEntry, FallbackEmbeddings, MagicMock, list[float]]:
+    """Neither build was read at setup; each server answers its own sequence."""
+    entry, chain, removed, waits = _kept_unchecked(
+        hass,
+        monkeypatch,
+        [],
+        fingerprint=OLLAMA_UNREAD,
+        answers={OLLAMA_SOURCE[0]: primary, FALLBACK_URL: fallback},
+    )
+    entry.runtime_data.embedding_digest_source = OLLAMA_SOURCE
+    return entry, chain, removed, waits
+
+
+@pytest.mark.asyncio
+async def test_both_builds_read_late_and_different_remove_the_fallback(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The #860 case: setup read neither build; both are learned in one pass."""
+    entry, chain, _removed, waits = _both_unread(
+        hass, monkeypatch, primary=[None, "w:a1"], fallback=[None, "w:b2"]
+    )
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    # Both re-reads waited once, alongside each other.
+    assert waits == [10.0, 10.0]
+    assert entry.runtime_data.embedding_fingerprint == OLLAMA_A
+    assert _chain_ids(chain) == ["p1"]
+    issue = _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD)
+    assert issue is not None
+    assert issue.translation_placeholders == {
+        "providers": SECONDARY,
+        "primary": "Ollama",
+        "model": "mxbai-embed-large",
+    }
+    assert entry.runtime_data.embedding_fallback_gate.left_out == (SECONDARY,)
+
+
+@pytest.mark.asyncio
+async def test_both_builds_read_late_and_the_same_keep_the_fallback(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entry, chain, removed, _waits = _both_unread(
+        hass, monkeypatch, primary=["w:a1"], fallback=["w:a1"]
+    )
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert entry.runtime_data.embedding_fingerprint == OLLAMA_A
+    assert _chain_ids(chain) == ["p1", "p2"]
+    removed.assert_not_called()
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD) is None
+    assert entry.runtime_data.embedding_fallback_gate.unchecked == ()
+
+
+@pytest.mark.asyncio
+async def test_a_late_primary_with_a_fallback_never_read_keeps_it_and_logs(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    entry, chain, _removed, waits = _both_unread(
+        hass, monkeypatch, primary=["w:a1"], fallback=[None, None, None]
+    )
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert waits == [10.0, 30.0]
+    assert entry.runtime_data.embedding_fingerprint == OLLAMA_A
+    assert _chain_ids(chain) == ["p1", "p2"]
+    assert f"fallback(s) {SECONDARY} serve" in caplog.text
+    assert entry.runtime_data.embedding_fallback_gate.unchecked == ()
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD) is None
+
+
+@pytest.mark.asyncio
+async def test_a_primary_never_read_leaves_the_fallbacks_named_in_the_log(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Three failed primary reads: the fallback's known build has no reference."""
+    entry, chain, _removed, waits = _both_unread(
+        hass, monkeypatch, primary=[None, None, None], fallback=["w:b2"]
+    )
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert waits == [10.0, 30.0]
+    assert entry.runtime_data.embedding_fingerprint == OLLAMA_UNREAD
+    assert _chain_ids(chain) == ["p1", "p2"]
+    assert f"fallback(s) {SECONDARY} serve could not be compared" in caplog.text
+    assert entry.runtime_data.embedding_fallback_gate.unchecked != ()
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD) is None
+
+
+@pytest.mark.asyncio
+async def test_an_unload_during_both_rereads_changes_nothing(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entry, chain, _removed, _waits = _both_unread(
+        hass, monkeypatch, primary=[None, "w:a1"], fallback=[None, "w:b2"]
+    )
+
+    async def _unloaded(_delay: float) -> None:
+        entry.mock_state(hass, ConfigEntryState.NOT_LOADED)
+
+    monkeypatch.setattr(er.asyncio, "sleep", _unloaded)
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert _chain_ids(chain) == ["p1", "p2"]
+    assert entry.runtime_data.embedding_fingerprint == OLLAMA_UNREAD
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD) is None
+    assert entry.runtime_data.embedding_fallback_gate.unchecked != ()
+
+
+@pytest.mark.asyncio
+async def test_a_fallback_judged_by_the_record_stays_when_the_late_primary_matches(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entry, chain, removed, _waits = _kept_unchecked(
+        hass, monkeypatch, ["w:a1"], fingerprint=OLLAMA_UNREAD, read_at_setup="w:a1"
+    )
+    entry.runtime_data.embedding_digest_source = OLLAMA_SOURCE
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert er.fetch_ollama_model_digest.await_count == 1  # type: ignore[attr-defined]
+    assert entry.runtime_data.embedding_fingerprint == OLLAMA_A
+    assert _chain_ids(chain) == ["p1", "p2"]
+    removed.assert_not_called()
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD) is None
+    assert entry.runtime_data.embedding_fallback_gate.unchecked == ()
+
+
+@pytest.mark.asyncio
+async def test_an_unload_during_the_primary_reread_removes_no_fallback(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fallback's build was known; only the primary's re-read waited."""
+    entry, chain, _removed, _waits = _kept_unchecked(
+        hass,
+        monkeypatch,
+        [None, "w:a1"],
+        fingerprint=OLLAMA_UNREAD,
+        read_at_setup="w:b2",
+    )
+    entry.runtime_data.embedding_digest_source = OLLAMA_SOURCE
+
+    async def _unloaded(_delay: float) -> None:
+        entry.mock_state(hass, ConfigEntryState.NOT_LOADED)
+
+    monkeypatch.setattr(er.asyncio, "sleep", _unloaded)
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert er.fetch_ollama_model_digest.await_count == 1  # type: ignore[attr-defined]
+    assert _chain_ids(chain) == ["p1", "p2"]
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD) is None
+    assert entry.runtime_data.embedding_fallback_gate.unchecked != ()
+
+
+@pytest.mark.asyncio
+async def test_an_unload_during_the_fallback_fetch_removes_nothing(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unloaded while the read itself ran, not during a wait."""
+    entry, chain, _removed, _waits = _kept_unchecked(hass, monkeypatch, [])
+
+    async def _fetch(*_args: Any, **_kwargs: Any) -> str:
+        entry.mock_state(hass, ConfigEntryState.NOT_LOADED)
+        return "w:b2"
+
+    monkeypatch.setattr(er, "fetch_ollama_model_digest", _fetch)
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert _chain_ids(chain) == ["p1", "p2"]
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD) is None
+
+
 # --- Starting the re-embed -------------------------------------------------
 
 
@@ -1176,7 +1973,12 @@ class _RunConn:
             return [], 1
         if query == er._SAVE_CURSOR_SQL:
             previous = params["previous"].obj if params["previous"] else None
-            if held != target_obj or self.record["reembed_cursor"] != previous:
+            mixed = params["mixed"].obj if params["mixed"] else None
+            if (
+                held != target_obj
+                or self.record["reembed_cursor"] != previous
+                or self.record.get("mixed_with") != mixed
+            ):
                 return [], 0
             self.record["reembed_cursor"] = params["cursor"].obj
             return [], 1
@@ -1187,7 +1989,12 @@ class _RunConn:
             return [], 1
         if query == er._FINISH_REEMBED_SQL:
             mixed = params["mixed"].obj if params["mixed"] else None
-            if held != target_obj or self.record.get("mixed_with") != mixed:
+            cursor = params["cursor"].obj if params["cursor"] else None
+            if (
+                held != target_obj
+                or self.record.get("mixed_with") != mixed
+                or self.record["reembed_cursor"] != cursor
+            ):
                 return [], 0
             self.record.update(
                 model=held, reembed_target=None, reembed_cursor=None, mixed_with=None
@@ -1472,8 +2279,14 @@ async def test_a_superseded_run_stops_at_its_next_save(
     conn = _RunConn(_rows(3))
     real_apply = conn._apply
 
+    taken = False
+
     def _taken_over(query: str, params: Any) -> tuple[list[Any], int]:
+        # The other run's write is committed: it survives this run's rollback.
+        nonlocal taken
         if query == er._SAVE_CURSOR_SQL:
+            taken = True
+        if taken:
             conn.record["reembed_target"] = OPENAI_B.as_json().obj
         return real_apply(query, params)
 
@@ -1696,12 +2509,93 @@ async def test_a_writer_noted_during_the_run_stops_its_next_save(
 
     monkeypatch.setattr(er, "_embed_with_retry", _check_commits_meanwhile)
 
-    assert await _run(conn) == []
+    assert await _run(conn) == [OPENAI.label]
 
     assert [u[2] for u in conn.updates] == ["k000"]
     assert conn.record["reembed_cursor"] is None
-    assert "another run changed its target" in caplog.text
+    # The record still names this run's target: a writer was noted, not a
+    # takeover, so the repair comes back and the next run starts over.
+    assert "another model wrote into the store during the run" in caplog.text
     assert pauses
+
+
+@pytest.mark.asyncio
+async def test_a_writer_noted_during_the_first_batch_stops_the_first_save(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    pauses: list[float],
+) -> None:
+    """No place to reset yet: the writers list alone must stop the run."""
+    monkeypatch.setattr(er, "_BATCH_SIZE", 1)
+    conn = _RunConn(_rows(3))
+    real_embed = er._embed_with_retry
+
+    async def _note_lands_meanwhile(embeddings: Any, texts: Any) -> Any:
+        if conn.record.get("mixed_with") is None:
+            conn.record["mixed_with"] = [OPENAI_B.as_json().obj]
+        return await real_embed(embeddings, texts)
+
+    monkeypatch.setattr(er, "_embed_with_retry", _note_lands_meanwhile)
+
+    assert await _run(conn) == [f"{OPENAI.label} + {OPENAI_B.label}"]
+
+    assert conn.updates == []
+    assert conn.record["reembed_cursor"] is None
+    assert conn.ran(er._FINISH_REEMBED_SQL) == []
+    assert "another model wrote into the store during the run" in caplog.text
+    assert pauses == []
+
+
+@pytest.mark.asyncio
+async def test_a_writer_already_listed_still_keeps_the_run_from_finishing(
+    monkeypatch: pytest.MonkeyPatch, pauses: list[float]
+) -> None:
+    """Its note resets only the place; the finish guard sees the reset."""
+    conn = _RunConn(_rows(1), record=_row(OPENAI, mixed=(OPENAI_B,)))
+    real_apply = conn._apply
+
+    def _place_reset_at_finish(query: str, params: Any) -> tuple[list[Any], int]:
+        if query == er._FINISH_REEMBED_SQL:
+            conn.record["reembed_cursor"] = None
+        return real_apply(query, params)
+
+    monkeypatch.setattr(conn, "_apply", _place_reset_at_finish)
+
+    assert await _run(conn) == [f"{OPENAI.label} + {OPENAI_B.label}"]
+
+    assert conn.record["model"] == OPENAI.as_json().obj
+    assert conn.record["reembed_target"] == OLLAMA_A.as_json().obj
+    assert pauses
+
+
+@pytest.mark.asyncio
+async def test_a_record_unreadable_after_a_stop_brings_the_repair_back(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    pauses: list[float],
+) -> None:
+    """Not knowing whether a run took over, the conservative stop re-raises."""
+    monkeypatch.setattr(er, "_BATCH_SIZE", 1)
+    conn = _RunConn(_rows(2))
+    real_apply = conn._apply
+    stopped = False
+
+    def _read_fails_after_the_stop(query: str, params: Any) -> tuple[list[Any], int]:
+        nonlocal stopped
+        if query == er._SAVE_CURSOR_SQL:
+            conn.record["mixed_with"] = [OPENAI_B.as_json().obj]
+            stopped = True
+        if stopped and query == er._READ_RECORD_SQL:
+            msg = "connection lost"
+            raise psycopg.OperationalError(msg)
+        return real_apply(query, params)
+
+    monkeypatch.setattr(conn, "_apply", _read_fails_after_the_stop)
+
+    assert await _run(conn) == [OPENAI.label]
+
+    assert "the record could not be read again" in caplog.text
+    assert pauses == []
 
 
 @pytest.mark.asyncio
@@ -2039,7 +2933,11 @@ class _SetupPool:
                 execute=AsyncMock(), fetchone=AsyncMock(return_value=None)
             )
 
-        yield SimpleNamespace(cursor=_cursor)
+        @contextlib.asynccontextmanager
+        async def _transaction() -> AsyncGenerator[None]:
+            yield
+
+        yield SimpleNamespace(cursor=_cursor, transaction=_transaction)
 
 
 async def _noop(*_args: Any, **_kwargs: Any) -> None:
@@ -2051,20 +2949,22 @@ def _with_database(
     digests: dict[str, str],
     *,
     recorded: str | None = None,
+    record_check: bool = False,
 ) -> list[Any]:
     """
     Give setup a database that accepts everything, and these digests.
 
     `recorded` is the build the store's record names. The returned list gets
-    each digest request and, as ("record", entry), each record check setup
-    schedules.
+    each digest request and, unless `record_check` runs the real one, each
+    record check setup schedules as ("record", fingerprint).
     """
     asked: list[Any] = []
 
     async def _digests(
-        _hass: Any, urls: list[str], model: str, **_kwargs: Any
+        _hass: Any, urls: list[str], model: str, **kwargs: Any
     ) -> dict[str, str]:
         asked.append((urls, model))
+        asked.append(("timeout", kwargs.get("timeout_s")))
         return {url: digests[url] for url in urls if url in digests}
 
     async def _recorded(_db_uri: str, model: str) -> str | None:
@@ -2092,23 +2992,36 @@ def _with_database(
         monkeypatch.setattr(hga_component, name, _noop)
     monkeypatch.setattr(hga_component, "ollama_model_digests", _digests)
     monkeypatch.setattr(hga_component, "async_recorded_ollama_digest", _recorded)
-    monkeypatch.setattr(hga_component, "async_sync_embedding_record", _record_check)
+    if not record_check:
+        monkeypatch.setattr(hga_component, "async_sync_embedding_record", _record_check)
     return asked
 
 
-FALLBACK_URL = "http://ollama-fallback:11434"
-
-
-async def _setup_two_ollama_servers(
+async def _setup_two_ollama_servers(  # noqa: PLR0913
     hass: Any,
     monkeypatch: pytest.MonkeyPatch,
     digests: dict[str, str],
     *,
     recorded: str | None = None,
     primary_up: bool = True,
+    record_check: bool = False,
+    entry: MockConfigEntry | None = None,
+    database: bool = True,
+    primary_client: bool = True,
+    openai_fallback: bool = False,
 ) -> tuple[MockConfigEntry, Any, list[Any]]:
-    entry = MockConfigEntry(domain=DOMAIN, data={})
-    entry.add_to_hass(hass)
+    """
+    Set up an Ollama primary with a second Ollama server as embedding fallback.
+
+    With `record_check` the real background check runs, which needs a loaded
+    entry (setup is called directly here, so the state is set by hand).
+    Without `database` no build is read and nothing is handed to the check.
+    """
+    if entry is None:
+        entry = MockConfigEntry(domain=DOMAIN, data={})
+        entry.add_to_hass(hass)
+    if record_check:
+        entry.mock_state(hass, ConfigEntryState.LOADED)
     hass.data.setdefault(DOMAIN, {})["http_registered"] = True
     data = _fallback_setup_data()
     data.options[CONF_EMBEDDING_MODEL_PROVIDER] = "ollama"
@@ -2116,15 +3029,21 @@ async def _setup_two_ollama_servers(
     second = _second_ollama(FALLBACK_URL)
     data.providers[second.entry_id] = second
     data.fallback_chains["embedding"] = [data.providers["ollama1"], second]
+    if openai_fallback:
+        data.fallback_chains["embedding"] = [
+            data.providers["ollama1"],
+            data.providers["openai1"],
+        ]
     _patch_setup_dependencies(hass, monkeypatch, data)
     monkeypatch.setattr(hga_component, "configured_ollama_urls", configured_ollama_urls)
-    monkeypatch.setattr(
-        hga_component,
-        "OllamaEmbeddings",
-        lambda *_args, model, base_url, **_kwargs: FakeEmbeddings(
-            f"{model}@{base_url}"
-        ),
-    )
+
+    def _client(*_args: Any, model: str, base_url: str, **_kwargs: Any) -> Any:
+        if not primary_client and base_url == "http://ollama":
+            msg = "bad client"
+            raise ValueError(msg)
+        return FakeEmbeddings(f"{model}@{base_url}")
+
+    monkeypatch.setattr(hga_component, "OllamaEmbeddings", _client)
     _capture_recheck(monkeypatch)
     if not primary_up:
 
@@ -2132,10 +3051,19 @@ async def _setup_two_ollama_servers(
             return url != "http://ollama"
 
         monkeypatch.setattr(hga_component, "ollama_healthy", _primary_down)
-    asked = _with_database(monkeypatch, digests, recorded=recorded)
+    asked: list[Any] = []
+    if database:
+        asked = _with_database(
+            monkeypatch, digests, recorded=recorded, record_check=record_check
+        )
+    else:
+        monkeypatch.setattr(
+            hga_component, "ollama_model_digests", AsyncMock(return_value={})
+        )
 
     assert await cast("Any", hga_component).async_setup_entry(hass, entry)
-    await hass.async_block_till_done()
+    # The real check is an entry background task, which the plain wait skips.
+    await hass.async_block_till_done(wait_background_tasks=record_check)
     return entry, data, asked
 
 
@@ -2221,6 +3149,367 @@ async def test_with_the_primary_down_a_matching_fallback_takes_over(
 
     assert entry.runtime_data.embeddings.name == f"configured-embed@{FALLBACK_URL}"
     assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD, entry.entry_id) is None
+
+
+@pytest.mark.asyncio
+async def test_setup_reads_builds_with_the_digest_timeout_not_the_health_checks(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 2 s health timeout ran past on a busy startup and left the gate blind."""
+    _entry, _data, asked = await _setup_two_ollama_servers(
+        hass, monkeypatch, {"http://ollama": "w:a1"}
+    )
+
+    assert ("timeout", er.DIGEST_FETCH_TIMEOUT_S) in asked
+    # Quoted in docs/configuration.md; the health check waits 2 s.
+    assert er.DIGEST_FETCH_TIMEOUT_S == 5.0
+
+
+@pytest.mark.parametrize(
+    ("digests", "unchecked", "left_out"),
+    [
+        # The fallback's build unread: kept, to be read again.
+        (
+            {"http://ollama": "w:a1"},
+            (FallbackBuild("ollama2", "Ollama Secondary", FALLBACK_URL, None),),
+            (),
+        ),
+        # The primary's build unread: the fallback's was judged by the record
+        # (none here), so it is compared with the primary's once that is read.
+        (
+            {FALLBACK_URL: "w:b2"},
+            (FallbackBuild("ollama2", "Ollama Secondary", FALLBACK_URL, "w:b2"),),
+            (),
+        ),
+        # Both read and the same: fully checked.
+        ({"http://ollama": "w:a1", FALLBACK_URL: "w:a1"}, (), ()),
+        # Both read and different: left out, nothing to check again.
+        ({"http://ollama": "w:a1", FALLBACK_URL: "w:b2"}, (), ("Ollama Secondary",)),
+        # Neither read (the busy boot #860 is about): kept, both re-read later.
+        ({}, (FallbackBuild("ollama2", "Ollama Secondary", FALLBACK_URL, None),), ()),
+        # The primary's unread, the fallback's read: still handed to the check.
+        (
+            {FALLBACK_URL: "w:a1"},
+            (FallbackBuild("ollama2", "Ollama Secondary", FALLBACK_URL, "w:a1"),),
+            (),
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_setup_hands_the_fallbacks_it_could_not_fully_check_to_the_record_check(
+    hass: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    digests: dict[str, str],
+    unchecked: tuple[FallbackBuild, ...],
+    left_out: tuple[str, ...],
+) -> None:
+    """A kept fallback not compared with the primary's live build is checked later."""
+    entry, _data, _asked = await _setup_two_ollama_servers(hass, monkeypatch, digests)
+
+    assert entry.runtime_data.embedding_fallback_gate == EmbeddingFallbackGate(
+        primary="Ollama",
+        model="configured-embed",
+        left_out=left_out,
+        unchecked=unchecked,
+    )
+
+
+@pytest.mark.asyncio
+async def test_with_the_primarys_build_unread_a_fallback_unlike_the_record_waits(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Primary up but unread: the fallback waits for the primary's build.
+
+    The record may be stale after a pull on both servers, so the fallback is
+    compared with the primary's build once read, not left out with an issue
+    blaming the primary.
+    """
+    entry, data, asked = await _setup_two_ollama_servers(
+        hass, monkeypatch, {FALLBACK_URL: "w:b2"}, recorded="w:a1"
+    )
+
+    assert ("recorded", "configured-embed") not in asked
+    assert len(data.captured_embedding_chain["chain"]) == 2
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD, entry.entry_id) is None
+    assert entry.runtime_data.embedding_fallback_gate == EmbeddingFallbackGate(
+        primary="Ollama",
+        model="configured-embed",
+        left_out=(),
+        unchecked=(FallbackBuild("ollama2", "Ollama Secondary", FALLBACK_URL, "w:b2"),),
+    )
+
+
+@pytest.mark.asyncio
+async def test_with_the_primary_down_an_unread_fallback_takes_over_unchecked(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unknown decides nothing: the fallback embeds alone until the reload."""
+    entry, _data, asked = await _setup_two_ollama_servers(
+        hass, monkeypatch, {}, recorded="w:a1", primary_up=False
+    )
+
+    assert ("recorded", "configured-embed") not in asked
+    assert entry.runtime_data.embeddings.name == f"configured-embed@{FALLBACK_URL}"
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD, entry.entry_id) is None
+    assert entry.runtime_data.embedding_fallback_gate.unchecked == (
+        FallbackBuild("ollama2", "Ollama Secondary", FALLBACK_URL, None),
+    )
+    assert entry.runtime_data.primary_embeddings is None
+
+
+@pytest.mark.asyncio
+async def test_without_a_database_a_kept_fallback_is_not_handed_to_the_check(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No store to protect: both servers embed, nothing is re-read later."""
+    entry, data, _asked = await _setup_two_ollama_servers(
+        hass, monkeypatch, {}, database=False
+    )
+
+    assert len(data.captured_embedding_chain["chain"]) == 2
+    assert entry.runtime_data.embedding_fallback_gate == EmbeddingFallbackGate(
+        primary="Ollama", model="configured-embed", left_out=(), unchecked=()
+    )
+
+
+@pytest.mark.asyncio
+async def test_setup_with_two_secondaries_syncs_the_one_it_left_out(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One read as another build, one unread: the issue names the first now."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    data.options[CONF_EMBEDDING_MODEL_PROVIDER] = "ollama"
+    data.options[CONF_OLLAMA_EMBEDDING_MODEL] = "configured-embed"
+    second = _second_ollama(FALLBACK_URL)
+    third = replace(
+        second,
+        entry_id="ollama3",
+        name="Ollama Third",
+        data={"settings": {"base_url": THIRD_URL}},
+    )
+    data.providers[second.entry_id] = second
+    data.providers[third.entry_id] = third
+    data.fallback_chains["embedding"] = [data.providers["ollama1"], second, third]
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    monkeypatch.setattr(hga_component, "configured_ollama_urls", configured_ollama_urls)
+    monkeypatch.setattr(
+        hga_component,
+        "OllamaEmbeddings",
+        lambda *_args, model, base_url, **_kwargs: FakeEmbeddings(
+            f"{model}@{base_url}"
+        ),
+    )
+    _capture_recheck(monkeypatch)
+    _with_database(monkeypatch, {"http://ollama": "w:a1", FALLBACK_URL: "w:b2"})
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+    await hass.async_block_till_done()
+
+    issue = _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD, entry.entry_id)
+    assert issue is not None
+    assert issue.translation_placeholders == {
+        "providers": "Ollama Secondary",
+        "primary": "Ollama",
+        "model": "configured-embed",
+    }
+    assert entry.runtime_data.embedding_fallback_gate == EmbeddingFallbackGate(
+        primary="Ollama",
+        model="configured-embed",
+        left_out=("Ollama Secondary",),
+        unchecked=(FallbackBuild("ollama3", "Ollama Third", THIRD_URL, None),),
+    )
+
+
+@pytest.mark.asyncio
+async def test_with_the_primary_down_an_unread_fallback_keeps_a_standing_issue(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No check will run, and nothing is known: the last boot's warning stands."""
+    stale = MockConfigEntry(domain=DOMAIN, data={})
+    stale.add_to_hass(hass)
+    _standing_issue(hass, stale, ["Ollama Secondary"])
+
+    entry, _data, _asked = await _setup_two_ollama_servers(
+        hass, monkeypatch, {}, recorded="w:a1", primary_up=False, entry=stale
+    )
+
+    assert entry.runtime_data.embeddings.name == f"configured-embed@{FALLBACK_URL}"
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD, entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_with_the_primary_down_and_no_record_a_read_fallback_takes_over(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing recorded to compare with: unknown decides nothing, it serves."""
+    entry, _data, asked = await _setup_two_ollama_servers(
+        hass, monkeypatch, {FALLBACK_URL: "w:b2"}, recorded=None, primary_up=False
+    )
+
+    assert ("recorded", "configured-embed") in asked
+    assert entry.runtime_data.embeddings.name == f"configured-embed@{FALLBACK_URL}"
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD, entry.entry_id) is None
+    assert entry.runtime_data.embedding_fallback_gate.unchecked == (
+        FallbackBuild("ollama2", "Ollama Secondary", FALLBACK_URL, "w:b2"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_primary_whose_client_failed_is_stood_in_for_by_the_record(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Healthy server, no client: the fallback writes alone, so the record judges."""
+    entry, _data, asked = await _setup_two_ollama_servers(
+        hass, monkeypatch, {FALLBACK_URL: "w:b2"}, recorded="w:a1", primary_client=False
+    )
+
+    assert ("recorded", "configured-embed") in asked
+    assert isinstance(entry.runtime_data.embeddings, UnavailableEmbeddings)
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD, entry.entry_id)
+    assert entry.runtime_data.embedding_fallback_gate.unchecked == ()
+
+
+@pytest.mark.asyncio
+async def test_a_non_ollama_fallback_is_never_handed_to_the_check(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only another Ollama server has a build to read."""
+    entry, _data, _asked = await _setup_two_ollama_servers(
+        hass, monkeypatch, {}, openai_fallback=True
+    )
+
+    assert entry.runtime_data.embedding_fallback_gate.unchecked == ()
+
+
+@pytest.mark.asyncio
+async def test_a_dismissed_issue_survives_the_check_that_names_it_again(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The settle updates the standing issue in place, so a dismissal holds."""
+    registry = ir.async_get(hass)
+    stale = MockConfigEntry(domain=DOMAIN, data={})
+    stale.add_to_hass(hass)
+    _standing_issue(hass, stale, ["Ollama Secondary"])
+    issue_id = er._other_build_issue_id(stale.entry_id)
+    registry.async_ignore(DOMAIN, issue_id, ignore=True)
+    monkeypatch.setattr(er, "fetch_ollama_model_digest", AsyncMock(return_value="w:b2"))
+
+    entry, _data, _asked = await _setup_two_ollama_servers(
+        hass, monkeypatch, {"http://ollama": "w:a1"}, record_check=True, entry=stale
+    )
+
+    assert _chain_ids(entry.runtime_data.embeddings) == ["ollama1"]
+    standing = registry.async_get_issue(DOMAIN, issue_id)
+    assert standing is not None
+    assert standing.translation_placeholders == {
+        "providers": "Ollama Secondary",
+        "primary": "Ollama",
+        "model": "configured-embed",
+    }
+    assert standing.dismissed_version is not None
+
+
+@pytest.mark.asyncio
+async def test_setup_and_the_record_check_remove_an_unread_other_build_end_to_end(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Setup's provider ids are the chain's: the real check finds and drops it."""
+    monkeypatch.setattr(er, "fetch_ollama_model_digest", AsyncMock(return_value="w:b2"))
+    notices: list[dict[str, Any]] = []
+    _register_capture_service(hass, "persistent_notification", "create", notices)
+    entry, data, _asked = await _setup_two_ollama_servers(
+        hass, monkeypatch, {"http://ollama": "w:a1"}, record_check=True
+    )
+
+    chain = entry.runtime_data.embeddings
+    assert isinstance(chain, FallbackEmbeddings)
+    assert _chain_ids(chain) == ["ollama1"]
+    issue = _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD, entry.entry_id)
+    assert issue is not None
+    assert issue.translation_placeholders == {
+        "providers": "Ollama Secondary",
+        "primary": "Ollama",
+        "model": "configured-embed",
+    }
+    # Removing an active fallback marks the tool index stale without the
+    # "fell back" notice a real switch sends.
+    entry.runtime_data.tool_index_ready = True
+    data.captured_embedding_kwargs["removed_callback"]("ollama2", "ollama1")
+    await hass.async_block_till_done()
+    assert entry.runtime_data.tool_index_ready is False
+    assert notices == []
+
+
+@pytest.mark.asyncio
+async def test_setup_leaves_a_standing_issue_to_the_record_check(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dismissed issue is not deleted at setup only to come back fresh (#860)."""
+    registry = ir.async_get(hass)
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    er.async_sync_other_build_fallback_issue(
+        hass,
+        entry.entry_id,
+        primary="Ollama",
+        model="configured-embed",
+        left_out=["Ollama Secondary"],
+    )
+    issue_id = er._other_build_issue_id(entry.entry_id)
+    registry.async_ignore(DOMAIN, issue_id, ignore=True)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    data.options[CONF_EMBEDDING_MODEL_PROVIDER] = "ollama"
+    data.options[CONF_OLLAMA_EMBEDDING_MODEL] = "configured-embed"
+    second = _second_ollama(FALLBACK_URL)
+    data.providers[second.entry_id] = second
+    data.fallback_chains["embedding"] = [data.providers["ollama1"], second]
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    monkeypatch.setattr(hga_component, "configured_ollama_urls", configured_ollama_urls)
+    monkeypatch.setattr(
+        hga_component,
+        "OllamaEmbeddings",
+        lambda *_args, model, base_url, **_kwargs: FakeEmbeddings(
+            f"{model}@{base_url}"
+        ),
+    )
+    _capture_recheck(monkeypatch)
+    # The fallback's build is unread at setup: the check will judge it.
+    _with_database(monkeypatch, {"http://ollama": "w:a1"})
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+    await hass.async_block_till_done()
+
+    standing = registry.async_get_issue(DOMAIN, issue_id)
+    assert standing is not None
+    assert standing.dismissed_version is not None
+
+
+@pytest.mark.asyncio
+async def test_setup_syncs_the_issue_itself_when_nothing_is_checked_later(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fully checked at setup, or primary down: setup's sync is the only one."""
+    stale = MockConfigEntry(domain=DOMAIN, data={})
+    stale.add_to_hass(hass)
+    _standing_issue(hass, stale, ["Ollama Secondary"])
+    entry, _data, _asked = await _setup_two_ollama_servers(
+        hass,
+        monkeypatch,
+        {"http://ollama": "w:a1", FALLBACK_URL: "w:a1"},
+        entry=stale,
+    )
+    assert entry is stale
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD, entry.entry_id) is None
+
+    down, _data, _asked = await _setup_two_ollama_servers(
+        hass, monkeypatch, {FALLBACK_URL: "w:b2"}, recorded="w:a1", primary_up=False
+    )
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD, down.entry_id)
 
 
 @pytest.mark.parametrize(
@@ -2358,6 +3647,8 @@ async def test_setup_without_a_database_asks_no_digest(
     fingerprint = entry.runtime_data.embedding_fingerprint
     assert fingerprint is not None
     assert fingerprint.digest is None
+    # No store to protect: nothing is handed to the record check either.
+    assert entry.runtime_data.embedding_fallback_gate.unchecked == ()
 
 
 @pytest.mark.asyncio

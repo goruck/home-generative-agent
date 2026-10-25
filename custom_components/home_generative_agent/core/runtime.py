@@ -46,7 +46,7 @@ if TYPE_CHECKING:
         SuppressionManager,
     )
 
-    from .embedding_record import EmbeddingFingerprint
+    from .embedding_record import EmbeddingFallbackGate, EmbeddingFingerprint
     from .provider_stall import ProviderStallTracker
     from .video_analyzer import VideoAnalyzer
 
@@ -111,6 +111,9 @@ class HGAData:
     embedding_fingerprint: EmbeddingFingerprint | None = None
     # (server URL, model) for an Ollama primary, to read its build again.
     embedding_digest_source: tuple[str, str] | None = None
+    # The Ollama embedding fallbacks setup left out for their build, and the
+    # kept ones it could not fully check, read again in the background (#860).
+    embedding_fallback_gate: EmbeddingFallbackGate | None = None
     reembed_task: asyncio.Task[None] | None = None
 
 
