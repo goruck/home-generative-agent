@@ -15,6 +15,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import UTC, datetime, timedelta
 from unittest.mock import ANY, AsyncMock, MagicMock, call
 
@@ -1083,6 +1084,62 @@ def _recency_aware_asearch(
     return AsyncMock(side_effect=_asearch)
 
 
+def _row(
+    content: str,
+    score: float | None,
+    *,
+    camera: str,
+    age_seconds: int = 60,
+    has_camera: bool = True,
+) -> MagicMock:
+    """Build a notified caption as the store holds it; without camera, pre-#706."""
+    item = _make_search_result(content, score, age_seconds=age_seconds, camera=camera)
+    item.updated_at = item.created_at
+    item.value = {"content": content, "notified": True, "unknown_person": False}
+    if has_camera:
+        item.value["camera"] = camera
+    return item
+
+
+class _PgLikeStore:
+    """
+    Reads like AsyncPostgresStore (#706).
+
+    A namespace matches as LIKE '<prefix>%' does, so ("video_analysis",
+    "side") also matches "side_gate", and "_" matches any one character; a
+    filter is applied before the limit; a search with a query ranks by score,
+    one without by updated_at, newest first.
+    """
+
+    def __init__(self, rows: list[MagicMock]) -> None:
+        self.rows = rows
+
+    async def asearch(  # noqa: PLR0913 (mirrors the store's keywords)
+        self,
+        namespace_prefix: tuple[str, ...],
+        *,
+        query: str | None = None,
+        filter: dict[str, object] | None = None,  # noqa: A002
+        limit: int = 10,
+        offset: int = 0,
+        refresh_ttl: bool | None = None,
+    ) -> list[MagicMock]:
+        del refresh_ttl
+        like = re.compile(re.escape(".".join(namespace_prefix)).replace("_", "."))
+        hits = [
+            r
+            for r in self.rows
+            if like.match(".".join(r.namespace))
+            and all(r.value.get(k) == v for k, v in (filter or {}).items())
+        ]
+        if query:
+            hits.sort(key=lambda r: r.score if r.score is not None else -1.0)
+            hits.reverse()
+        else:
+            hits.sort(key=lambda r: r.updated_at, reverse=True)
+        return hits[offset : offset + limit]
+
+
 @pytest.mark.asyncio
 async def test_recent_match_outranked_by_older_caption_suppresses(
     va: VideoAnalyzer,
@@ -1172,7 +1229,7 @@ async def test_recent_match_missing_from_top_results_suppresses(
     assert store.asearch.await_count == 2
     assert store.asearch.await_args_list[1] == call(
         ("video_analysis", "side"),
-        filter={"notified": True},
+        filter={"camera": "side", "notified": True},
         limit=50,
         offset=0,
         refresh_ttl=False,
@@ -1354,21 +1411,15 @@ async def test_other_cameras_recent_caption_does_not_suppress(
     A recent caption from the other camera must not silence this one, in the
     search results or in the scan.
     """
-    by_score = [
-        _make_search_result(
-            _WHITE_SHIRT_OLD, score=0.95, age_seconds=_THREE_DAYS_S, camera="side"
-        ),
-        _make_search_result(
-            _WHITE_SHIRT_RECENT, score=0.99, age_seconds=64, camera="side_gate"
-        ),
-    ]
-    newest_first = [
-        _make_search_result(
-            _WHITE_SHIRT_RECENT, score=None, age_seconds=64, camera="side_gate"
-        ),
-    ]
     store = va.entry.runtime_data.store
-    store.asearch = _recency_aware_asearch(by_score, newest_first)
+    store.asearch = AsyncMock(
+        side_effect=_PgLikeStore(
+            [
+                _row(_WHITE_SHIRT_OLD, 0.95, camera="side", age_seconds=_THREE_DAYS_S),
+                _row(_WHITE_SHIRT_RECENT, 0.99, camera="side_gate", age_seconds=64),
+            ]
+        ).asearch
+    )
     store.embeddings.aembed_documents = AsyncMock()
     decision = await va._is_caption_novel(  # type: ignore[attr-defined]
         "side", _WHITE_SHIRT_NOW, _fresh_snapshot_name(), []
@@ -1381,18 +1432,42 @@ async def test_other_cameras_recent_caption_does_not_suppress(
 
 @pytest.mark.asyncio
 async def test_only_other_cameras_captions_is_no_match(va: VideoAnalyzer) -> None:
-    """Search results that all belong to a prefix-sibling camera count as none."""
-    results = [
-        _make_search_result(
-            _WHITE_SHIRT_RECENT, score=0.99, age_seconds=64, camera="side_gate"
-        )
-    ]
-    va.entry.runtime_data.store.asearch = AsyncMock(return_value=results)
+    """Captions that all belong to a prefix-sibling camera count as none."""
+    va.entry.runtime_data.store.asearch = _PgLikeStore(
+        [_row(_WHITE_SHIRT_RECENT, 0.99, camera="side_gate", age_seconds=64)]
+    ).asearch
     decision = await va._is_caption_novel(  # type: ignore[attr-defined]
         "side", _WHITE_SHIRT_NOW, _fresh_snapshot_name(), []
     )
     assert decision.notify is True
     assert decision.reason == "no_match"
+
+
+@pytest.mark.asyncio
+async def test_a_wildcard_sibling_is_not_read(va: VideoAnalyzer) -> None:
+    """A "_" is a LIKE wildcard: "front_door" must not read "front1door"."""
+    va.entry.runtime_data.store.asearch = _PgLikeStore(
+        [_row(_WHITE_SHIRT_RECENT, 0.99, camera="front1door", age_seconds=64)]
+    ).asearch
+    own = await va._search_own_captions(  # type: ignore[attr-defined]
+        ("video_analysis", "front_door"), _WHITE_SHIRT_NOW
+    )
+    assert own == []
+
+
+@pytest.mark.asyncio
+async def test_a_caption_stored_before_706_is_not_scanned_until_backfilled(
+    va: VideoAnalyzer,
+) -> None:
+    """The scan filters on the camera field; the backfill adds it."""
+    legacy = _row(_WHITE_SHIRT_RECENT, None, camera="side", has_camera=False)
+    va.entry.runtime_data.store.asearch = _PgLikeStore([legacy]).asearch
+    namespace = ("video_analysis", "side")
+    assert await va._recent_captions(namespace) == []  # type: ignore[attr-defined]
+
+    legacy.value["camera"] = "side"
+    (found,) = await va._recent_captions(namespace)  # type: ignore[attr-defined]
+    assert found[0] == _WHITE_SHIRT_RECENT
 
 
 @pytest.mark.asyncio
@@ -1429,7 +1504,7 @@ async def test_recent_scan_pages_past_a_busy_window(va: VideoAnalyzer) -> None:
     assert decision.matched_caption == _WHITE_SHIRT_RECENT
     assert store.asearch.await_args_list[2] == call(
         ("video_analysis", "side"),
-        filter={"notified": True},
+        filter={"camera": "side", "notified": True},
         limit=50,
         offset=50,
         refresh_ttl=False,
@@ -1708,6 +1783,7 @@ async def test_unknown_person_scan_asks_for_unknown_face_notifications(
     assert decision.matched_age_seconds is not None
     assert decision.matched_age_seconds >= 60
     assert store.asearch.await_args_list[1].kwargs["filter"] == {
+        "camera": "side",
         "notified": True,
         "unknown_person": True,
     }
@@ -1818,6 +1894,7 @@ async def test_finalize_stores_whether_the_caption_notified(
         namespace=("video_analysis", "frontporch"),
         key=batch[0].name,
         value={
+            "camera": "frontporch",
             "content": "a person walks up the path",
             "snapshots": [str(batch[0])],
             "notified": notified,
@@ -1908,6 +1985,39 @@ async def test_search_keeps_the_ten_best_own_captions(va: VideoAnalyzer) -> None
     assert own == rows
 
 
+@pytest.mark.asyncio
+async def test_other_cameras_notified_captions_do_not_use_up_the_scan(
+    va: VideoAnalyzer,
+) -> None:
+    """
+    Two hundred notified "side_gate" captions in the window, then this one's.
+
+    Before #706 they filled the scan's four pages and the camera's own
+    notified caption was never read.
+    """
+    rows = [
+        _row(f"A dog runs {i}.", None, camera="side_gate", age_seconds=i)
+        for i in range(200)
+    ]
+    rows += [
+        _row(_WHITE_SHIRT_OLD, 0.95, camera="side", age_seconds=_THREE_DAYS_S),
+        _row(_WHITE_SHIRT_RECENT, None, camera="side", age_seconds=600),
+    ]
+
+    async def _embed(texts: list[str]) -> list[list[float]]:
+        return [[1.0, 0.0] for _ in texts]
+
+    store = va.entry.runtime_data.store
+    store.asearch = _PgLikeStore(rows).asearch
+    store.embeddings.aembed_documents = AsyncMock(side_effect=_embed)
+    decision = await va._is_caption_novel(  # type: ignore[attr-defined]
+        "side", _WHITE_SHIRT_NOW, _fresh_snapshot_name(), []
+    )
+    assert decision.notify is False
+    assert decision.reason == "recent_match"
+    assert decision.matched_caption == _WHITE_SHIRT_RECENT
+
+
 def _scan_store(va: VideoAnalyzer, pages: list[list[MagicMock]]) -> MagicMock:
     """Store whose similarity search finds one old match and whose scan pages."""
     by_score = [
@@ -1957,9 +2067,9 @@ async def test_recent_scan_stops_at_the_page_reaching_past_the_window(
 
 @pytest.mark.asyncio
 async def test_recent_scan_is_capped(va: VideoAnalyzer) -> None:
-    """Full pages of in-window rows from another camera: four pages, then stop."""
+    """Full pages of in-window notified rows: four pages, then stop."""
     page = [
-        _make_search_result(f"A dog {i}.", None, age_seconds=i, camera="side_gate")
+        _make_search_result(f"A dog {i}.", None, age_seconds=i, camera="side")
         for i in range(50)
     ]
     store = _scan_store(va, [page] * 10)
@@ -1969,7 +2079,6 @@ async def test_recent_scan_is_capped(va: VideoAnalyzer) -> None:
     assert decision.notify is True
     assert decision.reason == "stale_match"
     assert _scan_calls(store) == 4
-    store.embeddings.aembed_documents.assert_not_awaited()
 
 
 @pytest.mark.asyncio

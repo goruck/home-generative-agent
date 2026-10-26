@@ -81,6 +81,11 @@ from ..const import (  # noqa: TID252
     VIDEO_SUMMARY_NUM_PREDICT,
     VIDEO_VLM_NUM_PREDICT,
 )
+from .caption_store import (
+    CAPTION_CAMERA_FIELD,
+    caption_filter,
+    caption_namespace,
+)
 from .event_recording import (
     EVENT_WORK_PREFIX,
     RECORDING_FETCH_BACKOFF_SEC,
@@ -2090,7 +2095,7 @@ class VideoAnalyzer:
         if first_dt < dt_util.now() - timedelta(minutes=VIDEO_ANALYZER_TIME_OFFSET):
             return CaptionNoveltyDecision(notify=True, reason="stale_snapshot")
 
-        namespace = ("video_analysis", camera_name)
+        namespace = caption_namespace(camera_name)
         try:
             async with asyncio.timeout(10):
                 search_results = await self._search_own_captions(namespace, msg)
@@ -2231,7 +2236,10 @@ class VideoAnalyzer:
         The store matches namespaces by prefix, so a search for "side" also
         returns "side_gate". The search asks for more rows than are used so
         that other cameras' captions, dropped here, cannot crowd this camera's
-        own matches out of the results.
+        own matches out of the results; they still can when that camera has
+        more closer matches (#706). It does not filter on the camera in the
+        database: Postgres then scores every caption of the camera instead of
+        using the vector index, about a second per 25,000 captions in testing.
         """
         results = await self.entry.runtime_data.store.asearch(
             namespace,
@@ -2334,12 +2342,14 @@ class VideoAnalyzer:
         part of the BaseStore contract. Each caption has its own key, so it is
         written once and updated_at equals the created_at the age is read from.
         Captions stored before the notified flag existed are not returned; they
-        age out of the window half an hour after the upgrade.
+        age out of the window half an hour after the upgrade. Only captions
+        naming this camera are asked for, in the database (#706): those stored
+        before the field existed are skipped until the backfill reaches them.
         """
         store = self.entry.runtime_data.store
         window = VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC
         recent: dict[str, int] = {}
-        wanted: dict[str, bool] = {"notified": True}
+        wanted = caption_filter(namespace[1], notified=True)
         if unknown_only:
             wanted["unknown_person"] = True
         for page in range(_RECENT_CAPTION_SCAN_MAX_PAGES):
@@ -2353,10 +2363,7 @@ class VideoAnalyzer:
                 refresh_ttl=False,  # keeps the plain, ordered query
             )
             for r in items:
-                # Prefix match again: "side" also returns "side_gate".
-                if r.namespace != namespace or not _caption_anchors(
-                    r, unknown_only=unknown_only
-                ):
+                if not _caption_anchors(r, unknown_only=unknown_only):
                     continue
                 cap = (r.value or {}).get("content")
                 age = _caption_age_seconds(r)
@@ -2916,7 +2923,7 @@ class VideoAnalyzer:
         """
         camera_name = camera_id.rsplit(".", maxsplit=1)[-1]
         store = self.entry.runtime_data.store
-        namespace = ("video_analysis", camera_name)
+        namespace = caption_namespace(camera_name)
         key = batch[0].name
         async with asyncio.timeout(10):
             if not notified:
@@ -2933,6 +2940,7 @@ class VideoAnalyzer:
                 namespace=namespace,
                 key=key,
                 value={
+                    CAPTION_CAMERA_FIELD: camera_name,
                     "content": msg,
                     "snapshots": [str(p) for p in batch],
                     "notified": notified,

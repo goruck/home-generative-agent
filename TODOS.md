@@ -2480,6 +2480,20 @@ label pair ("Server URL" vs "Base URL").
 
 ---
 
+### A frozen model server (connections never accepted) can hold a turn past its budget
+
+**What:** In the #828 beta.4 field test, a conversation turn against an Ollama server frozen with `kill -STOP` hung for more than four minutes, past the 180 s turn budget: no timeout fired, no provider was marked stalled. A frozen process leaves new connections sitting in the kernel's accept backlog, so the TCP connect completes but nothing is ever read or written. The budget from `model_call_budget` evidently does not cover that state, while a live server that hangs on `/api/chat` does time out as designed (Andy's second run).
+
+**Why:** Reported by andymcmanus on #828 (2026-10-21) as a test artifact, but a host that freezes (swap storm, suspended VM, stopped container) produces the same socket state, and the safety net is meant to be the budget. Promised to look at it in the reply on #828 (2026-10-26).
+
+**How to apply:** Reproduce with a throwaway Ollama (or `nc -l` that never reads) frozen with `kill -STOP`, and find which await ignores the cancellation: `asyncio.timeout` around the call should cancel it unless the client blocks in a thread (sync httpx in an executor) or shields the request. If it is a thread, a cancel cannot interrupt it: give the Ollama httpx clients a connect and read timeout (see the entry above) so the thread returns. Add a test with a socket that accepts but never responds.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ### Migrate to langchain-google-genai 4.x (consolidated google-genai SDK)
 
 **What:** `manifest.json` pins `langchain-google-genai==3.1.0`; 4.x is current. 4.0.0 swapped the legacy `google-ai-generativelanguage` SDK for the consolidated `google-genai` SDK, which is where new capability lands, so staying a major behind gets more expensive the longer it runs. Moved here from [#584](https://github.com/goruck/home-generative-agent/issues/584) (2026-09-24) because it is internal maintenance with no reporter or contributor attached — the issue carries the full write-up and the links.
