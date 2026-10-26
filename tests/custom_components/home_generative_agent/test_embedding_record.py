@@ -3707,6 +3707,47 @@ async def test_unload_cancels_the_reembed_and_a_disable_drops_the_issues(
 
 
 @pytest.mark.asyncio
+async def test_setup_starts_the_caption_backfill_and_unload_cancels_it(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It runs on the pool, so it stops before the pool closes (#706)."""
+    started: list[Any] = []
+
+    async def _backfill(pool: Any) -> None:
+        started.append(pool)
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(hga_component, "async_backfill_caption_cameras", _backfill)
+    entry, _data, _asked = await _setup_two_ollama_servers(
+        hass, monkeypatch, {"http://ollama": "w:a1", FALLBACK_URL: "w:a1"}
+    )
+    await asyncio.sleep(0)
+    run = entry.runtime_data.caption_backfill_task
+    assert run is not None
+    assert started == [entry.runtime_data.pool]
+    monkeypatch.setattr(
+        hass.config_entries, "async_unload_platforms", AsyncMock(return_value=True)
+    )
+
+    assert await hga_component.async_unload_entry(hass, entry)
+
+    assert run.cancelled()
+    assert entry.runtime_data.caption_backfill_task is None
+
+
+@pytest.mark.asyncio
+async def test_no_database_starts_no_caption_backfill(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a pool there are no stored captions to backfill."""
+    entry, _data, _asked = await _setup_two_ollama_servers(
+        hass, monkeypatch, {}, database=False
+    )
+
+    assert entry.runtime_data.caption_backfill_task is None
+
+
+@pytest.mark.asyncio
 async def test_removal_drops_the_issues(hass: Any) -> None:
     """A removed entry leaves neither issue behind."""
     entry = MockConfigEntry(domain=DOMAIN, entry_id="entry1")

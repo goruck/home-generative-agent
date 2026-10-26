@@ -239,6 +239,7 @@ from .const import (
     VLM_TOP_P,
 )
 from .core.anthropic_client import SharedClientChatAnthropic, async_prime_async_client
+from .core.caption_store import async_backfill_caption_cameras
 from .core.database_guard import (
     async_check_database_reachable,
     async_clear_database_issue,
@@ -4698,6 +4699,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         async_sync_embedding_record(hass, entry),
         name="hga_embedding_record_check",
     )
+    # Same placement: captions stored before they named their camera get it,
+    # in batches, so each camera's reads find them again (#706). Kept to be
+    # cancelled at unload before the pool it writes on is closed.
+    if pool is not None:
+        entry.runtime_data.caption_backfill_task = entry.async_create_background_task(
+            hass,
+            async_backfill_caption_cameras(pool),
+            name="hga_caption_camera_backfill",
+        )
 
     # Same placement, same reason: four Sentinel rule ids (five evaluators) key
     # on a positive "Unknown Person" label that only the face pipeline writes,
@@ -4848,6 +4858,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
         # Writes on the pool closed next; it resumes at the next setup (#855).
         await _cancel_and_wait(rd.reembed_task, "memory store re-embed")
         rd.reembed_task = None
+        # Same for the caption camera backfill (#706).
+        await _cancel_and_wait(rd.caption_backfill_task, "caption camera backfill")
+        rd.caption_backfill_task = None
 
     await _teardown("reembed.cancel", _cancel_reembed)
     if rd.pool is not None:
