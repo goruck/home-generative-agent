@@ -529,6 +529,100 @@ async def test_setup_raises_an_issue_for_a_chosen_other_model_fallback(
     assert not _other_model_issue(hass, entry.entry_id)
 
 
+@pytest.mark.parametrize("provider_type", ["openai_compatible", "openai", "gemini"])
+@pytest.mark.asyncio
+async def test_setup_leaves_out_a_chosen_fallback_of_a_non_ollama_type(
+    hass: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    provider_type: str,
+) -> None:
+    """
+    A second provider of a non-Ollama primary's type is named, not dropped (#853).
+
+    It shared the primary's client, so the chain silently skipped it; it is
+    now left out with the repair that says why.
+    """
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    data.options[CONF_EMBEDDING_MODEL_PROVIDER] = provider_type
+
+    def _same_type(entry_id: str, name: str, url: str) -> ModelProviderConfig:
+        return ModelProviderConfig(
+            entry_id=entry_id,
+            name=name,
+            provider_type=cast("Any", provider_type),
+            capabilities={"embedding"},
+            data={"settings": {"base_url": url, "api_key": "key"}},
+            deployment="cloud",
+        )
+
+    primary = _same_type("primary", "Primary Server", "http://embed-a/v1")
+    second = _same_type("second", "Second Server", "http://embed-b/v1")
+    data.providers.update({primary.entry_id: primary, second.entry_id: second})
+    data.fallback_chains["embedding"] = [primary, second]
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    monkeypatch.setattr(hga_component, "chosen_fallback_ids", lambda *_args: {"second"})
+    measured: list[Any] = []
+
+    async def _size_check(*_args: Any, provider: Any, **_kwargs: Any) -> None:
+        measured.append(provider)
+
+    monkeypatch.setattr(hga_component, "async_sync_embedding_size_issue", _size_check)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+    await hass.async_block_till_done()
+
+    assert "chain" not in data.captured_embedding_chain
+    issue = _other_model_issue(hass, entry.entry_id)
+    assert issue is not None
+    assert issue.translation_placeholders == {
+        "providers": "Second Server",
+        "primary": "Primary Server",
+    }
+    assert any(
+        r.levelname == "WARNING" and "Second Server left out" in r.getMessage()
+        for r in caplog.records
+    )
+    # The size check measures the primary alone, never the left-out server.
+    assert [p.name for p in measured] == ["Primary Server"]
+
+
+@pytest.mark.asyncio
+async def test_setup_leaves_out_an_automatic_fallback_of_a_non_ollama_type(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One HGA added on its own is logged at INFO, with no repair issue."""
+    caplog.set_level("INFO")
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    second_openai = ModelProviderConfig(
+        entry_id="openai2",
+        name="OpenAI Work",
+        provider_type="openai",
+        capabilities={"embedding"},
+        data={"settings": {}},
+        deployment="cloud",
+    )
+    data.providers[second_openai.entry_id] = second_openai
+    data.fallback_chains["embedding"] = [data.providers["openai1"], second_openai]
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    monkeypatch.setattr(hga_component, "chosen_fallback_ids", lambda *_args: set())
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert "chain" not in data.captured_embedding_chain
+    assert not _other_model_issue(hass, entry.entry_id)
+    assert any(
+        r.levelname == "INFO" and "OpenAI Work left out" in r.getMessage()
+        for r in caplog.records
+    )
+
+
 @pytest.mark.asyncio
 async def test_the_left_out_issue_clears_once_nothing_is_left_out(
     hass: Any, monkeypatch: pytest.MonkeyPatch

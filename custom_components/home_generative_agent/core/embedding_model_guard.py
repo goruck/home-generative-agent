@@ -172,8 +172,9 @@ async def async_sync_ollama_embedding_model_issue(  # noqa: PLR0913
 
     ``urls`` are the reachable Ollama servers that embed for this entry, and
     ``primary_url`` is the one among them that is the primary provider (None
-    when Ollama is only a fallback). No servers (embeddings are not on Ollama,
-    or there is no database to use them) clears every issue. A server that
+    when Ollama is not; it then has no fallbacks either, #853). No servers
+    (embeddings are not on Ollama, or there is no database to use them)
+    clears every issue. A server that
     cannot list its models is a "can't tell", not a "missing"; one that
     answers with an empty list has no models at all. The size check holds
     servers that have the model to the store column's size, or to
@@ -271,9 +272,9 @@ def _sync_dims_issues(  # noqa: PLR0913
     ``sizes`` holds the servers that were measured. A primary measured wrong
     means the configured model itself is the wrong size, and choosing
     another one fixes every server, so its issue lists them all. The
-    fallback issue needs a primary measured right (or no Ollama primary, as
-    behind another provider): only then is a wrong fallback a different
-    build of the model, or a model the form does not set. An Ollama primary
+    fallback issue needs a primary measured right: only then is a wrong
+    fallback a different build of the model. Ollama fallbacks exist only
+    behind an Ollama primary (#751, #853). An Ollama primary
     that was not measured (down at boot, no listing, no such model, no size
     reported) decides nothing, so both issues stay as they are. The fallback
     issue is cleared only once every fallback server was measured.
