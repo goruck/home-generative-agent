@@ -581,7 +581,7 @@
     },
     "embedding_fallback_other_build": {
       "title": "Záložní poskytovatel embeddingů {providers} má jiné sestavení modelu {model}",
-      "description": "Server Ollama záložního poskytovatele embeddingů **{providers}** má jiné sestavení modelu **{model}** (jiné stažení nebo kvantizaci) než primární poskytovatel **{primary}** (nebo, když primární nefunguje, než sestavení, kterým bylo úložiště paměti naplněno). Různá sestavení vytvářejí odlišné embeddingy, proto Home Generative Agent tuto zálohu vynechává: míchání jejich vektorů by způsobilo chybné výsledky vyhledávání v paměti.\n\nChcete-li ji znovu používat, stáhněte na oba servery stejné sestavení (například spusťte `ollama pull {model}` na každém z nich) a znovu načtěte Home Generative Agent. Tento problém zmizí po prvním znovunačtení, kdy se sestavení shodují."
+      "description": "Server Ollama záložního poskytovatele embeddingů **{providers}** má jiné sestavení modelu **{model}** (jiné stažení nebo kvantizaci) než primární poskytovatel **{primary}** (nebo, když primární nefunguje, než sestavení, kterým bylo úložiště paměti naplněno). Různá sestavení vytvářejí odlišné embeddingy, proto Home Generative Agent tuto zálohu vynechává: míchání jejich vektorů by způsobilo chybné výsledky vyhledávání v paměti.\n\nChcete-li ji znovu používat, stáhněte na oba servery stejné sestavení (například spusťte `ollama pull {model}` na každém z nich) a znovu načtěte Home Generative Agent. Tento problém zmizí po znovunačtení, při kterém se podaří přečíst obě sestavení a zjistí se, že jsou stejná."
     }
   }
 }

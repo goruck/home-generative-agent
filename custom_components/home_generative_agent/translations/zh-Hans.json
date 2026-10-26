@@ -581,7 +581,7 @@
     },
     "embedding_fallback_other_build": {
       "title": "备用嵌入提供方 {providers} 使用的是 {model} 的另一个版本",
-      "description": "备用嵌入提供方 **{providers}** 的 Ollama 服务器上的 **{model}** 与主提供方 **{primary}**（或在主提供方不可用时，与填充记忆存储所用的版本）的版本不同（另一次拉取或另一种量化）。不同版本生成的嵌入不同，因此 Home Generative Agent 不会使用此备用提供方：混合它们的向量会导致记忆搜索返回错误结果。\n\n要重新使用它，请在两台服务器上拉取相同的版本（例如在每台服务器上运行 `ollama pull {model}`），然后重新加载 Home Generative Agent。版本一致后的首次重新加载时，此问题会自动清除。"
+      "description": "备用嵌入提供方 **{providers}** 的 Ollama 服务器上的 **{model}** 与主提供方 **{primary}**（或在主提供方不可用时，与填充记忆存储所用的版本）的版本不同（另一次拉取或另一种量化）。不同版本生成的嵌入不同，因此 Home Generative Agent 不会使用此备用提供方：混合它们的向量会导致记忆搜索返回错误结果。\n\n要重新使用它，请在两台服务器上拉取相同的版本（例如在每台服务器上运行 `ollama pull {model}`），然后重新加载 Home Generative Agent。当某次重新加载读取到两个版本并发现二者一致时，此问题会自动清除。"
     }
   }
 }
