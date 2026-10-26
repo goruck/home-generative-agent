@@ -186,7 +186,8 @@ _WORKER_ERROR_BACKOFF_SEC: Final[int] = 5  # pause after unexpected worker error
 _SUMMARY_MAX_FRAMES: Final[int] = 8  # kept frame descriptions fed to the summary
 _NOTIFY_PROTECT_TTL_SEC: Final[int] = 1800  # pruning protection for notified images
 # Captions the dedup check considers, and the rows the similarity search asks
-# for so that another camera sharing the name prefix cannot crowd them out.
+# for so that another camera sharing the name prefix is less likely to crowd
+# them out; when it still does, the recent-caption scan runs instead.
 _CAPTION_SEARCH_LIMIT: Final[int] = 10
 _CAPTION_SEARCH_WIDE_LIMIT: Final[int] = 50
 # Recent-caption scan (issue #704): when a caption would re-notify as a stale
@@ -2098,7 +2099,9 @@ class VideoAnalyzer:
         namespace = caption_namespace(camera_name)
         try:
             async with asyncio.timeout(10):
-                search_results = await self._search_own_captions(namespace, msg)
+                search_results, crowded = await self._search_own_captions(
+                    namespace, msg
+                )
         except TimeoutError:
             LOGGER.warning(
                 "[%s] store.asearch timed out in _is_caption_novel; treating as novel.",
@@ -2116,6 +2119,14 @@ class VideoAnalyzer:
             return CaptionNoveltyDecision(notify=True, reason="store_error")
 
         if not search_results:
+            if crowded:
+                # Another camera's closer matches took every row (#706): look
+                # for one this camera notified inside the window instead.
+                recent = await self._find_recent_caption_match(
+                    namespace, msg, [], unknown_only=unknown_person_seen
+                )
+                if recent is not None:
+                    return recent
             return CaptionNoveltyDecision(notify=True, reason="no_match")
 
         if not any(r.score is not None for r in search_results):
@@ -2229,17 +2240,21 @@ class VideoAnalyzer:
 
     async def _search_own_captions(
         self, namespace: tuple[str, str], msg: str
-    ) -> list[Any]:
+    ) -> tuple[list[Any], bool]:
         """
         Return the camera's stored captions most similar to msg, best first.
 
         The store matches namespaces by prefix, so a search for "side" also
-        returns "side_gate". The search asks for more rows than are used so
-        that other cameras' captions, dropped here, cannot crowd this camera's
-        own matches out of the results; they still can when that camera has
-        more closer matches (#706). It does not filter on the camera in the
-        database: Postgres then scores every caption of the camera instead of
-        using the vector index, about a second per 25,000 captions in testing.
+        returns "side_gate", whose captions are dropped here. The search asks
+        for more rows than are used, but a camera with many closer matches can
+        still crowd this one's own out (#706). The second value says whether a
+        crowded-out caption could have reached the similarity threshold:
+        another camera's captions came back and every row returned reached it
+        (a caption left out scores no higher than the lowest returned). It
+        does not filter on the camera in the database: Postgres then scores
+        every caption of the camera instead of using the vector index, 0.25 to
+        6.6 seconds per search on a Raspberry Pi 5 with 23,000 to 194,000
+        captions a camera.
         """
         results = await self.entry.runtime_data.store.asearch(
             namespace,
@@ -2251,7 +2266,11 @@ class VideoAnalyzer:
         )
         own = [r for r in results if r.namespace == namespace]
         own.sort(key=lambda r: r.score if r.score is not None else -1.0, reverse=True)
-        return own[:_CAPTION_SEARCH_LIMIT]
+        crowded = len(own) < len(results) and all(
+            r.score is not None and r.score >= VIDEO_ANALYZER_SIMILARITY_THRESHOLD
+            for r in results
+        )
+        return own[:_CAPTION_SEARCH_LIMIT], crowded
 
     async def _find_recent_caption_match(
         self,
