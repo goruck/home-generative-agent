@@ -50,7 +50,7 @@ from .embedding_model_guard import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Iterable, Sequence
 
     from homeassistant.core import HomeAssistant
     from psycopg import AsyncConnection
@@ -60,10 +60,6 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 ISSUE_EMBEDDING_DIMS_MISMATCH = "embedding_dims_mismatch"
-# A fallback can only be of the primary's type (#751), and until each
-# OpenAI-compatible provider gets a client of its own (#853) one shares the
-# primary's, so this issue has nothing to report yet; it is kept for then.
-ISSUE_FALLBACK_EMBEDDING_DIMS_MISMATCH = "fallback_embedding_dims_mismatch"
 ISSUE_EMBEDDING_FALLBACK_OTHER_MODEL = "embedding_fallback_other_model"
 
 # Tables langgraph's PostgresStore and AsyncPostgresSaver create, and the
@@ -152,61 +148,40 @@ async def async_forget_migrations(
 
 @dataclass(frozen=True)
 class EmbeddingProvider:
-    """One provider in the embedding chain, and the client it embeds with."""
+    """The embedding primary, and the client it embeds with."""
 
-    key: str
     name: str
     provider_type: str
     embeddings: Any
-    primary: bool
 
 
-def embedding_chain_providers(
-    chain: Sequence[Any],
-    instance_for: Callable[[Any], Any],
-    *,
-    primary_type: str,
-    primary_embeddings: Any,
-) -> list[EmbeddingProvider]:
+def embedding_size_check_provider(
+    head: Any | None, *, primary_type: str, primary_embeddings: Any
+) -> EmbeddingProvider | None:
     """
-    Return the embedding chain's providers the size check measures.
+    Return the provider the size check measures: a non-Ollama primary.
 
-    ``chain`` is the resolved chain of provider configs, primary first, and
-    ``instance_for`` gives each one's client. Ollama servers have their own
-    check, which names the model to pull. A provider whose client was not
-    built (its health check failed at boot) is kept: OpenAI's and Gemini's
-    size is known without it, and an OpenAI-compatible one is then unknown,
-    which leaves its issue as it is. A provider whose client is an earlier
-    one's (one client per type but Ollama, #853) is that provider again, so it
-    is measured once. Without a chain, the primary alone.
+    ``head`` is the embedding chain's primary provider config, if there is a
+    chain, and ``primary_embeddings`` the client setup built for the primary.
+    Ollama servers have their own check, which names the model to pull, and
+    every other chain is its primary alone (#853), so nothing past the
+    primary is measured. A head whose client was not built (its health check
+    failed at boot) is kept: OpenAI's and Gemini's size is known without it,
+    and an OpenAI-compatible one is then unknown, which leaves the issue as
+    it is. Without a chain, the primary is named by its type and measured
+    only once its client is built.
     """
-    if chain:
-        providers: list[EmbeddingProvider] = []
-        for index, p in enumerate(chain):
-            if p.provider_type == OLLAMA:
-                continue
-            instance = instance_for(p)
-            if instance is not None and any(
-                instance is q.embeddings for q in providers
-            ):
-                continue
-            providers.append(
-                EmbeddingProvider(
-                    p.entry_id, p.name, p.provider_type, instance, primary=index == 0
-                )
-            )
-        return providers
-    if primary_embeddings is None or primary_type == OLLAMA:
-        return []
-    return [
-        EmbeddingProvider(
-            primary_type,
-            PROVIDER_TYPE_LABELS.get(primary_type, primary_type),
-            primary_type,
-            primary_embeddings,
-            primary=True,
-        )
-    ]
+    if primary_type == OLLAMA or (head is not None and head.provider_type == OLLAMA):
+        return None
+    if head is not None:
+        return EmbeddingProvider(head.name, head.provider_type, primary_embeddings)
+    if primary_embeddings is None:
+        return None
+    return EmbeddingProvider(
+        PROVIDER_TYPE_LABELS.get(primary_type, primary_type),
+        primary_type,
+        primary_embeddings,
+    )
 
 
 async def _provider_size(provider: EmbeddingProvider) -> int | None:
@@ -228,47 +203,47 @@ async def _provider_size(provider: EmbeddingProvider) -> int | None:
     return len(vector) if isinstance(vector, list) and vector else None
 
 
-def _issue_ids(entry_id: str) -> tuple[str, str]:
-    """Per-entry ids of the primary's and the fallbacks' issues."""
-    return (
-        f"{ISSUE_EMBEDDING_DIMS_MISMATCH}_{entry_id}",
-        f"{ISSUE_FALLBACK_EMBEDDING_DIMS_MISMATCH}_{entry_id}",
-    )
+def _issue_id(entry_id: str) -> str:
+    """Per-entry id of the size issue."""
+    return f"{ISSUE_EMBEDDING_DIMS_MISMATCH}_{entry_id}"
 
 
-def _format_wrong(wrong: list[tuple[str, int]]) -> tuple[str, str]:
-    """Spell the wrong providers and their sizes for the issue placeholders."""
-    sizes = sorted({dims for _, dims in wrong})
-    if len(sizes) == 1:
-        return ", ".join(name for name, _ in wrong), str(sizes[0])
-    providers = ", ".join(f"{name} ({dims})" for name, dims in wrong)
-    return providers, ", ".join(str(size) for size in sizes)
-
-
-def _sync_issue(
+async def async_sync_embedding_size_issue(
     hass: HomeAssistant,
-    issue_id: str,
-    translation_key: str,
-    sized: list[tuple[EmbeddingProvider, int | None]],
-    expected: int,
+    entry_id: str,
+    *,
+    provider: EmbeddingProvider | None,
+    pool: AsyncConnectionPool[AsyncConnection[DictRow]] | None,
 ) -> None:
     """
-    Raise one issue for the wrong providers in `sized`, or clear it.
+    Raise or clear the issue for an embedding primary of the wrong size.
 
-    An unknown size never stands in for right or wrong, so with none wrong and
-    one unknown the issue is left as it is.
+    ``provider`` is the non-Ollama primary, if any. With none, or no
+    database, the issue is cleared. An unknown size, the provider's (a probe
+    that failed) or the store's (no vector table), decides nothing and leaves
+    the issue as this setup found it; the unload clears it, so after a reload
+    an unmeasured primary shows no issue until a probe succeeds.
     """
-    wrong = [(p.name, s) for p, s in sized if s is not None and s != expected]
-    if not wrong:
-        if all(s is not None for _, s in sized):
-            ir.async_delete_issue(hass, DOMAIN, issue_id)
+    issue_id = _issue_id(entry_id)
+    if provider is None or pool is None:
+        ir.async_delete_issue(hass, DOMAIN, issue_id)
         return
-    names, dims = _format_wrong(wrong)
+    expected, size = await asyncio.gather(
+        async_store_vector_dims(pool, default=None), _provider_size(provider)
+    )
+    entry = hass.config_entries.async_get_entry(entry_id)
+    if expected is None or entry is None or entry.state not in ACTIVE_ENTRY_STATES:
+        return
+    if size is None:
+        return
+    if size == expected:
+        ir.async_delete_issue(hass, DOMAIN, issue_id)
+        return
     LOGGER.error(
         "Embedding provider %s produces %s-dimension vectors, but the memory "
         "store holds %s-dimension vectors, so its embedding writes fail.",
-        names,
-        dims,
+        provider.name,
+        size,
         expected,
     )
     ir.async_create_issue(
@@ -277,56 +252,13 @@ def _sync_issue(
         issue_id,
         is_fixable=False,
         severity=ir.IssueSeverity.ERROR,
-        translation_key=translation_key,
+        translation_key=ISSUE_EMBEDDING_DIMS_MISMATCH,
         translation_placeholders={
-            "providers": names,
-            "dims": dims,
+            "providers": provider.name,
+            "dims": str(size),
             "expected": str(expected),
             "default_dims": str(EMBEDDING_MODEL_DIMS),
         },
-    )
-
-
-async def async_sync_embedding_size_issue(
-    hass: HomeAssistant,
-    entry_id: str,
-    *,
-    providers: Sequence[EmbeddingProvider],
-    pool: AsyncConnectionPool[AsyncConnection[DictRow]] | None,
-) -> None:
-    """
-    Raise or clear the issues for embedding providers of the wrong size.
-
-    ``providers`` are the embedding chain's non-Ollama providers, each right,
-    wrong or unknown (a probe that failed). An unknown store size (no
-    database, no vector table) decides nothing.
-    """
-    primary_id, fallback_id = _issue_ids(entry_id)
-    if not providers or pool is None:
-        for issue_id in (primary_id, fallback_id):
-            ir.async_delete_issue(hass, DOMAIN, issue_id)
-        return
-    expected, sizes = await asyncio.gather(
-        async_store_vector_dims(pool, default=None),
-        asyncio.gather(*(_provider_size(p) for p in providers)),
-    )
-    entry = hass.config_entries.async_get_entry(entry_id)
-    if expected is None or entry is None or entry.state not in ACTIVE_ENTRY_STATES:
-        return
-    sized = list(zip(providers, sizes, strict=True))
-    _sync_issue(
-        hass,
-        primary_id,
-        ISSUE_EMBEDDING_DIMS_MISMATCH,
-        [(p, s) for p, s in sized if p.primary],
-        expected,
-    )
-    _sync_issue(
-        hass,
-        fallback_id,
-        ISSUE_FALLBACK_EMBEDDING_DIMS_MISMATCH,
-        [(p, s) for p, s in sized if not p.primary],
-        expected,
     )
 
 
@@ -382,8 +314,9 @@ def async_sync_other_model_fallback_issue(
     """
     Raise or clear the issue naming chosen fallbacks left out of the chain (#751).
 
-    ``left_out`` are the embedding fallbacks the user picked whose provider
-    type differs from the primary's, so they would embed with another model.
+    ``left_out`` are the embedding fallbacks the user picked that
+    ``split_embedding_chain`` left out: anything but another Ollama server
+    behind an Ollama primary (#751, #853).
     """
     issue_id = _other_model_issue_id(entry_id)
     if not left_out:
@@ -405,9 +338,8 @@ def async_sync_other_model_fallback_issue(
 
 @callback
 def async_clear_embedding_size_issue(hass: HomeAssistant, entry_id: str) -> None:
-    """Drop the size issues on unload and on entry removal."""
-    for issue_id in _issue_ids(entry_id):
-        ir.async_delete_issue(hass, DOMAIN, issue_id)
+    """Drop the size issue on unload and on entry removal."""
+    ir.async_delete_issue(hass, DOMAIN, _issue_id(entry_id))
 
 
 @callback

@@ -280,7 +280,7 @@ from .core.embedding_store import (
     async_store_tables,
     async_sync_embedding_size_issue,
     async_sync_other_model_fallback_issue,
-    embedding_chain_providers,
+    embedding_size_check_provider,
     missing_tables,
 )
 from .core.face_guard import (
@@ -2058,8 +2058,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     providers = resolve_model_provider_configs(entry, options)
     model_deployments = build_model_deployments(entry, providers, options)
     fallback_chains = resolve_fallback_chains(entry, providers, options)
-    # The store holds one model's vectors, so an embedding fallback of another
-    # provider type (another model) is left out of the chain (#751).
+    # The store holds one model's vectors, so an embedding fallback is left
+    # out of the chain unless it is another Ollama server behind an Ollama
+    # primary, whose build is checked (#751, #853).
     embedding_chain, embedding_left_out = split_embedding_chain(
         fallback_chains.get("embedding", [])
     )
@@ -2070,9 +2071,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             p.name for p in embedding_left_out if p.entry_id in chosen
         ]
         (LOGGER.warning if embedding_left_out_chosen else LOGGER.info)(
-            "Embedding fallback provider(s) %s left out: they embed with another "
-            "model than the primary provider %s, which would mix models in the "
-            "memory store.",
+            "Embedding fallback provider(s) %s left out: only another Ollama "
+            "server behind an Ollama primary can be an embedding fallback. Any "
+            "other fallback of the primary provider %s adds no failover (a "
+            "second OpenAI or Gemini provider shares its client) or could mix "
+            "models in the memory store.",
             ", ".join(p.name for p in embedding_left_out),
             embedding_chain[0].name,
         )
@@ -2792,29 +2795,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             )
         for p in _emb_fb[1:]:
             m = _embedding_instance_for_provider(p)
-            # One client serves every OpenAI, Gemini or OpenAI-compatible
-            # provider (#853), and an Ollama one at the primary's URL is the
-            # primary's: the same client twice is no failover, only a false
-            # "fell back" and a needless tool index rebuild (#751 review).
+            # An Ollama fallback at the primary's URL is the primary's client:
+            # the same client twice is no failover, only a false "fell back"
+            # and a needless tool index rebuild (#751 review).
             if m is None or any(m is c for c, _d, _p in _emb_chain):
                 continue
             # Another build of the model on a fallback server embeds
             # differently from the primary's; an unknown digest decides
-            # nothing (#855).
-            digest = (
-                ollama_embedding_digests.get(_ollama_provider_url(p))
-                if p.provider_type == "ollama"
-                else None
-            )
+            # nothing (#855). Every fallback here is an Ollama server: the
+            # split above leaves out any other (#853).
+            digest = ollama_embedding_digests.get(_ollama_provider_url(p))
             if builds_differ(digest, reference_embedding_digest):
                 embedding_other_build.append(p.name)
                 continue
             # Without a database no build was read and there is no store to
             # protect, so there is nothing to check later either.
-            if (
-                p.provider_type == "ollama"
-                and db_uri is not None
-                and (digest is None or primary_embedding_digest is None)
+            if db_uri is not None and (
+                digest is None or primary_embedding_digest is None
             ):
                 embedding_fallback_unchecked.append(
                     FallbackBuild(p.entry_id, p.name, _ollama_provider_url(p), digest)
@@ -2908,11 +2905,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             embedding_model = None
 
     # Read by the embedding-size repair check at the end of setup (#760).
-    embedding_size_providers = embedding_chain_providers(
-        _emb_fb,
-        _embedding_instance_for_provider,
+    embedding_size_provider = embedding_size_check_provider(
+        _emb_fb[0] if _emb_fb else None,
         primary_type=embedding_provider,
-        primary_embeddings=embedding_model,
+        primary_embeddings=primary_embeddings,
     )
 
     if embedding_model is None and embedding_chain:
@@ -4670,7 +4666,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         async_sync_embedding_size_issue(
             hass,
             entry.entry_id,
-            providers=embedding_size_providers,
+            provider=embedding_size_provider,
             pool=pool,
         ),
         name="hga_embedding_size_check",

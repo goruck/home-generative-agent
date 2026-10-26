@@ -1224,15 +1224,25 @@ def split_embedding_chain(
 
     The store holds vectors of one model, and every provider of a type embeds
     with the one model configured for that type, so only fallbacks of the
-    primary's type embed with its model (a second Ollama server). Any other
-    fallback would mix models in the store: wrong search results when the
-    sizes match, every write failing when they differ.
+    primary's type embed with its model. Any other fallback would mix models
+    in the store: wrong search results when the sizes match, every write
+    failing when they differ.
+
+    Of those, only another Ollama server behind an Ollama primary is kept
+    (#853): its build of the model is checked against the primary's (#855).
+    OpenAI and Gemini have one client each, so a second provider of the type
+    is the primary again, and two OpenAI-compatible servers can serve other
+    weights under one model name with no way to tell.
     """
     if not chain:
         return [], []
     head = chain[0]
-    kept = [head, *(p for p in chain[1:] if p.provider_type == head.provider_type)]
-    left_out = [p for p in chain[1:] if p.provider_type != head.provider_type]
+
+    def _kept(provider: ModelProviderConfig) -> bool:
+        return head.provider_type == "ollama" and provider.provider_type == "ollama"
+
+    kept = [head, *(p for p in chain[1:] if _kept(p))]
+    left_out = [p for p in chain[1:] if not _kept(p)]
     return kept, left_out
 
 

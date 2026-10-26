@@ -3,7 +3,8 @@
 An embedding fallback never mixes models in the memory store (#751).
 
 Each provider type embeds with the one model configured for it, so only a
-fallback of the primary's type embeds with the primary's model.
+fallback of the primary's type embeds with the primary's model, and of those
+only another Ollama server is kept: its build is checked (#853).
 """
 
 from __future__ import annotations
@@ -40,8 +41,8 @@ def _provider(entry_id: str, provider_type: str) -> ModelProviderConfig:
     )
 
 
-def test_only_fallbacks_of_the_primarys_type_are_kept() -> None:
-    """Order is kept; every other type is left out."""
+def test_only_ollama_fallbacks_are_kept_behind_an_ollama_primary() -> None:
+    """Order is kept; every other provider is left out."""
     chain = [
         _provider("ollama-a", "ollama"),
         _provider("openai", "openai"),
@@ -53,6 +54,27 @@ def test_only_fallbacks_of_the_primarys_type_are_kept() -> None:
 
     assert [p.entry_id for p in kept] == ["ollama-a", "ollama-b"]
     assert [p.entry_id for p in left_out] == ["openai", "gemini"]
+
+
+@pytest.mark.parametrize("provider_type", ["openai_compatible", "openai", "gemini"])
+def test_no_fallback_is_kept_behind_another_primary(provider_type: str) -> None:
+    """
+    Behind a non-Ollama primary every fallback is left out (#853).
+
+    OpenAI and Gemini have one client, so a second provider of the type is the
+    primary again; a second OpenAI-compatible server can serve other weights
+    under the model's name, and no build check can tell.
+    """
+    chain = [
+        _provider("primary", provider_type),
+        _provider("same-type", provider_type),
+        _provider("ollama", "ollama"),
+    ]
+
+    kept, left_out = split_embedding_chain(chain)
+
+    assert [p.entry_id for p in kept] == ["primary"]
+    assert [p.entry_id for p in left_out] == ["same-type", "ollama"]
 
 
 def test_an_empty_or_single_chain_is_unchanged() -> None:

@@ -26,15 +26,14 @@ from custom_components.home_generative_agent.const import DOMAIN
 from custom_components.home_generative_agent.core import embedding_store
 from custom_components.home_generative_agent.core.embedding_store import (
     ISSUE_EMBEDDING_DIMS_MISMATCH,
-    ISSUE_FALLBACK_EMBEDDING_DIMS_MISMATCH,
     EmbeddingProvider,
     UnavailableEmbeddings,
-    _issue_ids,
+    _issue_id,
     async_clear_embedding_size_issue,
     async_forget_migrations,
     async_store_tables,
     async_sync_embedding_size_issue,
-    embedding_chain_providers,
+    embedding_size_check_provider,
 )
 
 from .test_database_guard import _setup_without_database
@@ -45,11 +44,8 @@ if TYPE_CHECKING:
 POOL: Any = object()
 
 
-def _issue(
-    hass: Any, entry_id: str = "entry1", *, fallback: bool = False
-) -> ir.IssueEntry | None:
-    issue_id = _issue_ids(entry_id)[1 if fallback else 0]
-    return ir.async_get(hass).async_get_issue(DOMAIN, issue_id)
+def _issue(hass: Any, entry_id: str = "entry1") -> ir.IssueEntry | None:
+    return ir.async_get(hass).async_get_issue(DOMAIN, _issue_id(entry_id))
 
 
 def _loaded_entry(hass: Any, state: ConfigEntryState = ConfigEntryState.LOADED) -> None:
@@ -79,42 +75,30 @@ class _Embeddings:
         return [0.0] * self.size
 
 
-def _compat(
-    size: int | None, name: str = "Local vLLM", *, primary: bool = True
-) -> EmbeddingProvider:
-    return EmbeddingProvider(
-        f"id-{name}-{primary}",
-        name,
-        "openai_compatible",
-        _Embeddings(size),
-        primary=primary,
-    )
+def _compat(size: int | None, name: str = "Local vLLM") -> EmbeddingProvider:
+    return EmbeddingProvider(name, "openai_compatible", _Embeddings(size))
 
 
-def _openai(name: str = "OpenAI", *, primary: bool = False) -> EmbeddingProvider:
-    return EmbeddingProvider(f"id-{name}", name, "openai", object(), primary=primary)
+def _openai(name: str = "OpenAI") -> EmbeddingProvider:
+    return EmbeddingProvider(name, "openai", object())
 
 
-def _raise(hass: Any, *, fallback: bool = False) -> None:
+def _raise(hass: Any) -> None:
     ir.async_create_issue(
         hass,
         DOMAIN,
-        _issue_ids("entry1")[1 if fallback else 0],
+        _issue_id("entry1"),
         is_fixable=False,
         severity=ir.IssueSeverity.ERROR,
-        translation_key=(
-            ISSUE_FALLBACK_EMBEDDING_DIMS_MISMATCH
-            if fallback
-            else ISSUE_EMBEDDING_DIMS_MISMATCH
-        ),
+        translation_key=ISSUE_EMBEDDING_DIMS_MISMATCH,
         translation_placeholders={"providers": "x", "dims": "1", "expected": "2"},
     )
 
 
-async def _sync(hass: Any, *providers: EmbeddingProvider, pool: Any = POOL) -> None:
-    await async_sync_embedding_size_issue(
-        hass, "entry1", providers=list(providers), pool=pool
-    )
+async def _sync(
+    hass: Any, provider: EmbeddingProvider | None, pool: Any = POOL
+) -> None:
+    await async_sync_embedding_size_issue(hass, "entry1", provider=provider, pool=pool)
 
 
 @pytest.mark.asyncio
@@ -125,7 +109,7 @@ async def test_a_provider_of_another_size_raises_the_issue(
     _loaded_entry(hass)
     _store_size(monkeypatch, 768)
 
-    await _sync(hass, _openai(primary=True), _compat(768, primary=False))
+    await _sync(hass, _openai())
 
     issue = _issue(hass)
     assert issue is not None
@@ -135,79 +119,7 @@ async def test_a_provider_of_another_size_raises_the_issue(
         "expected": "768",
         "default_dims": "1024",
     }
-    assert _issue(hass, fallback=True) is None
     assert "produces 1024-dimension vectors" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_a_wrong_fallback_gets_its_own_issue(
-    hass: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Only the primary's size can be followed, so the fixes differ."""
-    _loaded_entry(hass)
-    _store_size(monkeypatch, 768)
-
-    await _sync(hass, _compat(768), _openai())
-
-    assert _issue(hass) is None
-    issue = _issue(hass, fallback=True)
-    assert issue is not None
-    assert issue.translation_key == ISSUE_FALLBACK_EMBEDDING_DIMS_MISMATCH
-    assert (issue.translation_placeholders or {})["providers"] == "OpenAI"
-
-
-@pytest.mark.asyncio
-async def test_providers_that_share_a_name_are_each_listed(
-    hass: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Two fallbacks named alike are not folded into one."""
-    _loaded_entry(hass)
-    _store_size(monkeypatch, 768)
-
-    await _sync(
-        hass,
-        _compat(768),
-        _compat(384, "Compat", primary=False),
-        EmbeddingProvider("other", "Compat", "openai", object(), primary=False),
-    )
-
-    placeholders = cast("ir.IssueEntry", _issue(hass, fallback=True))
-    assert (placeholders.translation_placeholders or {})["providers"] == (
-        "Compat (384), Compat (1024)"
-    )
-
-
-@pytest.mark.asyncio
-async def test_a_wrong_provider_is_raised_beside_an_unmeasured_one(
-    hass: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An unknown never suppresses a measured wrong size."""
-    _loaded_entry(hass)
-    _store_size(monkeypatch, 768)
-
-    await _sync(hass, _compat(None), _openai(), _compat(None, "B", primary=False))
-
-    issue = cast("ir.IssueEntry", _issue(hass, fallback=True))
-    assert (issue.translation_placeholders or {})["providers"] == "OpenAI"
-
-
-@pytest.mark.asyncio
-async def test_providers_of_different_sizes_each_carry_their_own(
-    hass: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A message never pairs a provider with another one's size."""
-    _loaded_entry(hass)
-    _store_size(monkeypatch, 768)
-
-    await _sync(hass, _compat(768), _openai(), _compat(384, primary=False))
-
-    issue = cast("ir.IssueEntry", _issue(hass, fallback=True))
-    assert issue.translation_placeholders == {
-        "providers": "OpenAI (1024), Local vLLM (384)",
-        "dims": "384, 1024",
-        "expected": "768",
-        "default_dims": "1024",
-    }
 
 
 @pytest.mark.asyncio
@@ -218,13 +130,11 @@ async def test_a_measured_right_size_clears_the_issue(
     _loaded_entry(hass)
     _store_size(monkeypatch, 1024)
     _raise(hass)
-    _raise(hass, fallback=True)
     compat = _compat(1024)
 
-    await _sync(hass, _openai(), compat)
+    await _sync(hass, compat)
 
     assert _issue(hass) is None
-    assert _issue(hass, fallback=True) is None
     assert cast("_Embeddings", compat.embeddings).calls == 1
 
 
@@ -237,7 +147,7 @@ async def test_an_unmeasured_provider_leaves_the_issue_alone(
     _store_size(monkeypatch, 1024)
     _raise(hass)
 
-    await _sync(hass, _openai(), _compat(None))
+    await _sync(hass, _compat(None))
 
     assert _issue(hass) is not None
 
@@ -266,10 +176,8 @@ async def test_no_providers_or_no_database_clears_the_issue(
     _loaded_entry(hass)
     _store_size(monkeypatch, 768)
     _raise(hass)
-    _raise(hass, fallback=True)
-    await _sync(hass)
+    await _sync(hass, None)
     assert _issue(hass) is None
-    assert _issue(hass, fallback=True) is None
 
     _raise(hass)
     await _sync(hass, _openai(), pool=None)
@@ -295,43 +203,38 @@ async def test_unload_drops_the_issue(
 ) -> None:
     """The entry's unload hook clears the issue."""
     entry = await _setup_without_database(hass, monkeypatch)
-    for issue_id in _issue_ids(entry.entry_id):
-        ir.async_create_issue(
-            hass,
-            DOMAIN,
-            issue_id,
-            is_fixable=False,
-            severity=ir.IssueSeverity.ERROR,
-            translation_key=ISSUE_EMBEDDING_DIMS_MISMATCH,
-        )
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        _issue_id(entry.entry_id),
+        is_fixable=False,
+        severity=ir.IssueSeverity.ERROR,
+        translation_key=ISSUE_EMBEDDING_DIMS_MISMATCH,
+    )
 
     assert await cast("Any", hga_component).async_unload_entry(hass, entry)
     assert _issue(hass, entry.entry_id) is None
-    assert _issue(hass, entry.entry_id, fallback=True) is None
 
 
 @pytest.mark.asyncio
-async def test_removal_drops_both_issues(hass: Any) -> None:
+async def test_removal_drops_the_issue(hass: Any) -> None:
     """async_remove_entry clears what unload would."""
     entry = MockConfigEntry(domain=DOMAIN, entry_id="entry1")
     entry.add_to_hass(hass)
     _raise(hass)
-    _raise(hass, fallback=True)
 
     await cast("Any", hga_component).async_remove_entry(hass, entry)
 
     assert _issue(hass) is None
-    assert _issue(hass, fallback=True) is None
 
 
-def test_clear_drops_both_issues(hass: Any) -> None:
+def test_clear_drops_the_issue(hass: Any) -> None:
     """The callback the unload and removal hooks use."""
     _raise(hass)
-    _raise(hass, fallback=True)
 
     async_clear_embedding_size_issue(hass, "entry1")
 
-    assert (_issue(hass), _issue(hass, fallback=True)) == (None, None)
+    assert _issue(hass) is None
 
 
 # ----- table reads -----
@@ -434,63 +337,53 @@ def _config(entry_id: str, provider_type: str) -> Any:
     )
 
 
-def test_the_chain_is_measured_primary_first_without_ollama() -> None:
-    """Ollama has its own check; a provider whose client is missing stays."""
-    chain = [
-        _config("ollama", "ollama"),
-        _config("openai", "openai"),
-        _config("compat", "openai_compatible"),
-    ]
-    clients = {"openai": object(), "compat": None}
+def test_only_a_non_ollama_primary_is_measured() -> None:
+    """Ollama has its own check; a primary whose client is missing stays."""
+    compat = _config("compat", "openai_compatible")
 
-    providers = embedding_chain_providers(
-        chain,
-        lambda p: clients.get(p.entry_id),
-        primary_type="ollama",
-        primary_embeddings=object(),
+    provider = embedding_size_check_provider(
+        compat, primary_type="openai_compatible", primary_embeddings=None
     )
-
-    assert [(p.key, p.primary, p.embeddings is None) for p in providers] == [
-        ("openai", False, False),
-        ("compat", False, True),
-    ]
+    assert provider == EmbeddingProvider("compat", "openai_compatible", None)
+    assert (
+        embedding_size_check_provider(
+            _config("ollama", "ollama"),
+            primary_type="ollama",
+            primary_embeddings=object(),
+        )
+        is None
+    )
 
 
 def test_without_a_chain_the_primary_is_named_by_its_type() -> None:
-    """The raw option key never reaches the issue text."""
-    (provider,) = embedding_chain_providers(
-        [],
-        lambda _p: None,
-        primary_type="openai_compatible",
-        primary_embeddings=object(),
+    """The raw option key never reaches the issue text; no client, no check."""
+    provider = embedding_size_check_provider(
+        None, primary_type="openai_compatible", primary_embeddings=object()
     )
 
-    assert (provider.name, provider.primary) == ("OpenAI Compatible", True)
-    assert (
-        embedding_chain_providers(
-            [], lambda _p: None, primary_type="ollama", primary_embeddings=object()
+    assert provider is not None
+    assert provider.name == "OpenAI Compatible"
+    for primary_type, client in (("ollama", object()), ("openai", None)):
+        assert (
+            embedding_size_check_provider(
+                None, primary_type=primary_type, primary_embeddings=client
+            )
+            is None
         )
-        == []
-    )
 
 
 @pytest.mark.asyncio
 async def test_a_known_size_needs_no_client(
     hass: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """OpenAI down at boot still keeps its wrong-size issue."""
+    """Gemini down at boot still raises: its size is fixed, not probed."""
     _loaded_entry(hass)
     _store_size(monkeypatch, 768)
 
-    await _sync(
-        hass,
-        _compat(768),
-        EmbeddingProvider("o", "OpenAI", "openai", None, primary=False),
-        EmbeddingProvider("c", "Down", "openai_compatible", None, primary=False),
-    )
+    await _sync(hass, EmbeddingProvider("Gemini", "gemini", None))
 
-    issue = cast("ir.IssueEntry", _issue(hass, fallback=True))
-    assert (issue.translation_placeholders or {})["providers"] == "OpenAI"
+    issue = cast("ir.IssueEntry", _issue(hass))
+    assert (issue.translation_placeholders or {})["providers"] == "Gemini"
 
 
 @pytest.mark.asyncio

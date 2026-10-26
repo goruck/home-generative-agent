@@ -2555,6 +2555,19 @@ label pair ("Server URL" vs "Base URL").
 
 ---
 
+### An unmeasured embedding primary loses its wrong-size issue across a reload
+
+**What:** `async_clear_embedding_size_issue` runs on every unload (`async_unload_entry`), so a reload clears `embedding_dims_mismatch` before the new setup's size check runs. If that check cannot measure the primary (an OpenAI-compatible server slow or down at boot, so `_provider_size` returns None), it leaves the issue as it found it, which is now cleared. A known wrong-size primary then fails every embedding write with no repair issue until a later reload measures it.
+
+**Why:** Found by the red-team pass in the #853 review (2026-10-26). It predates #853 (it came with #760); the #853 PR only corrected the docstring to say so. OpenAI and Gemini are unaffected (their size is fixed, never probed).
+
+**How to apply:** Follow `embedding_fallback_other_model` and the other-build issue: clear the size issue only on disable and entry removal, not on a plain unload, so an unmeasured primary keeps the previous setup's verdict. Update `test_unload_drops_the_issue` in `test_embedding_store.py` to expect the issue to survive a reload, and add a test that a disable clears it.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
 ## Config Entry Lifecycle
 
 ### Two Sentinel autonomy options are unreachable, and the docs call them UI-configurable

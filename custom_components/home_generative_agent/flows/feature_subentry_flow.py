@@ -215,10 +215,8 @@ def _fallback_provider_options(
     """
     Return provider options excluding the primary.
 
-    For embeddings, only another Ollama server behind an Ollama primary: the
-    store holds one model's vectors, each type embeds with one configured
-    model, and every other type has one client, so a second provider of it
-    is the primary again (#751, #853).
+    For embeddings, only another Ollama server behind an Ollama primary, as
+    setup keeps (``split_embedding_chain``, #751, #853).
     """
     options: list[SelectOptionDict] = []
     if category == "embedding" and _provider_type_for_id(entry, primary_id) != (
@@ -1319,8 +1317,8 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
             return "", []
         entry = self._get_entry()
         # The submitted name is the Ollama embedding model only when Ollama is
-        # the primary; behind another primary, Ollama fallbacks embed with the
-        # separately resolved Ollama model, which the startup check verifies.
+        # the primary; behind another primary there are no embedding
+        # fallbacks and no Ollama model to check (#751, #853).
         if _provider_type_for_id(entry, provider_id) != "ollama":
             return "", []
         fallback_ids = user_input.get(CONF_FEATURE_FALLBACK_PROVIDER_IDS) or []
