@@ -4290,10 +4290,28 @@ async def test_a_text_that_fails_once_alone_keeps_its_vector(
     assert er._REJECT_RECHECK_S in pauses
 
 
+class RateLimitError(Exception):
+    """Named like the SDKs' rate-limit errors."""
+
+
+class _StatusError(Exception):
+    """An HTTP error carrying its status, as httpx and the SDKs do."""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"status {status_code}")
+        self.status_code = status_code
+
+
+def _caused_by_429() -> Exception:
+    err = ValueError("embedding call failed")
+    err.__cause__ = _StatusError(429)
+    return err
+
+
 @pytest.mark.parametrize(
     "error",
-    [TimeoutError(), ValueError("Rate limit reached for requests")],
-    ids=["timeout", "rate_limit"],
+    [TimeoutError(), RateLimitError("slow down"), _caused_by_429()],
+    ids=["timeout", "rate_limit_type", "rate_limit_status_cause"],
 )
 @pytest.mark.usefixtures("pauses")
 @pytest.mark.asyncio
@@ -4486,7 +4504,7 @@ async def test_a_held_fallback_at_setup_is_logged_as_held_not_announced(
     )
 
     _assert_held_alone(entry)
-    assert "Ollama Secondary stands in only once its build" in caplog.text
+    assert "Ollama Secondary stands in once its build" in caplog.text
     assert "Could not send model fallback notification" not in caplog.text
 
 
@@ -4499,7 +4517,7 @@ async def test_without_a_database_a_fallback_at_setup_is_announced(
         hass, monkeypatch, {}, primary_up=False, database=False
     )
 
-    assert "stands in only once its build" not in caplog.text
+    assert "stands in once its build" not in caplog.text
     assert "Could not send model fallback notification" in caplog.text
 
 
@@ -4640,3 +4658,49 @@ async def test_a_held_fallback_logs_its_hold_once(
         if "does not stand in" in r.getMessage() and r.levelname == "WARNING"
     ]
     assert len(warnings) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_over_length_error_quoting_429_is_still_a_rejection(
+    monkeypatch: pytest.MonkeyPatch, pauses: list[float]
+) -> None:
+    """A token count like 14290 in the message is not a rate limit."""
+    monkeypatch.setattr(er, "_BATCH_SIZE", 10)
+    conn = _RunConn(_rows(4))
+    embeddings = _RejectsOne("memory 2")
+
+    async def _over_length(texts: list[str]) -> list[list[float]]:
+        if embeddings.bad in texts:
+            msg = (
+                "This model's maximum context length is 8192 tokens, however "
+                "you requested 14290 tokens"
+            )
+            raise ValueError(msg)
+        return [[float(len(t))] for t in texts]
+
+    embeddings.aembed_documents = _over_length  # type: ignore[method-assign]
+
+    assert await _run(conn, embeddings) == []
+    assert ("memories.u1", "k002", "content", f"{STAMP}#2") in conn.deletes
+    assert pauses
+
+
+@pytest.mark.asyncio
+async def test_a_held_fallback_at_setup_is_announced_once_admitted(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The 'fell back' notice waits for the admission, then goes out once."""
+    entry, _data, _asked = await _setup_two_ollama_servers(
+        hass, monkeypatch, {}, recorded="w:a1", primary_up=False
+    )
+    chain = entry.runtime_data.embeddings
+    assert "Could not send model fallback notification" not in caplog.text
+    [(_client, _deployment, provider_id)] = chain.chain
+
+    chain.verify_provider(provider_id)
+    await hass.async_block_till_done()
+
+    assert caplog.text.count("Could not send model fallback notification") == 1
+    chain.verify_provider(provider_id)
+    await hass.async_block_till_done()
+    assert caplog.text.count("Could not send model fallback notification") == 1

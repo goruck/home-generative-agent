@@ -252,8 +252,10 @@ _REJECTED_LOGGED = 10
 # Wait before trying a failed text a second time: a text is rejected only if
 # it fails twice while the probe embeds after each failure (#857).
 _REJECT_RECHECK_S = 10.0
-# Words of a rate-limit error, which says nothing about the text.
-_RATE_LIMIT_WORDS = ("rate limit", "ratelimit", "too many requests", "429")
+# A rate-limit error says nothing about the text. Told by its type or HTTP
+# status, never by its message, which can quote a token count or the text.
+_RATE_LIMIT_STATUS = 429
+_CAUSE_DEPTH = 5
 _GEMINI_MODEL_PREFIX = "models/"
 _WHOLE_DOCUMENT = "$"
 
@@ -1005,9 +1007,14 @@ async def async_verify_embedding_fallback(  # noqa: PLR0913
         # The primary answers but its build is unread, so the record may be
         # stale (a pull on both servers): hold, and let the record check,
         # which reads the primary's build, judge it.
-        LOGGER.debug(
+        first = warned is None or provider_id not in warned
+        if warned is not None:
+            warned.add(provider_id)
+        LOGGER.log(
+            logging.WARNING if first else logging.DEBUG,
             "Embedding fallback provider %s serves another build of %s than the "
-            "memory store's record; held until the primary's build is read.",
+            "memory store's record; it does not stand in for the primary until "
+            "a reload reads the primary's build.",
             fb.name,
             model,
         )
@@ -1253,10 +1260,25 @@ async def _embed_once(embeddings: Any, texts: Sequence[str]) -> list[list[float]
     return vectors
 
 
+def _is_rate_limit(err: BaseException) -> bool:
+    """Return True for a rate-limit error, by type or HTTP status, or its cause's."""
+    seen: BaseException | None = err
+    for _ in range(_CAUSE_DEPTH):
+        if seen is None:
+            return False
+        response = getattr(seen, "response", None)
+        status = getattr(seen, "status_code", None) or getattr(
+            response, "status_code", None
+        )
+        if "RateLimit" in type(seen).__name__ or status == _RATE_LIMIT_STATUS:
+            return True
+        seen = seen.__cause__
+    return False
+
+
 def _says_nothing_about_the_text(err: BaseException) -> bool:
     """Return True for an error of the provider's state: a timeout or rate limit."""
-    text = str(err).lower()
-    return is_timeout_error(err) or any(word in text for word in _RATE_LIMIT_WORDS)
+    return is_timeout_error(err) or _is_rate_limit(err)
 
 
 async def _embed_alone(
