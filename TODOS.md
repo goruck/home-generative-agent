@@ -888,19 +888,6 @@ validation.
 
 ---
 
-### Write leak, smoke and safety alerts as critical push notifications
-
-**What:** `add_automation` now installs a working leak alert on the first try (PR [#669](https://github.com/goruck/home-generative-agent/pull/669)), but the push it writes is an ordinary `notify.mobile_app_*` call. On the field test the alert was delivered and then sat unseen in the phone's Home Assistant notification group among the ~370 camera-analysis and Sentinel pushes HGA sent that day; a Focus mode would have held it entirely. A wet floor is exactly the notification that must not be grouped, summarised or silenced.
-
-**Why:** Found on the 2026-09-26 field test of #669, after the automation itself was confirmed correct end to end. Out of scope there because it is a change in what the model is told to write, not in what the check refuses.
-
-**How to apply:** For automations whose trigger is a `binary_sensor` of device class `moisture`, `smoke`, `gas`, `carbon_monoxide` or `safety`, have the model add `data: {push: {sound: {name: default, critical: 1, volume: 1.0}}}` (iOS) and `data: {channel: alarm_stream, importance: high}` (Android) to the notify action. Two ways: a sentence in the tool docstring plus an example, or a post-validation rewrite in `add_automation` that adds the critical payload when the trigger's device class is one of those and the action targets a `notify.mobile_app_*` service (deterministic, works for every model). Prefer the rewrite; document it, because a critical alert bypasses the user's Do Not Disturb by design. Test with the field YAML from `test_automation_targets.py`.
-
-**Effort:** S
-**Priority:** P2
-
----
-
 ### The tool-loop guard's give-up message is still blind after an ordinary round
 
 **What:** `_tool_loop_guard` (`agent/graph.py`) now repeats the last tool result when that result was a refused `add_automation`, so the user sees what was wrong. After any other final round (a `GetLiveContext` that returned "Action failed.", a tool error, a lookup that came back empty) it still replies with the bare "I wasn't able to complete this request after several tool-use attempts", which tells the user nothing about which step failed or what the model was trying to do.
@@ -2584,22 +2571,6 @@ label pair ("Server URL" vs "Base URL").
 
 ## Config Entry Lifecycle
 
-### Two Sentinel autonomy options are unreachable, and the docs call them UI-configurable
-
-**What:** `sentinel_autonomy_level` and `sentinel_runtime_override_ttl_minutes` (`const.py:216-217`) are read only from `self._options` in `SentinelEngine.get_autonomy_level` (`sentinel/engine.py:616`) and `set_autonomy_level` (`:588`). Neither has a config-flow field, neither has a `strings.json` label, and neither is in `_apply_sentinel_options`' defaults dict in `core/subentry_resolver.py` — and that dict is the allowlist: the overlay is `for key, value in sentinel_defaults.items(): options[key] = data.get(key, value)`, so a value placed in Sentinel subentry data is never copied. The only live path is the legacy top-level base at `subentry_resolver.py:208` (`{**entry.data, **entry.options}`). Meanwhile `docs/constants.md:310` heads the whole *Sentinel Autonomy Level* section **"UI-configurable"**, and lists both rows under it.
-
-This is the same allowlist-omission class as #480 and as the triage options fixed in #651 — but it bites harder, because the autonomy level is what gates the layers above it: triage runs only at level >= 1 (`engine.py:1684`), and auto-execution needs level >= 2 (`_MIN_AUTO_EXECUTE_LEVEL`). Every install therefore sits permanently at the recommended default of `1`, and the only way to move it is `sentinel_set_autonomy_level`, whose override is TTL-bounded (default 60 minutes) and reverts. A user cannot persistently choose level 0 (fully passive, no notifications) or level 2/3 at all. The third row in that docs table, `sentinel_require_pin_for_level_increase`, *is* exposed in the Advanced schema, which is probably why the section's "UI-configurable" header was never questioned.
-
-**Why:** Found on 2026-09-23 while answering "where is `sentinel_set_autonomy_level` set?" after the #651 PIN work — the same question that surfaced the triage gap surfaces this one one layer down. Not fixed in #651 because that PR was scoped to three named TODOS items and this is a fourth, with a product question attached: whether a persistent level 3 should be settable from a dropdown at all, given that level 3 is what allows autonomous actuation.
-
-**How to apply:** Decide the product shape first, because the two options are not equal. The TTL is a plain tunable and can go straight into the Sentinel Advanced schema plus the resolver allowlist. The level itself is a safety control: exposing a persistent `3` in a dropdown makes autonomous actuation a two-click change, where today it needs an admin service call, a PIN when `require_pin` is on, and it lapses by itself. Options: (a) expose levels 0-2 in the flow and leave 3 to the service only; (b) expose 0-3 and lean on the existing PIN gate, which covers increases; (c) expose only the TTL, keep the level service-only, and correct the docs. Whichever is chosen, add both keys to `_apply_sentinel_options` if they are to be settable per subentry, add a resolver plumbing test in the #480 regression shape, and fix the `docs/constants.md` section header for whatever stays unexposed. Note `get_autonomy_level` already coerces through `_coerce_int`, so a `NumberSelector`'s float is safe.
-
-**Effort:** M
-**Priority:** P2
-**Depends on:** None
-
----
-
 ### services.yaml advertises confirm_enroll but nothing registers it
 
 **What:** `services.yaml:19` defines `confirm_enroll`, but no `async_register` call for it exists anywhere in the integration — 18 services advertised, 17 registered. The Developer Tools services page shows a service that errors with "Unable to find service" when called.
@@ -2721,19 +2692,6 @@ This is the same allowlist-omission class as #480 and as the triage options fixe
 
 ---
 
-### Deleting the Database subentry from the UI does not reload the entry
-
-**What:** `_on_entry_changed` (`__init__.py`, the `SIGNAL_CONFIG_ENTRY_CHANGED` listener) snapshots and diffs only Sentinel subentries. The feature wizard schedules its own reload when it creates or updates the Database subentry, but a UI deletion of that subentry has no equivalent path: the entry keeps running on the old pool, store, and gallery, no warning is logged and no `database_not_configured` repair issue appears, until an unrelated reload or restart flips it to in-memory storage at some arbitrary later time.
-
-**Why:** Converged on by the Claude adversarial pass and the Codex pass during the review of the #615 fix (v3.39.1). Deferred by user decision (2026-09-09): deleting the Database subentry from the UI is a rare, deliberate action, and extending the reload guard risks a double reload because the wizard already schedules one on DB writes, so the reload semantics deserve their own change.
-
-**How to apply:** Extend the `_sentinel_snapshot` / `current_snapshot` comprehensions to include `SUBENTRY_TYPE_DATABASE`, so a Database subentry add/remove/change reloads the entry (the immediate-stop branch is Sentinel-specific and must stay gated on the Sentinel diff). Add a test that a UI deletion (`hass.config_entries.async_remove_subentry`) reloads and raises the repair issue, and one that the wizard's own `_schedule_reload` on a DB write does not double-fire.
-
-**Effort:** S
-**Priority:** P2
-
----
-
 ### A store worker abandoned by the unload keeps its connection and can still write
 
 **What:** `_cancel_and_wait` (`__init__.py`) gives up on a task that outlives five cancels, logs a warning, and lets `async_unload_entry` close the pool and return. psycopg's `pool.close()` does not close checked-out connections, so an abandoned langgraph batch worker keeps its connection and, if it later resumes, can upsert tool-index rows computed by the old entry over the reloaded entry's rows; the new entry's cached hashes would still describe its own data and hide the stale index. The index runner has the same shape: `rd.tool_index_task = None` runs even when the wait gave up, dropping the only handle to a task that can still set `tool_index_ready` and send `SIGNAL_TOOL_INDEX_UPDATED` (not entry-scoped).
@@ -2840,6 +2798,24 @@ This is the same allowlist-omission class as #480 and as the triage options fixe
 ---
 
 ## Completed
+
+### Two Sentinel autonomy options are unreachable, and the docs call them UI-configurable
+
+**What:** `sentinel_autonomy_level` and `sentinel_runtime_override_ttl_minutes` (`const.py:216-217`) are read only from `self._options` in `SentinelEngine.get_autonomy_level` (`sentinel/engine.py:616`) and `set_autonomy_level` (`:588`). Neither has a config-flow field, neither has a `strings.json` label, and neither is in `_apply_sentinel_options`' defaults dict in `core/subentry_resolver.py` — and that dict is the allowlist: the overlay is `for key, value in sentinel_defaults.items(): options[key] = data.get(key, value)`, so a value placed in Sentinel subentry data is never copied. The only live path is the legacy top-level base at `subentry_resolver.py:208` (`{**entry.data, **entry.options}`). Meanwhile `docs/constants.md:310` heads the whole *Sentinel Autonomy Level* section **"UI-configurable"**, and lists both rows under it.
+
+This is the same allowlist-omission class as #480 and as the triage options fixed in #651 — but it bites harder, because the autonomy level is what gates the layers above it: triage runs only at level >= 1 (`engine.py:1684`), and auto-execution needs level >= 2 (`_MIN_AUTO_EXECUTE_LEVEL`). Every install therefore sits permanently at the recommended default of `1`, and the only way to move it is `sentinel_set_autonomy_level`, whose override is TTL-bounded (default 60 minutes) and reverts. A user cannot persistently choose level 0 (fully passive, no notifications) or level 2/3 at all. The third row in that docs table, `sentinel_require_pin_for_level_increase`, *is* exposed in the Advanced schema, which is probably why the section's "UI-configurable" header was never questioned.
+
+**Why:** Found on 2026-09-23 while answering "where is `sentinel_set_autonomy_level` set?" after the #651 PIN work — the same question that surfaced the triage gap surfaces this one one layer down. Not fixed in #651 because that PR was scoped to three named TODOS items and this is a fourth, with a product question attached: whether a persistent level 3 should be settable from a dropdown at all, given that level 3 is what allows autonomous actuation.
+
+**How to apply:** Decide the product shape first, because the two options are not equal. The TTL is a plain tunable and can go straight into the Sentinel Advanced schema plus the resolver allowlist. The level itself is a safety control: exposing a persistent `3` in a dropdown makes autonomous actuation a two-click change, where today it needs an admin service call, a PIN when `require_pin` is on, and it lapses by itself. Options: (a) expose levels 0-2 in the flow and leave 3 to the service only; (b) expose 0-3 and lean on the existing PIN gate, which covers increases; (c) expose only the TTL, keep the level service-only, and correct the docs. Whichever is chosen, add both keys to `_apply_sentinel_options` if they are to be settable per subentry, add a resolver plumbing test in the #480 regression shape, and fix the `docs/constants.md` section header for whatever stays unexposed. Note `get_autonomy_level` already coerces through `_coerce_int`, so a `NumberSelector`'s float is safe.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** None
+
+**Completed:** #783 (in `[Unreleased]`, ships in 3.45.0). Sentinel's Advanced setup now has **Autonomy level** (0–3, default 1) and **Autonomy override duration**; levels 2/3 notify like level 1 until automatic actions land (#789).
+
+---
 
 ### A PIN refusal that hits the action-round limit ends with a generic apology
 
