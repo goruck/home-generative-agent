@@ -1079,6 +1079,10 @@ class FallbackEmbeddings:
         self._admitted_callback: Callable[[str], None] | None = None
         self._verify_locks: dict[str, asyncio.Lock] = {}
         self._verify_after: dict[str, float] = {}
+        # Admitted against the store's record, the primary's build unknown.
+        self._by_record: set[str] = set()
+        # Bumped each time a member is held again, for the calls on it.
+        self._admissions: dict[str, int] = {}
 
     def _is_member(self, provider_id: str) -> bool:
         return any(item[2] == provider_id for item in self.chain)
@@ -1099,19 +1103,51 @@ class FallbackEmbeddings:
         verifier reads its build; True admits it for good, False skips it for
         this call and, unless it was removed meanwhile, for the next
         `_VERIFY_RETRY_S`. `admitted_callback(provider_id)` runs once per
-        member, when it is first admitted, whoever admits it.
+        member each time it is admitted, whoever admits it: again after
+        `hold_again`, so it must not mind a second call.
         """
         self._verifier = verifier
         self._admitted_callback = admitted_callback
         self._unverified.update(p for p in provider_ids if self._is_member(p))
 
-    def verify_provider(self, provider_id: str) -> None:
-        """Admit a held member whose build was found to be the store's (#857)."""
+    def verify_provider(self, provider_id: str, *, by_record: bool = False) -> None:
+        """
+        Admit a held member whose build was found to be the store's (#857).
+
+        `by_record`: compared with the build the store's record names, the
+        primary's being unknown; `revoke_record_admissions` holds it again
+        once the primary's build is known.
+        """
         if provider_id not in self._unverified:
             return
         self._unverified.discard(provider_id)
+        if by_record:
+            self._by_record.add(provider_id)
+        else:
+            self._by_record.discard(provider_id)
         if self._admitted_callback is not None and self._is_member(provider_id):
             self._admitted_callback(provider_id)
+
+    def revoke_record_admissions(self) -> None:
+        """Hold again the members admitted against the store's record (#857)."""
+        for provider_id in tuple(self._by_record):
+            self.hold_again(provider_id)
+        self._by_record.clear()
+
+    def hold_again(self, provider_id: str) -> None:
+        """
+        Hold an admitted member again until its build is checked anew (#857).
+
+        For one admitted against a reference that was since replaced (the
+        store's record, before the primary's build was known) and whose build
+        cannot be read now to compare with the new one.
+        """
+        if self._verifier is None or not self._is_member(provider_id):
+            return
+        self._unverified.add(provider_id)
+        self._verify_after.pop(provider_id, None)
+        # A call already on it discards its answer (see `_held_meanwhile`).
+        self._admissions[provider_id] = self._admissions.get(provider_id, 0) + 1
 
     @property
     def unverified(self) -> frozenset[str]:
@@ -1122,6 +1158,9 @@ class FallbackEmbeddings:
         """Return True if `provider_id` may answer; check a held one's build first."""
         if provider_id not in self._unverified:
             return True
+        if monotonic() < self._verify_after.get(provider_id, 0.0):
+            # Refused a moment ago: no wait on a check in flight either.
+            return False
         lock = self._verify_locks.setdefault(provider_id, asyncio.Lock())
         async with lock:
             if provider_id not in self._unverified:
@@ -1190,10 +1229,23 @@ class FallbackEmbeddings:
     ) -> HomeAssistantError:
         """Return the error for a call no member answered."""
         msg = cls._all_failed(last_err, skipped, held)
-        if last_err is None and held:
-            # Nothing was tried: the providers are unavailable, not failing.
+        if held or (last_err is None and not skipped):
+            # A member held until its build is checked, or none left: the
+            # store's embeddings are unavailable, not failing.
             return EmbeddingsUnavailableError(msg)
         return HomeAssistantError(msg)
+
+    def _held_meanwhile(self, label: str, provider_id: str, admission: int) -> bool:
+        """Return True, logging it, if the member was held again meanwhile (#857)."""
+        if self._admissions.get(provider_id, 0) == admission:
+            return False
+        LOGGER.warning(
+            "%s on embedding provider %s discarded: it was held again while "
+            "the call ran, until its build is checked anew.",
+            label,
+            provider_id,
+        )
+        return True
 
     def _removed_meanwhile(self, label: str, provider_id: str) -> bool:
         """Return True, logging it, if the provider left the chain meanwhile (#860)."""
@@ -1237,6 +1289,7 @@ class FallbackEmbeddings:
             return False
         self.chain = kept
         self._unverified.discard(provider_id)
+        self._by_record.discard(provider_id)
         if self._active_provider_id == provider_id:
             self._active_provider_id = kept[0][2] if kept else None
             if self._active_provider_id is not None and self.removed_callback:
@@ -1291,6 +1344,7 @@ class FallbackEmbeddings:
             if not await self._admitted(provider_id):
                 held.append(provider_id)
                 continue
+            admission = self._admissions.get(provider_id, 0)
             try:
                 result = await self._aembed_documents(model, texts)
             except Exception as err:
@@ -1306,6 +1360,9 @@ class FallbackEmbeddings:
                 continue
             else:
                 if self._removed_meanwhile("Embedding call", provider_id):
+                    continue
+                if self._held_meanwhile("Embedding call", provider_id, admission):
+                    held.append(provider_id)
                     continue
                 if failed_providers:
                     LOGGER.warning(
@@ -1337,6 +1394,7 @@ class FallbackEmbeddings:
             if not await self._admitted(provider_id):
                 held.append(provider_id)
                 continue
+            admission = self._admissions.get(provider_id, 0)
             try:
                 result = await self._aembed_query(model, text)
             except Exception as err:
@@ -1352,6 +1410,9 @@ class FallbackEmbeddings:
                 continue
             else:
                 if self._removed_meanwhile("Embedding query", provider_id):
+                    continue
+                if self._held_meanwhile("Embedding query", provider_id, admission):
+                    held.append(provider_id)
                     continue
                 if failed_providers:
                     LOGGER.warning(

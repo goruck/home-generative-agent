@@ -2582,6 +2582,30 @@ label pair ("Server URL" vs "Base URL").
 
 ---
 
+### Tool retrieval and the actuation safety filter log a traceback per turn while an embedding fallback is held
+
+**What:** Since #857, the embedding chain raises `EmbeddingsUnavailableError` while a held fallback is the only member it could try. `_search_memories` (`agent/graph.py`) handles it, but RAG tool retrieval (around `agent/graph.py:1081`) and `_get_actuation_safety_tools` (around `agent/graph.py:1957`) do not list it as a known error, so each turn logs a full traceback. The safety filter's outer `except Exception` also returns `[]` without trying its query-less fallback (`asearch(("system", "tools"))`, which needs no embedding), so actuation tools are not force-injected while the hold lasts. It fails closed, so it is not a safety break.
+
+**Why:** Found by the cycle 3 red team in the #857 review (2026-10-27) and deferred so the last fix round did not touch the safety tool filter without a review pass (D9).
+
+**How to apply:** Add `EmbeddingsUnavailableError` to the known-error handling at both call sites: a warning without a traceback (debug after the first), and for the safety filter, the existing query-less path. Test both with a chain whose only member is held.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+### Two small #857 display gaps: a stale label in the cap-stop repair, and the embedding deployment after a switch
+
+**What:** (1) A re-embed stopped on too many rejected texts raises its repair issue with the label read before `_END_ON_REJECTIONS_SQL` added the target to the store's writers, so the issue names "A" rather than "A + T" until the next setup recomputes it (`core/embedding_record.py`, the `_TooManyRejectedError` handler). (2) `model_deployments["embedding"]` is set when setup's held fallback is admitted, but not when a different, already-checked fallback answers first, and it is never set back when an admitted fallback is removed after `hold_again`.
+
+**Why:** Found by the cycle 3 Claude adversarial pass in the #857 review (2026-10-27); deferred as display-only (D9).
+
+**How to apply:** (1) Return the new holders' label from `_async_end_on_rejections` and raise `_StoppedError` with it. (2) Set the embedding deployment from the chain's switch and removed callbacks, wherever `_active_provider_id` changes.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
 ## Config Entry Lifecycle
 
 ### Two Sentinel autonomy options are unreachable, and the docs call them UI-configurable

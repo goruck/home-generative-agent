@@ -2864,6 +2864,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     def _announce_admitted_embedding_fallback(provider_id: str) -> None:
         if provider_id not in held_fallback_notices:
             return
+        # Only now the deployment that embeds: held, it answered nothing.
+        if (deployment := held_fallback_notices[provider_id]) is not None:
+            model_deployments["embedding"] = deployment
         _schedule_model_fallback_notification(
             "embedding",
             _emb_fb[0].entry_id,
@@ -2884,7 +2887,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         if active_provider_id == _emb_fb[0].entry_id:
             return
         provider = providers.get(active_provider_id)
-        model_deployments["embedding"] = provider.deployment if provider else deployment
         held = next(
             (
                 fb
@@ -2908,6 +2910,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 ollama_embedding_model,
             )
             return
+        model_deployments["embedding"] = provider.deployment if provider else deployment
         await _async_notify_model_fallback(
             "embedding",
             _emb_fb[0].entry_id,

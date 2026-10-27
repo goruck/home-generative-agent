@@ -2595,6 +2595,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 # (assist pipelines are routinely cancelled mid-await) cannot
                 # latch the in-progress guard and block all future indexing.
                 runtime_data.tool_indexing_in_progress = False
+                # An admission marked during this pass is spent with it (#857).
+                runtime_data.tool_index_rearmed = False
                 # Close never-awaited store.aput coroutines from interrupted
                 # paths; close() on a consumed coroutine is a no-op.
                 for task in index_tasks:
