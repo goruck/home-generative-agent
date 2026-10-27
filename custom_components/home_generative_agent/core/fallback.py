@@ -1065,6 +1065,7 @@ class FallbackEmbeddings:
         # the verifier admits them (#857).
         self._unverified: set[str] = set()
         self._verifier: Callable[[str], Awaitable[bool]] | None = None
+        self._admitted_callback: Callable[[str], None] | None = None
         self._verify_locks: dict[str, asyncio.Lock] = {}
         self._verify_after: dict[str, float] = {}
 
@@ -1072,7 +1073,11 @@ class FallbackEmbeddings:
         return any(item[2] == provider_id for item in self.chain)
 
     def hold_until_verified(
-        self, provider_ids: Iterable[str], verifier: Callable[[str], Awaitable[bool]]
+        self,
+        provider_ids: Iterable[str],
+        verifier: Callable[[str], Awaitable[bool]],
+        *,
+        admitted_callback: Callable[[str], None] | None = None,
     ) -> None:
         """
         Keep `provider_ids` from answering until `verifier` admits each (#857).
@@ -1082,14 +1087,20 @@ class FallbackEmbeddings:
         into the store unnoticed. Before such a member's first call the
         verifier reads its build; True admits it for good, False skips it for
         this call and, unless it was removed meanwhile, for the next
-        `_VERIFY_RETRY_S`.
+        `_VERIFY_RETRY_S`. `admitted_callback(provider_id)` runs once per
+        member, when it is first admitted, whoever admits it.
         """
         self._verifier = verifier
+        self._admitted_callback = admitted_callback
         self._unverified.update(p for p in provider_ids if self._is_member(p))
 
     def verify_provider(self, provider_id: str) -> None:
         """Admit a held member whose build was found to be the store's (#857)."""
+        if provider_id not in self._unverified:
+            return
         self._unverified.discard(provider_id)
+        if self._admitted_callback is not None and self._is_member(provider_id):
+            self._admitted_callback(provider_id)
 
     @property
     def unverified(self) -> frozenset[str]:
@@ -1108,9 +1119,18 @@ class FallbackEmbeddings:
                 provider_id, 0.0
             ):
                 return False
-            admitted = await self._verifier(provider_id)
+            try:
+                admitted = await self._verifier(provider_id)
+            except Exception as err:  # noqa: BLE001 - held, never let in blind
+                LOGGER.warning(
+                    "Could not check the build of embedding provider %s (%s); it "
+                    "stays held.",
+                    provider_id,
+                    _safe_err_summary(err),
+                )
+                admitted = False
             if admitted and self._is_member(provider_id):
-                self._unverified.discard(provider_id)
+                self.verify_provider(provider_id)
                 return True
             self._verify_after[provider_id] = monotonic() + _VERIFY_RETRY_S
             return False
@@ -1133,20 +1153,22 @@ class FallbackEmbeddings:
     def _all_failed(
         last_err: Exception | None, skipped: list[str], held: list[str]
     ) -> str:
+        held_reason = (
+            "the build of the model on "
+            + ", ".join(held)
+            + " is not yet known to match the memory store's"
+        )
         if last_err is not None:
             return (
                 "All embedding providers failed. Last error: "
                 f"{_safe_err_summary(last_err)}"
+                + (f"; not tried because {held_reason}" if held else "")
             )
         reasons = []
         if skipped:
             reasons.append("the circuit breaker is open for " + ", ".join(skipped))
         if held:
-            reasons.append(
-                "the build of the model on "
-                + ", ".join(held)
-                + " is not yet known to match the memory store's"
-            )
+            reasons.append(held_reason)
         if reasons:
             return "No embedding provider was tried: " + "; ".join(reasons)
         return "No embedding provider is left in the chain"

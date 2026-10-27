@@ -35,9 +35,10 @@ and can time out, so a kept fallback that setup could not fully check (its
 build unread, or the primary's, whose comparison then waited) is checked
 again here, alongside the record check, against the primary's build read by
 then: one holding another build is removed from the live chain and named in
-the same issue (#860). Nothing is re-admitted or reloaded. Until then the
-chain holds such a fallback: it answers nothing before its build is read and
-found to match, at its first call if that comes first (#857).
+the same issue (#860). A removed fallback is not re-admitted, and nothing is
+reloaded. Until it is judged, the chain holds such a fallback: it answers
+nothing before its build is read and found to match, at its first call if
+that comes first (#857).
 """
 
 from __future__ import annotations
@@ -65,7 +66,7 @@ from .embedding_store import (
     EmbeddingsUnavailableError,
     UnavailableEmbeddings,
 )
-from .fallback import FallbackEmbeddings
+from .fallback import FallbackEmbeddings, is_timeout_error
 from .utils import (
     builds_differ,
     fetch_ollama_model_digest,
@@ -248,6 +249,11 @@ _RECORD_RETRY_DELAYS_S = (30.0, 60.0, 120.0, 300.0, 600.0)
 _PROBE_TEXT = "ok"
 # A rejected text's keys named in the log, at most.
 _REJECTED_LOGGED = 10
+# Wait before trying a failed text a second time: a text is rejected only if
+# it fails twice while the probe embeds after each failure (#857).
+_REJECT_RECHECK_S = 10.0
+# Words of a rate-limit error, which says nothing about the text.
+_RATE_LIMIT_WORDS = ("rate limit", "ratelimit", "too many requests", "429")
 _GEMINI_MODEL_PREFIX = "models/"
 _WHOLE_DOCUMENT = "$"
 
@@ -818,10 +824,11 @@ async def _async_settle_fallback_builds(
     another build is removed from the live chain and named in the other-build
     issue, with the ones setup left out; if it answered an embedding call
     meanwhile, the store's record notes it as a writer and the model-changed
-    repair is raised, since its vectors may be in the store. One still
-    unreadable is kept, and the log says so. With the primary's build still
-    unknown there is nothing to compare with, and the kept fallbacks are
-    named in the log.
+    repair is raised, since its vectors may be in the store. One holding the
+    same build is admitted: the chain no longer holds it (#857). One still
+    unreadable stays in the chain, held until the chain's own check admits
+    it, and the log says so. With the primary's build still unknown there is
+    nothing to compare with: they stay held, and the log names them.
 
     An unknown build decides nothing about the issue either: it is synced
     only with positive evidence (a fallback left out or removed), or once
@@ -838,8 +845,8 @@ async def _async_settle_fallback_builds(
     if current is None or primary_build is None:
         LOGGER.warning(
             "The build of %s the embedding fallback(s) %s serve could not be "
-            "compared with the primary's, which is unknown; they stay in the "
-            "chain until the next reload reads both.",
+            "compared with the primary's, which is unknown; they stay held, "
+            "checked against the memory store's record when the chain needs them.",
             gate.model,
             ", ".join(fb.name for fb in gate.unchecked),
         )
@@ -918,11 +925,14 @@ async def _async_recorded_build(
     return _recorded_build_in(row, model)
 
 
-async def async_verify_embedding_fallback(
+async def async_verify_embedding_fallback(  # noqa: PLR0913
     hass: HomeAssistant,
     entry: ConfigEntry,
     fallbacks: Mapping[str, FallbackBuild],
     provider_id: str,
+    *,
+    chain: FallbackEmbeddings | None = None,
+    warned: set[str] | None = None,
 ) -> bool:
     """
     Check a held Ollama embedding fallback's build before its first call (#857).
@@ -933,11 +943,18 @@ async def async_verify_embedding_fallback(
     store's record names. The same build admits it. Another build removes it
     from the chain and names it in the other-build issue. Without both builds
     it stays held, so a fallback never writes vectors nobody can tell apart
-    from the store's.
+    from the store's. `chain` is the chain asking: one a reload replaced
+    decides nothing about the new entry's. `warned` names the fallbacks
+    already logged as held, so a long hold logs once.
     """
     fb = fallbacks.get(provider_id)
     rd = getattr(entry, "runtime_data", None)
-    if fb is None or rd is None or entry.state not in ACTIVE_ENTRY_STATES:
+    if (
+        fb is None
+        or rd is None
+        or entry.state not in ACTIVE_ENTRY_STATES
+        or (chain is not None and rd.embeddings is not chain)
+    ):
         return False
     gate = rd.embedding_fallback_gate
     model = gate.model if gate is not None else ""
@@ -948,16 +965,31 @@ async def async_verify_embedding_fallback(
         or fb.digest
     )
     current = rd.embedding_fingerprint
-    reference = current.digest if current is not None else None
-    if reference is None and rd.pool is not None:
-        reference = await _async_recorded_build(rd.pool, model)
-    if entry.state not in ACTIVE_ENTRY_STATES:
+    recorded = (
+        await _async_recorded_build(rd.pool, model)
+        if (current is None or current.digest is None) and rd.pool is not None
+        else None
+    )
+    if entry.state not in ACTIVE_ENTRY_STATES or (
+        chain is not None and rd.embeddings is not chain
+    ):
         return False
+    # Read after the waits: the record check may have learned the primary's
+    # build meanwhile, and it outranks the record (#857).
+    current = rd.embedding_fingerprint
+    reference = current.digest if current is not None else None
+    by_record = reference is None
+    if by_record:
+        reference = recorded
     if build is None or reference is None:
-        LOGGER.warning(
+        first = warned is None or provider_id not in warned
+        if warned is not None:
+            warned.add(provider_id)
+        LOGGER.log(
+            logging.WARNING if first else logging.DEBUG,
             "Embedding fallback provider %s does not stand in for the primary: "
             "the build of %s it serves, or the one the memory store holds, "
-            "could not be read. It is checked again within a minute when needed.",
+            "could not be read. It is checked again when the chain next needs it.",
             fb.name,
             model,
         )
@@ -969,15 +1001,29 @@ async def async_verify_embedding_fallback(
             model,
         )
         return True
-    chain = rd.embeddings
-    if isinstance(chain, FallbackEmbeddings):
-        chain.remove_provider(provider_id)
+    if by_record and _primary_built(entry):
+        # The primary answers but its build is unread, so the record may be
+        # stale (a pull on both servers): hold, and let the record check,
+        # which reads the primary's build, judge it.
+        LOGGER.debug(
+            "Embedding fallback provider %s serves another build of %s than the "
+            "memory store's record; held until the primary's build is read.",
+            fb.name,
+            model,
+        )
+        return False
+    live_chain = rd.embeddings
+    if isinstance(live_chain, FallbackEmbeddings):
+        live_chain.remove_provider(provider_id)
     LOGGER.warning(
         "Embedding fallback provider %s removed: its server holds another build "
         "of %s than the memory store's, which would mix models in it.",
         fb.name,
         model,
     )
+    # The live gate, read after the waits: the record check may have settled
+    # other fallbacks meanwhile (#857).
+    gate = rd.embedding_fallback_gate
     if gate is not None:
         left_out = tuple(dict.fromkeys((*gate.left_out, fb.name)))
         rd.embedding_fallback_gate = replace(gate, left_out=left_out)
@@ -1207,6 +1253,42 @@ async def _embed_once(embeddings: Any, texts: Sequence[str]) -> list[list[float]
     return vectors
 
 
+def _says_nothing_about_the_text(err: BaseException) -> bool:
+    """Return True for an error of the provider's state: a timeout or rate limit."""
+    text = str(err).lower()
+    return is_timeout_error(err) or any(word in text for word in _RATE_LIMIT_WORDS)
+
+
+async def _embed_alone(
+    embeddings: Any, text: str, batch_err: Exception
+) -> list[float] | None:
+    """
+    Embed one text of a failing batch; None only when the provider rejects it.
+
+    Rejected means it failed twice, a probe text embedding after each
+    failure, and neither failure was a timeout or rate limit. Anything else
+    raises, so the run stops with the vector kept: a provider that is down,
+    slow or rate limited is never read as a rejection (#857).
+    """
+    for attempt in range(2):
+        if attempt:
+            await asyncio.sleep(_REJECT_RECHECK_S)
+        try:
+            return (await _embed_once(embeddings, [text]))[0]
+        except EmbeddingsUnavailableError:
+            raise
+        except Exception as err:
+            if _says_nothing_about_the_text(err):
+                raise
+        try:
+            await _embed_once(embeddings, [_PROBE_TEXT])
+        except EmbeddingsUnavailableError:
+            raise
+        except Exception:  # noqa: BLE001 - the provider is down
+            raise batch_err from None
+    return None
+
+
 async def _embed_batch(
     embeddings: Any, texts: Sequence[str]
 ) -> tuple[list[list[float] | None], float]:
@@ -1214,10 +1296,10 @@ async def _embed_batch(
     Embed a batch; a text the provider keeps rejecting gets None (#857).
 
     The batch is embedded with retries first. If it still fails, each text is
-    embedded on its own: one that fails while a probe text still embeds is
-    rejected (over the provider's input limit, say), and the run carries on
-    without it rather than stopping on the same batch at every resume. If
-    the probe fails too, the provider is down and the batch's error stands.
+    embedded on its own: one the provider keeps rejecting (over its input
+    limit, say; see `_embed_alone`) gets None, and the run carries on without
+    it rather than stopping on the same batch at every resume. Any other
+    failure stops the run, the batch's error standing.
     """
     try:
         vectors, took = await _embed_with_retry(embeddings, texts)
@@ -1234,18 +1316,7 @@ async def _embed_batch(
         took = 0.0
         for text in texts:
             started = time.monotonic()
-            try:
-                single.extend(await _embed_once(embeddings, [text]))
-            except EmbeddingsUnavailableError:
-                raise
-            except Exception:  # noqa: BLE001 - told apart by the probe
-                try:
-                    await _embed_once(embeddings, [_PROBE_TEXT])
-                except EmbeddingsUnavailableError:
-                    raise
-                except Exception:  # noqa: BLE001 - the provider is down
-                    raise batch_err from None
-                single.append(None)
+            single.append(await _embed_alone(embeddings, text, batch_err))
             took += time.monotonic() - started
         return single, took
     return list(vectors), took
