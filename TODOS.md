@@ -888,19 +888,6 @@ validation.
 
 ---
 
-### Write leak, smoke and safety alerts as critical push notifications
-
-**What:** `add_automation` now installs a working leak alert on the first try (PR [#669](https://github.com/goruck/home-generative-agent/pull/669)), but the push it writes is an ordinary `notify.mobile_app_*` call. On the field test the alert was delivered and then sat unseen in the phone's Home Assistant notification group among the ~370 camera-analysis and Sentinel pushes HGA sent that day; a Focus mode would have held it entirely. A wet floor is exactly the notification that must not be grouped, summarised or silenced.
-
-**Why:** Found on the 2026-09-26 field test of #669, after the automation itself was confirmed correct end to end. Out of scope there because it is a change in what the model is told to write, not in what the check refuses.
-
-**How to apply:** For automations whose trigger is a `binary_sensor` of device class `moisture`, `smoke`, `gas`, `carbon_monoxide` or `safety`, have the model add `data: {push: {sound: {name: default, critical: 1, volume: 1.0}}}` (iOS) and `data: {channel: alarm_stream, importance: high}` (Android) to the notify action. Two ways: a sentence in the tool docstring plus an example, or a post-validation rewrite in `add_automation` that adds the critical payload when the trigger's device class is one of those and the action targets a `notify.mobile_app_*` service (deterministic, works for every model). Prefer the rewrite; document it, because a critical alert bypasses the user's Do Not Disturb by design. Test with the field YAML from `test_automation_targets.py`.
-
-**Effort:** S
-**Priority:** P2
-
----
-
 ### The tool-loop guard's give-up message is still blind after an ordinary round
 
 **What:** `_tool_loop_guard` (`agent/graph.py`) now repeats the last tool result when that result was a refused `add_automation`, so the user sees what was wrong. After any other final round (a `GetLiveContext` that returned "Action failed.", a tool error, a lookup that came back empty) it still replies with the bare "I wasn't able to complete this request after several tool-use attempts", which tells the user nothing about which step failed or what the model was trying to do.
@@ -2702,19 +2689,6 @@ label pair ("Server URL" vs "Base URL").
 
 **Effort:** M
 **Priority:** P3
-
----
-
-### Deleting the Database subentry from the UI does not reload the entry
-
-**What:** `_on_entry_changed` (`__init__.py`, the `SIGNAL_CONFIG_ENTRY_CHANGED` listener) snapshots and diffs only Sentinel subentries. The feature wizard schedules its own reload when it creates or updates the Database subentry, but a UI deletion of that subentry has no equivalent path: the entry keeps running on the old pool, store, and gallery, no warning is logged and no `database_not_configured` repair issue appears, until an unrelated reload or restart flips it to in-memory storage at some arbitrary later time.
-
-**Why:** Converged on by the Claude adversarial pass and the Codex pass during the review of the #615 fix (v3.39.1). Deferred by user decision (2026-09-09): deleting the Database subentry from the UI is a rare, deliberate action, and extending the reload guard risks a double reload because the wizard already schedules one on DB writes, so the reload semantics deserve their own change.
-
-**How to apply:** Extend the `_sentinel_snapshot` / `current_snapshot` comprehensions to include `SUBENTRY_TYPE_DATABASE`, so a Database subentry add/remove/change reloads the entry (the immediate-stop branch is Sentinel-specific and must stay gated on the Sentinel diff). Add a test that a UI deletion (`hass.config_entries.async_remove_subentry`) reloads and raises the repair issue, and one that the wizard's own `_schedule_reload` on a DB write does not double-fire.
-
-**Effort:** S
-**Priority:** P2
 
 ---
 
