@@ -66,7 +66,7 @@ from .embedding_store import (
     EmbeddingsUnavailableError,
     UnavailableEmbeddings,
 )
-from .fallback import FallbackEmbeddings, is_timeout_error
+from .fallback import FallbackEmbeddings
 from .utils import (
     builds_differ,
     fetch_ollama_model_digest,
@@ -252,9 +252,12 @@ _REJECTED_LOGGED = 10
 # Wait before trying a failed text a second time: a text is rejected only if
 # it fails twice while the probe embeds after each failure (#857).
 _REJECT_RECHECK_S = 10.0
-# A rate-limit error says nothing about the text. Told by its type or HTTP
-# status, never by its message, which can quote a token count or the text.
-_RATE_LIMIT_STATUS = 429
+# The HTTP statuses that say the provider refused the input itself: bad
+# request, too large, unprocessable. Any other failure (a timeout, a rate
+# limit, a 5xx, a dropped connection, no status at all) says nothing about the
+# text, so it never drops a vector (#857). Told by status, never by the
+# message, which can quote a token count or the text.
+_INPUT_REJECTED_STATUSES = frozenset({400, 413, 422})
 _CAUSE_DEPTH = 5
 _GEMINI_MODEL_PREFIX = "models/"
 _WHOLE_DOCUMENT = "$"
@@ -940,7 +943,7 @@ async def async_verify_embedding_fallback(  # noqa: PLR0913
     Check a held Ollama embedding fallback's build before its first call (#857).
 
     The chain asks this when it needs a fallback setup could not compare
-    with the primary's build. Its build, read now (or as setup read it), is
+    with the primary's build. Its build, read now, is
     compared with the primary's, or while that is unknown with the build the
     store's record names. The same build admits it. Another build removes it
     from the chain and names it in the other-build issue. Without both builds
@@ -960,11 +963,10 @@ async def async_verify_embedding_fallback(  # noqa: PLR0913
         return False
     gate = rd.embedding_fallback_gate
     model = gate.model if gate is not None else ""
-    build = (
-        await fetch_ollama_model_digest(
-            hass, fb.url, model, timeout_s=DIGEST_FETCH_TIMEOUT_S
-        )
-        or fb.digest
+    # Read now, never setup's read: a build that changed since, or a read
+    # that fails now, must not admit it (#857).
+    build = await fetch_ollama_model_digest(
+        hass, fb.url, model, timeout_s=DIGEST_FETCH_TIMEOUT_S
     )
     current = rd.embedding_fingerprint
     recorded = (
@@ -1260,25 +1262,33 @@ async def _embed_once(embeddings: Any, texts: Sequence[str]) -> list[list[float]
     return vectors
 
 
-def _is_rate_limit(err: BaseException) -> bool:
-    """Return True for a rate-limit error, by type or HTTP status, or its cause's."""
+def _http_status(err: BaseException) -> int | None:
+    """
+    Return the HTTP status an error, or its cause, carries; None without one.
+
+    Each SDK carries it its own way: `status_code` (OpenAI, Ollama), on its
+    `response` (httpx), or `code` (Google's api_core errors, Gemini's).
+    """
     seen: BaseException | None = err
     for _ in range(_CAUSE_DEPTH):
         if seen is None:
-            return False
+            return None
         response = getattr(seen, "response", None)
-        status = getattr(seen, "status_code", None) or getattr(
-            response, "status_code", None
-        )
-        if "RateLimit" in type(seen).__name__ or status == _RATE_LIMIT_STATUS:
-            return True
+        for value in (
+            getattr(seen, "status_code", None),
+            getattr(response, "status_code", None),
+            getattr(seen, "code", None),
+        ):
+            # HTTPStatus is an int; grpc and str codes are not.
+            if isinstance(value, int) and not isinstance(value, bool):
+                return int(value)
         seen = seen.__cause__
-    return False
+    return None
 
 
-def _says_nothing_about_the_text(err: BaseException) -> bool:
-    """Return True for an error of the provider's state: a timeout or rate limit."""
-    return is_timeout_error(err) or _is_rate_limit(err)
+def _rejects_the_input(err: BaseException) -> bool:
+    """Return True only if the provider answered that the input is bad (#857)."""
+    return _http_status(err) in _INPUT_REJECTED_STATUSES
 
 
 async def _embed_alone(
@@ -1287,10 +1297,11 @@ async def _embed_alone(
     """
     Embed one text of a failing batch; None only when the provider rejects it.
 
-    Rejected means it failed twice, a probe text embedding after each
-    failure, and neither failure was a timeout or rate limit. Anything else
-    raises, so the run stops with the vector kept: a provider that is down,
-    slow or rate limited is never read as a rejection (#857).
+    Rejected means it failed twice, each time with an HTTP status saying the
+    input is bad (see `_INPUT_REJECTED_STATUSES`), and a probe text embedded
+    after each failure. Anything else raises, so the run stops with the
+    vector kept: a provider that is down, slow, overloaded or rate limited is
+    never read as a rejection (#857).
     """
     for attempt in range(2):
         if attempt:
@@ -1300,7 +1311,7 @@ async def _embed_alone(
         except EmbeddingsUnavailableError:
             raise
         except Exception as err:
-            if _says_nothing_about_the_text(err):
+            if not _rejects_the_input(err):
                 raise
         try:
             await _embed_once(embeddings, [_PROBE_TEXT])

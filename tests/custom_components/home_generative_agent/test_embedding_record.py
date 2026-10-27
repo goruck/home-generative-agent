@@ -3909,8 +3909,10 @@ async def test_a_held_fallback_not_admitted_answers_nothing_for_a_while(
         lambda: clock[0],
     )
 
-    with pytest.raises(Exception, match="All embedding providers failed"):
+    with pytest.raises(Exception, match="All embedding providers failed") as err:
         await chain.aembed_documents(["abc"])
+    # A member was tried and failed: that is a failure, not unavailability.
+    assert not isinstance(err.value, EmbeddingsUnavailableError)
     with pytest.raises(Exception, match="All embedding providers failed"):
         await chain.aembed_query("abc")
     assert verifier.await_count == 1
@@ -3923,13 +3925,20 @@ async def test_a_held_fallback_not_admitted_answers_nothing_for_a_while(
 
 @pytest.mark.asyncio
 async def test_a_chain_of_held_members_alone_says_why_nothing_was_tried() -> None:
-    """With no other member, the error names the held one."""
+    """
+    With no other member, the error names the held one.
+
+    It is the unavailable error, so memory search falls back to recent
+    memories and a re-embed stops with every vector kept.
+    """
     chain = FallbackEmbeddings([(FakeEmbeddings("f"), "edge", "p2")])
     chain.hold_until_verified(["p2"], AsyncMock(return_value=False))
 
-    with pytest.raises(Exception, match="not yet known to match") as err:
+    with pytest.raises(EmbeddingsUnavailableError, match="not yet known") as err:
         await chain.aembed_documents(["abc"])
     assert "p2" in str(err.value)
+    with pytest.raises(EmbeddingsUnavailableError, match="not yet known"):
+        await chain.aembed_query("abc")
 
 
 @pytest.mark.asyncio
@@ -4062,9 +4071,11 @@ async def test_the_verifier_compares_with_the_record_while_the_primarys_is_unkno
     [
         (None, "w:a1", None, False),  # its build unread now and at setup
         ("w:a1", None, None, False),  # nothing to compare with
-        (None, "w:a1", "w:a1", True),  # setup's read stands in for a failed one
+        # Setup's read never stands in for a failed one: the build may have
+        # changed since (#857).
+        (None, "w:a1", "w:a1", False),
     ],
-    ids=["unread", "no_reference", "setup_read"],
+    ids=["unread", "no_reference", "setup_read_is_not_evidence"],
 )
 @pytest.mark.asyncio
 async def test_the_verifier_needs_both_builds(  # noqa: PLR0913
@@ -4179,9 +4190,11 @@ class _RejectsOne(FakeEmbeddings):
         self.down = False
 
     async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
-        if self.down or self.bad in texts:
-            msg = "input is too long"
-            raise ValueError(msg)
+        if self.down:
+            msg = "connection refused"
+            raise ConnectionError(msg)
+        if self.bad in texts:
+            raise _StatusError(400)
         return await super().aembed_documents(texts)
 
 
@@ -4239,8 +4252,7 @@ async def test_many_rejected_texts_are_named_up_to_a_limit(
     async def _only_the_probe(texts: list[str]) -> list[list[float]]:
         if texts == [er._PROBE_TEXT]:
             return [[1.0]]
-        msg = "input is too long"
-        raise ValueError(msg)
+        raise _StatusError(400)
 
     embeddings.aembed_documents = _only_the_probe
     conn = _RunConn(_rows(5))
@@ -4278,10 +4290,10 @@ class _FailsOnce(FakeEmbeddings):
 async def test_a_text_that_fails_once_alone_keeps_its_vector(
     monkeypatch: pytest.MonkeyPatch, pauses: list[float]
 ) -> None:
-    """A probe that embeds after one failure is not proof of a rejection."""
+    """One input error, then a vector: not proof of a rejection."""
     monkeypatch.setattr(er, "_BATCH_SIZE", 10)
     conn = _RunConn(_rows(4))
-    embeddings = _FailsOnce("memory 2", ValueError("server busy"))
+    embeddings = _FailsOnce("memory 2", _StatusError(400))
 
     assert await _run(conn, embeddings) == []
 
@@ -4302,23 +4314,53 @@ class _StatusError(Exception):
         self.status_code = status_code
 
 
-def _caused_by_429() -> Exception:
+class _CodeError(Exception):
+    """Google api_core's errors (Gemini's): the status is `code`, an int."""
+
+    def __init__(self, code: int) -> None:
+        super().__init__(f"code {code}")
+        self.code = code
+
+
+def _caused_by(cause: Exception) -> Exception:
     err = ValueError("embedding call failed")
-    err.__cause__ = _StatusError(429)
+    err.__cause__ = cause
     return err
 
 
 @pytest.mark.parametrize(
     "error",
-    [TimeoutError(), RateLimitError("slow down"), _caused_by_429()],
-    ids=["timeout", "rate_limit_type", "rate_limit_status_cause"],
+    [
+        TimeoutError(),
+        RateLimitError("slow down"),
+        _caused_by(_StatusError(429)),
+        _CodeError(429),
+        _caused_by(_CodeError(429)),
+        _StatusError(503),
+        _StatusError(401),
+        _StatusError(408),
+        ConnectionResetError(),
+        ValueError("input is too long"),
+    ],
+    ids=[
+        "timeout",
+        "rate_limit_type",
+        "rate_limit_status_cause",
+        "gemini_rate_limit_code",
+        "gemini_rate_limit_code_cause",
+        "overloaded",
+        "auth",
+        "request_timeout",
+        "connection_reset",
+        "no_status",
+    ],
 )
 @pytest.mark.usefixtures("pauses")
 @pytest.mark.asyncio
 async def test_a_slow_or_rate_limited_text_stops_the_run_and_drops_nothing(
     monkeypatch: pytest.MonkeyPatch, error: Exception
 ) -> None:
-    """Timeouts and rate limits are the provider's state, never the text's."""
+    """Only a status saying the input is bad is a rejection (#857)."""
     monkeypatch.setattr(er, "_BATCH_SIZE", 10)
     conn = _RunConn(_rows(4))
     embeddings = _FailsOnce("memory 2", error)
@@ -4469,7 +4511,10 @@ async def test_a_held_fallback_admitted_after_a_failed_index_rearms_it(
     entry = MockConfigEntry(domain=DOMAIN, entry_id="entry1")
     entry.add_to_hass(hass)
     entry.runtime_data = SimpleNamespace(
-        tool_index_failed=True, tool_index_ready=False, tool_content_hashes={"a": "b"}
+        tool_index_failed=True,
+        tool_index_ready=False,
+        tool_indexing_in_progress=False,
+        tool_content_hashes={"a": "b"},
     )
 
     hga_component._retry_failed_tool_index(hass, entry, "p2")
@@ -4486,12 +4531,37 @@ async def test_a_held_fallback_admitted_beside_a_good_index_leaves_it(
     entry = MockConfigEntry(domain=DOMAIN, entry_id="entry1")
     entry.add_to_hass(hass)
     entry.runtime_data = SimpleNamespace(
-        tool_index_failed=False, tool_index_ready=True, tool_content_hashes={"a": "b"}
+        tool_index_failed=False,
+        tool_index_ready=True,
+        tool_indexing_in_progress=False,
+        tool_content_hashes={"a": "b"},
     )
 
     hga_component._retry_failed_tool_index(hass, entry, "p2")
 
     assert entry.runtime_data.tool_index_ready is True
+
+
+@pytest.mark.asyncio
+async def test_a_held_fallback_admitted_while_the_index_builds_marks_it(
+    hass: Any,
+) -> None:
+    """Red Team: an admission before the index task fails left it latched."""
+    entry = MockConfigEntry(domain=DOMAIN, entry_id="entry1")
+    entry.add_to_hass(hass)
+    entry.runtime_data = SimpleNamespace(
+        tool_index_failed=False,
+        tool_index_ready=False,
+        tool_indexing_in_progress=True,
+        tool_index_rearmed=False,
+        tool_content_hashes={},
+    )
+
+    hga_component._retry_failed_tool_index(hass, entry, "p2")
+
+    # The task's failure, if it ends in one, then does not latch.
+    assert entry.runtime_data.tool_index_rearmed is True
+    assert entry.runtime_data.tool_index_failed is False
 
 
 @pytest.mark.asyncio
@@ -4661,21 +4731,24 @@ async def test_a_held_fallback_logs_its_hold_once(
 
 
 @pytest.mark.asyncio
-async def test_an_over_length_error_quoting_429_is_still_a_rejection(
+async def test_an_input_error_is_a_rejection_whatever_its_message(
     monkeypatch: pytest.MonkeyPatch, pauses: list[float]
 ) -> None:
-    """A token count like 14290 in the message is not a rate limit."""
+    """A 400 quoting a token count like 14290 is not read as a rate limit."""
     monkeypatch.setattr(er, "_BATCH_SIZE", 10)
     conn = _RunConn(_rows(4))
     embeddings = _RejectsOne("memory 2")
 
     async def _over_length(texts: list[str]) -> list[list[float]]:
         if embeddings.bad in texts:
-            msg = (
-                "This model's maximum context length is 8192 tokens, however "
-                "you requested 14290 tokens"
+            err = _StatusError(400)
+            err.args = (
+                (
+                    "This model's maximum context length is 8192 tokens, "
+                    "however you requested 14290 tokens"
+                ),
             )
-            raise ValueError(msg)
+            raise err
         return [[float(len(t))] for t in texts]
 
     embeddings.aembed_documents = _over_length  # type: ignore[method-assign]
@@ -4683,6 +4756,32 @@ async def test_an_over_length_error_quoting_429_is_still_a_rejection(
     assert await _run(conn, embeddings) == []
     assert ("memories.u1", "k002", "content", f"{STAMP}#2") in conn.deletes
     assert pauses
+
+
+@pytest.mark.parametrize(
+    "error",
+    [_CodeError(400), _caused_by(_StatusError(413)), _StatusError(422)],
+    ids=["gemini_invalid_argument", "too_large_cause", "unprocessable"],
+)
+@pytest.mark.usefixtures("pauses")
+@pytest.mark.asyncio
+async def test_each_input_error_status_is_a_rejection(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    """Told by status however the SDK carries it: Gemini's is `code`."""
+    monkeypatch.setattr(er, "_BATCH_SIZE", 10)
+    conn = _RunConn(_rows(4))
+    embeddings = _RejectsOne("memory 2")
+
+    async def _rejects(texts: list[str]) -> list[list[float]]:
+        if embeddings.bad in texts:
+            raise error
+        return [[float(len(t))] for t in texts]
+
+    embeddings.aembed_documents = _rejects  # type: ignore[method-assign]
+
+    assert await _run(conn, embeddings) == []
+    assert ("memories.u1", "k002", "content", f"{STAMP}#2") in conn.deletes
 
 
 @pytest.mark.asyncio

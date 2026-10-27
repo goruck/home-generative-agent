@@ -1392,10 +1392,16 @@ def _retry_failed_tool_index(
     A held fallback refuses calls until its build is checked (#857); a tool
     index built while it was the only provider left that could answer failed,
     and a failed index is not built again. It holds the store's build, so an
-    index that did build stays as it is.
+    index that did build stays as it is. An index still being written is
+    marked, so a failure it ends in does not latch either.
     """
     runtime_data = getattr(entry, "runtime_data", None)
-    if runtime_data is None or not runtime_data.tool_index_failed:
+    if runtime_data is None:
+        return
+    if runtime_data.tool_indexing_in_progress:
+        runtime_data.tool_index_rearmed = True
+        return
+    if not runtime_data.tool_index_failed:
         return
     runtime_data.tool_index_failed = False
     LOGGER.info(

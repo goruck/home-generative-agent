@@ -1140,10 +1140,16 @@ async def _run_tool_index_background(
         raise
     except Exception:
         _LOGGER.exception("Global tool index background task failed")
-        rd.tool_index_failed = True
-        async_dispatcher_send(hass, SIGNAL_TOOL_INDEX_UPDATED, "failed", 0)
+        if rd.tool_index_rearmed:
+            # A held embedding fallback was admitted while this ran (#857):
+            # the next pass builds the index again.
+            async_dispatcher_send(hass, SIGNAL_TOOL_INDEX_UPDATED, "stale", 0)
+        else:
+            rd.tool_index_failed = True
+            async_dispatcher_send(hass, SIGNAL_TOOL_INDEX_UPDATED, "failed", 0)
     finally:
         rd.tool_indexing_in_progress = False
+        rd.tool_index_rearmed = False
 
 
 async def async_setup_entry(

@@ -97,6 +97,10 @@ class HGAData:
     tool_index_ready: bool = False
     tool_indexing_in_progress: bool = False
     tool_index_failed: bool = False
+    # Set when a held embedding fallback is admitted while the index is being
+    # written (#857): a failure of that write is the hold's, not a lasting
+    # one, so it does not latch `tool_index_failed`.
+    tool_index_rearmed: bool = False
     # The background write of the tool index, when one is in flight. Held so
     # the unload can cancel and await it BEFORE the pool closes: a reload
     # (any options change) otherwise closes the pool under the write and the

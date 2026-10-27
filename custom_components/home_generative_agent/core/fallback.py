@@ -418,6 +418,17 @@ def _default_alert(
         )
 
 
+class EmbeddingsUnavailableError(HomeAssistantError):
+    """
+    No embedding provider can answer for the memory store (#751, #857).
+
+    Raised when none could be built at setup, and by the chain when the only
+    members it could try are held until their build is checked: memory
+    search falls back to recent memories, and a re-embed stops with every
+    vector kept.
+    """
+
+
 class ModelChainTimeoutError(HomeAssistantError, TimeoutError):
     """
     Every provider tried timed out.
@@ -1173,6 +1184,17 @@ class FallbackEmbeddings:
             return "No embedding provider was tried: " + "; ".join(reasons)
         return "No embedding provider is left in the chain"
 
+    @classmethod
+    def _chain_error(
+        cls, last_err: Exception | None, skipped: list[str], held: list[str]
+    ) -> HomeAssistantError:
+        """Return the error for a call no member answered."""
+        msg = cls._all_failed(last_err, skipped, held)
+        if last_err is None and held:
+            # Nothing was tried: the providers are unavailable, not failing.
+            return EmbeddingsUnavailableError(msg)
+        return HomeAssistantError(msg)
+
     def _removed_meanwhile(self, label: str, provider_id: str) -> bool:
         """Return True, logging it, if the provider left the chain meanwhile (#860)."""
         if self._is_member(provider_id):
@@ -1297,9 +1319,7 @@ class FallbackEmbeddings:
                 self._record_success(provider_id)
                 return result
 
-        raise HomeAssistantError(
-            self._all_failed(last_err, skipped, held)
-        ) from last_err
+        raise self._chain_error(last_err, skipped, held) from last_err
 
     async def aembed_query(self, text: str) -> list[float]:
         """Embed a query through the fallback chain."""
@@ -1345,9 +1365,7 @@ class FallbackEmbeddings:
                 self._record_success(provider_id)
                 return result
 
-        raise HomeAssistantError(
-            self._all_failed(last_err, skipped, held)
-        ) from last_err
+        raise self._chain_error(last_err, skipped, held) from last_err
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         """Raise: synchronous embedding is not supported in async HA context."""
