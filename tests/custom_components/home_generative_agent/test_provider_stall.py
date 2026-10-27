@@ -77,7 +77,9 @@ async def _cancel_probe_tasks() -> Any:
 
 
 def _tracker(
-    changes: list[str] | None = None, recovered: list[str] | None = None
+    changes: list[str] | None = None,
+    recovered: list[str] | None = None,
+    run_probe: Any = None,
 ) -> ProviderStallTracker:
     """Build a tracker whose background tasks run on the test loop."""
 
@@ -94,6 +96,7 @@ def _tracker(
         provider_name=lambda provider_id: f"Name of {provider_id}",
         on_change=lambda: log.append("changed"),
         on_recovered=recovered.append if recovered is not None else None,
+        run_probe=run_probe,
     )
 
 
@@ -240,6 +243,46 @@ async def test_the_probe_clears_the_stall_once_the_provider_answers(
     assert changes[0] == changes[-1] == "changed"
     # Setup resets the circuit breakers its timeouts may have opened.
     assert recovered == ["p0"]
+
+
+@pytest.mark.asyncio
+async def test_a_probe_round_is_skipped_while_chat_holds_the_gpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate skips a round without probing; the stall clears once it opens."""
+    monkeypatch.setattr(provider_stall, "STALL_PROBE_INTERVAL_S", 0.05)
+    monkeypatch.setattr(provider_stall, "STALL_PROBE_TIMEOUT_S", 0.1)
+    gate_open = False
+    rounds: list[str] = []
+
+    async def _run_probe(provider_id: str, probe: Any) -> Any:
+        rounds.append(provider_id)
+        if not gate_open:
+            raise provider_stall.StallProbeDeferredError(
+                provider_stall.PROBE_GATE_CLOSED
+            )
+        return await probe()
+
+    tracker = _tracker(run_probe=_run_probe)
+    model = _Model("primary")
+    for _ in range(provider_stall.STALL_TIMEOUT_THRESHOLD):
+        tracker.record_timeout("p0", lambda: model.ainvoke(_MESSAGES))
+    assert tracker.is_stalled("p0")
+
+    await asyncio.sleep(0.2)  # rounds come and go, none is sent
+    assert rounds
+    assert tracker.is_stalled("p0")
+    assert tracker.status()[0]["last_probe"] is None
+    assert model.calls == 0
+
+    gate_open = True
+    for _ in range(20):
+        await asyncio.sleep(0.05)
+        if not tracker.is_stalled("p0"):
+            break
+
+    assert not tracker.is_stalled("p0")
+    assert model.calls == 1
 
 
 @pytest.mark.asyncio

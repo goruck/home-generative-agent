@@ -51,6 +51,7 @@ async def _fresh_gate_primitives(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(utils_mod, "_chat_idle", chat_idle)
     monkeypatch.setattr(utils_mod, "_chat_active_count", 0)
+    monkeypatch.setattr(utils_mod, "_chat_last_end", 0.0)
     monkeypatch.setattr(utils_mod, "_video_idle", video_idle)
     monkeypatch.setattr(utils_mod, "_video_active_count", 0)
     monkeypatch.setattr(utils_mod, "_sentinel_last_run", 0.0)

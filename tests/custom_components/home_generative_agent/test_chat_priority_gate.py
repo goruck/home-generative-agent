@@ -17,6 +17,7 @@ import asyncio
 import logging
 import threading
 import time
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -61,6 +62,7 @@ async def _fresh_gate_primitives(
 
     monkeypatch.setattr(utils_mod, "_chat_idle", new_idle)
     monkeypatch.setattr(utils_mod, "_chat_active_count", 0)
+    monkeypatch.setattr(utils_mod, "_chat_last_end", 0.0)
     monkeypatch.setattr(utils_mod, "_sentinel_last_run", 0.0)
     monkeypatch.setattr(utils_mod, "_sentinel_first_defer", 0.0)
     monkeypatch.setattr(utils_mod, "_sentinel_defer_count", 0)
@@ -511,3 +513,128 @@ async def test_run_sentinel_model_call_async_leg_drops_unsupported_temperature()
     assert len(model.calls) == 2
     retry_config = model.calls[1]
     assert retry_config["configurable"]["temperature"] is None  # type: ignore[index]
+
+
+# ---------------------------------------------------------------------------
+# Grace period after a chat turn, and tracked calls without admission (#866)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sentinel_is_deferred_within_the_grace_after_a_chat_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call just after a chat turn is deferred at once, then admitted."""
+    monkeypatch.setattr(utils_mod, "SENTINEL_CHAT_GRACE_S", 0.3)
+    utils_mod.sentinel_admission_counters()  # start the deferral counters at 0
+    async with utils_mod.local_chat_session("edge"):
+        pass
+    health: dict[str, Any] = {}
+
+    assert not utils_mod.sentinel_may_start()
+    start = time.monotonic()
+    admitted = await utils_mod.sentinel_admission(
+        "edge", category="triage", timeout_s=2.0, health_stats=health
+    )
+    assert admitted is False
+    assert time.monotonic() - start < 0.2  # no wait: deferred at once
+    assert health["sentinel_admission_consecutive_deferrals"] == 1
+    assert utils_mod.sentinel_admission_counters()["deferred_chat"] == 1
+
+    await asyncio.sleep(0.35)
+    assert utils_mod.sentinel_may_start()
+    assert (
+        await utils_mod.sentinel_admission(
+            "edge", category="triage", timeout_s=0.1, health_stats=health
+        )
+        is True
+    )
+    assert health["sentinel_admission_consecutive_deferrals"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_cloud_chat_turn_leaves_no_grace() -> None:
+    """Cloud chat never touches the local gates."""
+    async with utils_mod.local_chat_session("cloud"):
+        pass
+    assert utils_mod.chat_grace_remaining_s() == 0.0
+    assert utils_mod.sentinel_may_start()
+
+
+@pytest.mark.asyncio
+async def test_sentinel_may_start_is_false_while_chat_is_active() -> None:
+    """The pure check mirrors the gates without waiting or counting."""
+    assert utils_mod.sentinel_may_start()
+    _idle().clear()
+    assert not utils_mod.sentinel_may_start()
+    _idle().set()
+    assert utils_mod.sentinel_may_start()
+
+
+@pytest.mark.asyncio
+async def test_a_tracked_call_cancelled_by_chat_is_deferred() -> None:
+    """Foreground chat cancels a tracked call, which surfaces as deferred."""
+    started = asyncio.Event()
+
+    async def _call() -> None:
+        started.set()
+        await asyncio.sleep(10)
+
+    task = asyncio.create_task(
+        utils_mod.run_tracked_sentinel_call(_call, category="stall probe")
+    )
+    await started.wait()
+    async with utils_mod.local_chat_session("edge"):
+        pass
+
+    with pytest.raises(utils_mod.SentinelLLMDeferredError, match="stall probe"):
+        await task
+    assert not utils_mod._sentinel_llm_tasks
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_tracked_calls_caller_still_cancels_it() -> None:
+    """The caller's own cancellation (unload) is not turned into a deferral."""
+    started = asyncio.Event()
+    inner_cancelled = asyncio.Event()
+
+    async def _call() -> None:
+        started.set()
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            inner_cancelled.set()
+            raise
+
+    task = asyncio.create_task(
+        utils_mod.run_tracked_sentinel_call(_call, category="stall probe")
+    )
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # The call is taken down with its caller, not left running.
+    await asyncio.wait_for(inner_cancelled.wait(), timeout=1.0)
+    assert not utils_mod._sentinel_llm_tasks
+
+
+@pytest.mark.asyncio
+async def test_a_tracked_calls_timeout_cancels_the_call() -> None:
+    """A timeout around the helper (the probe's) ends the call, not just the wait."""
+    started = asyncio.Event()
+    inner_cancelled = asyncio.Event()
+
+    async def _call() -> None:
+        started.set()
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            inner_cancelled.set()
+            raise
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.05):
+            await utils_mod.run_tracked_sentinel_call(_call, category="stall probe")
+    await asyncio.wait_for(inner_cancelled.wait(), timeout=1.0)
+    assert not utils_mod._sentinel_llm_tasks

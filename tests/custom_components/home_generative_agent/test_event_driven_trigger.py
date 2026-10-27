@@ -411,3 +411,51 @@ async def test_polling_runs_when_no_triggers_queued(
     # Engine ran with empty snapshot — no findings, no notifications.
     notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
     assert notifier.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Each run renews the triage call budget (#866)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_each_run_renews_the_triage_call_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_run_once tells the triage service a run begins, before any finding."""
+    snapshot: FullStateSnapshot = validate_snapshot(
+        {
+            "schema_version": 1,
+            "generated_at": "2025-01-01T00:00:00+00:00",
+            "entities": [],
+            "camera_activity": [],
+            "derived": {
+                "now": "2025-01-01T00:00:00+00:00",
+                "timezone": "UTC",
+                "is_night": False,
+                "anyone_home": True,
+                "people_home": [],
+                "people_away": [],
+                "last_motion_by_area": {},
+            },
+        }
+    )
+
+    async def _fake_build(_hass: HomeAssistant, **_kwargs: Any) -> FullStateSnapshot:
+        return snapshot
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.sentinel.engine.async_build_full_state_snapshot",
+        _fake_build,
+    )
+    engine = _make_engine(MagicMock())
+    runs_begun: list[str] = []
+    triage = MagicMock()
+    triage.begin_run.side_effect = lambda: runs_begun.append("begin")
+    engine._triage_service = triage
+
+    await engine._run_once("poll")
+    await engine._run_once("event")
+
+    assert runs_begun == ["begin", "begin"]
+    triage.triage.assert_not_called()

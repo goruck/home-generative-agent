@@ -308,6 +308,7 @@ This document covers the named constants that affect integration behaviour, orga
 | `_POWER_OFF_W` | `sentinel/power_enrichment.py` | `10.0` (W) | At or below this wattage a power sensor is treated as "appliance off" when walking recorder history for the last off→on transition. Only affects the enriched `last_changed` consumed downstream (dynamic rules, triage context, and the baseline cycle-completion recency window); the `appliance_power_duration` rule measures duration by direct observation and does not use it. |
 | `_LOOKBACK_DAYS` | `sentinel/power_enrichment.py` | `30` (days) | Recorder history window searched for a power sensor's last off→on transition. |
 | `SENTINEL_ADMISSION_TIMEOUT_S` | `core/utils.py` | `2.0` (s) | How long a Sentinel LLM call waits for the chat/video foreground to become idle before deferring. Keeps interactive latency unaffected by Sentinel background work. |
+| `SENTINEL_CHAT_GRACE_S` | `core/utils.py` | `30.0` (s) | After a chat turn ends on an edge deployment, no Sentinel LLM call (or stall probe) starts for this long, so a conversation's next turn does not land on a call started between turns and cancel it (#866). |
 | `_SENTINEL_STARVATION_WARN_S` | `core/utils.py` | `300.0` (s) | Consecutive deferral duration that triggers a `degraded` sentinel health state and a WARNING log. |
 | `_SENTINEL_CANCEL_WAIT_S` | `core/utils.py` | `2.0` (s) | Grace period given to a Sentinel task to cancel cleanly when a chat turn begins. |
 
@@ -354,6 +355,8 @@ This document covers the named constants that affect integration behaviour, orga
 |---|---|---|---|
 | `RECOMMENDED_SENTINEL_TRIAGE_ENABLED` | `sentinel_triage_enabled` | `False` | Enable LLM triage pass before notification (requires autonomy ≥ 1) |
 | `RECOMMENDED_SENTINEL_TRIAGE_TIMEOUT_SECONDS` | `sentinel_triage_timeout_seconds` | `10` (s) | Max wait for triage LLM response. On timeout the decision defaults to `notify`. |
+| `RECOMMENDED_SENTINEL_TRIAGE_MAX_PER_RUN` | `sentinel_triage_max_per_run` | `5` | Most findings one Sentinel run sends to the triage model; the rest pass through untriaged (`triage_cap`). Bounds the burst a model shared with chat sees (#866). |
+| `SENTINEL_TRIAGE_CALL_GAP_S` | — | `1.0` (s) | Pause between two triage calls of one run, so a chat turn arriving between them starts without cancelling anything (#866). |
 
 ---
 
@@ -645,6 +648,7 @@ These constants live outside `const.py` in individual modules. They affect runti
 | Constant | Value | Purpose |
 |---|---|---|
 | `SENTINEL_ADMISSION_TIMEOUT_S` | `2.0` (s) | How long Sentinel waits for the chat/video foreground to idle before deferring its LLM call |
+| `SENTINEL_CHAT_GRACE_S` | `30.0` (s) | No Sentinel LLM call starts within this long of a chat turn ending (#866) |
 | `_SENTINEL_STARVATION_WARN_S` | `300.0` (s) | Consecutive deferral duration that transitions `sentinel_health` to `degraded` |
 | `_SENTINEL_CANCEL_WAIT_S` | `2.0` (s) | Grace period for Sentinel task cancellation when a chat turn begins |
 

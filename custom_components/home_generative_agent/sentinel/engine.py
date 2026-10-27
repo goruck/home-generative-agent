@@ -1886,6 +1886,9 @@ class SentinelEngine:
         )
 
     async def _run_once(self, trigger_source: str = "poll") -> None:  # noqa: PLR0912, PLR0915
+        if self._triage_service is not None:
+            # A fresh triage call budget for this run (#866).
+            self._triage_service.begin_run()
         network_context = await self._network_context()
         try:
             snapshot = await async_build_full_state_snapshot(

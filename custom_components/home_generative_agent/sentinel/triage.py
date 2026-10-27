@@ -22,10 +22,27 @@ Design constraints (from sentinel_plan.md §6, §7)
   execution — only the ``decision`` field gates ``notify`` vs ``suppress``.
 * On timeout or any error the service fails-open: decision becomes
   ``notify`` with reason_code ``triage_error``.
+
+Load on a shared local model (#866)
+-----------------------------------
+Triage is one model call per finding, in series. A run with many findings
+used to send them back to back, and on a single-GPU host that shares the
+chat model a voice turn arriving mid-burst cancelled the call in flight,
+which on Ollama can wedge the runner and stall the voice turn itself. So,
+per run (``begin_run``):
+
+* at most ``max_per_run`` findings are triaged; the rest pass through with
+  reason_code ``triage_cap``;
+* consecutive calls are ``call_gap_s`` apart, so a chat turn arriving in
+  the gap starts without cancelling anything;
+* once a call is deferred or interrupted by chat, no further call is made
+  that run (``triage_deferred``): the admission gate would only defer each
+  one in turn, and a call started between two voice turns is cancelled.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -35,6 +52,10 @@ from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from custom_components.home_generative_agent.const import (
+    RECOMMENDED_SENTINEL_TRIAGE_MAX_PER_RUN,
+    SENTINEL_TRIAGE_CALL_GAP_S,
+)
 from custom_components.home_generative_agent.core.utils import (
     SENTINEL_ADMISSION_TIMEOUT_S,
     SentinelLLMDeferredError,
@@ -75,6 +96,13 @@ TRIAGE_REASON_TIMEOUT = "triage_timeout"
 TRIAGE_REASON_ERROR = "triage_error"
 TRIAGE_REASON_DISABLED = "triage_disabled"
 TRIAGE_REASON_DEFERRED = "triage_deferred"
+TRIAGE_REASON_CAP = "triage_cap"
+
+# Reason codes of a finding the model never saw. The health sensor leaves
+# these out of ``triage_suppress_rate``.
+TRIAGE_REASONS_NOT_RUN: frozenset[str] = frozenset(
+    {TRIAGE_REASON_DISABLED, TRIAGE_REASON_DEFERRED, TRIAGE_REASON_CAP}
+)
 
 # Input allowlist for optional sanitised evidence fields.
 _ALLOWED_EVIDENCE_KEYS: frozenset[str] = frozenset(
@@ -139,13 +167,15 @@ class SentinelTriageService:
     Pass ``None`` to disable triage (all findings pass through as notify).
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         model: Any,
         *,
         timeout_seconds: int = 10,
         deployment: str = "edge",
         health_stats: dict[str, Any] | None = None,
+        max_per_run: int = RECOMMENDED_SENTINEL_TRIAGE_MAX_PER_RUN,
+        call_gap_s: float = SENTINEL_TRIAGE_CALL_GAP_S,
     ) -> None:
         """Initialise with a LangChain-compatible model."""
         self._model = model
@@ -153,6 +183,48 @@ class SentinelTriageService:
         self._deployment = deployment
         self._health_stats = health_stats
         self._log_limiter = RepeatingLogLimiter(LOGGER)
+        self._max_per_run = max(1, int(max_per_run))
+        self._call_gap_s = max(0.0, float(call_gap_s))
+        # Per-run state (#866); see begin_run.
+        self._run_calls = 0
+        self._run_skipped = 0
+        self._run_deferred = False
+        self._last_call_end = 0.0
+
+    @property
+    def max_per_run(self) -> int:
+        """Most findings one run sends to the model."""
+        return self._max_per_run
+
+    def begin_run(self) -> None:
+        """
+        Start a Sentinel run: reset the per-run call budget (#866).
+
+        The engine calls this once per run, before dispatching findings.
+        """
+        self._run_calls = 0
+        self._run_skipped = 0
+        self._run_deferred = False
+        self._last_call_end = 0.0
+        if self._health_stats is not None:
+            self._health_stats["triage_calls_last_run"] = 0
+            self._health_stats["triage_passed_through_last_run"] = 0
+
+    def run_stats(self) -> dict[str, int]:
+        """Return how many findings this run triaged and passed through."""
+        return {"calls": self._run_calls, "skipped": self._run_skipped}
+
+    def _pass_through(self, reason_code: str, summary: str) -> TriageDecision:
+        """Return the decision of a finding this run did not send to the model."""
+        self._run_skipped += 1
+        if self._health_stats is not None:
+            self._health_stats["triage_passed_through_last_run"] = self._run_skipped
+        return TriageDecision(
+            decision=TRIAGE_NOTIFY,
+            reason_code=reason_code,
+            triage_confidence=None,
+            summary=summary,
+        )
 
     async def triage(
         self,
@@ -172,7 +244,42 @@ class SentinelTriageService:
                 triage_confidence=None,
                 summary="Triage disabled.",
             )
+        if self._run_deferred:
+            # Chat took the model earlier this run; do not start a call its
+            # next turn would cancel (#866).
+            return self._pass_through(
+                TRIAGE_REASON_DEFERRED, "Triage deferred; chat was active this run."
+            )
+        if self._run_calls >= self._max_per_run:
+            if self._run_skipped == 0:
+                LOGGER.info(
+                    "Sentinel triage reached its limit of %d call(s) this run; "
+                    "the run's remaining findings pass through untriaged.",
+                    self._max_per_run,
+                )
+            return self._pass_through(
+                TRIAGE_REASON_CAP, "Triage limit reached this run; passing through."
+            )
+        if self._run_calls > 0 and self._call_gap_s > 0.0:
+            # Space the calls so a chat turn arriving between two of them
+            # starts without cancelling anything (#866).
+            gap_left = self._call_gap_s - (time.monotonic() - self._last_call_end)
+            if gap_left > 0.0:
+                await asyncio.sleep(gap_left)
+        self._run_calls += 1
+        if self._health_stats is not None:
+            self._health_stats["triage_calls_last_run"] = self._run_calls
+        try:
+            return await self._triage_call(finding, snapshot)
+        finally:
+            self._last_call_end = time.monotonic()
 
+    async def _triage_call(
+        self,
+        finding: AnomalyFinding,
+        snapshot: FullStateSnapshot,
+    ) -> TriageDecision:
+        """Send one finding to the model; fail open on anything."""
         prompt = _build_prompt(finding, snapshot)
         start = time.monotonic()
 
@@ -204,6 +311,8 @@ class SentinelTriageService:
             return _parse_response(result, elapsed_ms)
         except SentinelLLMDeferredError as err:
             LOGGER.debug("Triage deferred: %s", err)
+            # The rest of this run passes through (#866).
+            self._run_deferred = True
             return TriageDecision(
                 decision=TRIAGE_NOTIFY,
                 reason_code=TRIAGE_REASON_DEFERRED,

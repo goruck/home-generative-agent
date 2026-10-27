@@ -72,6 +72,7 @@ from ..const import (  # noqa: TID252
     CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
     CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
     CONF_SENTINEL_TRIAGE_ENABLED,
+    CONF_SENTINEL_TRIAGE_MAX_PER_RUN,
     CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
     CRITICAL_PIN_MAX_LEN,
     CRITICAL_PIN_MIN_LEN,
@@ -110,6 +111,7 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_SENTINEL_RULE_ENTITY_EXCLUSIONS,
     RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
     RECOMMENDED_SENTINEL_TRIAGE_ENABLED,
+    RECOMMENDED_SENTINEL_TRIAGE_MAX_PER_RUN,
     RECOMMENDED_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
     SENTINEL_AUTONOMY_LEVELS,
     SENTINEL_SEVERITIES,
@@ -549,6 +551,7 @@ def _default_payload() -> dict[str, Any]:
         CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS: (
             RECOMMENDED_SENTINEL_TRIAGE_TIMEOUT_SECONDS
         ),
+        CONF_SENTINEL_TRIAGE_MAX_PER_RUN: RECOMMENDED_SENTINEL_TRIAGE_MAX_PER_RUN,
         CONF_SENTINEL_BASELINE_ENABLED: RECOMMENDED_SENTINEL_BASELINE_ENABLED,
         CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES: (
             RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES
@@ -708,6 +711,15 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     )
                 ),
             ): NumberSelector(NumberSelectorConfig(min=1, max=120, step=1)),
+            vol.Required(
+                CONF_SENTINEL_TRIAGE_MAX_PER_RUN,
+                default=int(
+                    payload.get(
+                        CONF_SENTINEL_TRIAGE_MAX_PER_RUN,
+                        RECOMMENDED_SENTINEL_TRIAGE_MAX_PER_RUN,
+                    )
+                ),
+            ): NumberSelector(NumberSelectorConfig(min=1, max=50, step=1)),
             vol.Required(
                 CONF_SENTINEL_BASELINE_ENABLED,
                 default=bool(

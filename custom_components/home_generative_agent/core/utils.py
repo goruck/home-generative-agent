@@ -50,6 +50,7 @@ from .provider_stall import model_call_budget
 if TYPE_CHECKING:
     from collections.abc import (
         AsyncIterator,
+        Awaitable,
         Callable,
         Coroutine,
         Mapping,
@@ -223,6 +224,8 @@ def configured_ollama_urls(
 _chat_idle = asyncio.Event()
 _chat_idle.set()  # "no chat active" by default
 _chat_active_count: int = 0
+# When the last chat turn ended (monotonic); 0.0 when none has.
+_chat_last_end: float = 0.0
 
 _video_idle = asyncio.Event()
 _video_idle.set()  # "no video active" by default
@@ -241,6 +244,13 @@ _sentinel_llm_tasks: set[asyncio.Future[Any]] = set()
 # to become idle before deferring.  All callers (triage, discovery, explain)
 # use the same value so policy changes need only one edit.
 SENTINEL_ADMISSION_TIMEOUT_S: float = 2.0
+# Seconds after a chat turn ends during which no Sentinel LLM call starts on
+# an edge deployment (#866). A voice conversation is several turns with short
+# gaps between them; a Sentinel call started in a gap is cancelled by the next
+# turn, and on Ollama a cancelled request can wedge the runner, stalling the
+# turn that cancelled it. Deferring through the gap keeps Sentinel off the
+# GPU until the conversation is over.
+SENTINEL_CHAT_GRACE_S: float = 30.0
 
 
 class SentinelLLMDeferredError(Exception):
@@ -270,7 +280,7 @@ async def local_chat_session(
     if not is_edge_deployment(deployment):
         yield
         return
-    global _chat_active_count  # noqa: PLW0603
+    global _chat_active_count, _chat_last_end  # noqa: PLW0603
     _chat_active_count += 1
     _chat_idle.clear()
     try:
@@ -283,6 +293,7 @@ async def local_chat_session(
         yield
     finally:
         _chat_active_count -= 1
+        _chat_last_end = time.monotonic()
         if _chat_active_count == 0:
             _chat_idle.set()
         LOGGER.debug(
@@ -322,6 +333,26 @@ async def local_video_session(deployment: str) -> AsyncIterator[None]:
 def video_is_active() -> bool:
     """Return True if any video model call is currently in progress."""
     return not _video_idle.is_set()
+
+
+def chat_grace_remaining_s() -> float:
+    """Return how long the grace period after the last chat turn still runs."""
+    if _chat_last_end <= 0.0:
+        return 0.0
+    return max(0.0, SENTINEL_CHAT_GRACE_S - (time.monotonic() - _chat_last_end))
+
+
+def sentinel_may_start() -> bool:
+    """
+    Return True when a Sentinel LLM call may start on an edge deployment now.
+
+    False while a chat turn or video call is active, or within
+    ``SENTINEL_CHAT_GRACE_S`` of the last chat turn ending. A pure check:
+    unlike ``sentinel_admission`` it waits for nothing and counts nothing.
+    """
+    return (
+        _chat_idle.is_set() and _video_idle.is_set() and chat_grace_remaining_s() <= 0.0
+    )
 
 
 async def wait_for_chat_idle(timeout_s: float) -> bool:
@@ -392,13 +423,26 @@ async def sentinel_admission(
             health_stats["sentinel_admission_starved_for_s"] = 0
         return True
 
+    deferred = False
     try:
         async with asyncio.timeout(timeout_s):
             # Both events must be set (idle) before Sentinel may proceed.
             await asyncio.gather(_chat_idle.wait(), _video_idle.wait())
     except TimeoutError:
+        deferred = True
+    # A chat turn that just ended is likely followed by another (#866): defer
+    # at once rather than start a call its next turn would cancel.
+    if not deferred and (grace_left := chat_grace_remaining_s()) > 0.0:
+        LOGGER.debug(
+            "Sentinel %s deferred: a chat turn ended %.0fs ago (grace %.0fs).",
+            category,
+            SENTINEL_CHAT_GRACE_S - grace_left,
+            SENTINEL_CHAT_GRACE_S,
+        )
+        deferred = True
+    if deferred:
         # Re-evaluate after timeout: both could still be blocking.
-        chat_blocking = not _chat_idle.is_set()
+        chat_blocking = not _chat_idle.is_set() or chat_grace_remaining_s() > 0.0
         video_blocking = not _video_idle.is_set()
         _sentinel_defer_count += 1
         if chat_blocking:
@@ -479,6 +523,37 @@ async def run_sentinel_llm_call(  # noqa: PLR0913
     try:
         return await asyncio.wait_for(task, timeout=call_timeout_s)
     except asyncio.CancelledError as err:
+        raise SentinelLLMDeferredError(
+            category, "interrupted by foreground chat"
+        ) from err
+    finally:
+        _sentinel_llm_tasks.discard(task)
+
+
+async def run_tracked_sentinel_call(
+    call_factory: Callable[[], Awaitable[Any]],
+    *,
+    category: str,
+) -> Any:
+    """
+    Run a background call that foreground chat may cancel, with no admission.
+
+    For callers that check ``sentinel_may_start`` themselves (the stall
+    probe). The call runs as a task in ``_sentinel_llm_tasks``; a chat turn
+    cancelling it surfaces as ``SentinelLLMDeferredError``, while the
+    caller's own cancellation (unload, a stall cleared) still propagates.
+    """
+    task = asyncio.ensure_future(call_factory())
+    _sentinel_llm_tasks.add(task)
+    try:
+        return await task
+    except asyncio.CancelledError as err:
+        current = asyncio.current_task()
+        if current is not None and current.cancelling():
+            # The caller is being cancelled (unload, its own timeout): take
+            # the call down with it rather than leave it running.
+            task.cancel()
+            raise
         raise SentinelLLMDeferredError(
             category, "interrupted by foreground chat"
         ) from err

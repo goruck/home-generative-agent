@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
 
@@ -15,7 +16,10 @@ from custom_components.home_generative_agent.core.utils import SentinelLLMDeferr
 from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
 from custom_components.home_generative_agent.sentinel.triage import (
     TRIAGE_NOTIFY,
+    TRIAGE_REASON_CAP,
     TRIAGE_REASON_DEFERRED,
+    TRIAGE_REASON_LLM_SUPPRESS,
+    TRIAGE_REASONS_NOT_RUN,
     TRIAGE_SUPPRESS,
     SentinelTriageService,
     TriageDecision,
@@ -45,9 +49,11 @@ class MockLLM:
         self.raise_exc = raise_exc
         self.timeout = timeout
         self.last_messages: list[Any] | None = None
+        self.calls = 0
 
     async def ainvoke(self, messages: list[Any]) -> Any:
         self.last_messages = messages
+        self.calls += 1
         if self.timeout:
             await asyncio.sleep(9999)
         if self.raise_exc:
@@ -684,3 +690,131 @@ async def test_triage_deferred_when_chat_active() -> None:
     assert result.decision == TRIAGE_NOTIFY
     assert result.reason_code == TRIAGE_REASON_DEFERRED
     assert result.triage_confidence is None
+
+
+# ---------------------------------------------------------------------------
+# 11. Per-run call budget on a shared model (#866)
+# ---------------------------------------------------------------------------
+
+_SUPPRESS_REPLY = {
+    "decision": "suppress",
+    "reason_code": "routine",
+    "triage_confidence": 0.9,
+    "summary": "Routine.",
+}
+
+
+@pytest.fixture(autouse=True)
+def _no_chat_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Another test file's chat turn must not hold triage back here."""
+    import custom_components.home_generative_agent.core.utils as utils_mod  # noqa: PLC0415
+
+    monkeypatch.setattr(utils_mod, "_chat_last_end", 0.0)
+
+
+@pytest.mark.asyncio
+async def test_findings_past_the_run_limit_pass_through_untriaged() -> None:
+    """A run sends at most max_per_run findings to the model; the rest notify."""
+    llm = MockLLM(_SUPPRESS_REPLY)
+    health: dict[str, Any] = {}
+    svc = SentinelTriageService(llm, max_per_run=2, call_gap_s=0.0, health_stats=health)
+    svc.begin_run()
+
+    results = [await svc.triage(_finding(), _snapshot()) for _ in range(4)]
+
+    assert [r.decision for r in results] == [
+        TRIAGE_SUPPRESS,
+        TRIAGE_SUPPRESS,
+        TRIAGE_NOTIFY,
+        TRIAGE_NOTIFY,
+    ]
+    assert results[2].reason_code == results[3].reason_code == TRIAGE_REASON_CAP
+    assert results[2].triage_confidence is None
+    assert llm.calls == 2
+    assert svc.run_stats() == {"calls": 2, "skipped": 2}
+    assert health["triage_calls_last_run"] == 2
+    assert health["triage_passed_through_last_run"] == 2
+    assert TRIAGE_REASON_CAP in TRIAGE_REASONS_NOT_RUN
+
+
+@pytest.mark.asyncio
+async def test_begin_run_renews_the_call_budget() -> None:
+    """The next run triages again, and the health counters start from zero."""
+    llm = MockLLM(_SUPPRESS_REPLY)
+    health: dict[str, Any] = {}
+    svc = SentinelTriageService(llm, max_per_run=1, call_gap_s=0.0, health_stats=health)
+    svc.begin_run()
+    await svc.triage(_finding(), _snapshot())
+    capped = await svc.triage(_finding(), _snapshot())
+    assert capped.reason_code == TRIAGE_REASON_CAP
+
+    svc.begin_run()
+    assert health["triage_calls_last_run"] == 0
+    assert health["triage_passed_through_last_run"] == 0
+    again = await svc.triage(_finding(), _snapshot())
+
+    assert again.decision == TRIAGE_SUPPRESS
+    assert again.reason_code == "routine"
+    assert llm.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_a_limit_below_one_still_triages_one_finding() -> None:
+    """The limit is clamped to at least one call per run."""
+    svc = SentinelTriageService(MockLLM(_SUPPRESS_REPLY), max_per_run=0, call_gap_s=0.0)
+    assert svc.max_per_run == 1
+
+
+@pytest.mark.asyncio
+async def test_consecutive_calls_in_a_run_are_spaced_by_the_gap() -> None:
+    """The first call starts at once; the second waits out the gap."""
+    llm = MockLLM(_SUPPRESS_REPLY)
+    svc = SentinelTriageService(llm, max_per_run=5, call_gap_s=0.2)
+    svc.begin_run()
+
+    start = time.monotonic()
+    await svc.triage(_finding(), _snapshot())
+    first_done = time.monotonic()
+    await svc.triage(_finding(), _snapshot())
+    second_done = time.monotonic()
+
+    assert first_done - start < 0.15
+    assert second_done - first_done >= 0.19
+    assert llm.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_call_stops_triage_for_the_rest_of_the_run() -> None:
+    """Once chat took the model, no further call is started that run."""
+    llm = MockLLM(_SUPPRESS_REPLY)
+    svc = SentinelTriageService(llm, max_per_run=5, call_gap_s=0.0)
+    svc.begin_run()
+
+    with patch(
+        "custom_components.home_generative_agent.sentinel.triage.run_sentinel_model_call",
+        side_effect=SentinelLLMDeferredError("triage", "chat is active"),
+    ) as call:
+        first = await svc.triage(_finding(), _snapshot())
+        second = await svc.triage(_finding(), _snapshot())
+
+    assert first.reason_code == second.reason_code == TRIAGE_REASON_DEFERRED
+    assert first.decision == second.decision == TRIAGE_NOTIFY
+    assert call.call_count == 1
+    assert svc.run_stats() == {"calls": 1, "skipped": 1}
+
+    # The next run tries the model again.
+    svc.begin_run()
+    result = await svc.triage(_finding(), _snapshot())
+    assert result.decision == TRIAGE_SUPPRESS
+    assert result.reason_code == "routine"
+
+
+@pytest.mark.asyncio
+async def test_an_llm_suppress_reply_is_counted_as_a_call() -> None:
+    """A suppress with an empty reason code reads llm_suppress, as before."""
+    llm = MockLLM({"decision": "suppress", "reason_code": ""})
+    svc = SentinelTriageService(llm, call_gap_s=0.0)
+    svc.begin_run()
+    result = await svc.triage(_finding(), _snapshot())
+    assert result.reason_code == TRIAGE_REASON_LLM_SUPPRESS
+    assert svc.run_stats() == {"calls": 1, "skipped": 0}

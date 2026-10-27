@@ -65,9 +65,9 @@ Each detection cycle runs through these stages in order:
 
 **Safety invariant:** Deterministic rules always detect. The LLM never mutates findings or executes actions. Triage may only suppress notification delivery; it cannot alter any finding field or gate execution, and it fails open.
 
-**Admission control on edge deployments:** Sentinel LLM calls (triage, discovery, explain) defer when a chat turn or video model call is active, so the GPU is not contended during live interactions. Priority order: chat (highest) > video > Sentinel. Chat cancels in-flight Sentinel tasks on entry; video defers queued Sentinel tasks for its entire window. Sentinel resumes immediately once both foreground activities are idle. Cloud providers (OpenAI, Gemini, Anthropic) are always admitted — they use remote inference. When deferrals persist for more than 300 s, the `sentinel_health` sensor transitions to `degraded` and a WARNING is logged.
+**Admission control on edge deployments:** Sentinel LLM calls (triage, discovery, explain) defer when a chat turn or video model call is active, so the GPU is not contended during live interactions. Priority order: chat (highest) > video > Sentinel. Chat cancels in-flight Sentinel tasks on entry; video defers queued Sentinel tasks for its entire window. A Sentinel call also does not start within 30 s of a chat turn ending ([#866](https://github.com/goruck/home-generative-agent/issues/866)): a voice conversation is several turns with short gaps between them, and a call started in a gap would be cancelled by the next turn. Sentinel resumes once both foreground activities are idle and that grace period has passed; a deferred call is not retried, the finding is notified untriaged or without an explanation. The probe that checks a stalled model provider ([#828](https://github.com/goruck/home-generative-agent/issues/828)) follows the same gate. Cloud providers (OpenAI, Gemini, Anthropic) are always admitted — they use remote inference. When deferrals persist for more than 300 s, the `sentinel_health` sensor transitions to `degraded` and a WARNING is logged.
 
-Set `model_provider_uncontended: true` in Options to bypass all local gates when the server has dedicated capacity.
+Set `model_provider_uncontended: true` in Options to bypass all local gates when the server has dedicated capacity. Keep it `false` when one Ollama server serves both chat and Sentinel: a request Home Assistant cancels on Ollama can leave the runner wedged for minutes, and the cancellation cannot undo that (an Ollama matter, see #866), so the gates exist to keep Sentinel from starting calls that chat would have to cancel.
 
 ---
 
@@ -240,6 +240,7 @@ When `sentinel_triage_enabled` is `true`, each finding passes through an LLM tri
 - `triage_confidence` is recorded in the audit log but does not gate execution.
 - Triage cannot alter any finding field — it can only gate the notification.
 - Fails open: on timeout or error the decision becomes `notify` with `reason_code: triage_error`.
+- Bounded per run on a shared model ([#866](https://github.com/goruck/home-generative-agent/issues/866)): a run sends at most `sentinel_triage_max_per_run` findings to the model (default 5) and the rest of that run's findings pass through with `reason_code: triage_cap`; consecutive calls are one second apart; and once a call in a run is deferred or cancelled by chat, the run's remaining findings pass through with `reason_code: triage_deferred`. A finding that passes through is notified as if triage were off. The `sentinel_health` sensor's `triage_calls_last_run` and `triage_passed_through_last_run` show the last run's counts, and `triage_suppress_rate` counts only the findings the model saw.
 
 **Configuration** (in the Sentinel subentry, Advanced setup — reconfiguring an existing Sentinel opens the full settings form directly):
 
@@ -247,6 +248,7 @@ When `sentinel_triage_enabled` is `true`, each finding passes through an LLM tri
 |---|---|---|---|
 | `sentinel_triage_enabled` | Enable LLM triage of findings | `false` | Enable LLM triage |
 | `sentinel_triage_timeout_seconds` | Triage timeout (seconds) | `10` | Max time to wait for triage LLM response |
+| `sentinel_triage_max_per_run` | Triage calls per run (most) | `5` | Most findings one run sends to the model; the rest pass through untriaged |
 
 Triage is off by default and costs one extra LLM call per finding. It requires a
 configured chat model and autonomy level ≥ 1 — at level 0, or while suppression
@@ -675,6 +677,8 @@ Sentinel registers `sensor.sentinel_health`, updated after every detection run.
 | `sentinel_admission_degraded_category` | Category (`triage`, `discovery`, `explain`) that last triggered degraded, or `null` |
 | `sentinel_admission_consecutive_deferrals` | Consecutive times LLM admission was denied |
 | `sentinel_admission_starved_for_s` | Seconds since the last successful LLM run |
+| `triage_calls_last_run` | Findings the last run sent to the triage model |
+| `triage_passed_through_last_run` | Findings the last run passed through untriaged: past the run's limit (`triage_cap`), or chat held the model (`triage_deferred`) |
 | `trigger_source_breakdown` | Rolling 24-hour counts: `{poll: N, event: N, on_demand: N}` |
 | `discovery_candidates_generated` | Total candidates returned by LLM in the most recent cycle |
 | `discovery_candidates_novel` | Candidates that passed deduplication |
@@ -687,7 +691,7 @@ Sentinel registers `sensor.sentinel_health`, updated after every detection run.
 | `triggers_ttl_expired` | Cumulative queued triggers discarded past TTL |
 | `triggers_excluded` | Cumulative event triggers suppressed by user entity exclusions (see [Per-entity rule exclusions](#per-entity-rule-exclusions)) |
 | `findings_count_by_severity` | Count by severity: `{low: N, medium: N, high: N}` |
-| `triage_suppress_rate` | Percentage of triaged findings suppressed (null if none triaged) |
+| `triage_suppress_rate` | Percentage of the findings the triage model saw that it suppressed (null if none); findings that passed through untriaged are not counted |
 | `auto_exec_count` | Number of autonomous execution attempts |
 | `auto_exec_failures` | Number of autonomous execution errors |
 | `action_success_rate` | Overall action success rate (null if no actions recorded) |

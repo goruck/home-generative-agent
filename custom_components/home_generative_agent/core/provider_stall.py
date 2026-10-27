@@ -23,6 +23,12 @@ the server still answered health checks while generation hung. Only a
 timeout after waiting at least ``STALL_EVIDENCE_MIN_S`` counts, and short
 budgets are not split (``SPLIT_MIN_BUDGET_S``), so a slow model that misses
 Sentinel triage's 10 s deadline is not taken for a hung one.
+
+The probe competes with chat when two providers share one GPU, so setup
+passes a ``run_probe`` callable that applies the chat-priority gate: a
+round is skipped (``StallProbeDeferredError``) while chat or video holds
+the GPU, and a probe in flight is cancelled by a chat turn like any other
+background model call (#866).
 """
 
 from __future__ import annotations
@@ -52,6 +58,20 @@ STALL_TIMEOUT_THRESHOLD = 3
 # How often a stalled provider is probed, and how long a probe may take.
 STALL_PROBE_INTERVAL_S = 60.0
 STALL_PROBE_TIMEOUT_S = 60.0
+
+
+class StallProbeDeferredError(Exception):
+    """A probe round was skipped or interrupted because chat holds the GPU."""
+
+    def __init__(self, reason: str) -> None:
+        """Record why the round was skipped."""
+        super().__init__(f"stall probe skipped: {reason}")
+
+
+# Why a probe round is skipped before it is sent (#866).
+PROBE_GATE_CLOSED = "chat or video holds the GPU, or a chat turn just ended"
+
+
 # Budgets shorter than this are not split: the first provider gets all of it,
 # as before #828. Sentinel triage (10 s), explain (30 s), discovery and video
 # summaries (60 s) keep their whole budget for the primary; conversation turns
@@ -161,7 +181,7 @@ class _ProviderState:
 class ProviderStallTracker:
     """Per-provider stall state shared by every fallback chain of one entry."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         hass: HomeAssistant,
         entry: ConfigEntry,
@@ -169,6 +189,8 @@ class ProviderStallTracker:
         provider_name: Callable[[str], str],
         on_change: Callable[[], None] | None = None,
         on_recovered: Callable[[str], None] | None = None,
+        run_probe: Callable[[str, Callable[[], Awaitable[Any]]], Awaitable[Any]]
+        | None = None,
     ) -> None:
         """
         Initialize the tracker for one config entry.
@@ -176,13 +198,17 @@ class ProviderStallTracker:
         *on_change* runs whenever the stalled set or a probe changes (to
         refresh the health sensor); *on_recovered* runs with the provider id
         when a stalled provider answers again (to reset circuit breakers that
-        its timeouts may have opened).
+        its timeouts may have opened). *run_probe* runs a probe for a
+        provider id; it raises ``StallProbeDeferredError`` to skip the round
+        while foreground chat holds the GPU (#866). Without it the probe is
+        sent directly.
         """
         self._hass = hass
         self._entry = entry
         self._provider_name = provider_name
         self._on_change = on_change
         self._on_recovered = on_recovered
+        self._run_probe = run_probe
         self._states: dict[str, _ProviderState] = {}
 
     def _state(self, provider_id: str) -> _ProviderState:
@@ -286,13 +312,23 @@ class ProviderStallTracker:
             await asyncio.sleep(STALL_PROBE_INTERVAL_S)
             if state.stalled_since is None:
                 return
-            state.last_probe = dt_util.utcnow()
+            probe_at = dt_util.utcnow()
             try:
                 if state.probe is None:
                     return
                 async with asyncio.timeout(STALL_PROBE_TIMEOUT_S):
-                    await state.probe()
+                    if self._run_probe is not None:
+                        await self._run_probe(provider_id, state.probe)
+                    else:
+                        await state.probe()
+            except StallProbeDeferredError as err:
+                # Not a probe: chat holds the GPU. Try again next round.
+                LOGGER.debug(
+                    "Stall probe for model provider %s skipped: %s", state.name, err
+                )
+                continue
             except Exception as err:  # noqa: BLE001
+                state.last_probe = probe_at
                 # Any failure (timeout, refused connection, error reply)
                 # means it is not answering yet; the next probe tries again.
                 LOGGER.debug(
