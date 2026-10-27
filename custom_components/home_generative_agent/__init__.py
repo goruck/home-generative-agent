@@ -262,6 +262,7 @@ from .core.embedding_record import (
     async_recorded_ollama_digest,
     async_sync_embedding_record,
     async_sync_other_build_fallback_issue,
+    async_verify_embedding_fallback,
     embedding_fingerprint,
 )
 from .core.embedding_store import (
@@ -1379,6 +1380,33 @@ def _ollama_embedding_urls_to_check(
 def _ollama_provider_url(provider: ModelProviderConfig) -> str:
     """Return the Ollama URL a provider's models use, as setup keys it."""
     return ollama_provider_settings_url(provider.data.get("settings", {}))
+
+
+def _hold_unchecked_embedding_fallbacks(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    chain: FallbackEmbeddings,
+    unchecked: Sequence[FallbackBuild],
+) -> None:
+    """
+    Keep Ollama embedding fallbacks setup could not fully check from answering.
+
+    One holding another build than the store's would write its vectors there
+    with nothing to say so (#857): each answers only once its build is read
+    and matches, checked when the chain first needs it or by the record check
+    at the end of setup, whichever comes first.
+    """
+    if not unchecked:
+        return
+    chain.hold_until_verified(
+        [fb.provider_id for fb in unchecked],
+        partial(
+            async_verify_embedding_fallback,
+            hass,
+            entry,
+            {fb.provider_id: fb for fb in unchecked},
+        ),
+    )
 
 
 def _provider_setting(
@@ -2887,6 +2915,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 switch_callback=_mark_tool_index_stale,
                 removed_callback=partial(_mark_tool_index_stale, notify=False),
             )
+            _hold_unchecked_embedding_fallbacks(
+                hass, entry, embedding_model, embedding_fallback_unchecked
+            )
         elif _emb_chain:
             active_provider_id = _emb_chain[0][2]
             if active_provider_id != _emb_fb[0].entry_id:
@@ -2902,6 +2933,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     setup_selected=True,
                 )
             embedding_model = _emb_chain[0][0]
+            if embedding_fallback_unchecked:
+                # Only an unchecked fallback answered at setup: wrapped, so
+                # it is held like one in a longer chain (#857).
+                embedding_model = FallbackEmbeddings(_emb_chain, circuit_breaker=None)
+                _hold_unchecked_embedding_fallbacks(
+                    hass, entry, embedding_model, embedding_fallback_unchecked
+                )
         else:
             embedding_model = None
 
