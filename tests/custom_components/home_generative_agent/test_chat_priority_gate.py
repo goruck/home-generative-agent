@@ -26,6 +26,9 @@ import pytest
 from langchain_ollama import OllamaEmbeddings
 
 import custom_components.home_generative_agent.core.utils as utils_mod
+from custom_components.home_generative_agent.core.provider_stall import (
+    StallProbeDeferredError,
+)
 
 # ---------------------------------------------------------------------------
 # Override pytest-homeassistant-custom-component autouse fixtures.
@@ -60,11 +63,17 @@ async def _fresh_gate_primitives(
     new_idle = asyncio.Event()
     new_idle.set()
 
+    new_video_idle = asyncio.Event()
+    new_video_idle.set()
+
     monkeypatch.setattr(utils_mod, "_chat_idle", new_idle)
     monkeypatch.setattr(utils_mod, "_chat_active_count", 0)
     monkeypatch.setattr(utils_mod, "_chat_last_end", 0.0)
+    monkeypatch.setattr(utils_mod, "_video_idle", new_video_idle)
+    monkeypatch.setattr(utils_mod, "_video_active_count", 0)
     monkeypatch.setattr(utils_mod, "_sentinel_last_run", 0.0)
     monkeypatch.setattr(utils_mod, "_sentinel_first_defer", 0.0)
+    monkeypatch.setattr(utils_mod, "_sentinel_last_defer", 0.0)
     monkeypatch.setattr(utils_mod, "_sentinel_defer_count", 0)
     monkeypatch.setattr(utils_mod, "_sentinel_llm_tasks", set())
 
@@ -272,6 +281,8 @@ async def test_sentinel_admission_edge_marks_health_degraded_without_prior_succe
     # hundreds of seconds into the past.
     monkeypatch.setattr(utils_mod, "_SENTINEL_STARVATION_WARN_S", 1.0)
     monkeypatch.setattr(utils_mod, "_sentinel_first_defer", time.monotonic() - 5.0)
+    # Sustained: the last deferral was recent, so the streak is still alive.
+    monkeypatch.setattr(utils_mod, "_sentinel_last_defer", time.monotonic())
 
     result = await utils_mod.sentinel_admission(
         "edge", category="triage", timeout_s=0.05, health_stats=health_stats
@@ -284,24 +295,16 @@ async def test_sentinel_admission_edge_marks_health_degraded_without_prior_succe
 
 
 @pytest.mark.asyncio
-async def test_sentinel_admission_edge_admitted_after_chat_ends() -> None:
-    """Edge Sentinel must be admitted once chat becomes idle."""
+async def test_sentinel_admission_edge_defers_at_once_while_chat_is_active() -> None:
+    """A chat turn can only end into the grace, so there is nothing to wait for (#866)."""
     _idle().clear()
-    admitted: list[bool] = []
-
-    async def _admit() -> None:
-        result = await utils_mod.sentinel_admission(
-            "edge", category="triage", timeout_s=2.0
-        )
-        admitted.append(result)
-
-    task = asyncio.create_task(_admit())
-    await asyncio.sleep(0.01)
-    assert not admitted
-
-    _idle().set()
-    await asyncio.wait_for(task, timeout=2.0)
-    assert admitted == [True]
+    start = time.monotonic()
+    result = await utils_mod.sentinel_admission(
+        "edge", category="triage", timeout_s=2.0
+    )
+    # gstack-timing-ok: the alternative is the full 2 s wait; 1 s is a generous bound
+    assert time.monotonic() - start < 1.0
+    assert result is False
 
 
 @pytest.mark.asyncio
@@ -531,18 +534,20 @@ async def test_sentinel_is_deferred_within_the_grace_after_a_chat_turn(
         pass
     health: dict[str, Any] = {}
 
-    assert not utils_mod.sentinel_may_start()
+    assert utils_mod.chat_grace_remaining_s() > 0.0
     start = time.monotonic()
     admitted = await utils_mod.sentinel_admission(
         "edge", category="triage", timeout_s=2.0, health_stats=health
     )
     assert admitted is False
-    assert time.monotonic() - start < 0.2  # no wait: deferred at once
+    # gstack-timing-ok: the alternative is the full 2 s wait; 1 s is a generous bound
+    assert time.monotonic() - start < 1.0
     assert health["sentinel_admission_consecutive_deferrals"] == 1
     assert utils_mod.sentinel_admission_counters()["deferred_chat"] == 1
 
-    await asyncio.sleep(0.35)
-    assert utils_mod.sentinel_may_start()
+    # Move the last chat end past the grace instead of sleeping it out.
+    utils_mod._chat_last_end = time.monotonic() - 1.0
+    assert utils_mod.chat_grace_remaining_s() == 0.0
     assert (
         await utils_mod.sentinel_admission(
             "edge", category="triage", timeout_s=0.1, health_stats=health
@@ -558,83 +563,276 @@ async def test_a_cloud_chat_turn_leaves_no_grace() -> None:
     async with utils_mod.local_chat_session("cloud"):
         pass
     assert utils_mod.chat_grace_remaining_s() == 0.0
-    assert utils_mod.sentinel_may_start()
 
 
 @pytest.mark.asyncio
-async def test_sentinel_may_start_is_false_while_chat_is_active() -> None:
-    """The pure check mirrors the gates without waiting or counting."""
-    assert utils_mod.sentinel_may_start()
-    _idle().clear()
-    assert not utils_mod.sentinel_may_start()
-    _idle().set()
-    assert utils_mod.sentinel_may_start()
-
-
-@pytest.mark.asyncio
-async def test_a_tracked_call_cancelled_by_chat_is_deferred() -> None:
-    """Foreground chat cancels a tracked call, which surfaces as deferred."""
-    started = asyncio.Event()
-
-    async def _call() -> None:
-        started.set()
-        await asyncio.sleep(10)
-
-    task = asyncio.create_task(
-        utils_mod.run_tracked_sentinel_call(_call, category="stall probe")
-    )
-    await started.wait()
+async def test_the_grace_yields_after_a_deferral_streak_only(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Chat turns every few seconds cannot hold Sentinel off past the degraded threshold."""
+    monkeypatch.setattr(utils_mod, "_SENTINEL_STARVATION_WARN_S", 0.2)
     async with utils_mod.local_chat_session("edge"):
         pass
+    assert utils_mod.chat_grace_remaining_s() > 0.0
+    health: dict[str, Any] = {}
 
-    with pytest.raises(utils_mod.SentinelLLMDeferredError, match="stall probe"):
-        await task
-    assert not utils_mod._sentinel_llm_tasks
-
-
-@pytest.mark.asyncio
-async def test_cancelling_a_tracked_calls_caller_still_cancels_it() -> None:
-    """The caller's own cancellation (unload) is not turned into a deferral."""
-    started = asyncio.Event()
-    inner_cancelled = asyncio.Event()
-
-    async def _call() -> None:
-        started.set()
-        try:
-            await asyncio.sleep(10)
-        except asyncio.CancelledError:
-            inner_cancelled.set()
-            raise
-
-    task = asyncio.create_task(
-        utils_mod.run_tracked_sentinel_call(_call, category="stall probe")
+    # A quiet house: the last admitted call is long ago, but nothing was
+    # deferred since. That is not starvation; the grace holds.
+    monkeypatch.setattr(utils_mod, "_sentinel_last_run", time.monotonic() - 5.0)
+    monkeypatch.setattr(utils_mod, "_sentinel_first_defer", 0.0)
+    assert (
+        await utils_mod.sentinel_admission(
+            "edge", category="triage", timeout_s=0.05, health_stats=health
+        )
+        is False
     )
-    await started.wait()
-    task.cancel()
-
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    # The call is taken down with its caller, not left running.
-    await asyncio.wait_for(inner_cancelled.wait(), timeout=1.0)
-    assert not utils_mod._sentinel_llm_tasks
+    # That deferral started the streak; a young streak still holds.
+    assert utils_mod._sentinel_first_defer > 0.0
+    assert (
+        await utils_mod.sentinel_admission(
+            "edge", category="triage", timeout_s=0.05, health_stats=health
+        )
+        is False
+    )
+    # A streak past the threshold yields, whatever the last admitted call,
+    # and says so at WARNING: the next turn can cancel this call.
+    monkeypatch.setattr(utils_mod, "_sentinel_first_defer", time.monotonic() - 1.0)
+    monkeypatch.setattr(utils_mod, "_sentinel_last_defer", time.monotonic())
+    monkeypatch.setattr(utils_mod, "_sentinel_last_run", time.monotonic())
+    with caplog.at_level(logging.WARNING, logger=utils_mod.LOGGER.name):
+        assert (
+            await utils_mod.sentinel_admission(
+                "edge", category="triage", timeout_s=0.05, health_stats=health
+            )
+            is True
+        )
+    assert [r for r in caplog.records if "admitted inside the chat grace" in r.message]
+    # The admission ended the streak: the grace holds again.
+    assert utils_mod._sentinel_first_defer == 0.0
+    assert (
+        await utils_mod.sentinel_admission(
+            "edge", category="triage", timeout_s=0.05, health_stats=health
+        )
+        is False
+    )
+    # An active chat turn defers, grace or streak.
+    monkeypatch.setattr(utils_mod, "_sentinel_first_defer", time.monotonic() - 1.0)
+    _idle().clear()
+    assert (
+        await utils_mod.sentinel_admission("edge", category="triage", timeout_s=0.05)
+        is False
+    )
 
 
 @pytest.mark.asyncio
-async def test_a_tracked_calls_timeout_cancels_the_call() -> None:
-    """A timeout around the helper (the probe's) ends the call, not just the wait."""
+async def test_sentinel_admission_defers_when_chat_starts_during_the_video_wait() -> (
+    None
+):
+    """A chat turn arriving while Sentinel waits for video still wins."""
+    utils_mod._video_idle.clear()
+    utils_mod.sentinel_admission_counters()
+    task = asyncio.create_task(
+        utils_mod.sentinel_admission("edge", category="triage", timeout_s=2.0)
+    )
+    await asyncio.sleep(0.01)
+    _idle().clear()
+    utils_mod._video_idle.set()
+    assert await asyncio.wait_for(task, timeout=1.0) is False
+    assert utils_mod.sentinel_admission_counters()["deferred_chat"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_chat_exit_after_a_reload_reset_does_not_close_the_gate() -> None:
+    """A reload zeroes the count mid-turn; that turn's exit must not go below zero."""
+    async with utils_mod.local_chat_session("edge"):
+        utils_mod._chat_active_count = 0  # what the setup reset block does
+    assert utils_mod._chat_active_count == 0
+    async with utils_mod.local_chat_session("edge"):
+        assert not _idle().is_set()
+    assert _idle().is_set()
+
+
+@pytest.mark.asyncio
+async def test_uncontended_bypasses_every_local_gate() -> None:
+    """model_provider_uncontended: chat marks nothing, Sentinel is always admitted."""
+    utils_mod.set_model_provider_uncontended(True)
+    try:
+        async with utils_mod.local_chat_session("edge"):
+            assert _idle().is_set()
+            assert not utils_mod.foreground_is_active()
+            assert (
+                await utils_mod.sentinel_admission(
+                    "edge", category="triage", timeout_s=0.05
+                )
+                is True
+            )
+        assert utils_mod.chat_grace_remaining_s() == 0.0
+    finally:
+        utils_mod.set_model_provider_uncontended(False)
+
+
+# ---------------------------------------------------------------------------
+# The stall-probe gate (#866)
+# ---------------------------------------------------------------------------
+
+
+def _deployments(**by_id: str) -> Any:
+    return by_id.get
+
+
+@pytest.mark.asyncio
+async def test_probe_runner_sends_a_cloud_providers_probe_directly() -> None:
+    runner = utils_mod.make_gated_probe_runner(_deployments(p0="cloud"))
+    _idle().clear()
+    probe = AsyncMock(return_value="ok")
+    assert await runner("p0", probe) == "ok"
+    probe.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_probe_runner_skips_the_round_while_chat_is_active() -> None:
+    runner = utils_mod.make_gated_probe_runner(_deployments(p0="edge"))
+    _idle().clear()
+    probe = AsyncMock(return_value="ok")
+    with pytest.raises(StallProbeDeferredError) as excinfo:
+        await runner("p0", probe)
+    probe.assert_not_called()
+    assert "holds the GPU" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_probe_runner_ignores_the_chat_grace() -> None:
+    """A stalled chat provider's fast-failing turns must not hold its probe off."""
+    runner = utils_mod.make_gated_probe_runner(_deployments(p0="edge"))
+    async with utils_mod.local_chat_session("edge"):
+        pass
+    assert utils_mod.chat_grace_remaining_s() > 0.0  # inside the grace
+    probe = AsyncMock(return_value="ok")
+    assert await runner("p0", probe) == "ok"
+
+
+@pytest.mark.asyncio
+async def test_probe_runner_bypasses_the_gate_when_uncontended() -> None:
+    runner = utils_mod.make_gated_probe_runner(_deployments(p0="edge"))
+    utils_mod.set_model_provider_uncontended(True)
+    try:
+        _idle().clear()
+        probe = AsyncMock(return_value="ok")
+        assert await runner("p0", probe) == "ok"
+    finally:
+        utils_mod.set_model_provider_uncontended(False)
+
+
+@pytest.mark.asyncio
+async def test_probe_runner_lets_a_sent_probe_finish() -> None:
+    """A probe that started is not cancelled by a chat turn (it could re-wedge the runner)."""
+    runner = utils_mod.make_gated_probe_runner(_deployments(p0="edge"))
     started = asyncio.Event()
-    inner_cancelled = asyncio.Event()
+    release = asyncio.Event()
 
-    async def _call() -> None:
+    async def _probe() -> str:
         started.set()
-        try:
-            await asyncio.sleep(10)
-        except asyncio.CancelledError:
-            inner_cancelled.set()
-            raise
+        await release.wait()
+        return "answered"
 
-    with pytest.raises(TimeoutError):
-        async with asyncio.timeout(0.05):
-            await utils_mod.run_tracked_sentinel_call(_call, category="stall probe")
-    await asyncio.wait_for(inner_cancelled.wait(), timeout=1.0)
-    assert not utils_mod._sentinel_llm_tasks
+    task = asyncio.ensure_future(runner("p0", _probe))
+    await started.wait()
+    async with utils_mod.local_chat_session("edge"):
+        pass  # cancels tracked Sentinel tasks; the probe is not one
+    release.set()
+    assert await task == "answered"
+
+
+@pytest.mark.asyncio
+async def test_a_stale_deferral_does_not_count_as_a_streak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One deferral this morning plus a quiet afternoon is not 300 s of pressure."""
+    monkeypatch.setattr(utils_mod, "_SENTINEL_STARVATION_WARN_S", 0.2)
+    async with utils_mod.local_chat_session("edge"):
+        pass
+    # A streak that began long ago but whose last deferral is older than a
+    # grace is over: the grace holds, and a new streak starts now.
+    monkeypatch.setattr(utils_mod, "_sentinel_first_defer", time.monotonic() - 100.0)
+    monkeypatch.setattr(utils_mod, "_sentinel_last_defer", time.monotonic() - 50.0)
+    assert (
+        await utils_mod.sentinel_admission("edge", category="triage", timeout_s=0.05)
+        is False
+    )
+    assert time.monotonic() - utils_mod._sentinel_first_defer < 1.0
+
+
+@pytest.mark.asyncio
+async def test_a_chat_turn_from_before_a_reload_does_not_open_the_gate() -> None:
+    """A turn that entered before the reset must not decrement the count the reset made."""
+    async with utils_mod.local_chat_session("edge"):
+        # The setup reset block of a reload, while this turn is still inside.
+        utils_mod._chat_active_count = 0
+        utils_mod._chat_idle.set()
+        utils_mod._gate_generation += 1
+        async with utils_mod.local_chat_session("edge"):
+            assert utils_mod._chat_active_count == 1
+            assert not _idle().is_set()
+            # Inner turn is the newer one; the outer one exits first here:
+        assert utils_mod._chat_active_count == 0
+        assert _idle().is_set()
+    # The old turn's exit changed nothing.
+    assert utils_mod._chat_active_count == 0
+    assert _idle().is_set()
+
+
+@pytest.mark.asyncio
+async def test_an_old_turn_exiting_under_a_new_one_keeps_the_gate_closed() -> None:
+    old_turn_entered = asyncio.Event()
+    release_old = asyncio.Event()
+
+    async def _old_turn() -> None:
+        async with utils_mod.local_chat_session("edge"):
+            old_turn_entered.set()
+            await release_old.wait()
+
+    task = asyncio.create_task(_old_turn())
+    await old_turn_entered.wait()
+    utils_mod._chat_active_count = 0
+    utils_mod._chat_idle.set()
+    utils_mod._gate_generation += 1  # the reload
+    async with utils_mod.local_chat_session("edge"):  # a turn after the reload
+        release_old.set()
+        await task
+        assert utils_mod._chat_active_count == 1
+        assert not _idle().is_set()
+    assert _idle().is_set()
+
+
+def test_sentinel_calls_are_gated_on_shared_local_models_only() -> None:
+    assert utils_mod.sentinel_calls_gated("edge")
+    assert not utils_mod.sentinel_calls_gated("cloud")
+    assert not utils_mod.sentinel_calls_gated(None)
+    utils_mod.set_model_provider_uncontended(True)
+    try:
+        assert not utils_mod.sentinel_calls_gated("edge")
+    finally:
+        utils_mod.set_model_provider_uncontended(False)
+
+
+def test_sentinel_call_gap_remaining() -> None:
+    utils_mod._sentinel_last_call_end = 0.0
+    assert utils_mod.sentinel_call_gap_remaining_s(1.0) == 0.0
+    utils_mod._sentinel_last_call_end = time.monotonic()
+    assert utils_mod.sentinel_call_gap_remaining_s(0.0) == 0.0
+    assert 0.9 < utils_mod.sentinel_call_gap_remaining_s(1.0) <= 1.0
+    utils_mod._sentinel_last_call_end = time.monotonic() - 5.0
+    assert utils_mod.sentinel_call_gap_remaining_s(1.0) == 0.0
+
+
+@pytest.mark.asyncio
+async def test_wait_sentinel_call_gap_only_on_gated_deployments() -> None:
+    utils_mod._sentinel_last_call_end = time.monotonic()
+    start = time.monotonic()
+    await utils_mod.wait_sentinel_call_gap(0.5, "cloud")
+    # gstack-timing-ok: the alternative is a 0.5 s wait; 0.3 s is a generous bound
+    assert time.monotonic() - start < 0.3
+    start = time.monotonic()
+    await utils_mod.wait_sentinel_call_gap(0.2, "edge")
+    # gstack-timing-ok: lower bound only
+    assert time.monotonic() - start >= 0.19

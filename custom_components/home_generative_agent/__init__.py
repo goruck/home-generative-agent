@@ -310,11 +310,7 @@ from .core.provider_recheck import (
     async_schedule_provider_recheck,
     endpoint_label,
 )
-from .core.provider_stall import (
-    PROBE_GATE_CLOSED,
-    ProviderStallTracker,
-    StallProbeDeferredError,
-)
+from .core.provider_stall import ProviderStallTracker
 from .core.runtime import HGAConfigEntry, HGAData
 from .core.subentry_resolver import (
     build_database_uri_from_entry,
@@ -328,7 +324,6 @@ from .core.subentry_resolver import (
     split_embedding_chain,
 )
 from .core.utils import (
-    SentinelLLMDeferredError,
     anthropic_healthy,
     builds_differ,
     configured_ollama_urls,
@@ -337,7 +332,7 @@ from .core.utils import (
     gemini_healthy,
     gemini_sampling_configurable,
     generate_embeddings,
-    is_edge_deployment,
+    make_gated_probe_runner,
     normalize_openai_compatible_base_url,
     normalized_ollama_url,
     ollama_healthy,
@@ -348,8 +343,7 @@ from .core.utils import (
     openai_healthy,
     reasoning_field,
     redact_url,
-    run_tracked_sentinel_call,
-    sentinel_may_start,
+    set_model_provider_uncontended,
     thinking_configurable,
     validate_anthropic_key,
     validate_gemini_key,
@@ -2109,6 +2103,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     _utils_mod._chat_active_count = 0  # noqa: SLF001
     _utils_mod._chat_idle.set()  # noqa: SLF001
     _utils_mod._chat_last_end = 0.0  # noqa: SLF001
+    _utils_mod._uncontended = False  # noqa: SLF001
+    _utils_mod._gate_generation += 1  # noqa: SLF001
+    _utils_mod._sentinel_last_call_end = 0.0  # noqa: SLF001
+    _utils_mod._sentinel_last_defer = 0.0  # noqa: SLF001
     _utils_mod._video_active_count = 0  # noqa: SLF001
     _utils_mod._video_idle.set()  # noqa: SLF001
     _utils_mod._sentinel_last_run = 0.0  # noqa: SLF001
@@ -2307,42 +2305,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         for breaker in (_chat_cb, _vlm_cb, _sum_cb, _emb_cb):
             breaker.record_success(provider_id)
 
-    uncontended = bool(
-        options.get(
-            CONF_MODEL_PROVIDER_UNCONTENDED, RECOMMENDED_MODEL_PROVIDER_UNCONTENDED
+    # A local server with capacity to spare bypasses every local gate: the
+    # chat session, Sentinel admission and its grace, and the probe gate.
+    set_model_provider_uncontended(
+        bool(
+            options.get(
+                CONF_MODEL_PROVIDER_UNCONTENDED, RECOMMENDED_MODEL_PROVIDER_UNCONTENDED
+            )
         )
     )
 
-    async def _run_stall_probe(
-        provider_id: str, probe: Callable[[], Awaitable[Any]]
-    ) -> Any:
-        """Send a stall probe under the chat-priority gate (#866)."""
+    def _provider_deployment(provider_id: str) -> str | None:
         provider = providers.get(provider_id)
-        gated = (
-            provider is not None
-            and is_edge_deployment(provider.deployment)
-            and not uncontended
-        )
-        if not gated:
-            return await probe()
-        if not sentinel_may_start():
-            raise StallProbeDeferredError(PROBE_GATE_CLOSED)
-        try:
-            return await run_tracked_sentinel_call(probe, category="stall probe")
-        except SentinelLLMDeferredError as err:
-            raise StallProbeDeferredError(str(err)) from err
+        return provider.deployment if provider else None
 
     # One stall state per provider, shared by the chat, VLM and summarization
     # chains: a provider that stopped answering for one is skipped by all
     # (#828). Changes refresh sensor.sentinel_health. On an edge deployment
-    # the probe waits for chat like any Sentinel call (#866).
+    # the probe is not sent while chat or video holds the GPU (#866).
     stall_tracker = ProviderStallTracker(
         hass,
         entry,
         provider_name=_provider_name,
         on_change=lambda: async_dispatcher_send(hass, SIGNAL_SENTINEL_RUN_COMPLETE),
         on_recovered=_reset_breakers,
-        run_probe=_run_stall_probe,
+        run_probe=make_gated_probe_runner(_provider_deployment),
     )
 
     _chat_cb = CircuitBreaker(

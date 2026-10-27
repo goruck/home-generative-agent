@@ -418,6 +418,7 @@ def test_resolver_propagates_triage_from_the_sentinel_subentry() -> None:
             CONF_SENTINEL_ENABLED: True,
             CONF_SENTINEL_TRIAGE_ENABLED: True,
             CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS: 25,
+            CONF_SENTINEL_TRIAGE_MAX_PER_RUN: 12,
         },
     )
     entry.subentries[sentinel.subentry_id] = sentinel
@@ -425,6 +426,10 @@ def test_resolver_propagates_triage_from_the_sentinel_subentry() -> None:
     options = resolve_runtime_options(entry)  # type: ignore[arg-type]
     assert options[CONF_SENTINEL_TRIAGE_ENABLED] is True
     assert options[CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS] == 25
+    # The per-run cap a user saves must reach runtime (#866): the resolver
+    # copies only allowlisted keys, so a missing entry silently keeps the
+    # default.
+    assert options[CONF_SENTINEL_TRIAGE_MAX_PER_RUN] == 12
 
 
 def test_resolver_defaults_triage_off_when_unset() -> None:
@@ -442,4 +447,7 @@ def test_resolver_defaults_triage_off_when_unset() -> None:
     assert options[CONF_SENTINEL_TRIAGE_ENABLED] is False
     assert options[CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS] == (
         RECOMMENDED_SENTINEL_TRIAGE_TIMEOUT_SECONDS
+    )
+    assert options[CONF_SENTINEL_TRIAGE_MAX_PER_RUN] == (
+        RECOMMENDED_SENTINEL_TRIAGE_MAX_PER_RUN
     )

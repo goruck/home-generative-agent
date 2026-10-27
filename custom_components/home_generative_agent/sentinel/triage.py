@@ -33,16 +33,20 @@ per run (``begin_run``):
 
 * at most ``max_per_run`` findings are triaged; the rest pass through with
   reason_code ``triage_cap``;
-* consecutive calls are ``call_gap_s`` apart, so a chat turn arriving in
+* consecutive calls are ``call_gap_s`` apart (measured from the last
+  Sentinel model call of any kind, across runs), so a chat turn arriving in
   the gap starts without cancelling anything;
 * once a call is deferred or interrupted by chat, no further call is made
   that run (``triage_deferred``): the admission gate would only defer each
   one in turn, and a call started between two voice turns is cancelled.
+
+None of this applies to a cloud provider, or a local server marked
+``model_provider_uncontended``: with no GPU to share, every finding is
+triaged (``sentinel_calls_gated``).
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
@@ -61,6 +65,8 @@ from custom_components.home_generative_agent.core.utils import (
     SentinelLLMDeferredError,
     extract_final,
     run_sentinel_model_call,
+    sentinel_calls_gated,
+    wait_sentinel_call_gap,
 )
 from custom_components.home_generative_agent.sentinel.logging_utils import (
     RepeatingLogLimiter,
@@ -98,11 +104,16 @@ TRIAGE_REASON_DISABLED = "triage_disabled"
 TRIAGE_REASON_DEFERRED = "triage_deferred"
 TRIAGE_REASON_CAP = "triage_cap"
 
-# Reason codes of a finding the model never saw. The health sensor leaves
-# these out of ``triage_suppress_rate``.
+# Reason codes of a finding the model never saw (#866).
 TRIAGE_REASONS_NOT_RUN: frozenset[str] = frozenset(
     {TRIAGE_REASON_DISABLED, TRIAGE_REASON_DEFERRED, TRIAGE_REASON_CAP}
 )
+# Reason codes without a model decision: the above, plus a call that timed
+# out or failed. The health sensor leaves these out of ``triage_suppress_rate``.
+TRIAGE_REASONS_NO_DECISION: frozenset[str] = TRIAGE_REASONS_NOT_RUN | {
+    TRIAGE_REASON_TIMEOUT,
+    TRIAGE_REASON_ERROR,
+}
 
 # Input allowlist for optional sanitised evidence fields.
 _ALLOWED_EVIDENCE_KEYS: frozenset[str] = frozenset(
@@ -189,12 +200,6 @@ class SentinelTriageService:
         self._run_calls = 0
         self._run_skipped = 0
         self._run_deferred = False
-        self._last_call_end = 0.0
-
-    @property
-    def max_per_run(self) -> int:
-        """Most findings one run sends to the model."""
-        return self._max_per_run
 
     def begin_run(self) -> None:
         """
@@ -205,14 +210,9 @@ class SentinelTriageService:
         self._run_calls = 0
         self._run_skipped = 0
         self._run_deferred = False
-        self._last_call_end = 0.0
         if self._health_stats is not None:
             self._health_stats["triage_calls_last_run"] = 0
             self._health_stats["triage_passed_through_last_run"] = 0
-
-    def run_stats(self) -> dict[str, int]:
-        """Return how many findings this run triaged and passed through."""
-        return {"calls": self._run_calls, "skipped": self._run_skipped}
 
     def _pass_through(self, reason_code: str, summary: str) -> TriageDecision:
         """Return the decision of a finding this run did not send to the model."""
@@ -250,6 +250,12 @@ class SentinelTriageService:
             return self._pass_through(
                 TRIAGE_REASON_DEFERRED, "Triage deferred; chat was active this run."
             )
+        if not sentinel_calls_gated(self._deployment):
+            # No GPU shared with chat: no limit, no gap (#866).
+            self._run_calls += 1
+            if self._health_stats is not None:
+                self._health_stats["triage_calls_last_run"] = self._run_calls
+            return await self._triage_call(finding, snapshot)
         if self._run_calls >= self._max_per_run:
             if self._run_skipped == 0:
                 LOGGER.info(
@@ -260,26 +266,37 @@ class SentinelTriageService:
             return self._pass_through(
                 TRIAGE_REASON_CAP, "Triage limit reached this run; passing through."
             )
-        if self._run_calls > 0 and self._call_gap_s > 0.0:
-            # Space the calls so a chat turn arriving between two of them
-            # starts without cancelling anything (#866).
-            gap_left = self._call_gap_s - (time.monotonic() - self._last_call_end)
-            if gap_left > 0.0:
-                await asyncio.sleep(gap_left)
+        # Space the calls (after any Sentinel model call, across runs too) so
+        # a chat turn arriving between two of them starts without cancelling
+        # anything (#866).
+        await wait_sentinel_call_gap(self._call_gap_s, self._deployment)
         self._run_calls += 1
         if self._health_stats is not None:
             self._health_stats["triage_calls_last_run"] = self._run_calls
         try:
             return await self._triage_call(finding, snapshot)
-        finally:
-            self._last_call_end = time.monotonic()
+        except SentinelLLMDeferredError as err:
+            # Chat held the model: no decision was made, so this finding is
+            # a pass-through, and the rest of the run follows. A request
+            # refused at admission was not a call; one interrupted in flight
+            # had reached the model and stays counted. The model's own
+            # reason_code never drives this: only the gate raises here.
+            LOGGER.debug("Triage deferred: %s", err)
+            if not err.started:
+                self._run_calls -= 1
+                if self._health_stats is not None:
+                    self._health_stats["triage_calls_last_run"] = self._run_calls
+            self._run_deferred = True
+            return self._pass_through(
+                TRIAGE_REASON_DEFERRED, "Triage deferred; chat was active."
+            )
 
     async def _triage_call(
         self,
         finding: AnomalyFinding,
         snapshot: FullStateSnapshot,
     ) -> TriageDecision:
-        """Send one finding to the model; fail open on anything."""
+        """Send one finding to the model; fail open on anything but a deferral."""
         prompt = _build_prompt(finding, snapshot)
         start = time.monotonic()
 
@@ -309,16 +326,10 @@ class SentinelTriageService:
             # SentinelEngine.start() then refuses to replace a non-None task,
             # so Sentinel stayed dead until the config entry was reloaded.
             return _parse_response(result, elapsed_ms)
-        except SentinelLLMDeferredError as err:
-            LOGGER.debug("Triage deferred: %s", err)
-            # The rest of this run passes through (#866).
-            self._run_deferred = True
-            return TriageDecision(
-                decision=TRIAGE_NOTIFY,
-                reason_code=TRIAGE_REASON_DEFERRED,
-                triage_confidence=None,
-                summary="Triage deferred; chat was active.",
-            )
+        except SentinelLLMDeferredError:
+            # triage() turns this into a pass-through and stops the run's
+            # triage (#866); the fail-open handler below must not eat it.
+            raise
         except TimeoutError:
             elapsed_ms = int((time.monotonic() - start) * 1000)
             self._log_limiter.warning(
@@ -475,6 +486,21 @@ def _parse_response(result: Any, elapsed_ms: int) -> TriageDecision:  # noqa: AR
         if decision == TRIAGE_SUPPRESS
         else TRIAGE_REASON_LLM_NOTIFY
     )
+    if reason_code in TRIAGE_REASONS_NO_DECISION:
+        # The triage_* codes describe how the call went, not what the model
+        # decided; a model may not claim one (it would read as no decision
+        # on the health sensor, #866).
+        _PARSE_LOG_LIMITER.warning(
+            "reserved_reason",
+            "Triage LLM replied with the reserved reason code %r; recorded as "
+            "the model's own decision instead.",
+            reason_code,
+        )
+        reason_code = (
+            TRIAGE_REASON_LLM_SUPPRESS
+            if decision == TRIAGE_SUPPRESS
+            else TRIAGE_REASON_LLM_NOTIFY
+        )
     _PARSE_LOG_LIMITER.recovered(
         "non_json",
         "Triage JSON parsing recovered after %d invalid response(s).",

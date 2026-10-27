@@ -45,7 +45,11 @@ from .fallback import (
     ainvoke_dropping_unsupported_params,
     invoke_dropping_unsupported_params,
 )
-from .provider_stall import model_call_budget
+from .provider_stall import (
+    PROBE_GATE_CLOSED,
+    StallProbeDeferredError,
+    model_call_budget,
+)
 
 if TYPE_CHECKING:
     from collections.abc import (
@@ -219,7 +223,18 @@ def configured_ollama_urls(
 #   3. Sentinel (edge)  — calls sentinel_admission before every LLM invocation;
 #                         defers if chat OR video is active.
 #   Cloud providers     — bypass all local gates.
+#   model_provider_uncontended — a local server with capacity to spare: the
+#                         chat session, Sentinel admission and its grace, and
+#                         the probe gate read the flag set at setup; the video
+#                         analyzer reads the option itself before it enters
+#                         local_video_session.
 # ---------------------------------------------------------------------------
+
+# CONF_MODEL_PROVIDER_UNCONTENDED, as set by the last config-entry setup.
+_uncontended: bool = False
+# Bumped by every config-entry setup: a chat or video session that entered
+# before a reload must not touch the counters the reload reset.
+_gate_generation: int = 0
 
 _chat_idle = asyncio.Event()
 _chat_idle.set()  # "no chat active" by default
@@ -232,6 +247,12 @@ _video_idle.set()  # "no video active" by default
 _video_active_count: int = 0
 
 _sentinel_last_run: float = 0.0  # monotonic timestamp of last admitted run
+# The current deferral streak: when it began, and the last deferral in it. A
+# deferral more than a grace after the previous one starts a new streak (#866).
+_sentinel_last_defer: float = 0.0
+# When the last Sentinel model call ended, whatever its kind (triage,
+# explanation, discovery): the gap between calls is measured from it (#866).
+_sentinel_last_call_end: float = 0.0
 _sentinel_first_defer: float = 0.0
 _sentinel_defer_count: int = 0
 _sentinel_admissions_deferred_chat: int = 0
@@ -256,14 +277,42 @@ SENTINEL_CHAT_GRACE_S: float = 30.0
 class SentinelLLMDeferredError(Exception):
     """Raised when a background Sentinel LLM call is deferred or interrupted."""
 
-    def __init__(self, category: str, reason: str) -> None:
-        """Initialize with the Sentinel LLM category and deferral reason."""
+    def __init__(self, category: str, reason: str, *, started: bool = False) -> None:
+        """
+        Initialize with the Sentinel LLM category and deferral reason.
+
+        *started* is True when the call had reached the model before chat
+        interrupted it, False when admission refused it before any request.
+        """
         super().__init__(f"Sentinel {category} {reason}.")
+        self.started = started
 
 
 def is_edge_deployment(deployment: str | None) -> bool:
     """Return True for edge (local) deployments subject to resource gating."""
     return deployment == "edge"
+
+
+def set_model_provider_uncontended(value: bool) -> None:  # noqa: FBT001
+    """Record whether the local gates are bypassed (``model_provider_uncontended``)."""
+    global _uncontended  # noqa: PLW0603
+    _uncontended = value
+
+
+def _gated(deployment: str | None) -> bool:
+    """Return True when calls on *deployment* go through the local gates."""
+    return is_edge_deployment(deployment) and not _uncontended
+
+
+def sentinel_calls_gated(deployment: str | None) -> bool:
+    """
+    Return True when Sentinel calls on *deployment* share a local GPU (#866).
+
+    The per-run call limit and the gap between calls exist for a local model
+    shared with chat; a cloud provider, or a local server marked
+    ``model_provider_uncontended``, is never limited.
+    """
+    return _gated(deployment)
 
 
 @contextlib.asynccontextmanager
@@ -274,13 +323,15 @@ async def local_chat_session(
     Mark a local chat turn active for its full duration.
 
     Clears _chat_idle for the entire turn so Sentinel LLM invocations can
-    check for active chat and defer.  No-op for cloud deployments.
+    check for active chat and defer.  No-op for cloud deployments and when
+    ``model_provider_uncontended`` is set.
     The try/finally guarantees the counter resets on cancellation or exception.
     """
-    if not is_edge_deployment(deployment):
+    if not _gated(deployment):
         yield
         return
     global _chat_active_count, _chat_last_end  # noqa: PLW0603
+    generation = _gate_generation
     _chat_active_count += 1
     _chat_idle.clear()
     try:
@@ -292,10 +343,14 @@ async def local_chat_session(
         )
         yield
     finally:
-        _chat_active_count -= 1
         _chat_last_end = time.monotonic()
-        if _chat_active_count == 0:
-            _chat_idle.set()
+        # A turn that entered before a reload is not in the count the reload
+        # reset: its exit must neither go below zero nor open the gate under
+        # a turn that entered after the reload.
+        if generation == _gate_generation:
+            _chat_active_count = max(0, _chat_active_count - 1)
+            if _chat_active_count == 0:
+                _chat_idle.set()
         LOGGER.debug(
             "Local chat resource gate ended (configured_deployment=%s, category=%s).",
             deployment,
@@ -310,29 +365,63 @@ async def local_video_session(deployment: str) -> AsyncIterator[None]:
 
     Clears _video_idle so Sentinel admission can detect and defer.
     Reference-counted: deferral lifts only when the last concurrent video
-    context exits.  No-op when CONF_MODEL_PROVIDER_UNCONTENDED is True
-    (caller is responsible for checking) or for cloud deployments.
+    context exits.  No-op for cloud deployments and when
+    ``model_provider_uncontended`` is set.
     The try/finally guarantees the flag resets on cancellation or exception.
     """
-    if not is_edge_deployment(deployment):
+    if not _gated(deployment):
         yield
         return
     global _video_active_count  # noqa: PLW0603
+    generation = _gate_generation
     _video_active_count += 1
     _video_idle.clear()
     try:
         LOGGER.debug("Video session active (deployment=%s).", deployment)
         yield
     finally:
-        _video_active_count -= 1
-        if _video_active_count == 0:
-            _video_idle.set()
+        if generation == _gate_generation:
+            _video_active_count = max(0, _video_active_count - 1)
+            if _video_active_count == 0:
+                _video_idle.set()
         LOGGER.debug("Video session ended (deployment=%s).", deployment)
 
 
 def video_is_active() -> bool:
     """Return True if any video model call is currently in progress."""
     return not _video_idle.is_set()
+
+
+def foreground_is_active() -> bool:
+    """Return True while a chat turn or a video model call holds the GPU."""
+    return not _chat_idle.is_set() or not _video_idle.is_set()
+
+
+def sentinel_call_gap_remaining_s(gap_s: float) -> float:
+    """Return how long to wait so that *gap_s* passes between Sentinel model calls."""
+    if _sentinel_last_call_end <= 0.0 or gap_s <= 0.0:
+        return 0.0
+    return max(0.0, gap_s - (time.monotonic() - _sentinel_last_call_end))
+
+
+def _note_sentinel_call_end() -> None:
+    global _sentinel_last_call_end  # noqa: PLW0603
+    _sentinel_last_call_end = time.monotonic()
+
+
+async def wait_sentinel_call_gap(gap_s: float, deployment: str | None) -> None:
+    """
+    Wait until *gap_s* has passed since the last Sentinel model call (#866).
+
+    Only on a gated deployment. Re-checked once after the sleep: a discovery
+    call ending during the sleep moves the clock.
+    """
+    if not sentinel_calls_gated(deployment):
+        return
+    if (gap_left := sentinel_call_gap_remaining_s(gap_s)) > 0.0:
+        await asyncio.sleep(gap_left)
+    if (gap_left := sentinel_call_gap_remaining_s(gap_s)) > 0.0:
+        await asyncio.sleep(gap_left)
 
 
 def chat_grace_remaining_s() -> float:
@@ -342,17 +431,29 @@ def chat_grace_remaining_s() -> float:
     return max(0.0, SENTINEL_CHAT_GRACE_S - (time.monotonic() - _chat_last_end))
 
 
-def sentinel_may_start() -> bool:
+def make_gated_probe_runner(
+    deployment_of: Callable[[str], str | None],
+) -> Callable[[str, Callable[[], Awaitable[Any]]], Awaitable[Any]]:
     """
-    Return True when a Sentinel LLM call may start on an edge deployment now.
+    Return the ``run_probe`` callable for ``ProviderStallTracker`` (#866).
 
-    False while a chat turn or video call is active, or within
-    ``SENTINEL_CHAT_GRACE_S`` of the last chat turn ending. A pure check:
-    unlike ``sentinel_admission`` it waits for nothing and counts nothing.
+    A probe to a provider on a gated deployment (edge, and not
+    ``model_provider_uncontended``) is skipped while a chat turn or video
+    call holds the GPU, with ``StallProbeDeferredError`` so the tracker tries
+    again soon. The chat grace does not apply: a stalled chat provider's
+    turns fail at once, so a user retrying it would otherwise hold its probe
+    off for good. Once sent, the probe is not cancelled for chat or video
+    (it is not a tracked Sentinel task): cancelling a request on a runner
+    that just recovered can wedge it again. Cloud and uncontended providers
+    are probed directly.
     """
-    return (
-        _chat_idle.is_set() and _video_idle.is_set() and chat_grace_remaining_s() <= 0.0
-    )
+
+    async def _run_probe(provider_id: str, probe: Callable[[], Awaitable[Any]]) -> Any:
+        if _gated(deployment_of(provider_id)) and foreground_is_active():
+            raise StallProbeDeferredError(PROBE_GATE_CLOSED)
+        return await probe()
+
+    return _run_probe
 
 
 async def wait_for_chat_idle(timeout_s: float) -> bool:
@@ -393,6 +494,21 @@ async def _cancel_active_sentinel_llm_tasks(category: str) -> None:
         )
 
 
+def _record_admission(health_stats: MutableMapping[str, Any] | None) -> None:
+    """Note an admitted Sentinel call: the starvation clock and stats reset."""
+    global _sentinel_first_defer, _sentinel_last_defer  # noqa: PLW0603
+    global _sentinel_last_run, _sentinel_defer_count  # noqa: PLW0603
+    _sentinel_last_run = time.monotonic()
+    _sentinel_first_defer = 0.0
+    _sentinel_last_defer = 0.0
+    _sentinel_defer_count = 0
+    if health_stats is not None:
+        health_stats["sentinel_admission_degraded"] = False
+        health_stats["sentinel_admission_degraded_category"] = None
+        health_stats["sentinel_admission_consecutive_deferrals"] = 0
+        health_stats["sentinel_admission_starved_for_s"] = 0
+
+
 async def sentinel_admission(
     deployment: str,
     *,
@@ -403,45 +519,67 @@ async def sentinel_admission(
     """
     Return True if a Sentinel LLM call may proceed.
 
-    Edge: waits up to timeout_s for both chat and video to become idle; returns
-    False if either is still active so the caller can defer the pass.
-    Cloud: always admitted.
+    Edge: returns False at once while a chat turn is active or ended less
+    than ``SENTINEL_CHAT_GRACE_S`` ago (a chat turn can only end into that
+    grace, so waiting for it would never admit the call, #866); otherwise
+    waits up to timeout_s for video to become idle and returns False if it
+    is still active, so the caller can defer the pass. A grace deferral
+    counts as a chat deferral. The grace yields once Sentinel has been
+    deferred for the degraded threshold in a row, so chat turns arriving
+    every few seconds cannot hold Sentinel off for good.
+    Cloud, and ``model_provider_uncontended``: always admitted.
     Tracks last-admitted timestamp and consecutive deferral count for health
     monitoring; logs a WARNING when Sentinel has been starved beyond the
     starvation threshold.
     """
-    global _sentinel_first_defer, _sentinel_last_run, _sentinel_defer_count  # noqa: PLW0603
+    global _sentinel_first_defer, _sentinel_last_defer, _sentinel_defer_count  # noqa: PLW0603
     global _sentinel_admissions_deferred_chat, _sentinel_admissions_deferred_video  # noqa: PLW0603
-    if not is_edge_deployment(deployment):
-        _sentinel_last_run = time.monotonic()
-        _sentinel_first_defer = 0.0
-        _sentinel_defer_count = 0
-        if health_stats is not None:
-            health_stats["sentinel_admission_degraded"] = False
-            health_stats["sentinel_admission_degraded_category"] = None
-            health_stats["sentinel_admission_consecutive_deferrals"] = 0
-            health_stats["sentinel_admission_starved_for_s"] = 0
+    if not _gated(deployment):
+        _record_admission(health_stats)
         return True
 
-    deferred = False
-    try:
-        async with asyncio.timeout(timeout_s):
-            # Both events must be set (idle) before Sentinel may proceed.
-            await asyncio.gather(_chat_idle.wait(), _video_idle.wait())
-    except TimeoutError:
-        deferred = True
+    deferred = not _chat_idle.is_set()
     # A chat turn that just ended is likely followed by another (#866): defer
-    # at once rather than start a call its next turn would cancel.
+    # at once rather than start a call its next turn would cancel. Unless
+    # Sentinel has been deferred for the degraded threshold in a row: then
+    # the grace yields, or chat turns every few seconds would hold it off
+    # for good. The streak is deferrals no more than a grace apart, not the
+    # time since the last admitted call or since some earlier deferral: a
+    # quiet house has nothing to admit for hours, and that is not starvation.
     if not deferred and (grace_left := chat_grace_remaining_s()) > 0.0:
-        LOGGER.debug(
-            "Sentinel %s deferred: a chat turn ended %.0fs ago (grace %.0fs).",
-            category,
-            SENTINEL_CHAT_GRACE_S - grace_left,
-            SENTINEL_CHAT_GRACE_S,
+        now = time.monotonic()
+        streak_alive = (
+            _sentinel_first_defer > 0.0
+            and now - _sentinel_last_defer <= SENTINEL_CHAT_GRACE_S
         )
-        deferred = True
+        deferred_for_s = now - _sentinel_first_defer if streak_alive else 0.0
+        if deferred_for_s > _SENTINEL_STARVATION_WARN_S:
+            # At most once per threshold: the admission resets the streak.
+            LOGGER.warning(
+                "Sentinel %s admitted inside the chat grace after %.0fs of "
+                "deferrals in a row: chat turns are arriving too often for the "
+                "grace to hold, so this call can be cancelled by the next one.",
+                category,
+                deferred_for_s,
+            )
+        else:
+            LOGGER.debug(
+                "Sentinel %s deferred: a chat turn ended %.0fs ago (grace %.0fs).",
+                category,
+                SENTINEL_CHAT_GRACE_S - grace_left,
+                SENTINEL_CHAT_GRACE_S,
+            )
+            deferred = True
+    if not deferred:
+        try:
+            async with asyncio.timeout(timeout_s):
+                await _video_idle.wait()
+        except TimeoutError:
+            deferred = True
+        # A chat turn that started during the video wait holds the GPU too.
+        deferred = deferred or not _chat_idle.is_set()
     if deferred:
-        # Re-evaluate after timeout: both could still be blocking.
+        # Attribute the deferral: chat (active or in its grace) or video.
         chat_blocking = not _chat_idle.is_set() or chat_grace_remaining_s() > 0.0
         video_blocking = not _video_idle.is_set()
         _sentinel_defer_count += 1
@@ -450,8 +588,12 @@ async def sentinel_admission(
         if video_blocking:
             _sentinel_admissions_deferred_video += 1
         now = time.monotonic()
-        if _sentinel_first_defer <= 0:
-            _sentinel_first_defer = now
+        if (
+            _sentinel_first_defer <= 0
+            or now - _sentinel_last_defer > SENTINEL_CHAT_GRACE_S
+        ):
+            _sentinel_first_defer = now  # a new streak
+        _sentinel_last_defer = now
         last_activity = _sentinel_last_run or _sentinel_first_defer
         starved_for_s = now - last_activity
         degraded = starved_for_s > _SENTINEL_STARVATION_WARN_S
@@ -474,14 +616,7 @@ async def sentinel_admission(
                 starved_for_s,
             )
         return False
-    _sentinel_last_run = time.monotonic()
-    _sentinel_first_defer = 0.0
-    _sentinel_defer_count = 0
-    if health_stats is not None:
-        health_stats["sentinel_admission_degraded"] = False
-        health_stats["sentinel_admission_degraded_category"] = None
-        health_stats["sentinel_admission_consecutive_deferrals"] = 0
-        health_stats["sentinel_admission_starved_for_s"] = 0
+    _record_admission(health_stats)
     return True
 
 
@@ -513,7 +648,9 @@ async def run_sentinel_llm_call(  # noqa: PLR0913
         timeout_s=admission_timeout_s,
         health_stats=health_stats,
     ):
-        raise SentinelLLMDeferredError(category, "deferred; chat is active")
+        raise SentinelLLMDeferredError(
+            category, "deferred; chat, its grace or video holds the model"
+        )
 
     # The task copies the budget, so a fallback chain inside it can split the
     # time between providers (#828).
@@ -524,41 +661,11 @@ async def run_sentinel_llm_call(  # noqa: PLR0913
         return await asyncio.wait_for(task, timeout=call_timeout_s)
     except asyncio.CancelledError as err:
         raise SentinelLLMDeferredError(
-            category, "interrupted by foreground chat"
+            category, "interrupted by foreground chat", started=True
         ) from err
     finally:
         _sentinel_llm_tasks.discard(task)
-
-
-async def run_tracked_sentinel_call(
-    call_factory: Callable[[], Awaitable[Any]],
-    *,
-    category: str,
-) -> Any:
-    """
-    Run a background call that foreground chat may cancel, with no admission.
-
-    For callers that check ``sentinel_may_start`` themselves (the stall
-    probe). The call runs as a task in ``_sentinel_llm_tasks``; a chat turn
-    cancelling it surfaces as ``SentinelLLMDeferredError``, while the
-    caller's own cancellation (unload, a stall cleared) still propagates.
-    """
-    task = asyncio.ensure_future(call_factory())
-    _sentinel_llm_tasks.add(task)
-    try:
-        return await task
-    except asyncio.CancelledError as err:
-        current = asyncio.current_task()
-        if current is not None and current.cancelling():
-            # The caller is being cancelled (unload, its own timeout): take
-            # the call down with it rather than leave it running.
-            task.cancel()
-            raise
-        raise SentinelLLMDeferredError(
-            category, "interrupted by foreground chat"
-        ) from err
-    finally:
-        _sentinel_llm_tasks.discard(task)
+        _note_sentinel_call_end()
 
 
 async def run_sentinel_llm_call_in_executor(  # noqa: PLR0913
@@ -577,7 +684,9 @@ async def run_sentinel_llm_call_in_executor(  # noqa: PLR0913
         timeout_s=admission_timeout_s,
         health_stats=health_stats,
     ):
-        raise SentinelLLMDeferredError(category, "deferred; chat is active")
+        raise SentinelLLMDeferredError(
+            category, "deferred; chat, its grace or video holds the model"
+        )
 
     task = asyncio.create_task(asyncio.to_thread(call_factory))
     _sentinel_llm_tasks.add(task)
@@ -585,10 +694,11 @@ async def run_sentinel_llm_call_in_executor(  # noqa: PLR0913
         return await asyncio.wait_for(task, timeout=call_timeout_s)
     except asyncio.CancelledError as err:
         raise SentinelLLMDeferredError(
-            category, "interrupted by foreground chat"
+            category, "interrupted by foreground chat", started=True
         ) from err
     finally:
         _sentinel_llm_tasks.discard(task)
+        _note_sentinel_call_end()
 
 
 async def run_sentinel_model_call(  # noqa: PLR0913

@@ -50,6 +50,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_QUIET_HOURS_START,
     CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
     CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
+    CONF_SENTINEL_TRIAGE_MAX_PER_RUN,
     RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN,
     RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     RECOMMENDED_SENTINEL_AUTH_IP_RETENTION_DAYS,
@@ -67,13 +68,17 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     RECOMMENDED_SENTINEL_PRESENCE_GRACE_MINUTES,
     RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
+    RECOMMENDED_SENTINEL_TRIAGE_MAX_PER_RUN,
     SENTINEL_SEVERITIES,
+    SENTINEL_TRIAGE_CALL_GAP_S,
     SIGNAL_SENTINEL_RUN_COMPLETE,
 )
 from custom_components.home_generative_agent.core.utils import (
     EXCLUSION_ENTRY_MAX_LEN,
+    sentinel_calls_gated,
     valid_exclusion_entry,
     verify_pin,
+    wait_sentinel_call_gap,
 )
 from custom_components.home_generative_agent.snapshot.builder import (
     async_build_full_state_snapshot,
@@ -187,7 +192,12 @@ from .suppression import (
     restore_cooldown_stamps,
     should_suppress,
 )
-from .triage import TRIAGE_SUPPRESS, SentinelTriageService
+from .triage import (
+    TRIAGE_REASON_CAP,
+    TRIAGE_REASON_DEFERRED,
+    TRIAGE_SUPPRESS,
+    SentinelTriageService,
+)
 from .trigger_scheduler import SentinelTriggerScheduler, TriggerRecord
 
 if TYPE_CHECKING:
@@ -429,6 +439,12 @@ class SentinelEngine:
         self._rule_registry = rule_registry
         self._entry_id = entry_id
         self._triage_service = triage_service
+        # Explanations share the per-run model-call limit (#866): calls made
+        # this run, the limit, and whether one was deferred to chat (then the
+        # run's remaining explanations are skipped).
+        self._explain_calls_this_run = 0
+        self._explain_limit = RECOMMENDED_SENTINEL_TRIAGE_MAX_PER_RUN
+        self._explain_deferred_this_run = False
         self._baseline_updater = baseline_updater
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
@@ -1889,6 +1905,15 @@ class SentinelEngine:
         if self._triage_service is not None:
             # A fresh triage call budget for this run (#866).
             self._triage_service.begin_run()
+        self._explain_calls_this_run = 0
+        self._explain_limit = max(
+            1,
+            _coerce_int(
+                self._options.get(CONF_SENTINEL_TRIAGE_MAX_PER_RUN),
+                default=RECOMMENDED_SENTINEL_TRIAGE_MAX_PER_RUN,
+            ),
+        )
+        self._explain_deferred_this_run = False
         network_context = await self._network_context()
         try:
             snapshot = await async_build_full_state_snapshot(
@@ -2362,6 +2387,41 @@ class SentinelEngine:
         """Return the cooldown floor a static rule declares for its type."""
         return self._rule_cooldown_floors.get(anomaly_type, timedelta(0))
 
+    async def _async_explanation(
+        self,
+        explainer: LLMExplainer,
+        finding: AnomalyFinding,
+        triage_reason_code: str | None,
+    ) -> str | None:
+        """
+        Return one explanation, within the run's model budget (#866).
+
+        On a model shared with chat (an edge deployment that is not marked
+        uncontended), explanation calls are capped per run at the same limit
+        as triage calls and spaced by the same gap. A finding that passed
+        through triage untriaged (the run's limit, or chat held the model)
+        gets no explanation call either, and once an explanation call is
+        deferred to chat the run's remaining ones are skipped: a run then
+        makes at most the limit in triage calls plus the limit in explanation
+        calls, and never a call its next voice turn would cancel. The
+        notification falls back to its fixed text. A cloud or uncontended
+        model is never limited.
+        """
+        if not sentinel_calls_gated(explainer.deployment):
+            return await explainer.async_explain(finding)
+        if (
+            self._explain_deferred_this_run
+            or self._explain_calls_this_run >= self._explain_limit
+            or triage_reason_code in (TRIAGE_REASON_CAP, TRIAGE_REASON_DEFERRED)
+        ):
+            return None
+        await wait_sentinel_call_gap(SENTINEL_TRIAGE_CALL_GAP_S, explainer.deployment)
+        self._explain_calls_this_run += 1
+        explanation = await explainer.async_explain(finding)
+        if explainer.last_call_deferred:
+            self._explain_deferred_this_run = True
+        return explanation
+
     def _explainer_for(
         self,
         explain_enabled: bool,  # noqa: FBT001
@@ -2571,7 +2631,9 @@ class SentinelEngine:
 
         explanation = None
         if (explainer := self._explainer_for(explain_enabled, finding)) is not None:
-            explanation = await explainer.async_explain(finding)
+            explanation = await self._async_explanation(
+                explainer, finding, triage_reason_code_value
+            )
 
         if self._is_passive():
             # Set to 0 while triage or the explanation ran: not sent (#783).
@@ -2745,7 +2807,7 @@ class SentinelEngine:
 
         explanation = None
         if (explainer := self._explainer_for(explain_enabled, best)) is not None:
-            explanation = await explainer.async_explain(best)
+            explanation = await self._async_explanation(explainer, best, None)
 
         # A partner the policy would auto-execute or block is never named:
         # holding it would delay its action by the prompt TTL, or announce a

@@ -229,9 +229,16 @@ async def test_sentinel_admission_admitted_after_video_ends() -> None:
 
 @pytest.mark.asyncio
 async def test_sentinel_admission_requires_both_idle() -> None:
-    """Sentinel waits for BOTH chat and video before admitting."""
+    """Chat active defers at once (#866); video active alone is waited out."""
     _chat().clear()
     _vid().clear()
+    # Chat busy: a chat turn can only end into the grace, so no wait.
+    assert (
+        await utils_mod.sentinel_admission("edge", category="triage", timeout_s=2.0)
+        is False
+    )
+
+    _chat().set()
     admitted: list[bool] = []
 
     async def _admit() -> None:
@@ -242,14 +249,11 @@ async def test_sentinel_admission_requires_both_idle() -> None:
 
     task = asyncio.create_task(_admit())
     await asyncio.sleep(0.01)
-
-    # Release video but keep chat busy — still blocked
-    _vid().set()
-    await asyncio.sleep(0.01)
+    # Video still busy: Sentinel waits.
     assert not admitted
 
-    # Release chat — now both idle, Sentinel is admitted
-    _chat().set()
+    # Release video: both idle, Sentinel is admitted.
+    _vid().set()
     await asyncio.wait_for(task, timeout=2.0)
     assert admitted == [True]
 
@@ -338,3 +342,18 @@ async def test_sentinel_admission_counters_not_incremented_on_success() -> None:
     counters = utils_mod.sentinel_admission_counters()
     assert counters["deferred_video"] == 0
     assert counters["deferred_chat"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_video_call_from_before_a_reload_does_not_touch_the_count() -> None:
+    """A video call that entered before the reset must not go below zero or open the gate."""
+    async with utils_mod.local_video_session("edge"):
+        utils_mod._video_active_count = 0
+        utils_mod._video_idle.set()
+        utils_mod._gate_generation += 1  # the reload
+        async with utils_mod.local_video_session("edge"):
+            assert utils_mod._video_active_count == 1
+            assert not _vid().is_set()
+        assert _vid().is_set()
+    assert utils_mod._video_active_count == 0
+    assert _vid().is_set()

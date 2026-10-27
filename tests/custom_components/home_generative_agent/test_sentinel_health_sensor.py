@@ -101,6 +101,17 @@ def test_compute_kpis_triage_rate_ignores_findings_the_model_never_saw() -> None
             "triage_decision": "notify",
             "triage_reason_code": "triage_disabled",
         },
+        # No decision either: the call timed out or failed.
+        {
+            "finding": {},
+            "triage_decision": "notify",
+            "triage_reason_code": "triage_timeout",
+        },
+        {
+            "finding": {},
+            "triage_decision": "notify",
+            "triage_reason_code": "triage_error",
+        },
     ]
     kpis = _compute_kpis(records)
     assert kpis["triage_suppress_rate"] == 50.0
@@ -396,6 +407,8 @@ async def test_refresh_run_stats_keys_present_when_no_engine() -> None:
         "sentinel_admission_degraded_category",
         "sentinel_admission_consecutive_deferrals",
         "sentinel_admission_starved_for_s",
+        "triage_calls_last_run",
+        "triage_passed_through_last_run",
     ):
         assert key in sensor._attrs
         assert sensor._attrs[key] is None

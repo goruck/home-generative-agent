@@ -50,9 +50,18 @@ class LLMExplainer:
         self._deployment = deployment
         self._health_stats = health_stats
         self._response_language = response_language
+        # True when the last call was deferred because chat held the model
+        # (#866); the engine then skips the rest of the run's explanations.
+        self.last_call_deferred = False
+
+    @property
+    def deployment(self) -> str:
+        """The deployment the explanation model runs on (edge or cloud)."""
+        return self._deployment
 
     async def async_explain(self, finding: AnomalyFinding) -> str | None:  # noqa: PLR0911
         """Return explanation text or None on failure."""
+        self.last_call_deferred = False
         if self._model is None:
             return None
 
@@ -108,6 +117,7 @@ class LLMExplainer:
             )
         except SentinelLLMDeferredError as err:
             LOGGER.debug("LLM explanation deferred: %s", err)
+            self.last_call_deferred = True
             return None
         except TimeoutError:
             LOGGER.warning(

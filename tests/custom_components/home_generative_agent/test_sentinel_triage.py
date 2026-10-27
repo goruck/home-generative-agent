@@ -18,6 +18,7 @@ from custom_components.home_generative_agent.sentinel.triage import (
     TRIAGE_NOTIFY,
     TRIAGE_REASON_CAP,
     TRIAGE_REASON_DEFERRED,
+    TRIAGE_REASON_LLM_NOTIFY,
     TRIAGE_REASON_LLM_SUPPRESS,
     TRIAGE_REASONS_NOT_RUN,
     TRIAGE_SUPPRESS,
@@ -704,14 +705,6 @@ _SUPPRESS_REPLY = {
 }
 
 
-@pytest.fixture(autouse=True)
-def _no_chat_grace(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Another test file's chat turn must not hold triage back here."""
-    import custom_components.home_generative_agent.core.utils as utils_mod  # noqa: PLC0415
-
-    monkeypatch.setattr(utils_mod, "_chat_last_end", 0.0)
-
-
 @pytest.mark.asyncio
 async def test_findings_past_the_run_limit_pass_through_untriaged() -> None:
     """A run sends at most max_per_run findings to the model; the rest notify."""
@@ -731,7 +724,6 @@ async def test_findings_past_the_run_limit_pass_through_untriaged() -> None:
     assert results[2].reason_code == results[3].reason_code == TRIAGE_REASON_CAP
     assert results[2].triage_confidence is None
     assert llm.calls == 2
-    assert svc.run_stats() == {"calls": 2, "skipped": 2}
     assert health["triage_calls_last_run"] == 2
     assert health["triage_passed_through_last_run"] == 2
     assert TRIAGE_REASON_CAP in TRIAGE_REASONS_NOT_RUN
@@ -759,10 +751,16 @@ async def test_begin_run_renews_the_call_budget() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_limit_below_one_still_triages_one_finding() -> None:
+async def test_a_limit_below_one_still_triages_exactly_one_finding() -> None:
     """The limit is clamped to at least one call per run."""
-    svc = SentinelTriageService(MockLLM(_SUPPRESS_REPLY), max_per_run=0, call_gap_s=0.0)
-    assert svc.max_per_run == 1
+    llm = MockLLM(_SUPPRESS_REPLY)
+    svc = SentinelTriageService(llm, max_per_run=0, call_gap_s=0.0)
+    svc.begin_run()
+    first = await svc.triage(_finding(), _snapshot())
+    second = await svc.triage(_finding(), _snapshot())
+    assert first.decision == TRIAGE_SUPPRESS
+    assert second.reason_code == TRIAGE_REASON_CAP
+    assert llm.calls == 1
 
 
 @pytest.mark.asyncio
@@ -772,13 +770,30 @@ async def test_consecutive_calls_in_a_run_are_spaced_by_the_gap() -> None:
     svc = SentinelTriageService(llm, max_per_run=5, call_gap_s=0.2)
     svc.begin_run()
 
-    start = time.monotonic()
     await svc.triage(_finding(), _snapshot())
     first_done = time.monotonic()
     await svc.triage(_finding(), _snapshot())
     second_done = time.monotonic()
 
-    assert first_done - start < 0.15
+    # gstack-timing-ok: lower bound only; a slow runner can only lengthen the gap
+    assert second_done - first_done >= 0.19
+    assert llm.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_the_gap_also_spaces_the_first_call_of_the_next_run() -> None:
+    """An event run right after a poll run does not restart the burst."""
+    llm = MockLLM(_SUPPRESS_REPLY)
+    svc = SentinelTriageService(llm, max_per_run=5, call_gap_s=0.2)
+    svc.begin_run()
+    await svc.triage(_finding(), _snapshot())
+    first_done = time.monotonic()
+
+    svc.begin_run()
+    await svc.triage(_finding(), _snapshot())
+    second_done = time.monotonic()
+
+    # gstack-timing-ok: lower bound only; a slow runner can only lengthen the gap
     assert second_done - first_done >= 0.19
     assert llm.calls == 2
 
@@ -800,7 +815,9 @@ async def test_a_deferred_call_stops_triage_for_the_rest_of_the_run() -> None:
     assert first.reason_code == second.reason_code == TRIAGE_REASON_DEFERRED
     assert first.decision == second.decision == TRIAGE_NOTIFY
     assert call.call_count == 1
-    assert svc.run_stats() == {"calls": 1, "skipped": 1}
+    # The model made no decision for either: both are pass-throughs.
+    assert svc._run_calls == 0
+    assert svc._run_skipped == 2
 
     # The next run tries the model again.
     svc.begin_run()
@@ -817,4 +834,92 @@ async def test_an_llm_suppress_reply_is_counted_as_a_call() -> None:
     svc.begin_run()
     result = await svc.triage(_finding(), _snapshot())
     assert result.reason_code == TRIAGE_REASON_LLM_SUPPRESS
-    assert svc.run_stats() == {"calls": 1, "skipped": 0}
+    assert svc._run_calls == 1
+    assert svc._run_skipped == 0
+
+
+@pytest.mark.asyncio
+async def test_an_admission_deferred_finding_is_a_pass_through_not_a_call() -> None:
+    """The health counters match the reason code: the model saw nothing."""
+    health: dict[str, Any] = {}
+    svc = SentinelTriageService(
+        MockLLM(_SUPPRESS_REPLY), max_per_run=5, call_gap_s=0.0, health_stats=health
+    )
+    svc.begin_run()
+    with patch(
+        "custom_components.home_generative_agent.sentinel.triage.run_sentinel_model_call",
+        side_effect=SentinelLLMDeferredError("triage", "deferred; chat is active"),
+    ):
+        result = await svc.triage(_finding(), _snapshot())
+
+    assert result.decision == TRIAGE_NOTIFY
+    assert result.reason_code == TRIAGE_REASON_DEFERRED
+    assert health["triage_calls_last_run"] == 0
+    assert health["triage_passed_through_last_run"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_model_reply_cannot_fake_a_deferral() -> None:
+    """A reserved reason code from the model is the model's decision, not a deferral."""
+    llm = MockLLM({"decision": "notify", "reason_code": "triage_deferred"})
+    svc = SentinelTriageService(llm, max_per_run=5, call_gap_s=0.0)
+    svc.begin_run()
+    first = await svc.triage(_finding(), _snapshot())
+    second = await svc.triage(_finding(), _snapshot())
+
+    assert llm.calls == 2  # the second finding still reached the model
+    assert first.reason_code == second.reason_code == TRIAGE_REASON_LLM_NOTIFY
+    assert svc._run_calls == 2
+    assert svc._run_deferred is False
+
+
+@pytest.mark.asyncio
+async def test_a_reserved_suppress_code_keeps_the_suppress_decision() -> None:
+    """Normalising the reason code never changes what the model decided."""
+    llm = MockLLM({"decision": "suppress", "reason_code": "triage_cap"})
+    svc = SentinelTriageService(llm, call_gap_s=0.0)
+    svc.begin_run()
+    result = await svc.triage(_finding(), _snapshot())
+    assert result.decision == TRIAGE_SUPPRESS
+    assert result.reason_code == TRIAGE_REASON_LLM_SUPPRESS
+
+
+@pytest.mark.asyncio
+async def test_a_call_interrupted_in_flight_stays_counted_as_a_call() -> None:
+    """The model got the request, so the load counter keeps it; the run still stops."""
+    health: dict[str, Any] = {}
+    svc = SentinelTriageService(
+        MockLLM(_SUPPRESS_REPLY), max_per_run=5, call_gap_s=0.0, health_stats=health
+    )
+    svc.begin_run()
+    with patch(
+        "custom_components.home_generative_agent.sentinel.triage.run_sentinel_model_call",
+        side_effect=SentinelLLMDeferredError(
+            "triage", "interrupted by foreground chat", started=True
+        ),
+    ):
+        result = await svc.triage(_finding(), _snapshot())
+
+    assert result.reason_code == TRIAGE_REASON_DEFERRED
+    assert health["triage_calls_last_run"] == 1
+    assert health["triage_passed_through_last_run"] == 1
+    assert svc._run_deferred is True
+
+
+@pytest.mark.asyncio
+async def test_a_cloud_model_is_never_capped_or_gapped() -> None:
+    """The limit and the gap exist for a GPU shared with chat; a cloud model has none."""
+    import custom_components.home_generative_agent.core.utils as utils_mod  # noqa: PLC0415
+
+    llm = MockLLM(_SUPPRESS_REPLY)
+    svc = SentinelTriageService(llm, max_per_run=1, call_gap_s=0.5, deployment="cloud")
+    svc.begin_run()
+    utils_mod._sentinel_last_call_end = time.monotonic()
+    start = time.monotonic()
+    first = await svc.triage(_finding(), _snapshot())
+    second = await svc.triage(_finding(), _snapshot())
+
+    assert first.decision == second.decision == TRIAGE_SUPPRESS
+    assert llm.calls == 2
+    # gstack-timing-ok: the alternative is a 0.5 s gap; 0.3 s is a generous bound
+    assert time.monotonic() - start < 0.3

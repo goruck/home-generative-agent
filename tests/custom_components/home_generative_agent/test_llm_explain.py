@@ -225,6 +225,26 @@ async def test_async_explain_returns_none_when_deferred() -> None:
     ):
         result = await explainer.async_explain(_finding())
     assert result is None
+    # The engine reads this flag to skip the rest of the run (#866).
+    assert explainer.last_call_deferred is True
+
+
+@pytest.mark.asyncio
+async def test_async_explain_flags_a_deferred_call_and_only_that() -> None:
+    """Only a deferral sets last_call_deferred; a later outcome clears it."""
+    explainer = LLMExplainer(DummyModel("some content"))
+    target = "custom_components.home_generative_agent.explain.llm_explain.run_sentinel_model_call"
+    with patch(
+        target, side_effect=SentinelLLMDeferredError("explain", "chat is active")
+    ):
+        assert await explainer.async_explain(_finding()) is None
+    assert explainer.last_call_deferred is True
+    with patch(target, side_effect=TimeoutError()):
+        assert await explainer.async_explain(_finding()) is None
+    assert explainer.last_call_deferred is False
+    with patch(target, side_effect=ValueError("bad")):
+        assert await explainer.async_explain(_finding()) is None
+    assert explainer.last_call_deferred is False
 
 
 @pytest.mark.asyncio
