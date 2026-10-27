@@ -2584,22 +2584,6 @@ label pair ("Server URL" vs "Base URL").
 
 ## Config Entry Lifecycle
 
-### Two Sentinel autonomy options are unreachable, and the docs call them UI-configurable
-
-**What:** `sentinel_autonomy_level` and `sentinel_runtime_override_ttl_minutes` (`const.py:216-217`) are read only from `self._options` in `SentinelEngine.get_autonomy_level` (`sentinel/engine.py:616`) and `set_autonomy_level` (`:588`). Neither has a config-flow field, neither has a `strings.json` label, and neither is in `_apply_sentinel_options`' defaults dict in `core/subentry_resolver.py` — and that dict is the allowlist: the overlay is `for key, value in sentinel_defaults.items(): options[key] = data.get(key, value)`, so a value placed in Sentinel subentry data is never copied. The only live path is the legacy top-level base at `subentry_resolver.py:208` (`{**entry.data, **entry.options}`). Meanwhile `docs/constants.md:310` heads the whole *Sentinel Autonomy Level* section **"UI-configurable"**, and lists both rows under it.
-
-This is the same allowlist-omission class as #480 and as the triage options fixed in #651 — but it bites harder, because the autonomy level is what gates the layers above it: triage runs only at level >= 1 (`engine.py:1684`), and auto-execution needs level >= 2 (`_MIN_AUTO_EXECUTE_LEVEL`). Every install therefore sits permanently at the recommended default of `1`, and the only way to move it is `sentinel_set_autonomy_level`, whose override is TTL-bounded (default 60 minutes) and reverts. A user cannot persistently choose level 0 (fully passive, no notifications) or level 2/3 at all. The third row in that docs table, `sentinel_require_pin_for_level_increase`, *is* exposed in the Advanced schema, which is probably why the section's "UI-configurable" header was never questioned.
-
-**Why:** Found on 2026-09-23 while answering "where is `sentinel_set_autonomy_level` set?" after the #651 PIN work — the same question that surfaced the triage gap surfaces this one one layer down. Not fixed in #651 because that PR was scoped to three named TODOS items and this is a fourth, with a product question attached: whether a persistent level 3 should be settable from a dropdown at all, given that level 3 is what allows autonomous actuation.
-
-**How to apply:** Decide the product shape first, because the two options are not equal. The TTL is a plain tunable and can go straight into the Sentinel Advanced schema plus the resolver allowlist. The level itself is a safety control: exposing a persistent `3` in a dropdown makes autonomous actuation a two-click change, where today it needs an admin service call, a PIN when `require_pin` is on, and it lapses by itself. Options: (a) expose levels 0-2 in the flow and leave 3 to the service only; (b) expose 0-3 and lean on the existing PIN gate, which covers increases; (c) expose only the TTL, keep the level service-only, and correct the docs. Whichever is chosen, add both keys to `_apply_sentinel_options` if they are to be settable per subentry, add a resolver plumbing test in the #480 regression shape, and fix the `docs/constants.md` section header for whatever stays unexposed. Note `get_autonomy_level` already coerces through `_coerce_int`, so a `NumberSelector`'s float is safe.
-
-**Effort:** M
-**Priority:** P2
-**Depends on:** None
-
----
-
 ### services.yaml advertises confirm_enroll but nothing registers it
 
 **What:** `services.yaml:19` defines `confirm_enroll`, but no `async_register` call for it exists anywhere in the integration — 18 services advertised, 17 registered. The Developer Tools services page shows a service that errors with "Unable to find service" when called.
@@ -2840,6 +2824,24 @@ This is the same allowlist-omission class as #480 and as the triage options fixe
 ---
 
 ## Completed
+
+### Two Sentinel autonomy options are unreachable, and the docs call them UI-configurable
+
+**What:** `sentinel_autonomy_level` and `sentinel_runtime_override_ttl_minutes` (`const.py:216-217`) are read only from `self._options` in `SentinelEngine.get_autonomy_level` (`sentinel/engine.py:616`) and `set_autonomy_level` (`:588`). Neither has a config-flow field, neither has a `strings.json` label, and neither is in `_apply_sentinel_options`' defaults dict in `core/subentry_resolver.py` — and that dict is the allowlist: the overlay is `for key, value in sentinel_defaults.items(): options[key] = data.get(key, value)`, so a value placed in Sentinel subentry data is never copied. The only live path is the legacy top-level base at `subentry_resolver.py:208` (`{**entry.data, **entry.options}`). Meanwhile `docs/constants.md:310` heads the whole *Sentinel Autonomy Level* section **"UI-configurable"**, and lists both rows under it.
+
+This is the same allowlist-omission class as #480 and as the triage options fixed in #651 — but it bites harder, because the autonomy level is what gates the layers above it: triage runs only at level >= 1 (`engine.py:1684`), and auto-execution needs level >= 2 (`_MIN_AUTO_EXECUTE_LEVEL`). Every install therefore sits permanently at the recommended default of `1`, and the only way to move it is `sentinel_set_autonomy_level`, whose override is TTL-bounded (default 60 minutes) and reverts. A user cannot persistently choose level 0 (fully passive, no notifications) or level 2/3 at all. The third row in that docs table, `sentinel_require_pin_for_level_increase`, *is* exposed in the Advanced schema, which is probably why the section's "UI-configurable" header was never questioned.
+
+**Why:** Found on 2026-09-23 while answering "where is `sentinel_set_autonomy_level` set?" after the #651 PIN work — the same question that surfaced the triage gap surfaces this one one layer down. Not fixed in #651 because that PR was scoped to three named TODOS items and this is a fourth, with a product question attached: whether a persistent level 3 should be settable from a dropdown at all, given that level 3 is what allows autonomous actuation.
+
+**How to apply:** Decide the product shape first, because the two options are not equal. The TTL is a plain tunable and can go straight into the Sentinel Advanced schema plus the resolver allowlist. The level itself is a safety control: exposing a persistent `3` in a dropdown makes autonomous actuation a two-click change, where today it needs an admin service call, a PIN when `require_pin` is on, and it lapses by itself. Options: (a) expose levels 0-2 in the flow and leave 3 to the service only; (b) expose 0-3 and lean on the existing PIN gate, which covers increases; (c) expose only the TTL, keep the level service-only, and correct the docs. Whichever is chosen, add both keys to `_apply_sentinel_options` if they are to be settable per subentry, add a resolver plumbing test in the #480 regression shape, and fix the `docs/constants.md` section header for whatever stays unexposed. Note `get_autonomy_level` already coerces through `_coerce_int`, so a `NumberSelector`'s float is safe.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** None
+
+**Completed:** #783 (in `[Unreleased]`, ships in 3.45.0). Sentinel's Advanced setup now has **Autonomy level** (0–3, default 1) and **Autonomy override duration**; levels 2/3 notify like level 1 until automatic actions land (#789).
+
+---
 
 ### A PIN refusal that hits the action-round limit ends with a generic apology
 
