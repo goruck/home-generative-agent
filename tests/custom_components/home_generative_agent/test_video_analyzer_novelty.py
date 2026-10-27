@@ -1449,10 +1449,11 @@ async def test_a_wildcard_sibling_is_not_read(va: VideoAnalyzer) -> None:
     va.entry.runtime_data.store.asearch = _PgLikeStore(
         [_row(_WHITE_SHIRT_RECENT, 0.99, camera="front1door", age_seconds=64)]
     ).asearch
-    own = await va._search_own_captions(  # type: ignore[attr-defined]
+    own, crowded = await va._search_own_captions(  # type: ignore[attr-defined]
         ("video_analysis", "front_door"), _WHITE_SHIRT_NOW
     )
     assert own == []
+    assert crowded is True  # its 0.99 caption took the row, then was dropped
 
 
 @pytest.mark.asyncio
@@ -1979,10 +1980,11 @@ async def test_search_keeps_the_ten_best_own_captions(va: VideoAnalyzer) -> None
     ]
     eleventh = _make_search_result(_WHITE_SHIRT_RECENT, 0.1, age_seconds=64)
     va.entry.runtime_data.store.asearch = AsyncMock(return_value=[*rows, eleventh])
-    own = await va._search_own_captions(  # type: ignore[attr-defined]
+    own, crowded = await va._search_own_captions(  # type: ignore[attr-defined]
         ("video_analysis", "side"), _WHITE_SHIRT_NOW
     )
     assert own == rows
+    assert crowded is False
 
 
 @pytest.mark.asyncio
@@ -2016,6 +2018,108 @@ async def test_other_cameras_notified_captions_do_not_use_up_the_scan(
     assert decision.notify is False
     assert decision.reason == "recent_match"
     assert decision.matched_caption == _WHITE_SHIRT_RECENT
+
+
+async def _same_vector(texts: list[str]) -> list[list[float]]:
+    return [[1.0, 0.0] for _ in texts]
+
+
+@pytest.mark.asyncio
+async def test_own_match_crowded_out_entirely_still_suppresses_in_the_window(
+    va: VideoAnalyzer,
+) -> None:
+    """Fifty closer "side_gate" captions fill the search; the scan finds its own."""
+    rows = [
+        _row(_WHITE_SHIRT_RECENT, 0.99, camera="side_gate", age_seconds=i)
+        for i in range(50)
+    ]
+    rows.append(_row(_WHITE_SHIRT_RECENT, 0.95, camera="side", age_seconds=600))
+    store = va.entry.runtime_data.store
+    store.asearch = _PgLikeStore(rows).asearch
+    store.embeddings.aembed_documents = AsyncMock(side_effect=_same_vector)
+    decision = await va._is_caption_novel(  # type: ignore[attr-defined]
+        "side", _WHITE_SHIRT_NOW, _fresh_snapshot_name(), []
+    )
+    assert decision.notify is False
+    assert decision.reason == "recent_match"
+    assert decision.matched_age_seconds == 600
+
+
+@pytest.mark.asyncio
+async def test_weak_own_match_means_nothing_crowded_out_could_match(
+    va: VideoAnalyzer,
+) -> None:
+    """A row left out scores no higher than a returned 0.5 one: no scan."""
+    rows = [
+        _row(_WHITE_SHIRT_RECENT, 0.99, camera="side_gate", age_seconds=i)
+        for i in range(49)
+    ]
+    rows.append(_row("A cat sits.", 0.5, camera="side", age_seconds=_THREE_DAYS_S))
+    rows.append(_row(_WHITE_SHIRT_RECENT, 0.4, camera="side", age_seconds=600))
+    store = va.entry.runtime_data.store
+    store.asearch = _PgLikeStore(rows).asearch
+    store.embeddings.aembed_documents = AsyncMock(side_effect=_same_vector)
+    decision = await va._is_caption_novel(  # type: ignore[attr-defined]
+        "side", _WHITE_SHIRT_NOW, _fresh_snapshot_name(), []
+    )
+    assert decision.notify is True
+    assert decision.reason == "score_below_threshold"
+    store.embeddings.aembed_documents.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_weak_matches_of_another_camera_do_not_scan(va: VideoAnalyzer) -> None:
+    """Another camera's rows below the threshold hide nothing that could match."""
+    rows = [
+        _row("A dog runs.", 0.5, camera="side_gate", age_seconds=i) for i in range(5)
+    ]
+    store = va.entry.runtime_data.store
+    store.asearch = AsyncMock(side_effect=_PgLikeStore(rows).asearch)
+    decision = await va._is_caption_novel(  # type: ignore[attr-defined]
+        "side", _WHITE_SHIRT_NOW, _fresh_snapshot_name(), []
+    )
+    assert decision.reason == "no_match"
+    store.asearch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_scan_after_crowding_still_notifies(va: VideoAnalyzer) -> None:
+    """The scan fails open: the caption notifies as no_match."""
+    rows = [
+        _row(_WHITE_SHIRT_RECENT, 0.99, camera="side_gate", age_seconds=i)
+        for i in range(50)
+    ]
+    pg = _PgLikeStore(rows)
+
+    async def _asearch(*args: object, **kwargs: object) -> list[MagicMock]:
+        if kwargs.get("query"):
+            return await pg.asearch(*args, **kwargs)  # type: ignore[arg-type]
+        msg = "database went away"
+        raise OSError(msg)
+
+    va.entry.runtime_data.store.asearch = _asearch
+    decision = await va._is_caption_novel(  # type: ignore[attr-defined]
+        "side", _WHITE_SHIRT_NOW, _fresh_snapshot_name(), []
+    )
+    assert decision.notify is True
+    assert decision.reason == "no_match"
+
+
+@pytest.mark.asyncio
+async def test_weak_match_without_another_camera_does_not_scan(
+    va: VideoAnalyzer,
+) -> None:
+    """With only its own captions back, nothing was crowded out: no extra scan."""
+    rows = [_row("A cat sits.", 0.5, camera="side", age_seconds=600)]
+    store = va.entry.runtime_data.store
+    store.asearch = _PgLikeStore(rows).asearch
+    store.embeddings.aembed_documents = AsyncMock(side_effect=_same_vector)
+    decision = await va._is_caption_novel(  # type: ignore[attr-defined]
+        "side", _WHITE_SHIRT_NOW, _fresh_snapshot_name(), []
+    )
+    assert decision.notify is True
+    assert decision.reason == "score_below_threshold"
+    store.embeddings.aembed_documents.assert_not_awaited()
 
 
 def _scan_store(va: VideoAnalyzer, pages: list[list[MagicMock]]) -> MagicMock:
