@@ -962,6 +962,20 @@ validation.
 
 ## Sentinel Triage
 
+### The per-run triage budget is spent in dispatch order and renewed per run
+
+**What:** `sentinel_triage_max_per_run` (#866) hands triage slots out in dispatch order: the built-in rules first, then the dynamic and baseline findings (`engine.py` `_run_once` appends `dynamic_findings` after static evaluation). With more findings than the limit, the baseline and threshold findings, the noisy class triage exists to filter, are the ones that pass through untriaged, and nothing in the audit says which class was skipped. The budget is also per run: event-triggered runs are coalesced only within a 5 s window, so a state-change storm gets a fresh budget per run (the 1 s gap now spans runs, which bounds the back-to-back case but not the sustained one), and the health sensor shows only the last run's counts.
+
+**Why:** Red Team pass of the PR #875 review (2026-10-27). Lindo chose to document the order and keep dispatch order unchanged, since reordering touches the correlation groups, the `settled` map and the auth-inventory commit.
+
+**How to apply:** Spend the budget by value rather than position: let `triage()` accept a priority (low/medium severity and dynamic findings first), or skip triage for high-severity findings (they notify regardless), without reordering dispatch. Consider a rolling-rate budget (calls per minute) in place of the per-run counter, and a cumulative `triage_calls_24h` attribute so the load is visible.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ### Drop or wire the dead `summary` field in the triage JSON contract
 
 **What:** The triage system prompt requires a `summary` field (`sentinel/triage.py:91`, 120-char cap) and the parser extracts it (`triage.py:337`, trimmed to 240) into `TriageDecision.summary`, but no consumer exists anywhere — the engine reads only `decision`/`reason_code`/`triage_confidence` (`sentinel/engine.py:962-964`); the only appearance is a `LOGGER.debug` line. Tokens are spent generating a sentence that is discarded every run.
@@ -2438,20 +2452,6 @@ label pair ("Server URL" vs "Base URL").
 ---
 
 ## Model Providers
-
-### Stall probes skip the chat-priority gate
-
-**What:** `ProviderStallTracker._async_probe_until_answered` (`core/provider_stall.py`) sends a stalled provider a tiny request every 60 s directly, without `sentinel_admission` or registration in `_sentinel_llm_tasks` (`core/utils.py`), so foreground chat neither waits for it nor cancels it.
-
-**Why:** Codex review of the #828 fix (2026-10-21). It only matters when two provider entries share one GPU and one of them is stalled: the probe (at most 60 s, once a minute) can compete with chat on the other. The stalled server itself is not answering anyway. Gating it needs the admission helpers in `core/utils.py`, which imports `fallback.py`, which imports `provider_stall.py`, so the probe would have to receive the gate as a callback.
-
-**How to apply:** Pass an admission callable into the tracker from `__init__.py` (edge deployments only) and skip the probe round when chat is active; register the probe task so `_cancel_active_sentinel_llm_tasks` can cancel it.
-
-**Effort:** S
-**Priority:** P3
-**Depends on:** None
-
----
 
 ### Embedding calls and budget-less callers are not covered by stall detection
 

@@ -98,6 +98,7 @@ from .const import (
     CONF_GEMINI_EMBEDDING_MODEL,
     CONF_GEMINI_SUMMARIZATION_MODEL,
     CONF_GEMINI_VLM,
+    CONF_MODEL_PROVIDER_UNCONTENDED,
     CONF_NOTIFY_SERVICE,
     CONF_OLLAMA_CHAT_CONTEXT_SIZE,
     CONF_OLLAMA_CHAT_KEEPALIVE,
@@ -138,6 +139,7 @@ from .const import (
     CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     CONF_SENTINEL_RESPONSE_LANGUAGE,
     CONF_SENTINEL_TRIAGE_ENABLED,
+    CONF_SENTINEL_TRIAGE_MAX_PER_RUN,
     CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
     CONF_SUMMARIZATION_MODEL_PROVIDER,
     CONF_SUMMARIZATION_MODEL_TEMPERATURE,
@@ -183,6 +185,7 @@ from .const import (
     RECOMMENDED_GEMINI_EMBEDDING_MODEL,
     RECOMMENDED_GEMINI_SUMMARIZATION_MODEL,
     RECOMMENDED_GEMINI_VLM,
+    RECOMMENDED_MODEL_PROVIDER_UNCONTENDED,
     RECOMMENDED_OLLAMA_CHAT_KEEPALIVE,
     RECOMMENDED_OLLAMA_CHAT_MODEL,
     RECOMMENDED_OLLAMA_CONTEXT_SIZE,
@@ -212,6 +215,7 @@ from .const import (
     RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
     RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     RECOMMENDED_SENTINEL_TRIAGE_ENABLED,
+    RECOMMENDED_SENTINEL_TRIAGE_MAX_PER_RUN,
     RECOMMENDED_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
     RECOMMENDED_SUMMARIZATION_MODEL_PROVIDER,
     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
@@ -328,6 +332,7 @@ from .core.utils import (
     gemini_healthy,
     gemini_sampling_configurable,
     generate_embeddings,
+    make_gated_probe_runner,
     normalize_openai_compatible_base_url,
     normalized_ollama_url,
     ollama_healthy,
@@ -338,6 +343,7 @@ from .core.utils import (
     openai_healthy,
     reasoning_field,
     redact_url,
+    set_model_provider_uncontended,
     thinking_configurable,
     validate_anthropic_key,
     validate_gemini_key,
@@ -2096,6 +2102,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     _utils_mod._chat_active_count = 0  # noqa: SLF001
     _utils_mod._chat_idle.set()  # noqa: SLF001
+    _utils_mod._chat_last_end = 0.0  # noqa: SLF001
+    _utils_mod._uncontended = False  # noqa: SLF001
+    _utils_mod._gate_generation += 1  # noqa: SLF001
+    _utils_mod._sentinel_last_call_end = 0.0  # noqa: SLF001
+    _utils_mod._sentinel_last_defer = 0.0  # noqa: SLF001
     _utils_mod._video_active_count = 0  # noqa: SLF001
     _utils_mod._video_idle.set()  # noqa: SLF001
     _utils_mod._sentinel_last_run = 0.0  # noqa: SLF001
@@ -2294,15 +2305,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         for breaker in (_chat_cb, _vlm_cb, _sum_cb, _emb_cb):
             breaker.record_success(provider_id)
 
+    # A local server with capacity to spare bypasses every local gate: the
+    # chat session, Sentinel admission and its grace, and the probe gate.
+    set_model_provider_uncontended(
+        bool(
+            options.get(
+                CONF_MODEL_PROVIDER_UNCONTENDED, RECOMMENDED_MODEL_PROVIDER_UNCONTENDED
+            )
+        )
+    )
+
+    def _provider_deployment(provider_id: str) -> str | None:
+        provider = providers.get(provider_id)
+        return provider.deployment if provider else None
+
     # One stall state per provider, shared by the chat, VLM and summarization
     # chains: a provider that stopped answering for one is skipped by all
-    # (#828). Changes refresh sensor.sentinel_health.
+    # (#828). Changes refresh sensor.sentinel_health. On an edge deployment
+    # the probe is not sent while chat or video holds the GPU (#866).
     stall_tracker = ProviderStallTracker(
         hass,
         entry,
         provider_name=_provider_name,
         on_change=lambda: async_dispatcher_send(hass, SIGNAL_SENTINEL_RUN_COMPLETE),
         on_recovered=_reset_breakers,
+        run_probe=make_gated_probe_runner(_provider_deployment),
     )
 
     _chat_cb = CircuitBreaker(
@@ -3930,13 +3957,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 RECOMMENDED_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
             )
         )
+        triage_max_per_run = int(
+            options.get(
+                CONF_SENTINEL_TRIAGE_MAX_PER_RUN,
+                RECOMMENDED_SENTINEL_TRIAGE_MAX_PER_RUN,
+            )
+        )
         triage_service = SentinelTriageService(
             chat_model,
             timeout_seconds=triage_timeout,
             deployment=chat_deployment,
             health_stats=sentinel_run_stats,
+            max_per_run=triage_max_per_run,
         )
-        LOGGER.info("Sentinel LLM triage enabled (timeout=%ds).", triage_timeout)
+        LOGGER.info(
+            "Sentinel LLM triage enabled (timeout=%ds, at most %d call(s) per run).",
+            triage_timeout,
+            triage_max_per_run,
+        )
     # Issue #265: optional baseline updater (requires PostgreSQL pool).
     # Baseline collection is gated on sentinel_enabled acting as master switch.
     baseline_updater: SentinelBaselineUpdater | None = None

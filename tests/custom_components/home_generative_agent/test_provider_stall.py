@@ -48,6 +48,7 @@ class _Model:
         self.answer = answer
         self.hang = hang
         self.calls = 0
+        self.cancelled = False
         self._released = asyncio.Event()
 
     def release(self) -> None:
@@ -59,7 +60,11 @@ class _Model:
     ) -> AIMessage:
         self.calls += 1
         if self.hang:
-            await self._released.wait()
+            try:
+                await self._released.wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
         return AIMessage(content=self.answer)
 
 
@@ -77,7 +82,9 @@ async def _cancel_probe_tasks() -> Any:
 
 
 def _tracker(
-    changes: list[str] | None = None, recovered: list[str] | None = None
+    changes: list[str] | None = None,
+    recovered: list[str] | None = None,
+    run_probe: Any = None,
 ) -> ProviderStallTracker:
     """Build a tracker whose background tasks run on the test loop."""
 
@@ -94,6 +101,7 @@ def _tracker(
         provider_name=lambda provider_id: f"Name of {provider_id}",
         on_change=lambda: log.append("changed"),
         on_recovered=recovered.append if recovered is not None else None,
+        run_probe=run_probe,
     )
 
 
@@ -240,6 +248,124 @@ async def test_the_probe_clears_the_stall_once_the_provider_answers(
     assert changes[0] == changes[-1] == "changed"
     # Setup resets the circuit breakers its timeouts may have opened.
     assert recovered == ["p0"]
+
+
+@pytest.mark.asyncio
+async def test_a_probe_round_is_skipped_while_chat_holds_the_gpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate skips a round without probing; the stall clears once it opens."""
+    monkeypatch.setattr(provider_stall, "STALL_PROBE_INTERVAL_S", 0.1)
+    monkeypatch.setattr(provider_stall, "STALL_PROBE_TIMEOUT_S", 0.1)
+    monkeypatch.setattr(provider_stall, "STALL_PROBE_RETRY_S", 0.01)
+    gate_open = False
+    rounds: list[str] = []
+
+    async def _run_probe(provider_id: str, probe: Any) -> Any:
+        rounds.append(provider_id)
+        if not gate_open:
+            # A skipped round is retried after STALL_PROBE_RETRY_S, not a full
+            # interval.
+            raise provider_stall.StallProbeDeferredError(
+                provider_stall.PROBE_GATE_CLOSED
+            )
+        return await probe()
+
+    changes: list[str] = []
+    tracker = _tracker(changes, run_probe=_run_probe)
+    model = _Model("primary")
+    for _ in range(provider_stall.STALL_TIMEOUT_THRESHOLD):
+        tracker.record_timeout("p0", lambda: model.ainvoke(_MESSAGES))
+    assert tracker.is_stalled("p0")
+
+    await asyncio.sleep(0.25)  # rounds come and go, none is sent
+    # gstack-timing-ok: lower bound; with the full 0.1 s interval at most 2 rounds fit
+    assert len(rounds) >= 4
+    assert tracker.is_stalled("p0")
+    status = tracker.status()[0]
+    assert status["last_probe"] is None
+    assert status["probe_rounds_skipped"] == len(rounds)
+    assert model.calls == 0
+    # The sensor is refreshed on the first skip of the streak only: the stall
+    # itself ("changed") and that first skip.
+    assert changes == ["changed", "changed"]
+
+    gate_open = True
+    for _ in range(20):
+        await asyncio.sleep(0.05)
+        if not tracker.is_stalled("p0"):
+            break
+
+    assert not tracker.is_stalled("p0")
+    assert model.calls == 1
+
+    # A second stall starts its skip count from zero.
+    for _ in range(provider_stall.STALL_TIMEOUT_THRESHOLD):
+        tracker.record_timeout("p0", lambda: model.ainvoke(_MESSAGES))
+    assert tracker.status()[0]["probe_rounds_skipped"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_recovery_recorded_meanwhile_lets_a_sent_probe_finish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """record_success from another call must not cancel a probe request in flight."""
+    monkeypatch.setattr(provider_stall, "STALL_PROBE_INTERVAL_S", 0.02)
+    monkeypatch.setattr(provider_stall, "STALL_PROBE_TIMEOUT_S", 1.0)
+    recovered: list[str] = []
+    tracker = _tracker(recovered=recovered)
+    model = _Model("primary", hang=True)
+    for _ in range(provider_stall.STALL_TIMEOUT_THRESHOLD):
+        tracker.record_timeout("p0", lambda: model.ainvoke(_MESSAGES))
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+        if model.calls:
+            break
+    assert model.calls == 1  # the probe request is with the provider
+
+    tracker.record_success("p0")  # an older call answered meanwhile
+    assert not tracker.is_stalled("p0")
+    await asyncio.sleep(0.05)
+    assert not model.cancelled  # the probe was left to finish
+    model.release()
+    await asyncio.sleep(0.05)
+    assert recovered == ["p0"]
+
+
+@pytest.mark.asyncio
+async def test_a_restall_while_a_probe_is_out_reuses_its_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second stall must not start a second probe loop beside the one in flight."""
+    monkeypatch.setattr(provider_stall, "STALL_PROBE_INTERVAL_S", 0.02)
+    monkeypatch.setattr(provider_stall, "STALL_PROBE_TIMEOUT_S", 1.0)
+    recovered: list[str] = []
+    tracker = _tracker(recovered=recovered)
+    model = _Model("primary", hang=True)
+    for _ in range(provider_stall.STALL_TIMEOUT_THRESHOLD):
+        tracker.record_timeout("p0", lambda: model.ainvoke(_MESSAGES))
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+        if model.calls:
+            break
+    assert model.calls == 1
+    loops_before = len(_probe_tasks)
+
+    tracker.record_success("p0")  # an older call answered; the probe is still out
+    for _ in range(provider_stall.STALL_TIMEOUT_THRESHOLD):
+        tracker.record_timeout("p0", lambda: model.ainvoke(_MESSAGES))
+    assert tracker.is_stalled("p0")
+    assert len(_probe_tasks) == loops_before  # no second loop
+
+    model.release()
+    for _ in range(20):
+        await asyncio.sleep(0.02)
+        if not tracker.is_stalled("p0"):
+            break
+    assert not tracker.is_stalled("p0")
+    assert not model.cancelled
+    assert model.calls == 1  # the one probe out there settled the second stall too
+    assert recovered == ["p0", "p0"]
 
 
 @pytest.mark.asyncio

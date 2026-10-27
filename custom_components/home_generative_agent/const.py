@@ -336,6 +336,13 @@ CONF_SENTINEL_TRIAGE_ENABLED = "sentinel_triage_enabled"
 CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS = "sentinel_triage_timeout_seconds"
 RECOMMENDED_SENTINEL_TRIAGE_ENABLED: bool = False
 RECOMMENDED_SENTINEL_TRIAGE_TIMEOUT_SECONDS: int = 10
+# Most findings one Sentinel run sends to the triage model; the rest pass
+# through untriaged (#866). Bounds the burst a shared local model sees.
+CONF_SENTINEL_TRIAGE_MAX_PER_RUN = "sentinel_triage_max_per_run"
+RECOMMENDED_SENTINEL_TRIAGE_MAX_PER_RUN: int = 5
+# Pause between two triage calls of one run, so a chat turn arriving between
+# them starts without cancelling anything (#866).
+SENTINEL_TRIAGE_CALL_GAP_S: float = 1.0
 
 # ---- Sentinel baseline storage (Issue #265) ----
 CONF_SENTINEL_BASELINE_ENABLED = "sentinel_baseline_enabled"

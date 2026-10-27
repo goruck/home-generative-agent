@@ -16,6 +16,7 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_SENTINEL_ENABLED,
     SIGNAL_SENTINEL_RUN_COMPLETE,
 )
+from ..sentinel.triage import TRIAGE_REASONS_NO_DECISION  # noqa: TID252
 
 if TYPE_CHECKING:
     from custom_components.home_generative_agent.audit.store import AuditStore
@@ -86,7 +87,13 @@ def _compute_kpis(records: list[dict[str, Any]]) -> dict[str, Any]:  # noqa: PLR
             trigger_source_counts[trigger] = trigger_source_counts.get(trigger, 0) + 1
 
         triage_decision = r.get("triage_decision")
-        if triage_decision is not None:
+        # A finding the model never decided on (triage off, deferred to chat,
+        # past the run's limit, timed out or failed, #866) says nothing about
+        # what the model suppresses.
+        if (
+            triage_decision is not None
+            and r.get("triage_reason_code") not in TRIAGE_REASONS_NO_DECISION
+        ):
             triage_total += 1
             if triage_decision == "suppress":
                 triage_suppress += 1
@@ -279,6 +286,10 @@ class SentinelHealthSensor(SensorEntity):
             "sentinel_admission_degraded_category",
             "sentinel_admission_consecutive_deferrals",
             "sentinel_admission_starved_for_s",
+            # Triage calls the last run made, and findings it passed through
+            # untriaged (its limit, or chat held the model) (#866).
+            "triage_calls_last_run",
+            "triage_passed_through_last_run",
             "triggers_excluded",
             # Network / HA-security audit: rules skipped because the snapshot
             # lacks a capability they need ({rule_id: [missing paths]}) and

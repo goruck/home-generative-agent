@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock, patch
@@ -26,6 +27,10 @@ from custom_components.home_generative_agent.snapshot.schema import (
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
+
+    from custom_components.home_generative_agent.explain.llm_explain import (
+        LLMExplainer,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -83,10 +88,11 @@ class DummyAudit:
         self.calls.append({"finding": finding})
 
 
-def _make_engine(hass: Any) -> SentinelEngine:
+def _make_engine(hass: Any, **options: Any) -> SentinelEngine:
     return SentinelEngine(
         hass=cast("HomeAssistant", hass),
         options={
+            **options,
             "sentinel_cooldown_minutes": 0,
             "sentinel_entity_cooldown_minutes": 0,
             "sentinel_interval_seconds": 60,
@@ -411,3 +417,201 @@ async def test_polling_runs_when_no_triggers_queued(
     # Engine ran with empty snapshot — no findings, no notifications.
     notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
     assert notifier.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Each run renews the triage call budget (#866)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_each_run_renews_the_triage_call_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_run_once tells the triage service a run begins, before any finding."""
+    snapshot: FullStateSnapshot = validate_snapshot(
+        {
+            "schema_version": 1,
+            "generated_at": "2025-01-01T00:00:00+00:00",
+            "entities": [],
+            "camera_activity": [],
+            "derived": {
+                "now": "2025-01-01T00:00:00+00:00",
+                "timezone": "UTC",
+                "is_night": False,
+                "anyone_home": True,
+                "people_home": [],
+                "people_away": [],
+                "last_motion_by_area": {},
+            },
+        }
+    )
+
+    events: list[str] = []
+
+    async def _fake_build(_hass: HomeAssistant, **_kwargs: Any) -> FullStateSnapshot:
+        events.append("build")
+        return snapshot
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.sentinel.engine.async_build_full_state_snapshot",
+        _fake_build,
+    )
+    engine = _make_engine(MagicMock())
+    triage = MagicMock()
+    triage.begin_run.side_effect = lambda: events.append("begin")
+    engine._triage_service = triage
+    engine._explain_deferred_this_run = True
+    engine._explain_calls_this_run = 3
+
+    await engine._run_once("poll")
+    assert engine._explain_deferred_this_run is False
+    assert engine._explain_calls_this_run == 0
+    assert engine._explain_limit == 5  # the option's default
+    await engine._run_once("event")
+
+    # The budget is renewed before the snapshot, so before any finding of
+    # the run can reach triage().
+    assert events == ["begin", "build", "begin", "build"]
+    triage.triage.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Explanations stay inside the run's model budget (#866)
+# ---------------------------------------------------------------------------
+
+
+class _FakeExplainer:
+    def __init__(
+        self, *, defer_on_call: int | None = None, deployment: str = "edge"
+    ) -> None:
+        self.calls = 0
+        self.last_call_deferred = False
+        self.deployment = deployment
+        self._defer_on_call = defer_on_call
+
+    async def async_explain(self, _finding: Any) -> str | None:
+        self.calls += 1
+        self.last_call_deferred = self.calls == self._defer_on_call
+        return None if self.last_call_deferred else f"explanation {self.calls}"
+
+
+@pytest.mark.asyncio
+async def test_a_pass_through_finding_gets_no_explanation_call() -> None:
+    """Findings past the triage limit, or deferred, do not fan out to explain."""
+    engine = _make_engine(MagicMock())
+    explainer = _FakeExplainer()
+    explainer_arg = cast("LLMExplainer", explainer)
+    finding = MagicMock()
+
+    assert await engine._async_explanation(explainer_arg, finding, "triage_cap") is None
+    assert (
+        await engine._async_explanation(explainer_arg, finding, "triage_deferred")
+        is None
+    )
+    assert explainer.calls == 0
+    assert await engine._async_explanation(explainer_arg, finding, "llm_notify") == (
+        "explanation 1"
+    )
+    assert (
+        await engine._async_explanation(explainer_arg, finding, None) == "explanation 2"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_explanation_stops_the_runs_explanations() -> None:
+    """Once chat held the model, the rest of the run is skipped; the next run tries again."""
+    engine = _make_engine(MagicMock())
+    explainer = _FakeExplainer(defer_on_call=2)
+    explainer_arg = cast("LLMExplainer", explainer)
+    finding = MagicMock()
+
+    assert (
+        await engine._async_explanation(explainer_arg, finding, None) == "explanation 1"
+    )
+    assert (
+        await engine._async_explanation(explainer_arg, finding, None) is None
+    )  # deferred
+    assert (
+        await engine._async_explanation(explainer_arg, finding, None) is None
+    )  # skipped
+    assert explainer.calls == 2
+
+    engine._explain_deferred_this_run = False  # what _run_once does
+    assert (
+        await engine._async_explanation(explainer_arg, finding, None) == "explanation 3"
+    )
+
+
+@pytest.mark.asyncio
+async def test_explanation_calls_are_capped_per_run() -> None:
+    """The same limit bounds explanation calls, triage on or off."""
+    engine = _make_engine(MagicMock())
+    engine._explain_limit = 2
+    explainer = _FakeExplainer()
+    explainer_arg = cast("LLMExplainer", explainer)
+    finding = MagicMock()
+
+    assert (
+        await engine._async_explanation(explainer_arg, finding, None) == "explanation 1"
+    )
+    assert (
+        await engine._async_explanation(explainer_arg, finding, None) == "explanation 2"
+    )
+    assert await engine._async_explanation(explainer_arg, finding, None) is None
+    assert explainer.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_the_explanation_limit_comes_from_the_option() -> None:
+    """The user's cap reaches the engine, clamped and coerced like the rest."""
+    import custom_components.home_generative_agent.sentinel.engine as engine_module  # noqa: PLC0415
+
+    key = engine_module.CONF_SENTINEL_TRIAGE_MAX_PER_RUN
+    for raw, expected in ((2, 2), (0, 1), ("abc", 5), (None, 5)):
+        engine = _make_engine(MagicMock(), **({key: raw} if raw is not None else {}))
+        with (
+            patch.object(engine, "_network_context", return_value=None),
+            patch(
+                "custom_components.home_generative_agent.sentinel.engine.async_build_full_state_snapshot",
+                side_effect=ValueError("stop here"),
+            ),
+        ):
+            await engine._run_once("poll")
+        assert engine._explain_limit == expected, raw
+
+
+@pytest.mark.asyncio
+async def test_an_explanation_waits_out_the_gap_after_the_last_sentinel_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import custom_components.home_generative_agent.core.utils as utils_mod  # noqa: PLC0415
+    import custom_components.home_generative_agent.sentinel.engine as engine_module  # noqa: PLC0415
+
+    monkeypatch.setattr(engine_module, "SENTINEL_TRIAGE_CALL_GAP_S", 0.2)
+    utils_mod._sentinel_last_call_end = time.monotonic()
+    engine = _make_engine(MagicMock())
+    explainer = _FakeExplainer()
+    start = time.monotonic()
+    assert (
+        await engine._async_explanation(
+            cast("LLMExplainer", explainer), MagicMock(), None
+        )
+        == "explanation 1"
+    )
+    # gstack-timing-ok: lower bound only
+    assert time.monotonic() - start >= 0.19
+
+
+@pytest.mark.asyncio
+async def test_a_cloud_explainer_is_never_capped() -> None:
+    engine = _make_engine(MagicMock())
+    engine._explain_limit = 1
+    engine._explain_deferred_this_run = True
+    explainer = _FakeExplainer(deployment="cloud")
+    arg = cast("LLMExplainer", explainer)
+    assert (
+        await engine._async_explanation(arg, MagicMock(), "triage_cap")
+        == "explanation 1"
+    )
+    assert await engine._async_explanation(arg, MagicMock(), None) == "explanation 2"

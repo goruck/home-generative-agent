@@ -255,6 +255,9 @@ async def test_network_disabled_passes_disabled_context(
 
 
 class _RecordingExplainer:
+    last_call_deferred = False
+    deployment = "edge"
+
     def __init__(self) -> None:
         self.calls: list[str] = []
 

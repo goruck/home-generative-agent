@@ -1576,6 +1576,9 @@ async def test_level_zero_set_while_an_alert_is_prepared_stops_it(
     monkeypatch.setattr(engine, "get_autonomy_level", lambda _entry_id: level[0])
 
     class _SlowExplainer:
+        last_call_deferred = False
+        deployment = "edge"
+
         async def async_explain(self, _finding: Any) -> str:
             level[0] = 0  # set while the explanation was being written
             return "explained"
@@ -1615,6 +1618,9 @@ async def test_late_silence_leaves_no_cooldown_or_prompt_behind(
     monkeypatch.setattr(engine, "get_autonomy_level", lambda _entry_id: level[0])
 
     class _SlowExplainer:
+        last_call_deferred = False
+        deployment = "edge"
+
         async def async_explain(self, _finding: Any) -> str:
             level[0] = 0
             return "explained"
@@ -1660,6 +1666,9 @@ async def test_late_silence_in_a_group_stops_the_push(
     monkeypatch.setattr(engine, "get_autonomy_level", lambda _entry_id: level[0])
 
     class _SlowExplainer:
+        last_call_deferred = False
+        deployment = "edge"
+
         async def async_explain(self, _finding: Any) -> str:
             level[0] = 0
             return "explained"

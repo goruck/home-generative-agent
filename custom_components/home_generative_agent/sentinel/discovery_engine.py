@@ -17,12 +17,14 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
+    SENTINEL_TRIAGE_CALL_GAP_S,
 )
 from custom_components.home_generative_agent.core.utils import (
     SENTINEL_ADMISSION_TIMEOUT_S,
     SentinelLLMDeferredError,
     extract_final,
     run_sentinel_model_call,
+    wait_sentinel_call_gap,
 )
 from custom_components.home_generative_agent.explain.discovery_prompts import (
     SYSTEM_PROMPT,
@@ -537,6 +539,9 @@ class SentinelDiscoveryEngine:
         messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
 
         try:
+            # Like triage and explanations: not right after another Sentinel
+            # call on a shared GPU (#866).
+            await wait_sentinel_call_gap(SENTINEL_TRIAGE_CALL_GAP_S, self._deployment)
             result = await run_sentinel_model_call(
                 self._model,
                 messages,

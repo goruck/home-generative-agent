@@ -23,6 +23,15 @@ the server still answered health checks while generation hung. Only a
 timeout after waiting at least ``STALL_EVIDENCE_MIN_S`` counts, and short
 budgets are not split (``SPLIT_MIN_BUDGET_S``), so a slow model that misses
 Sentinel triage's 10 s deadline is not taken for a hung one.
+
+The probe competes with chat when two providers share one GPU, so setup
+passes a ``run_probe`` callable that applies the chat-priority gate: a
+round is skipped (``StallProbeDeferredError``) while chat or video holds
+the GPU, and tried again after ``STALL_PROBE_RETRY_S`` rather than a full
+interval. A probe that has been sent is not cancelled for chat or video,
+and a recovery recorded by another call lets it finish under its own
+timeout: cancelling a request on a runner that just recovered can wedge
+it again (#866).
 """
 
 from __future__ import annotations
@@ -52,6 +61,24 @@ STALL_TIMEOUT_THRESHOLD = 3
 # How often a stalled provider is probed, and how long a probe may take.
 STALL_PROBE_INTERVAL_S = 60.0
 STALL_PROBE_TIMEOUT_S = 60.0
+
+
+# How soon a skipped probe round is tried again (#866).
+STALL_PROBE_RETRY_S = 10.0
+
+
+class StallProbeDeferredError(Exception):
+    """A probe round was skipped because chat or video holds the GPU."""
+
+    def __init__(self, reason: str) -> None:
+        """Record why the round was skipped."""
+        super().__init__(f"stall probe skipped: {reason}")
+
+
+# Why a probe round is skipped before it is sent (#866).
+PROBE_GATE_CLOSED = "chat or video holds the GPU"
+
+
 # Budgets shorter than this are not split: the first provider gets all of it,
 # as before #828. Sentinel triage (10 s), explain (30 s), discovery and video
 # summaries (60 s) keep their whole budget for the primary; conversation turns
@@ -154,6 +181,13 @@ class _ProviderState:
     consecutive_timeouts: int = 0
     stalled_since: datetime | None = None
     last_probe: datetime | None = None
+    # Rounds skipped because chat or video held the GPU, this stall (#866).
+    probe_rounds_skipped: int = 0
+    # Skips since the last probe that was sent; the sensor is refreshed on
+    # the first of a streak only.
+    probe_skips_in_a_row: int = 0
+    # True while a probe request is with the provider.
+    probe_in_flight: bool = False
     probe: Callable[[], Awaitable[Any]] | None = None
     probe_task: asyncio.Task[None] | None = None
 
@@ -161,7 +195,7 @@ class _ProviderState:
 class ProviderStallTracker:
     """Per-provider stall state shared by every fallback chain of one entry."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         hass: HomeAssistant,
         entry: ConfigEntry,
@@ -169,6 +203,8 @@ class ProviderStallTracker:
         provider_name: Callable[[str], str],
         on_change: Callable[[], None] | None = None,
         on_recovered: Callable[[str], None] | None = None,
+        run_probe: Callable[[str, Callable[[], Awaitable[Any]]], Awaitable[Any]]
+        | None = None,
     ) -> None:
         """
         Initialize the tracker for one config entry.
@@ -176,13 +212,17 @@ class ProviderStallTracker:
         *on_change* runs whenever the stalled set or a probe changes (to
         refresh the health sensor); *on_recovered* runs with the provider id
         when a stalled provider answers again (to reset circuit breakers that
-        its timeouts may have opened).
+        its timeouts may have opened). *run_probe* runs a probe for a
+        provider id; it raises ``StallProbeDeferredError`` to skip the round
+        while chat or video holds the GPU, and the round is tried again after
+        ``STALL_PROBE_RETRY_S`` (#866). Without it the probe is sent directly.
         """
         self._hass = hass
         self._entry = entry
         self._provider_name = provider_name
         self._on_change = on_change
         self._on_recovered = on_recovered
+        self._run_probe = run_probe
         self._states: dict[str, _ProviderState] = {}
 
     def _state(self, provider_id: str) -> _ProviderState:
@@ -224,6 +264,20 @@ class ProviderStallTracker:
         ):
             return
         state.stalled_since = dt_util.utcnow()
+        state.probe_rounds_skipped = 0
+        state.probe_skips_in_a_row = 0
+        if state.probe_task is not None and not state.probe_task.done():
+            # A probe of the previous stall is still with the provider: its
+            # loop carries on for this stall; a second loop would let the
+            # two cancel each other's request (#866).
+            LOGGER.warning(
+                "Model provider %s stopped answering again (%d timeouts in a "
+                "row) while its last probe is still out; waiting for it.",
+                state.name,
+                state.consecutive_timeouts,
+            )
+            self._changed()
+            return
         LOGGER.warning(
             "Model provider %s stopped answering (%d timeouts in a row). "
             "Skipping it, and checking it every %.0f s until it answers again. "
@@ -253,9 +307,15 @@ class ProviderStallTracker:
             state.stalled_since.isoformat(),
         )
         state.stalled_since = None
-        task, state.probe_task = state.probe_task, None
-        if task is not None and task is not asyncio.current_task():
-            task.cancel()
+        task = state.probe_task
+        # A probe request already with the provider finishes under its own
+        # timeout (the loop then sees the stall cleared and exits, and keeps
+        # the task reference until then); only a sleeping loop is cancelled
+        # (#866).
+        if task is not None and not state.probe_in_flight:
+            state.probe_task = None
+            if task is not asyncio.current_task():
+                task.cancel()
         if self._on_recovered is not None:
             self._on_recovered(provider_id)
         self._changed()
@@ -270,6 +330,7 @@ class ProviderStallTracker:
                 "last_probe": state.last_probe.isoformat()
                 if state.last_probe
                 else None,
+                "probe_rounds_skipped": state.probe_rounds_skipped,
             }
             for state in self._states.values()
             if state.stalled_since is not None
@@ -282,17 +343,46 @@ class ProviderStallTracker:
     async def _async_probe_until_answered(self, provider_id: str) -> None:
         """Send the stalled provider a tiny request until it answers."""
         state = self._state(provider_id)
+        delay = STALL_PROBE_INTERVAL_S
         while state.stalled_since is not None:
-            await asyncio.sleep(STALL_PROBE_INTERVAL_S)
+            await asyncio.sleep(delay)
+            delay = STALL_PROBE_INTERVAL_S
             if state.stalled_since is None:
                 return
-            state.last_probe = dt_util.utcnow()
+            probe_at = dt_util.utcnow()
             try:
                 if state.probe is None:
                     return
                 async with asyncio.timeout(STALL_PROBE_TIMEOUT_S):
-                    await state.probe()
+                    state.probe_in_flight = True
+                    if self._run_probe is not None:
+                        await self._run_probe(provider_id, state.probe)
+                    else:
+                        await state.probe()
+            except StallProbeDeferredError as err:
+                state.probe_in_flight = False
+                # Not a probe: chat or video holds the GPU. Try again soon,
+                # not a whole interval later, and show the first skip of a
+                # streak (each refresh re-reads the audit store) (#866).
+                state.probe_rounds_skipped += 1
+                state.probe_skips_in_a_row += 1
+                delay = min(STALL_PROBE_RETRY_S, STALL_PROBE_INTERVAL_S)
+                LOGGER.debug(
+                    "Stall probe for model provider %s skipped (%d so far): %s",
+                    state.name,
+                    state.probe_rounds_skipped,
+                    err,
+                )
+                if state.probe_skips_in_a_row == 1:
+                    self._changed()
+                continue
             except Exception as err:  # noqa: BLE001
+                state.probe_skips_in_a_row = 0
+                state.probe_in_flight = False
+                if state.stalled_since is None:
+                    state.probe_task = None
+                    return  # recovered meanwhile, by another call
+                state.last_probe = probe_at
                 # Any failure (timeout, refused connection, error reply)
                 # means it is not answering yet; the next probe tries again.
                 LOGGER.debug(
@@ -302,5 +392,7 @@ class ProviderStallTracker:
                 )
                 self._changed()
                 continue
+            state.probe_skips_in_a_row = 0
+            state.probe_in_flight = False
             self.record_success(provider_id)
             return

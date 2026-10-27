@@ -73,6 +73,59 @@ def test_compute_kpis_triage_suppress_rate_50pct() -> None:
     assert kpis["triage_suppress_rate"] == 50.0
 
 
+def test_compute_kpis_triage_rate_ignores_findings_the_model_never_saw() -> None:
+    """A finding passed through untriaged (#866) says nothing about the model."""
+    records = [
+        {
+            "finding": {},
+            "triage_decision": "suppress",
+            "triage_reason_code": "llm_suppress",
+        },
+        {
+            "finding": {},
+            "triage_decision": "notify",
+            "triage_reason_code": "llm_notify",
+        },
+        {
+            "finding": {},
+            "triage_decision": "notify",
+            "triage_reason_code": "triage_cap",
+        },
+        {
+            "finding": {},
+            "triage_decision": "notify",
+            "triage_reason_code": "triage_deferred",
+        },
+        {
+            "finding": {},
+            "triage_decision": "notify",
+            "triage_reason_code": "triage_disabled",
+        },
+        # No decision either: the call timed out or failed.
+        {
+            "finding": {},
+            "triage_decision": "notify",
+            "triage_reason_code": "triage_timeout",
+        },
+        {
+            "finding": {},
+            "triage_decision": "notify",
+            "triage_reason_code": "triage_error",
+        },
+    ]
+    kpis = _compute_kpis(records)
+    assert kpis["triage_suppress_rate"] == 50.0
+
+    only_passed_through = [
+        {
+            "finding": {},
+            "triage_decision": "notify",
+            "triage_reason_code": "triage_cap",
+        },
+    ]
+    assert _compute_kpis(only_passed_through)["triage_suppress_rate"] is None
+
+
 def test_compute_kpis_triage_suppress_rate_none_when_no_triage() -> None:
     """triage_suppress_rate is None when no records have triage data."""
     records = [{"finding": {}}, {"finding": {}}]
@@ -354,6 +407,8 @@ async def test_refresh_run_stats_keys_present_when_no_engine() -> None:
         "sentinel_admission_degraded_category",
         "sentinel_admission_consecutive_deferrals",
         "sentinel_admission_starved_for_s",
+        "triage_calls_last_run",
+        "triage_passed_through_last_run",
     ):
         assert key in sensor._attrs
         assert sensor._attrs[key] is None

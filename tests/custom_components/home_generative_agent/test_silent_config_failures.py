@@ -43,8 +43,10 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
     CONF_SENTINEL_TRIAGE_ENABLED,
+    CONF_SENTINEL_TRIAGE_MAX_PER_RUN,
     CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
     RECOMMENDED_SENTINEL_TRIAGE_ENABLED,
+    RECOMMENDED_SENTINEL_TRIAGE_MAX_PER_RUN,
     RECOMMENDED_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
     SUBENTRY_TYPE_SENTINEL,
 )
@@ -387,12 +389,16 @@ def test_triage_fields_are_in_the_advanced_schema(hass: HomeAssistant) -> None:
     keys = _schema_keys(flow._schema(_default_payload()))
     assert CONF_SENTINEL_TRIAGE_ENABLED in keys
     assert CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS in keys
+    assert CONF_SENTINEL_TRIAGE_MAX_PER_RUN in keys
 
 
 def test_triage_defaults_are_in_the_default_payload() -> None:
     """A new Sentinel subentry persists the triage defaults (off)."""
     payload = _default_payload()
     assert payload[CONF_SENTINEL_TRIAGE_ENABLED] is RECOMMENDED_SENTINEL_TRIAGE_ENABLED
+    assert payload[CONF_SENTINEL_TRIAGE_MAX_PER_RUN] == (
+        RECOMMENDED_SENTINEL_TRIAGE_MAX_PER_RUN
+    )
     assert payload[CONF_SENTINEL_TRIAGE_ENABLED] is False, (
         "triage costs an LLM call per finding; it must stay opt-in"
     )
@@ -412,6 +418,7 @@ def test_resolver_propagates_triage_from_the_sentinel_subentry() -> None:
             CONF_SENTINEL_ENABLED: True,
             CONF_SENTINEL_TRIAGE_ENABLED: True,
             CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS: 25,
+            CONF_SENTINEL_TRIAGE_MAX_PER_RUN: 12,
         },
     )
     entry.subentries[sentinel.subentry_id] = sentinel
@@ -419,6 +426,10 @@ def test_resolver_propagates_triage_from_the_sentinel_subentry() -> None:
     options = resolve_runtime_options(entry)  # type: ignore[arg-type]
     assert options[CONF_SENTINEL_TRIAGE_ENABLED] is True
     assert options[CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS] == 25
+    # The per-run cap a user saves must reach runtime (#866): the resolver
+    # copies only allowlisted keys, so a missing entry silently keeps the
+    # default.
+    assert options[CONF_SENTINEL_TRIAGE_MAX_PER_RUN] == 12
 
 
 def test_resolver_defaults_triage_off_when_unset() -> None:
@@ -436,4 +447,7 @@ def test_resolver_defaults_triage_off_when_unset() -> None:
     assert options[CONF_SENTINEL_TRIAGE_ENABLED] is False
     assert options[CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS] == (
         RECOMMENDED_SENTINEL_TRIAGE_TIMEOUT_SECONDS
+    )
+    assert options[CONF_SENTINEL_TRIAGE_MAX_PER_RUN] == (
+        RECOMMENDED_SENTINEL_TRIAGE_MAX_PER_RUN
     )
