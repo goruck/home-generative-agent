@@ -34,7 +34,6 @@ from typing import TYPE_CHECKING, Any
 
 import psycopg
 from homeassistant.core import callback
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
 from psycopg import sql
 
@@ -48,6 +47,7 @@ from .embedding_model_guard import (
     STORE_VECTORS_TABLE,
     async_store_vector_dims,
 )
+from .fallback import EmbeddingsUnavailableError
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -260,10 +260,6 @@ async def async_sync_embedding_size_issue(
             "default_dims": str(EMBEDDING_MODEL_DIMS),
         },
     )
-
-
-class EmbeddingsUnavailableError(HomeAssistantError):
-    """No embedding provider could be built at setup (#751)."""
 
 
 class UnavailableEmbeddings:

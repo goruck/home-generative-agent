@@ -35,7 +35,10 @@ and can time out, so a kept fallback that setup could not fully check (its
 build unread, or the primary's, whose comparison then waited) is checked
 again here, alongside the record check, against the primary's build read by
 then: one holding another build is removed from the live chain and named in
-the same issue (#860). Nothing is re-admitted or reloaded.
+the same issue (#860). A removed fallback is not re-admitted, and nothing is
+reloaded. Until it is judged, the chain holds such a fallback: it answers
+nothing before its build is read and found to match, at its first call if
+that comes first (#857).
 """
 
 from __future__ import annotations
@@ -43,6 +46,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import time
 from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
@@ -60,10 +64,9 @@ from .embedding_model_guard import ACTIVE_ENTRY_STATES, STORE_VECTORS_TABLE
 from .embedding_store import (
     GEMINI,
     OLLAMA,
-    EmbeddingsUnavailableError,
     UnavailableEmbeddings,
 )
-from .fallback import FallbackEmbeddings
+from .fallback import EmbeddingsUnavailableError, FallbackEmbeddings
 from .utils import (
     builds_differ,
     fetch_ollama_model_digest,
@@ -72,7 +75,7 @@ from .utils import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
@@ -149,6 +152,14 @@ _FINISH_REEMBED_SQL = """
 _BUILD_CHANGED_SQL = """
     UPDATE hga_embedding_model
     SET reembed_cursor = NULL, mixed_with = %(mixed)s
+    WHERE id = 1 AND reembed_target = %(target)s
+"""
+# A run stopped on too many rejected texts is not resumed by setup: its
+# target joins the store's writers (it may have rewritten rows), so the
+# repair asks again and the next run starts over (#857).
+_END_ON_REJECTIONS_SQL = """
+    UPDATE hga_embedding_model
+    SET reembed_target = NULL, reembed_cursor = NULL, mixed_with = %(mixed)s
     WHERE id = 1 AND reembed_target = %(target)s
 """
 # A run whose first batch could not be written (vectors of another size)
@@ -236,6 +247,30 @@ _BUILD_REREAD_DELAYS_S = (0.0, 10.0, 30.0)
 # Waits before trying again to note a removed fallback as a writer (#860): a
 # re-embed holds the record row for a batch at a time.
 _NOTE_RETRY_DELAYS_S = (10.0, 30.0, 60.0)
+# Waits before trying the record check again after the database did not
+# answer (#857): until it lands, a model change is not noted, and switching
+# back later would leave the vectors written meanwhile unflagged. A database
+# down for longer takes the store's writes down with it.
+_RECORD_RETRY_DELAYS_S = (30.0, 60.0, 120.0, 300.0, 600.0)
+# Embedded to tell a text the provider rejects from a provider that is down,
+# when a batch keeps failing (#857).
+_PROBE_TEXT = "ok"
+# A rejected text's keys named in the log, at most.
+_REJECTED_LOGGED = 10
+# Wait before trying a failed text a second time: a text is rejected only if
+# it fails twice while the probe embeds after each failure (#857).
+_REJECT_RECHECK_S = 10.0
+# The HTTP statuses that say the provider refused the input itself: bad
+# request, too large, unprocessable. Any other failure (a timeout, a rate
+# limit, a 5xx, a dropped connection, no status at all) says nothing about the
+# text, so it never drops a vector (#857). Told by status, never by the
+# message, which can quote a token count or the text.
+_INPUT_REJECTED_STATUSES = frozenset({400, 413, 422})
+# Rejected texts one run drops at most. More points at a server or proxy
+# limit (request size, input length) rather than at the texts: the run stops
+# with every vector kept, so a limit never empties the store's search (#857).
+_REJECTED_PER_RUN_MAX = 10
+_CAUSE_DEPTH = 5
 _GEMINI_MODEL_PREFIX = "models/"
 _WHOLE_DOCUMENT = "$"
 
@@ -338,7 +373,8 @@ class EmbeddingFallbackGate:
 class _Record:
     model: EmbeddingFingerprint | None
     target: EmbeddingFingerprint | None
-    cursor: list[str] | None
+    # The last row done, then the texts the run rejected so far (#857).
+    cursor: list[Any] | None
     # Other models that wrote into the store since it was last whole, and the
     # stored value they were read from (the finish is guarded on it).
     mixed: tuple[EmbeddingFingerprint, ...] = ()
@@ -388,8 +424,12 @@ async def _read_record(
     cursor = row["reembed_cursor"]
     valid_cursor = (
         isinstance(cursor, list)
-        and len(cursor) == 3  # noqa: PLR2004
-        and all(isinstance(part, str) for part in cursor)
+        and len(cursor) in (3, 4)
+        and all(isinstance(part, str) for part in cursor[:3])
+        and all(
+            isinstance(n, int) and not isinstance(n, bool) and n >= 0
+            for n in cursor[3:]
+        )
     )
     return _Record(
         EmbeddingFingerprint.from_json(row["model"]),
@@ -560,7 +600,8 @@ async def async_sync_embedding_record(hass: HomeAssistant, entry: ConfigEntry) -
     rd = entry.runtime_data
     gate = rd.embedding_fallback_gate
     if gate is None or not gate.unchecked or not _primary_built(entry):
-        await _async_sync_model_record(hass, entry)
+        if not await _async_sync_model_record(hass, entry):
+            await _async_retry_model_record(hass, entry)
         return
     # The record check's own errors are caught inside it; anything else must
     # not take the fallback check down with it.
@@ -576,16 +617,20 @@ async def async_sync_embedding_record(hass: HomeAssistant, entry: ConfigEntry) -
     if isinstance(builds, dict):
         await _async_settle_fallback_builds(hass, entry, gate, builds)
     elif isinstance(builds, BaseException):
-        # The kept fallbacks stay as setup left them, and so does the issue.
+        # The kept fallbacks stay held as setup left them, and so does the
+        # issue; each is checked when the chain first needs it.
         LOGGER.error(
-            "The embedding fallbacks' build check failed: %r; %s stay in the "
-            "chain unverified until the next reload.",
+            "The embedding fallbacks' build check failed: %r; %s are checked "
+            "when the chain first needs them.",
             builds,
             ", ".join(fb.name for fb in gate.unchecked),
         )
+    # After the fallback check, which the retry waits must not hold up.
+    if record_result is False:
+        await _async_retry_model_record(hass, entry)
 
 
-async def _async_sync_model_record(hass: HomeAssistant, entry: ConfigEntry) -> None:
+async def _async_sync_model_record(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """
     Compare the store's model record with the current primary.
 
@@ -593,12 +638,13 @@ async def _async_sync_model_record(hass: HomeAssistant, entry: ConfigEntry) -> N
     raises the model-changed issue when they differ, unless a re-embed to the
     current model was started, which this resumes. An Ollama primary's build
     that setup could not read is read again first, and a build read then
-    becomes the entry's fingerprint.
+    becomes the entry's fingerprint. Returns False only when the database
+    did not answer, for `_async_retry_model_record`.
     """
     rd = entry.runtime_data
     pool, current = rd.pool, rd.embedding_fingerprint
     if pool is None or current is None or entry.state not in ACTIVE_ENTRY_STATES:
-        return
+        return True
     if (
         current.undetermined
         and rd.embedding_digest_source is not None
@@ -608,26 +654,33 @@ async def _async_sync_model_record(hass: HomeAssistant, entry: ConfigEntry) -> N
         # may be writing, and the reload once it is back runs this check.
         current = await _async_learn_primary_build(hass, entry, current)
         if entry.state not in ACTIVE_ENTRY_STATES:
-            return
+            return True
+    return await _async_apply_record_check(hass, entry, current)
+
+
+async def _async_apply_record_check(
+    hass: HomeAssistant, entry: ConfigEntry, current: EmbeddingFingerprint
+) -> bool:
+    """Run the record check and act on it; False if the database did not answer."""
     issue_id = _changed_issue_id(entry.entry_id)
     try:
-        decision, record = await _async_check_record(pool, current)
+        decision, record = await _async_check_record(entry.runtime_data.pool, current)
     except (TimeoutError, psycopg.Error) as err:
         LOGGER.warning(
             "Could not read which embedding model filled the memory store: %s", err
         )
-        return
+        return False
     if entry.state not in ACTIVE_ENTRY_STATES or decision is _Decision.WAIT:
-        return
+        return True
     if decision is _Decision.MATCH or record is None:
         ir.async_delete_issue(hass, DOMAIN, issue_id)
-        return
+        return True
     if decision is _Decision.RESUME:
         if _start_reembed_task(hass, entry, start=False):
             ir.async_delete_issue(hass, DOMAIN, issue_id)
         else:
             _raise_changed_issue(hass, entry, record.held_label, current.label)
-        return
+        return True
     LOGGER.warning(
         "The memory store holds vectors of %s, but the embedding model is now %s, "
         "so memory search returns wrong results until the store is re-embedded.",
@@ -635,6 +688,35 @@ async def _async_sync_model_record(hass: HomeAssistant, entry: ConfigEntry) -> N
         current.label,
     )
     _raise_changed_issue(hass, entry, record.held_label, current.label)
+    return True
+
+
+async def _async_retry_model_record(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """
+    Try the record check again after the database did not answer (#857).
+
+    The new model writes into the store from setup on, and only the check
+    notes it: one that never lands leaves a later switch back free to clear
+    the issue while those vectors stay. Each try uses the entry's current
+    fingerprint, which a repair confirmed meanwhile may have filled in.
+    """
+    for delay in _RECORD_RETRY_DELAYS_S:
+        LOGGER.info(
+            "Trying the memory store's embedding model check again in %d s.", delay
+        )
+        await asyncio.sleep(delay)
+        rd = entry.runtime_data
+        if entry.state not in ACTIVE_ENTRY_STATES or rd.embedding_fingerprint is None:
+            return
+        if await _async_apply_record_check(hass, entry, rd.embedding_fingerprint):
+            return
+    if entry.state in ACTIVE_ENTRY_STATES:
+        LOGGER.error(
+            "The memory store's embedding model record could not be read; if the "
+            "embedding model changed, memory search may return wrong results "
+            "with no repair offered. Reload Home Generative Agent once the "
+            "database answers to check it again."
+        )
 
 
 @callback
@@ -706,7 +788,7 @@ async def _async_learn_primary_build(
             return entry.runtime_data.embedding_fingerprint
         if build is not None:
             learned = replace(current, digest=build)
-            entry.runtime_data.embedding_fingerprint = learned
+            _learn_primary_fingerprint(entry, learned)
             return learned
     LOGGER.warning(
         "Could not read which build of %s the embedding primary serves (it did "
@@ -717,16 +799,32 @@ async def _async_learn_primary_build(
     return current
 
 
+def _learn_primary_fingerprint(
+    entry: ConfigEntry, fingerprint: EmbeddingFingerprint
+) -> None:
+    """
+    Set the primary's fingerprint, its build now read (#857).
+
+    A fallback admitted against the store's record was not compared with
+    this build: it is held again, checked anew at its next call.
+    """
+    rd = entry.runtime_data
+    rd.embedding_fingerprint = fingerprint
+    if isinstance(rd.embeddings, FallbackEmbeddings):
+        rd.embeddings.revoke_record_admissions()
+
+
 async def _async_read_fallback_builds(
     hass: HomeAssistant, entry: ConfigEntry, gate: EmbeddingFallbackGate
 ) -> dict[str, str] | None:
     """
     Map each unchecked fallback's provider id to its build, as far as readable.
 
-    Builds setup read are kept; the rest are read again with the primary's
-    waits. None when the entry stopped meanwhile.
+    Every build is read now, with the primary's waits; setup's reads may be
+    out of date, and a match admits the fallback for good (#857). None when
+    the entry stopped meanwhile.
     """
-    builds = {fb.provider_id: fb.digest for fb in gate.unchecked if fb.digest}
+    builds: dict[str, str] = {}
     for delay in _BUILD_REREAD_DELAYS_S:
         unread = [fb for fb in gate.unchecked if fb.provider_id not in builds]
         if not unread:
@@ -764,10 +862,11 @@ async def _async_settle_fallback_builds(
     another build is removed from the live chain and named in the other-build
     issue, with the ones setup left out; if it answered an embedding call
     meanwhile, the store's record notes it as a writer and the model-changed
-    repair is raised, since its vectors may be in the store. One still
-    unreadable is kept, and the log says so. With the primary's build still
-    unknown there is nothing to compare with, and the kept fallbacks are
-    named in the log.
+    repair is raised, since its vectors may be in the store. One holding the
+    same build is admitted: the chain no longer holds it (#857). One still
+    unreadable stays in the chain, held until the chain's own check admits
+    it, and the log says so. With the primary's build still unknown there is
+    nothing to compare with: they stay held, and the log names them.
 
     An unknown build decides nothing about the issue either: it is synced
     only with positive evidence (a fallback left out or removed), or once
@@ -784,8 +883,9 @@ async def _async_settle_fallback_builds(
     if current is None or primary_build is None:
         LOGGER.warning(
             "The build of %s the embedding fallback(s) %s serve could not be "
-            "compared with the primary's, which is unknown; they stay in the "
-            "chain until the next reload reads both.",
+            "compared with the primary's, which is unknown; they are checked "
+            "against the memory store's record when the chain needs them, and "
+            "again once the primary's build is read.",
             gate.model,
             ", ".join(fb.name for fb in gate.unchecked),
         )
@@ -800,6 +900,9 @@ async def _async_settle_fallback_builds(
     wrote = [fb for fb in other if fb.provider_id in chain.served]
     for fb in other:
         chain.remove_provider(fb.provider_id)
+    for fb in gate.unchecked:
+        if fb not in other and fb not in unread:
+            chain.verify_provider(fb.provider_id)
     if other:
         LOGGER.warning(
             "Embedding fallback provider(s) %s removed: their server holds "
@@ -824,18 +927,157 @@ async def _async_settle_fallback_builds(
     if unread:
         LOGGER.warning(
             "Could not read which build of %s the embedding fallback(s) %s serve "
-            "(they did not answer, or do not name their weights); they stay in "
-            "the chain, so one holding another build is not detected.",
+            "(they did not answer, or do not name their weights); they stand in "
+            "for the primary only once their build is read and matches.",
             gate.model,
             ", ".join(fb.name for fb in unread),
         )
-    left_out = (*gate.left_out, *(fb.name for fb in other))
-    rd.embedding_fallback_gate = replace(gate, left_out=left_out, unchecked=())
+    # The live gate, not the one this check started from: a fallback the
+    # chain checked meanwhile may have been left out already (#857).
+    live = rd.embedding_fallback_gate or gate
+    left_out = tuple(
+        dict.fromkeys((*live.left_out, *gate.left_out, *(fb.name for fb in other)))
+    )
+    rd.embedding_fallback_gate = replace(live, left_out=left_out, unchecked=())
     if entry.state not in ACTIVE_ENTRY_STATES or (unread and not left_out):
         return
     async_sync_other_build_fallback_issue(
         hass, entry.entry_id, primary=gate.primary, model=gate.model, left_out=left_out
     )
+
+
+async def _async_recorded_build(
+    pool: AsyncConnectionPool[AsyncConnection[DictRow]], model: str
+) -> str | None:
+    """Return the Ollama build the store's record names for `model`, or None."""
+    try:
+        async with (
+            asyncio.timeout(_DIGEST_READ_TIMEOUT_S),
+            pool.connection() as conn,
+            conn.cursor() as cur,
+        ):
+            await cur.execute(_RECORDED_MODEL_SQL)
+            row = await cur.fetchone()
+    except (TimeoutError, psycopg.Error) as err:
+        LOGGER.debug("Could not read the store's recorded embedding build: %s", err)
+        return None
+    return _recorded_build_in(row, model)
+
+
+async def async_verify_embedding_fallback(  # noqa: PLR0913
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    fallbacks: Mapping[str, FallbackBuild],
+    provider_id: str,
+    *,
+    chain: FallbackEmbeddings | None = None,
+    warned: set[str] | None = None,
+) -> bool:
+    """
+    Check a held Ollama embedding fallback's build before its first call (#857).
+
+    The chain asks this when it needs a fallback setup could not compare
+    with the primary's build. Its build, read now, is
+    compared with the primary's, or while that is unknown with the build the
+    store's record names. The same build admits it. Another build removes it
+    from the chain and names it in the other-build issue. Without both builds
+    it stays held, so a fallback never writes vectors nobody can tell apart
+    from the store's. `chain` is the chain asking: one a reload replaced
+    decides nothing about the new entry's. `warned` names the fallbacks
+    already logged as held, so a long hold logs once.
+    """
+    fb = fallbacks.get(provider_id)
+    rd = getattr(entry, "runtime_data", None)
+    if (
+        fb is None
+        or rd is None
+        or entry.state not in ACTIVE_ENTRY_STATES
+        or (chain is not None and rd.embeddings is not chain)
+    ):
+        return False
+    gate = rd.embedding_fallback_gate
+    model = gate.model if gate is not None else ""
+    # Read now, never setup's read: a build that changed since, or a read
+    # that fails now, must not admit it (#857).
+    build = await fetch_ollama_model_digest(
+        hass, fb.url, model, timeout_s=DIGEST_FETCH_TIMEOUT_S
+    )
+    current = rd.embedding_fingerprint
+    recorded = (
+        await _async_recorded_build(rd.pool, model)
+        if (current is None or current.digest is None) and rd.pool is not None
+        else None
+    )
+    if entry.state not in ACTIVE_ENTRY_STATES or (
+        chain is not None and rd.embeddings is not chain
+    ):
+        return False
+    # Read after the waits: the record check may have learned the primary's
+    # build meanwhile, and it outranks the record (#857).
+    current = rd.embedding_fingerprint
+    reference = current.digest if current is not None else None
+    by_record = reference is None
+    if by_record:
+        reference = recorded
+    if build is None or reference is None:
+        first = warned is None or provider_id not in warned
+        if warned is not None:
+            warned.add(provider_id)
+        LOGGER.log(
+            logging.WARNING if first else logging.DEBUG,
+            "Embedding fallback provider %s does not stand in for the primary: "
+            "the build of %s it serves, or the one the memory store holds, "
+            "could not be read. It is checked again when the chain next needs it.",
+            fb.name,
+            model,
+        )
+        return False
+    if not builds_differ(build, reference):
+        LOGGER.info(
+            "Embedding fallback provider %s holds the memory store's build of %s.",
+            fb.name,
+            model,
+        )
+        live_chain = rd.embeddings
+        if by_record and isinstance(live_chain, FallbackEmbeddings):
+            # Held again once the primary's build is known (#857).
+            live_chain.verify_provider(provider_id, by_record=True)
+        return True
+    if by_record and _primary_built(entry):
+        # The primary answers but its build is unread, so the record may be
+        # stale (a pull on both servers): hold, and let the record check,
+        # which reads the primary's build, judge it.
+        first = warned is None or provider_id not in warned
+        if warned is not None:
+            warned.add(provider_id)
+        LOGGER.log(
+            logging.WARNING if first else logging.DEBUG,
+            "Embedding fallback provider %s serves another build of %s than the "
+            "memory store's record; it does not stand in for the primary until "
+            "the primary's build is read and matches.",
+            fb.name,
+            model,
+        )
+        return False
+    live_chain = rd.embeddings
+    if isinstance(live_chain, FallbackEmbeddings):
+        live_chain.remove_provider(provider_id)
+    LOGGER.warning(
+        "Embedding fallback provider %s removed: its server holds another build "
+        "of %s than the memory store's, which would mix models in it.",
+        fb.name,
+        model,
+    )
+    # The live gate, read after the waits: the record check may have settled
+    # other fallbacks meanwhile (#857).
+    gate = rd.embedding_fallback_gate
+    if gate is not None:
+        left_out = tuple(dict.fromkeys((*gate.left_out, fb.name)))
+        rd.embedding_fallback_gate = replace(gate, left_out=left_out)
+        async_sync_other_build_fallback_issue(
+            hass, entry.entry_id, primary=gate.primary, model=model, left_out=left_out
+        )
+    return False
 
 
 async def _async_mark_writers(
@@ -937,7 +1179,7 @@ async def async_start_reembed(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if rd.embedding_digest_source is not None:
         build = await _async_primary_build(hass, entry)
         if build is not None and fingerprint.digest is None:
-            rd.embedding_fingerprint = replace(fingerprint, digest=build)
+            _learn_primary_fingerprint(entry, replace(fingerprint, digest=build))
         elif builds_differ(build, fingerprint.digest):
             LOGGER.warning(
                 "The embedding primary now serves another build of %s than at "
@@ -1030,7 +1272,8 @@ async def _embed_with_retry(
         except EmbeddingsUnavailableError:
             raise
         except Exception as err:
-            if delay is None:
+            # An input rejected stays rejected: straight to one text at a time.
+            if delay is None or _rejects_the_input(err):
                 raise
             LOGGER.warning(
                 "Re-embedding the memory store: embedding failed (%s); "
@@ -1041,11 +1284,132 @@ async def _embed_with_retry(
             await asyncio.sleep(delay)
             continue
         took = time.monotonic() - started
-        if len(vectors) != len(texts):
-            msg = f"got {len(vectors)} vectors for {len(texts)} texts"
-            raise ValueError(msg)
-        return vectors, took
+        return _checked_vectors(vectors, len(texts)), took
     raise AssertionError  # unreachable: the last attempt returns or raises
+
+
+def _checked_vectors(vectors: list[list[float]], count: int) -> list[list[float]]:
+    """
+    Return `vectors` if there is one, not empty, per text; raise otherwise.
+
+    An empty, null or non-finite vector is the server's fault, never a
+    rejection: None stands for a rejected text further on, and would drop the
+    vector (#857).
+    """
+    if len(vectors) != count:
+        msg = f"got {len(vectors)} vectors for {count} texts"
+        raise ValueError(msg)
+    if not all(vectors):
+        msg = "got an empty vector"
+        raise ValueError(msg)
+    # pgvector refuses NaN as a DataError, read as vectors of another size.
+    if not all(math.isfinite(x) for v in vectors for x in v):
+        msg = "got a vector with a non-finite value"
+        raise ValueError(msg)
+    return vectors
+
+
+async def _embed_once(embeddings: Any, texts: Sequence[str]) -> list[list[float]]:
+    """Embed `texts` in one call, no retries; the run's timeout applies."""
+    async with asyncio.timeout(_EMBED_TIMEOUT_S):
+        vectors = await generate_embeddings(embeddings, texts)
+    return _checked_vectors(vectors, len(texts))
+
+
+def _http_status(err: BaseException) -> int | None:
+    """
+    Return the HTTP status an error, or its cause, carries; None without one.
+
+    Each SDK carries it its own way: `status_code` (OpenAI, Ollama), on its
+    `response` (httpx), or `code` (Google's api_core errors, Gemini's).
+    """
+    seen: BaseException | None = err
+    for _ in range(_CAUSE_DEPTH):
+        if seen is None:
+            return None
+        response = getattr(seen, "response", None)
+        for value in (
+            getattr(seen, "status_code", None),
+            getattr(response, "status_code", None),
+            getattr(seen, "code", None),
+        ):
+            # HTTPStatus is an int; grpc and str codes are not.
+            if isinstance(value, int) and not isinstance(value, bool):
+                return int(value)
+        seen = seen.__cause__
+    return None
+
+
+def _rejects_the_input(err: BaseException) -> bool:
+    """Return True only if the provider answered that the input is bad (#857)."""
+    return _http_status(err) in _INPUT_REJECTED_STATUSES
+
+
+async def _embed_alone(
+    embeddings: Any, text: str, batch_err: Exception
+) -> list[float] | None:
+    """
+    Embed one text of a failing batch; None only when the provider rejects it.
+
+    Rejected means it failed twice, each time with an HTTP status saying the
+    input is bad (see `_INPUT_REJECTED_STATUSES`), and a probe text embedded
+    after each failure. Anything else raises, so the run stops with the
+    vector kept: a provider that is down, slow, overloaded or rate limited is
+    never read as a rejection (#857).
+    """
+    for attempt in range(2):
+        if attempt:
+            await asyncio.sleep(_REJECT_RECHECK_S)
+        try:
+            return (await _embed_once(embeddings, [text]))[0]
+        except EmbeddingsUnavailableError:
+            raise
+        except Exception as err:
+            if not _rejects_the_input(err):
+                raise
+        try:
+            await _embed_once(embeddings, [_PROBE_TEXT])
+        except EmbeddingsUnavailableError:
+            raise
+        except Exception:  # noqa: BLE001 - the provider is down
+            raise batch_err from None
+    return None
+
+
+async def _embed_batch(
+    embeddings: Any, texts: Sequence[str], budget: int = _REJECTED_PER_RUN_MAX
+) -> tuple[list[list[float] | None], float]:
+    """
+    Embed a batch; a text the provider keeps rejecting gets None (#857).
+
+    The batch is embedded with retries first. If it still fails, each text is
+    embedded on its own: one the provider keeps rejecting (over its input
+    limit, say; see `_embed_alone`) gets None, and the run carries on without
+    it rather than stopping on the same batch at every resume. Any other
+    failure stops the run, the batch's error standing.
+    """
+    try:
+        vectors, took = await _embed_with_retry(embeddings, texts)
+    except EmbeddingsUnavailableError:
+        raise
+    except Exception as batch_err:  # noqa: BLE001 - narrowed per text below
+        LOGGER.warning(
+            "Re-embedding the memory store: a batch kept failing (%s); "
+            "embedding its %d texts one at a time.",
+            type(batch_err).__name__,
+            len(texts),
+        )
+        single: list[list[float] | None] = []
+        took = 0.0
+        for text in texts:
+            started = time.monotonic()
+            single.append(await _embed_alone(embeddings, text, batch_err))
+            took += time.monotonic() - started
+            if single.count(None) > budget:
+                # The rest would only cost calls: the run stops here (#857).
+                raise _TooManyRejectedError from None
+        return single, took
+    return list(vectors), took
 
 
 class _SupersededError(Exception):
@@ -1054,6 +1418,15 @@ class _SupersededError(Exception):
 
 class _RecordGoneError(Exception):
     """The store has no readable model record to re-embed."""
+
+
+class _TooManyRejectedError(Exception):
+    """The provider rejected more texts in one run than a store plausibly holds."""
+
+    def __init__(self, removed: int = 0) -> None:
+        super().__init__(removed)
+        # Vectors earlier batches of the run dropped, for good.
+        self.removed = removed
 
 
 class _BuildChangedError(Exception):
@@ -1187,7 +1560,33 @@ async def _async_held_if_target(
     return record.held_label
 
 
-async def _async_run_locked(
+async def _async_end_on_rejections(
+    conn: AsyncConnection[DictRow], target: EmbeddingFingerprint
+) -> None:
+    """
+    End a run stopped on rejections, so setup does not resume it (#857).
+
+    The writers are read again under the row lock: one noted while the run
+    embedded is kept, not written over by the run's starting copy.
+    """
+    with contextlib.suppress(psycopg.Error):
+        async with conn.transaction(), conn.cursor() as cur:
+            record = await _read_record(cur, for_update=True)
+            if record is None or record.target is None:
+                return
+            writers = [*record.mixed]
+            if not any(target.same_model(m) for m in writers):
+                writers.append(target)
+            await cur.execute(
+                _END_ON_REJECTIONS_SQL,
+                {
+                    "target": target.as_json(),
+                    "mixed": Jsonb([asdict(f) for f in writers]),
+                },
+            )
+
+
+async def _async_run_locked(  # noqa: PLR0912, PLR0915 - a handler per stop
     conn: AsyncConnection[DictRow],
     embeddings: Any,
     target: EmbeddingFingerprint,
@@ -1263,6 +1662,21 @@ async def _async_run_locked(
             else "did not say which build it serves",
         )
         raise _StoppedError(recorded) from None
+    except _TooManyRejectedError as err:
+        if stored is not None:
+            await _async_end_on_rejections(conn, stored)
+        LOGGER.error(  # noqa: TRY400 - a stop cause, not a fault: no traceback
+            "Re-embedding the memory store with %s stopped: the embedding "
+            "provider rejected more than %d stored texts, which points at a "
+            "server or proxy limit (request size, input length) rather than "
+            "at the texts. %d vector(s) were removed this run (named above); "
+            "the rest are kept. Raise the limit, then start the repair again; "
+            "it starts over.",
+            target.label,
+            _REJECTED_PER_RUN_MAX,
+            err.removed,
+        )
+        raise _StoppedError(recorded) from None
     except psycopg.DataError as err:
         if stored is not None:
             with contextlib.suppress(psycopg.Error):
@@ -1295,6 +1709,48 @@ async def _async_run_locked(
         raise _StoppedError(recorded) from None
 
 
+def _rejected_so_far(cursor: list[Any] | None) -> int:
+    """Return the texts a run rejected before `cursor`; 0 for an older one."""
+    return int(cursor[3]) if cursor is not None and len(cursor) > 3 else 0  # noqa: PLR2004
+
+
+async def _embed_found(
+    embeddings: Any, texts: list[str], rejected_before: int
+) -> tuple[list[list[float] | None], float]:
+    """Embed a batch's texts within the run's rejection budget (#857)."""
+    if not texts:
+        return [], 0.0
+    try:
+        return await _embed_batch(
+            embeddings, texts, _REJECTED_PER_RUN_MAX - rejected_before
+        )
+    except _TooManyRejectedError:
+        raise _TooManyRejectedError(rejected_before) from None
+
+
+async def _async_check_rejections(
+    rejected_before: int,
+    rejected: int,
+    target: EmbeddingFingerprint,
+    current_build: Callable[[], Awaitable[str | None]],
+) -> int:
+    """
+    Return the run's rejected count, raising unless their vectors may go (#857).
+
+    They are dropped for good, so only on the target's build: one pulled
+    during the run may reject what it takes. `_embed_batch` keeps the count
+    within `_REJECTED_PER_RUN_MAX`.
+    """
+    if not rejected:
+        return rejected_before
+    rejected_total = rejected_before + rejected
+    if target.provider_type == OLLAMA:
+        build = await current_build()
+        if build is None or builds_differ(build, target.digest):
+            raise _BuildChangedError(build)
+    return rejected_total
+
+
 async def _async_reembed_rows(
     conn: AsyncConnection[DictRow],
     embeddings: Any,
@@ -1315,13 +1771,16 @@ async def _async_reembed_rows(
         ", resuming where it stopped" if cursor else "",
     )
     done = 0
+    # Carried in the cursor: a resumed run goes on with what is left of the
+    # budget, never a fresh one (#857).
+    rejected_total = _rejected_so_far(cursor)
     last_log = time.monotonic()
     target_json = target.as_json()
     mixed_json = Jsonb(record.mixed_json) if record.mixed_json is not None else None
     while True:
         params: dict[str, Any] = {"limit": _BATCH_SIZE}
         if cursor is not None:
-            params.update(zip(("prefix", "key", "field"), cursor, strict=True))
+            params.update(zip(("prefix", "key", "field"), cursor[:3], strict=True))
         query = _FIRST_BATCH_SQL if cursor is None else _NEXT_BATCH_SQL
         rows = await (await conn.execute(query, params)).fetchall()
         if not rows:
@@ -1334,13 +1793,20 @@ async def _async_reembed_rows(
                 gone.append(row)
             else:
                 found.append((row, text))
-        vectors, took = (
-            await _embed_with_retry(embeddings, [text for _, text in found])
-            if found
-            else ([], 0.0)
+        embedded, took = await _embed_found(
+            embeddings, [text for _, text in found], rejected_total
+        )
+        # A rejected text's vector is the old model's: dropped like a gone
+        # one, so the store is not recorded as the new model's with it.
+        rejected = [r for (r, _), v in zip(found, embedded, strict=True) if v is None]
+        written = [
+            (r, v) for (r, _), v in zip(found, embedded, strict=True) if v is not None
+        ]
+        rejected_total = await _async_check_rejections(
+            rejected_total, len(rejected), target, current_build
         )
         last = rows[-1]
-        next_cursor = [last["prefix"], last["key"], last["field_name"]]
+        next_cursor = [last["prefix"], last["key"], last["field_name"], rejected_total]
         # One commit per batch, its place saved first: a run that stops never
         # leaves rewritten vectors the record does not know about, and one
         # whose target was taken writes nothing.
@@ -1356,22 +1822,33 @@ async def _async_reembed_rows(
             )
             if cur.rowcount == 0:
                 raise _SupersededError
-            if found:
+            if written:
                 await cur.executemany(
                     _UPDATE_VECTOR_SQL,
                     [
                         (v, r["prefix"], r["key"], r["field_name"], r["updated_at"])
-                        for (r, _), v in zip(found, vectors, strict=True)
+                        for r, v in written
                     ],
                 )
-            if gone:
+            if gone or rejected:
                 await cur.executemany(
                     _DELETE_VECTOR_SQL,
                     [
                         (r["prefix"], r["key"], r["field_name"], r["updated_at"])
-                        for r in gone
+                        for r in (*gone, *rejected)
                     ],
                 )
+        if rejected:
+            LOGGER.warning(
+                "Re-embedding the memory store: the embedding provider rejected "
+                "%d stored text(s), so their old vectors were removed; the items "
+                "stay stored but memory search no longer finds them: %s",
+                len(rejected),
+                ", ".join(
+                    f"{r['prefix']}/{r['key']}" for r in rejected[:_REJECTED_LOGGED]
+                )
+                + (" ..." if len(rejected) > _REJECTED_LOGGED else ""),
+            )
         cursor = next_cursor
         done += len(rows)
         if time.monotonic() - last_log >= _PROGRESS_LOG_S:
@@ -1390,7 +1867,7 @@ async def _async_finish(
     record: _Record,
     current_build: Callable[[], Awaitable[str | None]],
     done: int,
-    cursor: list[str] | None,
+    cursor: list[Any] | None,
 ) -> None:
     """Record the run's target, once its build, writers and place still hold."""
     if record.target is None:
@@ -1443,6 +1920,16 @@ async def async_recorded_ollama_digest(db_uri: str, model: str) -> str | None:
     except (TimeoutError, psycopg.Error, OSError) as err:
         LOGGER.debug("Could not read the store's recorded embedding build: %s", err)
         return None
+    return _recorded_build_in(row, model)
+
+
+def _recorded_build_in(row: Any, model: str) -> str | None:
+    """
+    Return the Ollama build of `model` a record row names, or None.
+
+    A re-embed to a build of `model` names the build the store is heading
+    to; otherwise the recorded model's.
+    """
     if not row:
         return None
     current = embedding_fingerprint(OLLAMA, model, dims=None, digest=None)

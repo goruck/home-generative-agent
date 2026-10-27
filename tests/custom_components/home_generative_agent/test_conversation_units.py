@@ -400,6 +400,7 @@ async def test_run_tool_index_background_failure_sets_flag() -> None:
     rd.tool_index_ready = False
     rd.tool_indexing_in_progress = True
     rd.tool_index_failed = False
+    rd.tool_index_rearmed = False
     rd.tool_content_hashes = {}
 
     hass = MagicMock()
@@ -418,6 +419,47 @@ async def test_run_tool_index_background_failure_sets_flag() -> None:
     assert rd.tool_index_failed is True
     assert rd.tool_index_ready is False
     assert rd.tool_indexing_in_progress is False
+
+
+@pytest.mark.asyncio
+async def test_run_tool_index_background_failure_after_an_admission_rearms() -> None:
+    """
+    A held embedding fallback admitted mid-write does not latch the failure.
+
+    The write failed on the hold (#857); the next pass builds the index again.
+    """
+    rd = MagicMock()
+    rd.tool_index_ready = False
+    rd.tool_indexing_in_progress = True
+    rd.tool_index_failed = False
+    rd.tool_index_rearmed = False
+    rd.tool_content_hashes = {}
+
+    async def _admitted_then_failed(_tasks: list[Any]) -> None:
+        rd.tool_index_rearmed = True
+        msg = "embedding provider held"
+        raise HomeAssistantError(msg)
+
+    with (
+        patch(
+            "custom_components.home_generative_agent.conversation.gather_store_puts_in_chunks",
+            new=_admitted_then_failed,
+        ),
+        patch(
+            "custom_components.home_generative_agent.conversation.async_dispatcher_send"
+        ) as send,
+    ):
+        await _run_tool_index_background(
+            index_tasks=[AsyncMock()],
+            tool_hashes={"key": "hash"},
+            rd=rd,
+            hass=MagicMock(),
+        )
+
+    assert rd.tool_index_failed is False
+    assert rd.tool_index_rearmed is False
+    assert rd.tool_indexing_in_progress is False
+    assert send.call_args.args[2] == "stale"
 
 
 @pytest.mark.asyncio

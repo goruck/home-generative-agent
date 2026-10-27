@@ -262,6 +262,7 @@ from .core.embedding_record import (
     async_recorded_ollama_digest,
     async_sync_embedding_record,
     async_sync_other_build_fallback_issue,
+    async_verify_embedding_fallback,
     embedding_fingerprint,
 )
 from .core.embedding_store import (
@@ -1379,6 +1380,76 @@ def _ollama_embedding_urls_to_check(
 def _ollama_provider_url(provider: ModelProviderConfig) -> str:
     """Return the Ollama URL a provider's models use, as setup keys it."""
     return ollama_provider_settings_url(provider.data.get("settings", {}))
+
+
+@callback
+def _retry_failed_tool_index(
+    hass: HomeAssistant, entry: ConfigEntry, provider_id: str
+) -> None:
+    """
+    Let the tool index build again once a held embedding fallback is admitted.
+
+    A held fallback refuses calls until its build is checked (#857); a tool
+    index built while it was the only provider left that could answer failed,
+    and a failed index is not built again. It holds the store's build, so an
+    index that did build stays as it is. An index still being written is
+    marked, so a failure it ends in does not latch either.
+    """
+    runtime_data = getattr(entry, "runtime_data", None)
+    if runtime_data is None:
+        return
+    if runtime_data.tool_indexing_in_progress:
+        runtime_data.tool_index_rearmed = True
+        return
+    if not runtime_data.tool_index_failed:
+        return
+    runtime_data.tool_index_failed = False
+    LOGGER.info(
+        "Embedding provider %s was admitted after its build check; the tool "
+        "index that failed meanwhile is built again on the next indexing pass.",
+        provider_id,
+    )
+    async_dispatcher_send(hass, SIGNAL_TOOL_INDEX_UPDATED, "stale", 0)
+
+
+def _hold_unchecked_embedding_fallbacks(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    chain: FallbackEmbeddings,
+    unchecked: Sequence[FallbackBuild],
+    *,
+    on_admitted: Callable[[str], None] | None = None,
+) -> None:
+    """
+    Keep Ollama embedding fallbacks setup could not fully check from answering.
+
+    One holding another build than the store's would write its vectors there
+    with nothing to say so (#857): each answers only once its build is read
+    and matches, checked when the chain first needs it or by the record check
+    at the end of setup, whichever comes first. `on_admitted` runs too when
+    one is first admitted.
+    """
+    if not unchecked:
+        return
+
+    @callback
+    def _admitted(provider_id: str) -> None:
+        _retry_failed_tool_index(hass, entry, provider_id)
+        if on_admitted is not None:
+            on_admitted(provider_id)
+
+    chain.hold_until_verified(
+        [fb.provider_id for fb in unchecked],
+        partial(
+            async_verify_embedding_fallback,
+            hass,
+            entry,
+            {fb.provider_id: fb for fb in unchecked},
+            chain=chain,
+            warned=set(),
+        ),
+        admitted_callback=_admitted,
+    )
 
 
 def _provider_setting(
@@ -2786,6 +2857,68 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         embedding_model is ollama_embeddings
     )
 
+    # Setup notices of held fallbacks, sent when the chain admits them.
+    held_fallback_notices: dict[str, str | None] = {}
+
+    @callback
+    def _announce_admitted_embedding_fallback(provider_id: str) -> None:
+        if provider_id not in held_fallback_notices:
+            return
+        # Only now the deployment that embeds: held, it answered nothing.
+        if (deployment := held_fallback_notices[provider_id]) is not None:
+            model_deployments["embedding"] = deployment
+        _schedule_model_fallback_notification(
+            "embedding",
+            _emb_fb[0].entry_id,
+            provider_id,
+            held_fallback_notices.pop(provider_id),
+        )
+
+    async def _async_announce_setup_embedding_fallback(
+        active: tuple[Any, str, str],
+    ) -> None:
+        """
+        Say that setup starts embedding on a fallback, the primary being down.
+
+        A fallback held until its build is checked (#857) may answer nothing,
+        so it is logged as held instead of announced as standing in.
+        """
+        _model, deployment, active_provider_id = active
+        if active_provider_id == _emb_fb[0].entry_id:
+            return
+        provider = providers.get(active_provider_id)
+        held = next(
+            (
+                fb
+                for fb in embedding_fallback_unchecked
+                if fb.provider_id == active_provider_id
+            ),
+            None,
+        )
+        if held is not None:
+            # Announced once the chain admits it, if it ever does.
+            held_fallback_notices[active_provider_id] = (
+                provider.deployment if provider else deployment
+            )
+            LOGGER.warning(
+                "The embedding primary %s is down; fallback provider %s stands in "
+                "once its build of %s is read and matches the memory store's, "
+                "checked at its first call. Until then saving memories and "
+                "captions fails.",
+                _emb_fb[0].name,
+                held.name,
+                ollama_embedding_model,
+            )
+            return
+        model_deployments["embedding"] = provider.deployment if provider else deployment
+        await _async_notify_model_fallback(
+            "embedding",
+            _emb_fb[0].entry_id,
+            active_provider_id,
+            provider.deployment if provider else deployment,
+            setup_selected=True,
+        )
+
     # Wrap embedding model with fallback if multiple providers available
     _emb_fb = fallback_chains.get("embedding", [])
     if _emb_fb:
@@ -2829,19 +2962,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 _emb_fb[0].name,
             )
         if len(_emb_chain) > 1:
-            active_provider_id = _emb_chain[0][2]
-            if active_provider_id != _emb_fb[0].entry_id:
-                provider = providers.get(active_provider_id)
-                model_deployments["embedding"] = (
-                    provider.deployment if provider else _emb_chain[0][1]
-                )
-                await _async_notify_model_fallback(
-                    "embedding",
-                    _emb_fb[0].entry_id,
-                    active_provider_id,
-                    provider.deployment if provider else _emb_chain[0][1],
-                    setup_selected=True,
-                )
+            await _async_announce_setup_embedding_fallback(_emb_chain[0])
 
             def _mark_tool_index_stale(
                 previous_provider_id: str, provider_id: str, *, notify: bool = True
@@ -2887,21 +3008,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 switch_callback=_mark_tool_index_stale,
                 removed_callback=partial(_mark_tool_index_stale, notify=False),
             )
+            _hold_unchecked_embedding_fallbacks(
+                hass,
+                entry,
+                embedding_model,
+                embedding_fallback_unchecked,
+                on_admitted=_announce_admitted_embedding_fallback,
+            )
         elif _emb_chain:
-            active_provider_id = _emb_chain[0][2]
-            if active_provider_id != _emb_fb[0].entry_id:
-                provider = providers.get(active_provider_id)
-                model_deployments["embedding"] = (
-                    provider.deployment if provider else _emb_chain[0][1]
-                )
-                await _async_notify_model_fallback(
-                    "embedding",
-                    _emb_fb[0].entry_id,
-                    active_provider_id,
-                    provider.deployment if provider else _emb_chain[0][1],
-                    setup_selected=True,
-                )
+            await _async_announce_setup_embedding_fallback(_emb_chain[0])
             embedding_model = _emb_chain[0][0]
+            if embedding_fallback_unchecked:
+                # Only an unchecked fallback answered at setup: wrapped, so
+                # it is held like one in a longer chain (#857).
+                embedding_model = FallbackEmbeddings(_emb_chain, circuit_breaker=None)
+                _hold_unchecked_embedding_fallbacks(
+                    hass,
+                    entry,
+                    embedding_model,
+                    embedding_fallback_unchecked,
+                    on_admitted=_announce_admitted_embedding_fallback,
+                )
         else:
             embedding_model = None
 
@@ -4682,7 +4809,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     # issue itself once it knows (#860): syncing it here too would delete a
     # standing, perhaps dismissed, issue on no evidence, only for the check to
     # raise it again fresh, or, with the primary down and no check to come,
-    # for good while the fallback it names takes over unverified.
+    # for good while the fallback it names is still held, unjudged (#857).
     if embedding_other_build or not embedding_fallback_unchecked:
         async_sync_other_build_fallback_issue(
             hass,

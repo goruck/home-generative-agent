@@ -76,9 +76,9 @@ from custom_components.home_generative_agent.const import (
     TOOL_INCLUSIONS_MAX_PER_TURN,
 )
 
-from ..core.embedding_store import EmbeddingsUnavailableError  # noqa: TID252
 from ..core.fallback import (  # noqa: TID252
     DROPPABLE_SAMPLING_PARAMS,
+    EmbeddingsUnavailableError,
     FallbackChatModel,
     ainvoke_dropping_unsupported_params,
     unsupported_sampling_param_in_chain,
@@ -3642,8 +3642,10 @@ async def _search_memories(store: BaseStore, user_id: str, query: str | None) ->
             "format of your OpenAI-compatible server."
         )
     except EmbeddingsUnavailableError:
-        # Setup's stand-in while no embedding provider is up (#751): already
-        # logged once at setup, so recent memories without a warning per turn.
+        # No embedding provider can answer: none was up at setup (#751), or
+        # the fallback is held until its build is checked (#857). Each is
+        # logged where it happens (setup, the chain's provider failures, the
+        # build check), so recent memories without a warning per turn.
         pass
     except psycopg.DataError as err:
         LOGGER.warning(
