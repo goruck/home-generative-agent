@@ -358,10 +358,12 @@
           "data": {
             "camera_image_analysis": "Analýza obrazu z kamery",
             "conversation_summary": "Souhrn konverzace",
-            "embedding": "Embeddings"
+            "embedding": "Embeddings",
+            "sentinel_model": "Model Sentinelu"
           },
           "data_description": {
-            "embedding": "Embedding model pro sémantickou paměť a vyhledávání nástrojů. Pokud je vypnuto, poskytovatel je vybrán automaticky (poskytovatel konverzace, pokud podporuje embeddings)."
+            "embedding": "Embedding model pro sémantickou paměť a vyhledávání nástrojů. Pokud je vypnuto, poskytovatel je vybrán automaticky (poskytovatel konverzace, pokud podporuje embeddings).",
+            "sentinel_model": "Vlastní model pro triáž, objevování a vysvětlení Sentinelu, aby mohly běžet na malém modelu nebo druhém serveru Ollama místo sdílení modelu konverzace s hlasem a chatem. Při vypnutí běží Sentinel na modelu konverzace."
           }
         },
         "feature_provider": {

@@ -358,10 +358,12 @@
           "data": {
             "camera_image_analysis": "Camera Image Analysis",
             "conversation_summary": "Conversation Summary",
-            "embedding": "Embeddings"
+            "embedding": "Embeddings",
+            "sentinel_model": "Sentinel Model"
           },
           "data_description": {
-            "embedding": "Embedding model for semantic memory and tool search. When off, the provider is chosen automatically (the Conversation provider if it supports embeddings)."
+            "embedding": "Embedding model for semantic memory and tool search. When off, the provider is chosen automatically (the Conversation provider if it supports embeddings).",
+            "sentinel_model": "A model of its own for Sentinel's triage, discovery and explanations, so they can run on a small model or a second Ollama server instead of sharing the Conversation model with voice and chat. When off, Sentinel runs on the Conversation model."
           }
         },
         "feature_provider": {

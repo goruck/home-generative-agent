@@ -47,6 +47,9 @@ from ..const import (  # noqa: TID252
     CONF_OLLAMA_EMBEDDING_MODEL,
     CONF_OLLAMA_EMBEDDING_URL,
     CONF_OLLAMA_REASONING,
+    CONF_OLLAMA_SENTINEL_CONTEXT_SIZE,
+    CONF_OLLAMA_SENTINEL_KEEPALIVE,
+    CONF_OLLAMA_SENTINEL_URL,
     CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
     CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
     CONF_OLLAMA_SUMMARIZATION_MODEL,
@@ -309,6 +312,21 @@ def _coerce_capabilities(raw: Any) -> set[str]:
         return set()
 
 
+# Categories a provider serves by serving another: Sentinel's triage,
+# discovery and explanation calls are chat calls (#866), so every provider
+# stored before the category existed qualifies without a migration.
+IMPLIED_CAPABILITIES: dict[str, frozenset[str]] = {"chat": frozenset({"sentinel"})}
+
+
+def with_implied_capabilities(capabilities: set[str]) -> set[str]:
+    """Return *capabilities* plus the categories they imply."""
+    caps = set(capabilities)
+    for base, implied in IMPLIED_CAPABILITIES.items():
+        if base in caps:
+            caps |= implied
+    return caps
+
+
 def get_database_subentry(
     _hass: Any, config_entry: ConfigEntry
 ) -> ConfigSubentry | None:
@@ -518,7 +536,7 @@ def _model_provider_from_subentry(subentry: ConfigSubentry) -> ModelProviderConf
         entry_id=subentry.subentry_id,
         name=name,
         provider_type=provider_type,
-        capabilities=caps,
+        capabilities=with_implied_capabilities(caps),
         data={"settings": dict(settings), "name": name},
         deployment=_deployment_for(provider_type, data),
     )
@@ -664,7 +682,7 @@ def _build_ollama_legacy_providers(
             entry_id=provider_id,
             name=settings["name"],
             provider_type="ollama",
-            capabilities=categories,
+            capabilities=with_implied_capabilities(categories),
             data={"settings": settings},
             deployment=_DEPLOYMENT_DEFAULTS.get("ollama", "edge"),
         )
@@ -698,7 +716,7 @@ def _build_openai_legacy_provider(
         entry_id=_legacy_provider_id(entry, "openai"),
         name=settings["name"],
         provider_type="openai",
-        capabilities={"chat", "vlm", "summarization", "embedding"},
+        capabilities={"chat", "vlm", "summarization", "embedding", "sentinel"},
         data={"settings": settings},
         deployment=_DEPLOYMENT_DEFAULTS.get("openai", "cloud"),
     )
@@ -730,7 +748,7 @@ def _build_gemini_legacy_provider(
         entry_id=_legacy_provider_id(entry, "gemini"),
         name=settings["name"],
         provider_type="gemini",
-        capabilities={"chat", "vlm", "summarization", "embedding"},
+        capabilities={"chat", "vlm", "summarization", "embedding", "sentinel"},
         data={"settings": settings},
         deployment=_DEPLOYMENT_DEFAULTS.get("gemini", "cloud"),
     )
@@ -937,6 +955,8 @@ def _apply_provider_to_category(
             options[CONF_OLLAMA_SUMMARIZATION_URL] = base_url
         if category == "embedding":
             options[CONF_OLLAMA_EMBEDDING_URL] = base_url
+        if category == "sentinel":
+            options[CONF_OLLAMA_SENTINEL_URL] = base_url
 
     if provider.provider_type == "openai" and (api_key := settings.get("api_key")):
         options[CONF_API_KEY] = api_key
@@ -980,11 +1000,13 @@ def _apply_feature_model_to_options(
             "chat": CONF_OLLAMA_CHAT_KEEPALIVE,
             "vlm": CONF_OLLAMA_VLM_KEEPALIVE,
             "summarization": CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
+            "sentinel": CONF_OLLAMA_SENTINEL_KEEPALIVE,
         }
         context_map = {
             "chat": CONF_OLLAMA_CHAT_CONTEXT_SIZE,
             "vlm": CONF_OLLAMA_VLM_CONTEXT_SIZE,
             "summarization": CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
+            "sentinel": CONF_OLLAMA_SENTINEL_CONTEXT_SIZE,
         }
         keepalive_key = keepalive_map.get(category)
         keepalive_val = model_data.get(CONF_FEATURE_MODEL_KEEPALIVE)
@@ -1014,7 +1036,13 @@ def _apply_feature_model_to_options(
             options[CONF_CHAT_REASONING_BY_MODEL] = dict(by_model)
 
 
-MODEL_CATEGORIES = ("chat", "vlm", "summarization", "embedding")
+MODEL_CATEGORIES = ("chat", "vlm", "summarization", "embedding", "sentinel")
+
+# Categories with no automatic provider: left unresolved, their consumer
+# falls back on its own. Sentinel without a "Sentinel Model" feature runs on
+# the chat model (#866); an automatic pick would move it to whichever
+# provider happens to be first.
+OPT_IN_CATEGORIES: frozenset[str] = frozenset({"sentinel"})
 
 
 def _resolve_category_providers(
@@ -1052,7 +1080,7 @@ def _resolve_category_providers(
             demoted.append((feature, cat, pinned))
 
     for cat in MODEL_CATEGORIES:
-        if cat in category_provider:
+        if cat in category_provider or cat in OPT_IN_CATEGORIES:
             continue
         # Without an embedding feature of its own, embeddings ride along with
         # the chat provider when it can serve them (legacy behaviour).

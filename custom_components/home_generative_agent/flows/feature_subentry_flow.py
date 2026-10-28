@@ -65,6 +65,7 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_OLLAMA_CHAT_KEEPALIVE,
     RECOMMENDED_OLLAMA_CONTEXT_SIZE,
     RECOMMENDED_OLLAMA_REASONING,
+    RECOMMENDED_OLLAMA_SENTINEL_KEEPALIVE,
     RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE,
     RECOMMENDED_OLLAMA_URL,
     RECOMMENDED_OLLAMA_VLM_KEEPALIVE,
@@ -74,6 +75,7 @@ from ..const import (  # noqa: TID252
 )
 from ..core.db_utils import build_postgres_uri  # noqa: TID252
 from ..core.embedding_model_guard import async_store_vector_dims  # noqa: TID252
+from ..core.subentry_resolver import with_implied_capabilities  # noqa: TID252
 from ..core.utils import (  # noqa: TID252
     CannotConnectError,
     InvalidAuthError,
@@ -96,6 +98,7 @@ KEEPALIVE_DEFAULTS = {
     "chat": RECOMMENDED_OLLAMA_CHAT_KEEPALIVE,
     "vlm": RECOMMENDED_OLLAMA_VLM_KEEPALIVE,
     "summarization": RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE,
+    "sentinel": RECOMMENDED_OLLAMA_SENTINEL_KEEPALIVE,
 }
 
 
@@ -132,7 +135,7 @@ def _provider_options(entry: ConfigEntry, category: str) -> list[SelectOptionDic
     for subentry in entry.subentries.values():
         if subentry.subentry_type != SUBENTRY_TYPE_MODEL_PROVIDER:
             continue
-        caps = set(subentry.data.get("capabilities") or [])
+        caps = with_implied_capabilities(set(subentry.data.get("capabilities") or []))
         if caps and category not in caps:
             continue
         # A subentry stored before capabilities existed has an empty caps set,
@@ -243,7 +246,7 @@ def _fallback_provider_options(
             or _subentry_ollama_url(subentry) == primary_url
         ):
             continue
-        caps = set(subentry.data.get("capabilities") or [])
+        caps = with_implied_capabilities(set(subentry.data.get("capabilities") or []))
         if caps and category not in caps:
             continue
         # A subentry stored before capabilities existed has an empty caps set,
@@ -675,6 +678,10 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
         disabled_cache = self._disabled_feature_cache()
 
         for feature_type, info in FEATURE_DEFS.items():
+            if not info.get("basic", True):
+                # Opt-in only (the Sentinel model): Basic setup leaves it to
+                # its default, the Conversation model (#866).
+                continue
             category = FEATURE_CATEGORY_MAP.get(feature_type, "")
             provider_opts = _provider_options(entry, category)
             if not provider_opts:
@@ -1359,6 +1366,12 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
     ) -> SubentryFlowResult:
         """Handle the conversation summary feature step."""
         return await self._async_step_feature("conversation_summary", user_input)
+
+    async def async_step_sentinel_model(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Handle the Sentinel model feature step (#866)."""
+        return await self._async_step_feature("sentinel_model", user_input)
 
     async def async_step_embedding(
         self, user_input: dict[str, Any] | None = None

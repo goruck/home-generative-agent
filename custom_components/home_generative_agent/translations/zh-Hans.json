@@ -358,10 +358,12 @@
           "data": {
             "camera_image_analysis": "摄像头图像分析",
             "conversation_summary": "对话摘要",
-            "embedding": "Embedding"
+            "embedding": "Embedding",
+            "sentinel_model": "Sentinel 模型"
           },
           "data_description": {
-            "embedding": "用于语义记忆和工具搜索的 Embedding 模型。关闭时会自动选择提供商（如果对话提供商支持 Embedding，则使用它）。"
+            "embedding": "用于语义记忆和工具搜索的 Embedding 模型。关闭时会自动选择提供商（如果对话提供商支持 Embedding，则使用它）。",
+            "sentinel_model": "为 Sentinel 的过滤、发现和说明单独指定模型，使其可以运行在小模型或第二台 Ollama 服务器上，而不是与语音和聊天共用对话模型。关闭时，Sentinel 使用对话模型。"
           }
         },
         "feature_provider": {

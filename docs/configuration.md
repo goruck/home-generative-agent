@@ -24,7 +24,7 @@ The configuration UI is available in English, Czech, Simplified Chinese, and Tur
    - The first provider added is automatically assigned to all features.
    - A provider must exist before you can run **+ Setup**.
 3. Click **+ Setup** to enable features. Choose a setup mode:
-   - **Basic** — enables all features (Conversation, Camera Image Analysis, Conversation Summary) with recommended defaults and creates the database subentry automatically. No database prompt appears.
+   - **Basic** — enables all features (Conversation, Camera Image Analysis, Conversation Summary) with recommended defaults and creates the database subentry automatically. No database prompt appears. The optional **Sentinel Model** feature is left off, so Sentinel runs on the Conversation model.
    - **Advanced** — step through each feature individually to assign providers, models, and fallback chains; includes a database configuration step.
 4. Use the **gear icon** on any feature to adjust its model settings later.
 5. Click **+ Sentinel** to configure proactive anomaly detection (see [Sentinel guide](sentinel.md)). Choose a setup mode:
@@ -60,6 +60,11 @@ Supported providers and their default models:
 | Summarization | Gemini | gemini-3.5-flash-lite | Context summarization |
 | Summarization | Anthropic | claude-haiku-4-5-20251001 | Context summarization |
 | Summarization | OpenAI Compatible | gpt-4o | Context summarization |
+| Sentinel | Ollama | qwen3:4b | Sentinel triage, discovery, explanations (optional; the Conversation model when off) |
+| Sentinel | OpenAI | gpt-5-nano | Sentinel triage, discovery, explanations |
+| Sentinel | Gemini | gemini-3.5-flash-lite | Sentinel triage, discovery, explanations |
+| Sentinel | Anthropic | claude-haiku-4-5-20251001 | Sentinel triage, discovery, explanations |
+| Sentinel | OpenAI Compatible | gpt-4o | Sentinel triage, discovery, explanations |
 | Embeddings | Ollama | mxbai-embed-large | Semantic search |
 | Embeddings | OpenAI | text-embedding-3-small | Semantic search |
 | Embeddings | Gemini | gemini-embedding-001 | Semantic search |
@@ -86,6 +91,8 @@ Common Ollama embedding models by vector size:
 Limits of the record ([#857](https://github.com/goruck/home-generative-agent/issues/857) tracks the cases still open): entries that share one database must use one embedding model, since the store holds one model's vectors (two entries with different models would each ask to re-embed it to their own). An OpenAI-compatible model is recorded by its name, not its server, so a different server serving another model under the same name is not noticed. While a re-embed runs, the database grows (each re-embedded vector leaves an old copy, in the table and in its search index, until PostgreSQL vacuums it), so a large store needs about as much free disk again as its vector table takes.
 
 **Multiple providers:** You can add multiple Model Provider subentries and assign them per-feature. For example: a "Primary Ollama" provider for chat and a "Vision Ollama" provider for camera analysis. You can also mix types — a local vLLM server as **OpenAI Compatible** alongside an Ollama provider, or two cloud providers side by side (Anthropic for Conversation and Summary, Gemini for Camera Image Analysis and Embeddings).
+
+One limit: two providers of the same type (two OpenAI accounts, say, one for Conversation and one for the Sentinel Model) share one set of credentials at runtime, the key of whichever was resolved last; a second account's key is never used and its billing never moves. Use different provider types, or one account, until this is lifted.
 
 Add each one with **+ Model Provider** on the integration page. The flow's first step asks **Edge** or **Cloud**, and that choice is what determines the provider types the next step lists — **Edge** offers Ollama and OpenAI Compatible, **Cloud** offers OpenAI, Gemini, and Anthropic. Reconfiguring an existing provider *replaces it in place* (the subentry keeps its identity, and every feature pointing at it moves with it), so use **+ Model Provider** — not reconfigure — when you want a second provider alongside the first.
 
@@ -124,6 +131,7 @@ Each feature is enabled separately under **+ Setup** and has its own model/provi
 - **Camera Image Analysis** — on-demand and proactive vision analysis
 - **Conversation Summary** — automatic context window management
 - **Embeddings** — embedding model for semantic memory and tool retrieval; assign it a dedicated provider/server or leave it off for automatic selection
+- **Sentinel Model** — a model of its own for Sentinel's triage, discovery and explanations ([#866](https://github.com/goruck/home-generative-agent/issues/866)). Off by default and left off by Basic setup: Sentinel then runs on the Conversation model. Turn it on (Advanced setup, or the gear icon later) to point Sentinel at a small model such as `qwen3:4b`, or at a second Ollama server, so its background calls never share a GPU with voice and chat. Any provider that serves Conversation can serve it, with its own fallback chain; the per-run call limit and gap of a shared local model still apply to it when it runs on an edge provider.
 
 Global options such as system prompt, face recognition URL, context management parameters, and the critical-action PIN live in the integration's **Options** flow (gear icon on the integration page).
 

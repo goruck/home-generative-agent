@@ -140,11 +140,14 @@ CONF_OLLAMA_SUMMARIZATION_URL = "ollama_summarization_url"
 RECOMMENDED_OLLAMA_SUMMARIZATION_URL = RECOMMENDED_OLLAMA_URL
 CONF_OLLAMA_EMBEDDING_URL = "ollama_embedding_url"
 RECOMMENDED_OLLAMA_EMBEDDING_URL = RECOMMENDED_OLLAMA_URL
+CONF_OLLAMA_SENTINEL_URL = "ollama_sentinel_url"
+RECOMMENDED_OLLAMA_SENTINEL_URL = RECOMMENDED_OLLAMA_URL
 OLLAMA_CATEGORY_URL_KEYS = {
     "chat": CONF_OLLAMA_CHAT_URL,
     "vlm": CONF_OLLAMA_VLM_URL,
     "summarization": CONF_OLLAMA_SUMMARIZATION_URL,
     "embedding": CONF_OLLAMA_EMBEDDING_URL,
+    "sentinel": CONF_OLLAMA_SENTINEL_URL,
 }
 
 CONF_OLLAMA_REASONING = "ollama_reasoning"
@@ -443,6 +446,10 @@ FEATURE_DEFS: dict[str, dict[str, Any]] = {
     # When disabled, the embedding provider is selected automatically
     # (conversation provider if capable, else first embedding-capable provider).
     "embedding": {"name": "Embeddings", "required": False},
+    # Sentinel's triage, discovery and explanation calls. Opt-in (#866): Basic
+    # setup does not create it, and without it Sentinel runs on the
+    # Conversation model, as it always has.
+    "sentinel_model": {"name": "Sentinel Model", "required": False, "basic": False},
 }
 
 FEATURE_NAMES: dict[str, str] = {
@@ -454,6 +461,7 @@ FEATURE_CATEGORY_MAP: dict[str, str] = {
     "camera_image_analysis": "vlm",
     "conversation_summary": "summarization",
     "embedding": "embedding",
+    "sentinel_model": "sentinel",
 }
 
 # ---- Feature model config (per-feature subentry) ----
@@ -863,6 +871,53 @@ RECOMMENDED_ANTHROPIC_SUMMARIZATION_MODEL: SUMMARIZATION_MODEL_ANTHROPIC_SUPPORT
 
 CONF_SUMMARIZATION_MODEL_TEMPERATURE = "summarization_model_temperature"
 RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE = 0.2
+
+# ---------------- Sentinel model (#866) ----------------
+# The model Sentinel's triage, discovery and explanation calls run on when a
+# "Sentinel Model" feature is set up; without one they run on the chat model.
+# Any chat-capable model will do, and a small one is enough: triage is a short
+# classification, discovery is periodic. Any provider that serves chat serves
+# this category (the capability is implied; see subentry_resolver).
+SENTINEL_MODEL_TOP_P = 1.0
+SENTINEL_MODEL_OLLAMA_SUPPORTED = Literal[
+    "qwen3:1.7b", "qwen3:4b", "qwen3:8b", "qwen3:32b", "gpt-oss"
+]
+SENTINEL_MODEL_OPENAI_SUPPORTED = CHAT_MODEL_OPENAI_SUPPORTED
+SENTINEL_MODEL_GEMINI_SUPPORTED = CHAT_MODEL_GEMINI_SUPPORTED
+SENTINEL_MODEL_ANTHROPIC_SUPPORTED = CHAT_MODEL_ANTHROPIC_SUPPORTED
+
+CONF_SENTINEL_MODEL_PROVIDER = "sentinel_model_provider"
+RECOMMENDED_SENTINEL_MODEL_PROVIDER: Literal[
+    "openai", "ollama", "gemini", "anthropic"
+] = "ollama"
+
+CONF_OLLAMA_SENTINEL_MODEL = "ollama_sentinel_model"
+RECOMMENDED_OLLAMA_SENTINEL_MODEL: SENTINEL_MODEL_OLLAMA_SUPPORTED = "qwen3:4b"
+CONF_OLLAMA_SENTINEL_KEEPALIVE = "ollama_sentinel_keepalive"
+RECOMMENDED_OLLAMA_SENTINEL_KEEPALIVE: KeepAliveSeconds = 300
+CONF_OLLAMA_SENTINEL_CONTEXT_SIZE = "ollama_sentinel_context_size"
+SENTINEL_MODEL_PREDICT = None  # Ollama only; None = the server's default
+SENTINEL_MODEL_REPEAT_PENALTY = 1.05  # Ollama only
+SENTINEL_MIRO_STAT = 0  # Ollama only
+
+CONF_OPENAI_SENTINEL_MODEL = "openai_sentinel_model"
+RECOMMENDED_OPENAI_SENTINEL_MODEL: SENTINEL_MODEL_OPENAI_SUPPORTED = "gpt-5-nano"
+
+CONF_OPENAI_COMPATIBLE_SENTINEL_MODEL = "openai_compatible_sentinel_model"
+RECOMMENDED_OPENAI_COMPATIBLE_SENTINEL_MODEL = "gpt-4o"
+
+CONF_GEMINI_SENTINEL_MODEL = "gemini_sentinel_model"
+RECOMMENDED_GEMINI_SENTINEL_MODEL: SENTINEL_MODEL_GEMINI_SUPPORTED = (
+    "gemini-3.5-flash-lite"
+)
+
+CONF_ANTHROPIC_SENTINEL_MODEL = "anthropic_sentinel_model"
+RECOMMENDED_ANTHROPIC_SENTINEL_MODEL: SENTINEL_MODEL_ANTHROPIC_SUPPORTED = (
+    "claude-haiku-4-5-20251001"
+)
+
+CONF_SENTINEL_MODEL_TEMPERATURE = "sentinel_model_temperature"
+RECOMMENDED_SENTINEL_MODEL_TEMPERATURE = 0.2
 
 # Prompts for summarization (used in graph/tools flows)
 SUMMARIZATION_SYSTEM_PROMPT = (
@@ -1412,6 +1467,33 @@ MODEL_CATEGORY_SPECS: dict[str, dict[str, Any]] = {
             "ollama": CONF_OLLAMA_SUMMARIZATION_MODEL,
             "gemini": CONF_GEMINI_SUMMARIZATION_MODEL,
             "anthropic": CONF_ANTHROPIC_SUMMARIZATION_MODEL,
+        },
+    },
+    "sentinel": {
+        "provider_key": CONF_SENTINEL_MODEL_PROVIDER,
+        "temperature_key": CONF_SENTINEL_MODEL_TEMPERATURE,
+        "recommended_provider": RECOMMENDED_SENTINEL_MODEL_PROVIDER,
+        "recommended_temperature": RECOMMENDED_SENTINEL_MODEL_TEMPERATURE,
+        "providers": {
+            "openai": list(get_args(SENTINEL_MODEL_OPENAI_SUPPORTED)),
+            "openai_compatible": list(get_args(SENTINEL_MODEL_OPENAI_SUPPORTED)),
+            "ollama": list(get_args(SENTINEL_MODEL_OLLAMA_SUPPORTED)),
+            "gemini": list(get_args(SENTINEL_MODEL_GEMINI_SUPPORTED)),
+            "anthropic": list(get_args(SENTINEL_MODEL_ANTHROPIC_SUPPORTED)),
+        },
+        "recommended_models": {
+            "openai": RECOMMENDED_OPENAI_SENTINEL_MODEL,
+            "openai_compatible": RECOMMENDED_OPENAI_COMPATIBLE_SENTINEL_MODEL,
+            "ollama": RECOMMENDED_OLLAMA_SENTINEL_MODEL,
+            "gemini": RECOMMENDED_GEMINI_SENTINEL_MODEL,
+            "anthropic": RECOMMENDED_ANTHROPIC_SENTINEL_MODEL,
+        },
+        "model_keys": {
+            "openai": CONF_OPENAI_SENTINEL_MODEL,
+            "openai_compatible": CONF_OPENAI_COMPATIBLE_SENTINEL_MODEL,
+            "ollama": CONF_OLLAMA_SENTINEL_MODEL,
+            "gemini": CONF_GEMINI_SENTINEL_MODEL,
+            "anthropic": CONF_ANTHROPIC_SENTINEL_MODEL,
         },
     },
     "embedding": {
