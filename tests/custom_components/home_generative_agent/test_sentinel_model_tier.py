@@ -15,10 +15,14 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.home_generative_agent.const import (
+    CONF_EXPLAIN_ENABLED,
     CONF_FEATURE_MODEL,
     CONF_FEATURE_MODEL_NAME,
+    CONF_OLLAMA_SENTINEL_CONTEXT_SIZE,
+    CONF_OLLAMA_SENTINEL_KEEPALIVE,
     CONF_OLLAMA_SENTINEL_MODEL,
     CONF_OLLAMA_SENTINEL_URL,
+    CONF_OPENAI_COMPATIBLE_BASE_URL,
     CONF_OPENAI_SENTINEL_MODEL,
     CONF_SENTINEL_MODEL_PROVIDER,
     CONF_SENTINEL_MODEL_TEMPERATURE,
@@ -43,11 +47,14 @@ from custom_components.home_generative_agent.core.subentry_resolver import (
     with_implied_capabilities,
 )
 from custom_components.home_generative_agent.flows.feature_subentry_flow import (
+    _fallback_provider_options,
     _provider_options,
+    _shared_slot_clash,
 )
 
 from .test_fallback_setup import (
     FakeConfiguredModel,
+    NoopAsyncEngine,
     _fallback_setup_data,
     _patch_setup_dependencies,
     hga_component,
@@ -90,9 +97,12 @@ def test_the_sentinel_tier_is_registered_but_not_a_default_feature() -> None:
     assert "sentinel_model" not in DEFAULT_FEATURE_TYPES
     assert "sentinel" in OPT_IN_CATEGORIES
     # Every provider type that serves chat is listed for the tier.
-    assert set(MODEL_CATEGORY_SPECS["sentinel"]["providers"]) == set(
-        MODEL_CATEGORY_SPECS["chat"]["providers"]
-    )
+    expected = {"openai", "openai_compatible", "ollama", "gemini", "anthropic"}
+    spec = MODEL_CATEGORY_SPECS["sentinel"]
+    assert set(spec["providers"]) == expected
+    assert set(spec["recommended_models"]) == expected
+    assert set(spec["model_keys"]) == expected
+    assert set(MODEL_CATEGORY_SPECS["chat"]["providers"]) == expected
 
 
 def test_chat_capability_implies_the_sentinel_capability() -> None:
@@ -110,6 +120,20 @@ def test_a_provider_stored_without_the_capability_serves_the_tier() -> None:
     assert [o["value"] for o in _provider_options(entry, "sentinel")] == [  # type: ignore[arg-type]
         "prov1"
     ]
+    # A second chat-only server is offered as a Sentinel fallback too.
+    second = DummySubentry(
+        "prov2",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Ollama 3",
+        {
+            "provider_type": "ollama",
+            "capabilities": ["chat"],
+            "settings": {"base_url": "http://ollama-3:11434"},
+        },
+    )
+    entry.subentries["prov2"] = second
+    fallbacks = _fallback_provider_options(entry, "sentinel", "prov1")  # type: ignore[arg-type]
+    assert [o["value"] for o in fallbacks] == ["prov2"]
 
 
 # ---------------------------------------------------------------------------
@@ -235,45 +259,77 @@ async def test_the_feature_step_exists(hass: HomeAssistant) -> None:
 # ---------------------------------------------------------------------------
 
 
-class _RecordingTriage:
-    """Stand in for SentinelTriageService and record what setup hands it."""
+class _Recorder:
+    """Stand in for a Sentinel LLM consumer and record what setup hands it."""
 
-    built: ClassVar[list[_RecordingTriage]] = []
+    built: ClassVar[list[_Recorder]] = []
 
-    def __init__(self, model: Any, **kwargs: Any) -> None:
-        self.model = model
+    def __init__(self, model: Any = None, **kwargs: Any) -> None:
+        self.model = kwargs.get("model", model)
         self.deployment = kwargs.get("deployment")
-        _RecordingTriage.built.append(self)
+        type(self).built.append(self)
 
     def begin_run(self) -> None:
         """No-op."""
 
 
+class _RecordingTriage(_Recorder):
+    built: ClassVar[list[_Recorder]] = []
+
+
+class _RecordingExplainer(_Recorder):
+    built: ClassVar[list[_Recorder]] = []
+
+
+class _RecordingDiscovery(NoopAsyncEngine):
+    built: ClassVar[list[_RecordingDiscovery]] = []
+
+    def __init__(self, *_args: Any, **kwargs: Any) -> None:
+        self.model = kwargs.get("model")
+        self.deployment = kwargs.get("deployment")
+        _RecordingDiscovery.built.append(self)
+
+
 @pytest.fixture(autouse=True)
-def _record_triage(monkeypatch: pytest.MonkeyPatch) -> None:
+def _record_consumers(monkeypatch: pytest.MonkeyPatch) -> None:
     _RecordingTriage.built = []
+    _RecordingExplainer.built = []
+    _RecordingDiscovery.built = []
     monkeypatch.setattr(hga_component, "SentinelTriageService", _RecordingTriage)
+    monkeypatch.setattr(hga_component, "LLMExplainer", _RecordingExplainer)
+
+
+async def _set_up(hass: Any, monkeypatch: pytest.MonkeyPatch, data: Any) -> Any:
+    """Set the entry up and return its runtime data."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data.options[CONF_SENTINEL_TRIAGE_ENABLED] = True
+    data.options[CONF_EXPLAIN_ENABLED] = True
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    monkeypatch.setattr(hga_component, "SentinelDiscoveryEngine", _RecordingDiscovery)
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry) is True
+    return entry.runtime_data
+
+
+def _sentinel_consumers() -> list[Any]:
+    """Return what triage, discovery and explanations were each handed."""
+    (triage,) = _RecordingTriage.built
+    (discovery,) = _RecordingDiscovery.built
+    (explainer,) = _RecordingExplainer.built
+    return [triage, discovery, explainer]
 
 
 @pytest.mark.asyncio
 async def test_without_the_feature_sentinel_runs_on_the_chat_model(
     hass: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    entry = MockConfigEntry(domain=DOMAIN, data={})
-    entry.add_to_hass(hass)
-    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
-    data = _fallback_setup_data()
-    data.options[CONF_SENTINEL_TRIAGE_ENABLED] = True
-    _patch_setup_dependencies(hass, monkeypatch, data)
+    runtime = await _set_up(hass, monkeypatch, _fallback_setup_data())
 
-    assert await cast("Any", hga_component).async_setup_entry(hass, entry) is True
-
-    runtime = entry.runtime_data
-    assert runtime.sentinel_model is runtime.chat_model
     assert "sentinel" not in runtime.model_deployments
-    (triage,) = _RecordingTriage.built
-    assert triage.model is runtime.chat_model
-    assert triage.deployment == runtime.model_deployments["chat"]
+    for consumer in _sentinel_consumers():
+        assert consumer.model is runtime.chat_model
+        assert consumer.deployment == runtime.model_deployments["chat"]
 
 
 @pytest.mark.asyncio
@@ -281,11 +337,7 @@ async def test_with_the_feature_sentinel_gets_its_own_chain(
     hass: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Its own primary, its own fallback model, its own deployment."""
-    entry = MockConfigEntry(domain=DOMAIN, data={})
-    entry.add_to_hass(hass)
-    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
     data = _fallback_setup_data()
-    data.options[CONF_SENTINEL_TRIAGE_ENABLED] = True
     data.options[CONF_SENTINEL_MODEL_PROVIDER] = "openai"
     data.options[CONF_OPENAI_SENTINEL_MODEL] = "gpt-sentinel"
     data.providers["ollama1"].data["settings"]["sentinel_model"] = (
@@ -296,12 +348,11 @@ async def test_with_the_feature_sentinel_gets_its_own_chain(
         data.providers["ollama1"],
     ]
     data.deployments["sentinel"] = "cloud"
-    _patch_setup_dependencies(hass, monkeypatch, data)
 
-    assert await cast("Any", hga_component).async_setup_entry(hass, entry) is True
+    runtime = await _set_up(hass, monkeypatch, data)
 
-    runtime = entry.runtime_data
-    sentinel_model = runtime.sentinel_model
+    triage, discovery, explainer = _sentinel_consumers()
+    sentinel_model = triage.model
     assert isinstance(sentinel_model, FallbackChatModel)
     assert sentinel_model is not runtime.chat_model
     primary = cast("FakeConfiguredModel", sentinel_model.chain[0][0])
@@ -310,6 +361,132 @@ async def test_with_the_feature_sentinel_gets_its_own_chain(
     assert fallback.config["configurable"]["model"] == "qwen-sentinel-fallback"
     assert fallback.config["configurable"]["num_predict"] is None
     assert runtime.model_deployments["sentinel"] == "cloud"
-    (triage,) = _RecordingTriage.built
-    assert triage.model is sentinel_model
-    assert triage.deployment == "cloud"
+    for consumer in (triage, discovery, explainer):
+        assert consumer.model is sentinel_model
+        assert consumer.deployment == "cloud"
+
+
+@pytest.mark.asyncio
+async def test_an_ollama_sentinel_model_uses_its_own_options(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The recommended provider: model, context and keep-alive of its own."""
+    data = _fallback_setup_data()
+    data.options[CONF_SENTINEL_MODEL_PROVIDER] = "ollama"
+    data.options[CONF_OLLAMA_SENTINEL_MODEL] = "qwen3:1.7b"
+    data.options[CONF_OLLAMA_SENTINEL_CONTEXT_SIZE] = 4096
+    data.options[CONF_OLLAMA_SENTINEL_KEEPALIVE] = 60
+    data.fallback_chains["sentinel"] = [data.providers["ollama1"]]
+    data.deployments["sentinel"] = "edge"
+
+    runtime = await _set_up(hass, monkeypatch, data)
+
+    triage, discovery, explainer = _sentinel_consumers()
+    sentinel_model = triage.model
+    assert isinstance(sentinel_model, FallbackChatModel)
+    (head,) = [member[0] for member in sentinel_model.chain]
+    assert isinstance(head, FakeConfiguredModel)
+    configurable = head.config["configurable"]
+    assert configurable["model"] == "qwen3:1.7b"
+    assert configurable["num_ctx"] == 4096
+    assert configurable["keep_alive"] == 60
+    assert runtime.model_deployments["sentinel"] == "edge"
+    assert discovery.model is explainer.model is sentinel_model
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_sentinel_provider_falls_back_to_chat(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Never a placeholder beside a healthy chat model, and never silently."""
+    data = _fallback_setup_data()
+    data.openai_available = False
+    data.options[CONF_SENTINEL_MODEL_PROVIDER] = "openai"
+    data.fallback_chains["sentinel"] = [data.providers["openai1"]]
+    data.deployments["sentinel"] = "cloud"
+
+    runtime = await _set_up(hass, monkeypatch, data)
+
+    assert "sentinel" not in runtime.model_deployments
+    for consumer in _sentinel_consumers():
+        assert consumer.model is runtime.chat_model
+        assert consumer.deployment == runtime.model_deployments["chat"]
+    assert "Sentinel Model provider OpenAI is unavailable" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# One runtime slot per provider type
+# ---------------------------------------------------------------------------
+
+
+def _compatible_provider(subentry_id: str, title: str, url: str) -> DummySubentry:
+    return DummySubentry(
+        subentry_id,
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        title,
+        {
+            "provider_type": "openai_compatible",
+            "capabilities": ["chat"],
+            "settings": {"base_url": url, "api_key": f"key-{subentry_id}"},
+        },
+    )
+
+
+def _two_server_entry(sentinel_provider_id: str) -> DummyEntry:
+    """Conversation on a LAN server, the Sentinel Model on another provider."""
+    return _entry_with(
+        _compatible_provider("lan", "LAN", "http://lan:8000/v1"),
+        _compatible_provider("cloud", "Cloud", "https://cloud.example/v1"),
+        DummySubentry(
+            "conv",
+            SUBENTRY_TYPE_FEATURE,
+            "Conversation",
+            {"feature_type": "conversation", "model_provider_id": "lan"},
+        ),
+        DummySubentry(
+            "sent",
+            SUBENTRY_TYPE_FEATURE,
+            "Sentinel Model",
+            {
+                "feature_type": "sentinel_model",
+                "model_provider_id": sentinel_provider_id,
+            },
+        ),
+    )
+
+
+def test_a_second_server_of_one_type_never_moves_conversation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Sentinel runs on chat rather than take over Conversation's slot."""
+    entry = _two_server_entry("cloud")
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+
+    assert options[CONF_OPENAI_COMPATIBLE_BASE_URL] == "http://lan:8000/v1"
+    assert CONF_SENTINEL_MODEL_PROVIDER not in options
+    providers = resolve_model_provider_configs(entry, {})  # type: ignore[arg-type]
+    assert "sentinel" not in build_model_deployments(entry, providers, {})  # type: ignore[arg-type]
+    assert "sentinel" not in resolve_fallback_chains(entry, providers, {})  # type: ignore[arg-type]
+    assert "runs on the Conversation model instead" in caplog.text
+
+
+def test_the_conversation_provider_itself_serves_the_tier() -> None:
+    options = resolve_runtime_options(_two_server_entry("lan"))  # type: ignore[arg-type]
+    assert options[CONF_SENTINEL_MODEL_PROVIDER] == "openai_compatible"
+    assert options[CONF_OPENAI_COMPATIBLE_BASE_URL] == "http://lan:8000/v1"
+
+
+def test_setup_refuses_a_second_server_of_one_type() -> None:
+    entry = _two_server_entry("lan")
+    assert _shared_slot_clash(entry, "sentinel_model", "cloud") == "LAN"  # type: ignore[arg-type]
+    assert _shared_slot_clash(entry, "sentinel_model", "lan") is None  # type: ignore[arg-type]
+    # Only the opt-in tier is refused; the other features keep their behaviour.
+    assert _shared_slot_clash(entry, "conversation", "cloud") is None  # type: ignore[arg-type]
+
+
+def test_a_dangling_pin_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """A deleted provider leaves Sentinel on chat, and says so."""
+    entry = _two_server_entry("deleted")
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert CONF_SENTINEL_MODEL_PROVIDER not in options
+    assert "Feature 'sentinel_model' has no model provider" in caplog.text

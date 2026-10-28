@@ -656,7 +656,10 @@ async def run_sentinel_llm_call(  # noqa: PLR0913
     # time between providers (#828).
     with model_call_budget(call_timeout_s):
         task = asyncio.create_task(call_factory())
-    _sentinel_llm_tasks.add(task)
+    # Only a call on the shared local GPU yields to chat: a cloud Sentinel
+    # model beside a local chat model is not in its way (#866).
+    if _gated(deployment):
+        _sentinel_llm_tasks.add(task)
     try:
         return await asyncio.wait_for(task, timeout=call_timeout_s)
     except asyncio.CancelledError as err:
@@ -689,7 +692,8 @@ async def run_sentinel_llm_call_in_executor(  # noqa: PLR0913
         )
 
     task = asyncio.create_task(asyncio.to_thread(call_factory))
-    _sentinel_llm_tasks.add(task)
+    if _gated(deployment):
+        _sentinel_llm_tasks.add(task)
     try:
         return await asyncio.wait_for(task, timeout=call_timeout_s)
     except asyncio.CancelledError as err:

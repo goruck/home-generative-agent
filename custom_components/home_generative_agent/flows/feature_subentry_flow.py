@@ -75,7 +75,11 @@ from ..const import (  # noqa: TID252
 )
 from ..core.db_utils import build_postgres_uri  # noqa: TID252
 from ..core.embedding_model_guard import async_store_vector_dims  # noqa: TID252
-from ..core.subentry_resolver import with_implied_capabilities  # noqa: TID252
+from ..core.subentry_resolver import (  # noqa: TID252
+    OPT_IN_CATEGORIES,
+    shares_runtime_slot,
+    with_implied_capabilities,
+)
 from ..core.utils import (  # noqa: TID252
     CannotConnectError,
     InvalidAuthError,
@@ -153,6 +157,44 @@ def _provider_options(entry: ConfigEntry, category: str) -> list[SelectOptionDic
             )
         )
     return options
+
+
+def _shared_slot_clash(
+    entry: ConfigEntry, feature_type: str, provider_id: str | None
+) -> str | None:
+    """
+    Return the provider an opt-in feature's choice would displace, if any.
+
+    Two providers of one cloud type with different credentials, or two
+    OpenAI-compatible servers, share one slot at runtime, so pointing the
+    Sentinel Model at a second one would move Conversation onto it (#866).
+    """
+    if FEATURE_CATEGORY_MAP.get(feature_type) not in OPT_IN_CATEGORIES:
+        return None
+    chosen = entry.subentries.get(provider_id or "")
+    if chosen is None:
+        return None
+    for subentry in entry.subentries.values():
+        if subentry.subentry_type != SUBENTRY_TYPE_FEATURE:
+            continue
+        category = FEATURE_CATEGORY_MAP.get(str(subentry.data.get("feature_type")))
+        if not category or category in OPT_IN_CATEGORIES:
+            continue
+        other = entry.subentries.get(subentry.data.get("model_provider_id") or "")
+        if other is None or other.subentry_type != SUBENTRY_TYPE_MODEL_PROVIDER:
+            continue
+        other_type = str(other.data.get("provider_type") or "")
+        # OpenAI-compatible embeddings have a URL and key of their own.
+        if category == "embedding" and other_type == "openai_compatible":
+            continue
+        if shares_runtime_slot(
+            str(chosen.data.get("provider_type") or ""),
+            chosen.data.get("settings") or {},
+            other_type,
+            other.data.get("settings") or {},
+        ):
+            return other.title or other.subentry_id
+    return None
 
 
 def _provider_type_serves(provider_type: str, category: str) -> bool:
@@ -949,13 +991,21 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
             )
 
         provider_id = user_input.get("model_provider_id")
+        clash = None
         if provider_id not in provider_ids:
+            error = "no_providers"
+        elif clash := _shared_slot_clash(entry, feature_type, provider_id):
+            error = "shared_provider_slot"
+        else:
+            error = None
+        if error:
             return self.async_show_form(
                 step_id="feature_provider",
                 data_schema=schema,
-                errors={"base": "no_providers"},
+                errors={"base": error},
                 description_placeholders={
                     "feature_name": FEATURE_DEFS[feature_type]["name"],
+                    "other_provider": clash or "",
                 },
             )
 

@@ -90,9 +90,6 @@ class HGAData:
     openai_http_client: httpx.Client | None = None
     # Per-provider stall state shared by the model chains (#828).
     stall_tracker: ProviderStallTracker | None = None
-    # The model Sentinel's triage, discovery and explanations run on: its own
-    # chain when a "Sentinel Model" feature is set up, else chat_model (#866).
-    sentinel_model: Any = None
     model_deployments: dict[str, str] = field(default_factory=dict)
     tool_content_hashes: dict[str, str] = field(default_factory=dict)
     # The house words each API's tools were indexed with (#848).

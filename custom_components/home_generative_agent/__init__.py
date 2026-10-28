@@ -4019,8 +4019,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         )
 
     _sent_fb = fallback_chains.get("sentinel", [])
+    _sent_chain: list[tuple[Any, str, str]] = []
     if _sent_fb and sentinel_model is not None:
-        _sent_chain = []
         _append_available_model(
             _sent_chain,
             sentinel_model,
@@ -4034,6 +4034,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 _append_available_model(
                     _sent_chain, m, p.deployment, p.entry_id, "sentinel"
                 )
+    if _sent_fb and sentinel_model is not None and not _sent_chain:
+        # A placeholder would leave triage, discovery and explanations doing
+        # nothing beside a healthy chat model; run on chat until the Sentinel
+        # provider answers and the recheck reloads the entry (#866).
+        LOGGER.warning(
+            "Sentinel Model provider %s is unavailable and no fallback answers; "
+            "Sentinel runs on the Conversation model until it does.",
+            _sent_fb[0].name,
+        )
+        sentinel_model = None
+        model_deployments.pop("sentinel", None)
+    elif _sent_fb and sentinel_model is not None:
         sentinel_model = _finalize_model_chain(
             "sentinel",
             _sent_chain,
@@ -4212,7 +4224,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         chat_model_options=ollama_chat_model_options,
         vision_model=vision_model,
         summarization_model=summarization_model,
-        sentinel_model=sentinel_llm,
         model_deployments=model_deployments,
         store=store,
         video_analyzer=video_analyzer,
