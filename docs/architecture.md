@@ -37,6 +37,11 @@ The agent is built on [LangGraph](https://www.langchain.com/langgraph) and uses 
 | Summarization | Gemini | gemini-3.5-flash-lite | Primary model context summarization |
 | Summarization | Anthropic | claude-haiku-4-5-20251001 | Primary model context summarization |
 | Summarization | OpenAI Compatible | gpt-4o | Primary model context summarization |
+| Sentinel | Ollama | qwen3:4b | Sentinel triage, discovery and explanations (optional; the chat model when off) |
+| Sentinel | OpenAI | gpt-5-nano | Sentinel triage, discovery and explanations |
+| Sentinel | Gemini | gemini-3.5-flash-lite | Sentinel triage, discovery and explanations |
+| Sentinel | Anthropic | claude-haiku-4-5-20251001 | Sentinel triage, discovery and explanations |
+| Sentinel | OpenAI Compatible | gpt-4o | Sentinel triage, discovery and explanations |
 | Embeddings | Ollama | mxbai-embed-large | Semantic search |
 | Embeddings | OpenAI | text-embedding-3-small | Semantic search |
 | Embeddings | Gemini | gemini-embedding-001 | Semantic search |
@@ -100,7 +105,7 @@ For a deep-dive on the streaming implementation, see [docs/streaming-design.md](
 
 Several techniques reduce latency:
 
-- Specialized smaller helper LLMs run on edge for camera analysis and summarization.
+- Specialized smaller helper LLMs run on edge for camera analysis, summarization and, when the Sentinel Model feature is on, Sentinel's own calls.
 - Static prompt content is placed upfront to enable cloud provider prompt caching.
 - Multi-tool turns execute tool calls concurrently (`asyncio.gather`).
 - Streaming means perceived response time is near-instant even when total generation time is longer.

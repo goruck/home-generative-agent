@@ -341,6 +341,33 @@ async def test_local_chat_session_cancels_inflight_sentinel_llm() -> None:
         assert sentinel_deferred == [True]
 
 
+@pytest.mark.asyncio
+async def test_local_chat_session_leaves_a_cloud_sentinel_call_running() -> None:
+    """A cloud Sentinel model beside a local chat model is not in its way (#866)."""
+    sentinel_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _llm() -> str:
+        sentinel_started.set()
+        await release.wait()
+        return "done"
+
+    sentinel_task = asyncio.create_task(
+        utils_mod.run_sentinel_llm_call(
+            _llm,
+            deployment="cloud",
+            category="triage",
+            admission_timeout_s=0.1,
+            call_timeout_s=60.0,
+        )
+    )
+    await sentinel_started.wait()
+
+    async with utils_mod.local_chat_session("edge"):
+        release.set()
+        assert await asyncio.wait_for(sentinel_task, timeout=1.0) == "done"
+
+
 # ---------------------------------------------------------------------------
 # generate_embeddings: no gate — runs freely even during active chat
 # ---------------------------------------------------------------------------

@@ -137,6 +137,24 @@ This document covers the named constants that affect integration behaviour, orga
 
 ---
 
+## Sentinel Model
+
+The model Sentinel's triage, discovery and explanation calls run on when a **Sentinel Model** feature is set up ([#866](https://github.com/goruck/home-generative-agent/issues/866)); without one they run on the chat model. Any provider that serves chat serves this category (`with_implied_capabilities` in `core/subentry_resolver.py`), and the category is opt-in: the resolver never picks a provider for it automatically (`OPT_IN_CATEGORIES`).
+
+| Constant | Config key | Default | Description |
+|---|---|---|---|
+| `RECOMMENDED_SENTINEL_MODEL_PROVIDER` | `sentinel_model_provider` | `ollama` | Provider type the feature resolved to; absent when the feature is off |
+| `RECOMMENDED_OLLAMA_SENTINEL_MODEL` | `ollama_sentinel_model` | `qwen3:4b` | Ollama model; `qwen3:1.7b`, `qwen3:8b`, `qwen3:32b` and `gpt-oss` are listed too |
+| `RECOMMENDED_OPENAI_SENTINEL_MODEL` | `openai_sentinel_model` | `gpt-5-nano` | OpenAI model (the chat list) |
+| `RECOMMENDED_OPENAI_COMPATIBLE_SENTINEL_MODEL` | `openai_compatible_sentinel_model` | `gpt-4o` | OpenAI-compatible model |
+| `RECOMMENDED_GEMINI_SENTINEL_MODEL` | `gemini_sentinel_model` | `gemini-3.5-flash-lite` | Gemini model (the chat list) |
+| `RECOMMENDED_ANTHROPIC_SENTINEL_MODEL` | `anthropic_sentinel_model` | `claude-haiku-4-5-20251001` | Anthropic model (the chat list) |
+| `RECOMMENDED_SENTINEL_MODEL_TEMPERATURE` | `sentinel_model_temperature` | `0.2` | Sampling temperature |
+| `RECOMMENDED_OLLAMA_SENTINEL_KEEPALIVE` | `ollama_sentinel_keepalive` | `300` (s) | Ollama keep-alive |
+| `RECOMMENDED_OLLAMA_SENTINEL_URL` | `ollama_sentinel_url` | `http://localhost:11434` | The feature's Ollama server, written from its provider |
+| `SENTINEL_MODEL_TOP_P` | — | `1.0` | Nucleus sampling |
+| `SENTINEL_MODEL_PREDICT` / `SENTINEL_MODEL_REPEAT_PENALTY` / `SENTINEL_MIRO_STAT` | — | `None` / `1.05` / `0` | Ollama generation settings, as for summarization |
+
 ## Embeddings
 
 **File:** `const.py` | **UI-configurable**

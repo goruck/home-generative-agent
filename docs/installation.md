@@ -71,6 +71,7 @@ Run models locally for lower cost and latency.
   ollama pull gpt-oss            # chat
   ollama pull qwen3:8b           # chat (larger)
   ollama pull qwen3:1.7b         # summarization (lighter)
+  ollama pull qwen3:4b           # Sentinel model (optional; keeps Sentinel off the chat GPU)
   ollama pull qwen3-vl:8b        # vision (VLM)
   ollama pull qwen2.5vl:7b       # vision alternative
   ollama pull gemma3:4b          # vision alternative (lighter; needs Ollama 0.6+)

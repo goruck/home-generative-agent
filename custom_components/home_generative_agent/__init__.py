@@ -71,6 +71,7 @@ from .const import (
     CHAT_MODEL_TOP_P,
     CONF_ANTHROPIC_API_KEY,
     CONF_ANTHROPIC_CHAT_MODEL,
+    CONF_ANTHROPIC_SENTINEL_MODEL,
     CONF_ANTHROPIC_SUMMARIZATION_MODEL,
     CONF_ANTHROPIC_VLM,
     CONF_AUDIT_HOT_MAX_RECORDS,
@@ -96,6 +97,7 @@ from .const import (
     CONF_GEMINI_API_KEY,
     CONF_GEMINI_CHAT_MODEL,
     CONF_GEMINI_EMBEDDING_MODEL,
+    CONF_GEMINI_SENTINEL_MODEL,
     CONF_GEMINI_SUMMARIZATION_MODEL,
     CONF_GEMINI_VLM,
     CONF_MODEL_PROVIDER_UNCONTENDED,
@@ -106,6 +108,9 @@ from .const import (
     CONF_OLLAMA_CHAT_URL,
     CONF_OLLAMA_EMBEDDING_MODEL,
     CONF_OLLAMA_REASONING,
+    CONF_OLLAMA_SENTINEL_CONTEXT_SIZE,
+    CONF_OLLAMA_SENTINEL_KEEPALIVE,
+    CONF_OLLAMA_SENTINEL_MODEL,
     CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
     CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
     CONF_OLLAMA_SUMMARIZATION_MODEL,
@@ -123,9 +128,11 @@ from .const import (
     CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_URL,
+    CONF_OPENAI_COMPATIBLE_SENTINEL_MODEL,
     CONF_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
     CONF_OPENAI_COMPATIBLE_VLM,
     CONF_OPENAI_EMBEDDING_MODEL,
+    CONF_OPENAI_SENTINEL_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
     CONF_OPENAI_VLM,
     CONF_SENTINEL_BASELINE_ENABLED,
@@ -136,6 +143,8 @@ from .const import (
     CONF_SENTINEL_ENABLED,
     CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
     CONF_SENTINEL_INTERVAL_SECONDS,
+    CONF_SENTINEL_MODEL_PROVIDER,
+    CONF_SENTINEL_MODEL_TEMPERATURE,
     CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     CONF_SENTINEL_RESPONSE_LANGUAGE,
     CONF_SENTINEL_TRIAGE_ENABLED,
@@ -166,6 +175,7 @@ from .const import (
     NO_DATABASE_REMEDIATION,
     OPENAI_CHAT_COMPLETIONS_PATH,
     RECOMMENDED_ANTHROPIC_CHAT_MODEL,
+    RECOMMENDED_ANTHROPIC_SENTINEL_MODEL,
     RECOMMENDED_ANTHROPIC_SUMMARIZATION_MODEL,
     RECOMMENDED_ANTHROPIC_VLM,
     RECOMMENDED_AUDIT_HOT_MAX_RECORDS,
@@ -183,6 +193,7 @@ from .const import (
     RECOMMENDED_FACE_RECOGNITION,
     RECOMMENDED_GEMINI_CHAT_MODEL,
     RECOMMENDED_GEMINI_EMBEDDING_MODEL,
+    RECOMMENDED_GEMINI_SENTINEL_MODEL,
     RECOMMENDED_GEMINI_SUMMARIZATION_MODEL,
     RECOMMENDED_GEMINI_VLM,
     RECOMMENDED_MODEL_PROVIDER_UNCONTENDED,
@@ -191,6 +202,8 @@ from .const import (
     RECOMMENDED_OLLAMA_CONTEXT_SIZE,
     RECOMMENDED_OLLAMA_EMBEDDING_MODEL,
     RECOMMENDED_OLLAMA_REASONING,
+    RECOMMENDED_OLLAMA_SENTINEL_KEEPALIVE,
+    RECOMMENDED_OLLAMA_SENTINEL_MODEL,
     RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE,
     RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
     RECOMMENDED_OLLAMA_URL,
@@ -200,9 +213,11 @@ from .const import (
     RECOMMENDED_OPENAI_COMPATIBLE_CHAT_MODEL,
     RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
     RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
+    RECOMMENDED_OPENAI_COMPATIBLE_SENTINEL_MODEL,
     RECOMMENDED_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
     RECOMMENDED_OPENAI_COMPATIBLE_VLM,
     RECOMMENDED_OPENAI_EMBEDDING_MODEL,
+    RECOMMENDED_OPENAI_SENTINEL_MODEL,
     RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
     RECOMMENDED_OPENAI_VLM,
     RECOMMENDED_SENTINEL_BASELINE_ENABLED,
@@ -213,6 +228,7 @@ from .const import (
     RECOMMENDED_SENTINEL_ENABLED,
     RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES,
     RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
+    RECOMMENDED_SENTINEL_MODEL_TEMPERATURE,
     RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     RECOMMENDED_SENTINEL_TRIAGE_ENABLED,
     RECOMMENDED_SENTINEL_TRIAGE_MAX_PER_RUN,
@@ -224,6 +240,10 @@ from .const import (
     RECOMMENDED_VLM_RESPONSE_LANGUAGE,
     RECOMMENDED_VLM_TEMPERATURE,
     SENTINEL_AUTONOMY_LEVELS,
+    SENTINEL_MIRO_STAT,
+    SENTINEL_MODEL_PREDICT,
+    SENTINEL_MODEL_REPEAT_PENALTY,
+    SENTINEL_MODEL_TOP_P,
     SIGNAL_HGA_NEW_LATEST,
     SIGNAL_HGA_RECOGNIZED,
     SIGNAL_SENTINEL_RUN_COMPLETE,
@@ -322,6 +342,7 @@ from .core.subentry_resolver import (
     resolve_model_provider_configs,
     resolve_runtime_options,
     split_embedding_chain,
+    with_implied_capabilities,
 )
 from .core.utils import (
     anthropic_healthy,
@@ -1513,6 +1534,7 @@ def _default_model_data(category: str, provider_type: str) -> dict[str, Any]:
             "chat": RECOMMENDED_OLLAMA_CHAT_KEEPALIVE,
             "vlm": RECOMMENDED_OLLAMA_VLM_KEEPALIVE,
             "summarization": RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE,
+            "sentinel": RECOMMENDED_OLLAMA_SENTINEL_KEEPALIVE,
         }
         keepalive = keepalive_map.get(category)
         if keepalive is not None:
@@ -1568,7 +1590,9 @@ def _assign_first_provider_if_needed(hass: HomeAssistant, entry: ConfigEntry) ->
             if isinstance(feature_type, str)
             else None
         )
-        capabilities = {str(c) for c in provider.data.get("capabilities") or []}
+        capabilities = with_implied_capabilities(
+            {str(c) for c in provider.data.get("capabilities") or []}
+        )
         if category and capabilities and category not in capabilities:
             continue
         model_data = dict(data.get(CONF_FEATURE_MODEL, {}))
@@ -2302,7 +2326,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     def _reset_breakers(provider_id: str) -> None:
         """Make a recovered provider usable at once, whatever its timeouts opened."""
-        for breaker in (_chat_cb, _vlm_cb, _sum_cb, _emb_cb):
+        for breaker in (_chat_cb, _vlm_cb, _sum_cb, _emb_cb, _sent_cb):
             breaker.record_success(provider_id)
 
     # A local server with capacity to spare bypasses every local gate: the
@@ -2343,6 +2367,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         cooldown_seconds=FALLBACK_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
     )
     _sum_cb = CircuitBreaker(
+        threshold=FALLBACK_CIRCUIT_BREAKER_THRESHOLD,
+        window_seconds=FALLBACK_CIRCUIT_BREAKER_WINDOW_SECONDS,
+        cooldown_seconds=FALLBACK_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+    )
+    _sent_cb = CircuitBreaker(
         threshold=FALLBACK_CIRCUIT_BREAKER_THRESHOLD,
         window_seconds=FALLBACK_CIRCUIT_BREAKER_WINDOW_SECONDS,
         cooldown_seconds=FALLBACK_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
@@ -2408,6 +2437,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     )
     ollama_embedding_url = (
         ollama_url_for_category(conf, "embedding", fallback=base_ollama_url)
+        or base_ollama_url
+    )
+    ollama_sentinel_url = (
+        ollama_url_for_category(conf, "sentinel", fallback=base_ollama_url)
         or base_ollama_url
     )
     face_api_url = conf.get(CONF_FACE_API_URL, RECOMMENDED_FACE_API_URL)
@@ -2477,6 +2510,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         ("vlm", ollama_vlm_url),
         ("summarization", ollama_sum_url),
         ("embedding", ollama_embedding_url),
+        ("sentinel", ollama_sentinel_url),
     ):
         # The head runs at the category's URL; fallbacks at their own, above.
         chain = fallback_chains.get(category)
@@ -2514,7 +2548,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     # Keyed by URL and key: setup shares one check only when both match.
     compatible_endpoints: dict[tuple[str, str], bool] = {}
     if openai_compatible_base_url and _chains_use_compatible(
-        ("chat", "vlm", "summarization")
+        ("chat", "vlm", "summarization", "sentinel")
     ):
         compatible_endpoints[
             (openai_compatible_base_url, openai_compatible_api_key)
@@ -3225,6 +3259,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     chat_ollama_provider = ollama_providers.get(ollama_chat_url)
     vlm_ollama_provider = ollama_providers.get(ollama_vlm_url)
     summarization_ollama_provider = ollama_providers.get(ollama_sum_url)
+    sentinel_ollama_provider = ollama_providers.get(ollama_sentinel_url)
 
     # CHAT
     chat_provider = options.get(
@@ -3539,6 +3574,96 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             }
         )
 
+    # SENTINEL (#866): only when a "Sentinel Model" feature is set up (the
+    # resolver then writes the provider key); otherwise Sentinel's triage,
+    # discovery and explanations run on the chat model, as before.
+    sentinel_provider = options.get(CONF_SENTINEL_MODEL_PROVIDER)
+    sentinel_model: Any = None
+    sentinel_temp = options.get(
+        CONF_SENTINEL_MODEL_TEMPERATURE, RECOMMENDED_SENTINEL_MODEL_TEMPERATURE
+    )
+    if sentinel_provider == "openai":
+        sentinel_model = (openai_provider or NullChat()).with_config(
+            config={
+                "configurable": {
+                    "model_name": options.get(
+                        CONF_OPENAI_SENTINEL_MODEL, RECOMMENDED_OPENAI_SENTINEL_MODEL
+                    ),
+                    "temperature": sentinel_temp,
+                    "top_p": SENTINEL_MODEL_TOP_P,
+                }
+            }
+        )
+    elif sentinel_provider == "openai_compatible":
+        sentinel_model = (openai_compatible_provider or NullChat()).with_config(
+            config={
+                "configurable": {
+                    "model_name": options.get(
+                        CONF_OPENAI_COMPATIBLE_SENTINEL_MODEL,
+                        RECOMMENDED_OPENAI_COMPATIBLE_SENTINEL_MODEL,
+                    ),
+                    "temperature": sentinel_temp,
+                    "top_p": SENTINEL_MODEL_TOP_P,
+                }
+            }
+        )
+    elif sentinel_provider == "gemini":
+        gemini_sentinel_model = options.get(
+            CONF_GEMINI_SENTINEL_MODEL, RECOMMENDED_GEMINI_SENTINEL_MODEL
+        )
+        sentinel_model = (gemini_provider or NullChat()).with_config(
+            config={
+                "configurable": {
+                    "model": gemini_sentinel_model,
+                    **gemini_sampling_configurable(
+                        model=gemini_sentinel_model,
+                        temperature=sentinel_temp,
+                        top_p=SENTINEL_MODEL_TOP_P,
+                        recommended_temperature=RECOMMENDED_SENTINEL_MODEL_TEMPERATURE,
+                    ),
+                }
+            }
+        )
+    elif sentinel_provider == "anthropic":
+        sentinel_model = (anthropic_provider or NullChat()).with_config(
+            config={
+                "configurable": {
+                    "model": options.get(
+                        CONF_ANTHROPIC_SENTINEL_MODEL,
+                        RECOMMENDED_ANTHROPIC_SENTINEL_MODEL,
+                    ),
+                    "temperature": sentinel_temp,
+                }
+            }
+        )
+    elif sentinel_provider == "ollama":
+        ollama_sentinel_model = options.get(
+            CONF_OLLAMA_SENTINEL_MODEL, RECOMMENDED_OLLAMA_SENTINEL_MODEL
+        )
+        sentinel_model = (sentinel_ollama_provider or NullChat()).with_config(
+            config={
+                "configurable": {
+                    "model": ollama_sentinel_model,
+                    "temperature": sentinel_temp,
+                    "top_p": SENTINEL_MODEL_TOP_P,
+                    "num_predict": SENTINEL_MODEL_PREDICT,
+                    "num_ctx": options.get(
+                        CONF_OLLAMA_SENTINEL_CONTEXT_SIZE,
+                        RECOMMENDED_OLLAMA_CONTEXT_SIZE,
+                    ),
+                    "repeat_penalty": SENTINEL_MODEL_REPEAT_PENALTY,
+                    "mirostat": SENTINEL_MIRO_STAT,
+                    "keep_alive": options.get(
+                        CONF_OLLAMA_SENTINEL_KEEPALIVE,
+                        RECOMMENDED_OLLAMA_SENTINEL_KEEPALIVE,
+                    ),
+                    **reasoning_field(
+                        model=ollama_sentinel_model, enabled=ollama_reasoning
+                    ),
+                }
+            }
+        )
+
     def _fallback_model_name(provider: ModelProviderConfig, category: str) -> Any:
         """Return the model name to use for a fallback provider/category."""
         settings = provider.data.get("settings", {})
@@ -3555,6 +3680,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             return VLM_TOP_P
         if category == "summarization":
             return SUMMARIZATION_MODEL_TOP_P
+        if category == "sentinel":
+            return SENTINEL_MODEL_TOP_P
         return None
 
     def _configured_cloud_model(
@@ -3653,6 +3780,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "keep_alive": settings.get(
                         "summarization_keepalive",
                         RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE,
+                    ),
+                }
+            )
+        elif category == "sentinel":
+            config.update(
+                {
+                    "top_p": SENTINEL_MODEL_TOP_P,
+                    "num_predict": SENTINEL_MODEL_PREDICT,
+                    "num_ctx": settings.get(
+                        "sentinel_context", RECOMMENDED_OLLAMA_CONTEXT_SIZE
+                    ),
+                    "repeat_penalty": SENTINEL_MODEL_REPEAT_PENALTY,
+                    "mirostat": SENTINEL_MIRO_STAT,
+                    "keep_alive": settings.get(
+                        "sentinel_keepalive", RECOMMENDED_OLLAMA_SENTINEL_KEEPALIVE
                     ),
                 }
             )
@@ -3876,6 +4018,47 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             ),
         )
 
+    _sent_fb = fallback_chains.get("sentinel", [])
+    _sent_chain: list[tuple[Any, str, str]] = []
+    if _sent_fb and sentinel_model is not None:
+        _append_available_model(
+            _sent_chain,
+            sentinel_model,
+            _sent_fb[0].deployment,
+            _sent_fb[0].entry_id,
+            "sentinel",
+        )
+        for p in _sent_fb[1:]:
+            m = _configured_model_for_provider(p, "sentinel")
+            if m is not None:
+                _append_available_model(
+                    _sent_chain, m, p.deployment, p.entry_id, "sentinel"
+                )
+    if _sent_fb and sentinel_model is not None and not _sent_chain:
+        # A placeholder would leave triage, discovery and explanations doing
+        # nothing beside a healthy chat model; run on chat until the Sentinel
+        # provider answers and the recheck reloads the entry (#866).
+        LOGGER.warning(
+            "Sentinel Model provider %s is unavailable and no fallback answers; "
+            "Sentinel runs on the Conversation model until it does.",
+            _sent_fb[0].name,
+        )
+        sentinel_model = None
+        model_deployments.pop("sentinel", None)
+    elif _sent_fb and sentinel_model is not None:
+        sentinel_model = _finalize_model_chain(
+            "sentinel",
+            _sent_chain,
+            _sent_fb,
+            sentinel_model,
+            lambda chain: FallbackChatModel(
+                chain,
+                circuit_breaker=_breaker_for(chain, _sent_cb),
+                alert_callback=_model_fallback_alert("sentinel"),
+                stall_tracker=stall_tracker,
+            ),
+        )
+
     for category, primary_id, fallback_id, fallback_deployment in setup_model_fallbacks:
         await _async_notify_model_fallback(
             category,
@@ -3939,11 +4122,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         "sentinel_admission_starved_for_s": 0,
     }
     chat_deployment = model_deployments.get("chat", "edge")
+    # Sentinel's model: its own chain when a "Sentinel Model" feature is set
+    # up, else the chat model and its deployment, as before (#866).
+    sentinel_llm = sentinel_model if sentinel_model is not None else chat_model
+    sentinel_deployment = (
+        model_deployments.get("sentinel", chat_deployment)
+        if sentinel_model is not None
+        else chat_deployment
+    )
     explainer = None
     if options.get(CONF_EXPLAIN_ENABLED, RECOMMENDED_EXPLAIN_ENABLED):
         explainer = LLMExplainer(
-            chat_model,
-            deployment=chat_deployment,
+            sentinel_llm,
+            deployment=sentinel_deployment,
             health_stats=sentinel_run_stats,
             response_language=options.get(CONF_SENTINEL_RESPONSE_LANGUAGE, ""),
         )
@@ -3964,9 +4155,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             )
         )
         triage_service = SentinelTriageService(
-            chat_model,
+            sentinel_llm,
             timeout_seconds=triage_timeout,
-            deployment=chat_deployment,
+            deployment=sentinel_deployment,
             health_stats=sentinel_run_stats,
             max_per_run=triage_max_per_run,
         )
@@ -4007,12 +4198,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     discovery_engine = SentinelDiscoveryEngine(
         hass=hass,
         options=options,
-        model=chat_model,
+        model=sentinel_llm,
         store=discovery_store,
         rule_registry=rule_registry,
         proposal_store=proposal_store,
         baseline_updater=baseline_updater,
-        deployment=chat_deployment,
+        deployment=sentinel_deployment,
         health_stats=sentinel_run_stats,
     )
 
@@ -4109,6 +4300,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         ("vlm", ollama_vlm_url),
         ("summarization", ollama_sum_url),
         ("embedding", ollama_embedding_url),
+        ("sentinel", ollama_sentinel_url),
     ):
         chain = fallback_chains.get(category)
         if chain and chain[0].provider_type == "ollama" and ollama_health.get(head_url):
@@ -4206,7 +4398,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     msg = (
         "Home Generative Agent initialized with the following models: "
-        "chat=%s, vlm=%s, summarization=%s. embeddings=%s. "
+        "chat=%s, vlm=%s, summarization=%s, sentinel=%s. embeddings=%s. "
         "OpenAI ok=%s, Ollama ok=%s, Gemini ok=%s, Anthropic ok=%s."
     )
     LOGGER.info(
@@ -4214,6 +4406,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         chat_provider,
         vlm_provider,
         sum_provider,
+        sentinel_provider or "chat",
         embedding_provider,
         openai_ok,
         ollama_any_ok,

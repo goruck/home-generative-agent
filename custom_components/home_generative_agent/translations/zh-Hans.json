@@ -334,7 +334,8 @@
         "unknown": "意外错误。",
         "ollama_model_not_installed": "位于 {url} 的 Ollama 上没有安装模型 {model}。请在那台服务器上运行 `ollama pull {model}`，或选择一个已安装的模型。如果服务器上它用的是别的名字，或者你马上就要拉取它，再提交一次即可强制保存。",
         "ollama_embedding_dims_mismatch": "模型 {model} 在位于 {url} 的 Ollama 上生成 {dims} 维的 Embedding，但记忆存储保存的是 {expected} 维向量，因此它的 Embedding 将无法保存。请选择一个生成 {expected} 维向量的 Embedding 模型（配置文档列出了常用的模型）。如果你确定服务器报告的维度有误，再提交一次即可强制保存。",
-        "ollama_fallback_embedding_dims_mismatch": "位于 {url} 的 Ollama 用 {model} 生成 {dims} 维的 Embedding，但记忆存储保存的是 {expected} 维向量，因此这个备用提供商的 Embedding 将无法保存。如果主提供商上的 {model} 维度正确，说明那台服务器上的是另一个构建版本：请在那里运行 `ollama pull {model}`。否则，请把那台服务器从备用提供商中移除。如果你确定服务器报告的维度有误，再提交一次即可强制保存。"
+        "ollama_fallback_embedding_dims_mismatch": "位于 {url} 的 Ollama 用 {model} 生成 {dims} 维的 Embedding，但记忆存储保存的是 {expected} 维向量，因此这个备用提供商的 Embedding 将无法保存。如果主提供商上的 {model} 维度正确，说明那台服务器上的是另一个构建版本：请在那里运行 `ollama pull {model}`。否则，请把那台服务器从备用提供商中移除。如果你确定服务器报告的维度有误，再提交一次即可强制保存。",
+        "shared_provider_slot": "{other_provider} 已在为另一个功能提供服务，它与所选提供商类型相同，但密钥或服务器不同；同一类型一次只能使用一个提供商，此选择会把该功能转到新的提供商上。请为 {feature_name} 选择 {other_provider} 或其他类型的提供商。"
       },
       "initiate_flow": {
         "reconfigure": "重新配置功能",
@@ -358,10 +359,12 @@
           "data": {
             "camera_image_analysis": "摄像头图像分析",
             "conversation_summary": "对话摘要",
-            "embedding": "Embedding"
+            "embedding": "Embedding",
+            "sentinel_model": "Sentinel 模型"
           },
           "data_description": {
-            "embedding": "用于语义记忆和工具搜索的 Embedding 模型。关闭时会自动选择提供商（如果对话提供商支持 Embedding，则使用它）。"
+            "embedding": "用于语义记忆和工具搜索的 Embedding 模型。关闭时会自动选择提供商（如果对话提供商支持 Embedding，则使用它）。",
+            "sentinel_model": "为 Sentinel 的过滤、发现和说明单独指定模型，使其可以运行在小模型或第二台 Ollama 服务器上，而不是与语音和聊天共用对话模型。关闭时，Sentinel 使用对话模型。"
           }
         },
         "feature_provider": {

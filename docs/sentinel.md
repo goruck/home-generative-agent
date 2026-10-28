@@ -614,7 +614,7 @@ In the Sentinel subentry:
 | `sentinel_auth_ip_retention_days` | How long a pseudonymized token address stays in the auth inventory (default 90); the inventory keeps at most 20 addresses per token |
 | `audit_hot_max_records` | Max records in local hot store (default 500) |
 
-Discovery and baseline both require `sentinel_enabled` to be `true`. Discovery and triage also require a configured chat model.
+Discovery and baseline both require `sentinel_enabled` to be `true`. Discovery, triage and explanations run on the **Sentinel Model** feature's model when one is set up under **+ Setup** (a small model, or a second Ollama server, so Sentinel's calls never share a GPU with voice and chat, [#866](https://github.com/goruck/home-generative-agent/issues/866)), and on the Conversation model otherwise; the admission gates, the per-run limit and the gap follow that model's deployment (on an edge deployment they still follow chat on any Ollama server, [#877](https://github.com/goruck/home-generative-agent/issues/877)).
 
 ---
 

@@ -47,6 +47,9 @@ from ..const import (  # noqa: TID252
     CONF_OLLAMA_EMBEDDING_MODEL,
     CONF_OLLAMA_EMBEDDING_URL,
     CONF_OLLAMA_REASONING,
+    CONF_OLLAMA_SENTINEL_CONTEXT_SIZE,
+    CONF_OLLAMA_SENTINEL_KEEPALIVE,
+    CONF_OLLAMA_SENTINEL_URL,
     CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
     CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
     CONF_OLLAMA_SUMMARIZATION_MODEL,
@@ -309,6 +312,46 @@ def _coerce_capabilities(raw: Any) -> set[str]:
         return set()
 
 
+def with_implied_capabilities(capabilities: set[str]) -> set[str]:
+    """
+    Return *capabilities* plus the categories they imply.
+
+    Sentinel's triage, discovery and explanation calls are chat calls (#866),
+    so every provider stored before the category existed qualifies without a
+    migration.
+    """
+    caps = set(capabilities)
+    if "chat" in caps:
+        caps.add("sentinel")
+    return caps
+
+
+# Provider types whose credentials (and, for OpenAI-compatible, server URL)
+# live in one runtime slot per type, shared by every category but embedding.
+_SHARED_SLOT_PROVIDER_TYPES = frozenset(
+    {"openai", "openai_compatible", "gemini", "anthropic"}
+)
+
+
+def shares_runtime_slot(
+    provider_type: str,
+    settings: Mapping[str, Any],
+    other_type: str,
+    other_settings: Mapping[str, Any],
+) -> bool:
+    """
+    Return True when two providers would overwrite each other's runtime slot.
+
+    Two providers of one type with a different key or server cannot both be
+    used: whichever is applied last serves every category (#866).
+    """
+    if provider_type != other_type or provider_type not in _SHARED_SLOT_PROVIDER_TYPES:
+        return False
+    return any(
+        settings.get(key) != other_settings.get(key) for key in ("api_key", "base_url")
+    )
+
+
 def get_database_subentry(
     _hass: Any, config_entry: ConfigEntry
 ) -> ConfigSubentry | None:
@@ -518,7 +561,7 @@ def _model_provider_from_subentry(subentry: ConfigSubentry) -> ModelProviderConf
         entry_id=subentry.subentry_id,
         name=name,
         provider_type=provider_type,
-        capabilities=caps,
+        capabilities=with_implied_capabilities(caps),
         data={"settings": dict(settings), "name": name},
         deployment=_deployment_for(provider_type, data),
     )
@@ -664,7 +707,7 @@ def _build_ollama_legacy_providers(
             entry_id=provider_id,
             name=settings["name"],
             provider_type="ollama",
-            capabilities=categories,
+            capabilities=with_implied_capabilities(categories),
             data={"settings": settings},
             deployment=_DEPLOYMENT_DEFAULTS.get("ollama", "edge"),
         )
@@ -698,7 +741,9 @@ def _build_openai_legacy_provider(
         entry_id=_legacy_provider_id(entry, "openai"),
         name=settings["name"],
         provider_type="openai",
-        capabilities={"chat", "vlm", "summarization", "embedding"},
+        capabilities=with_implied_capabilities(
+            {"chat", "vlm", "summarization", "embedding"}
+        ),
         data={"settings": settings},
         deployment=_DEPLOYMENT_DEFAULTS.get("openai", "cloud"),
     )
@@ -730,7 +775,9 @@ def _build_gemini_legacy_provider(
         entry_id=_legacy_provider_id(entry, "gemini"),
         name=settings["name"],
         provider_type="gemini",
-        capabilities={"chat", "vlm", "summarization", "embedding"},
+        capabilities=with_implied_capabilities(
+            {"chat", "vlm", "summarization", "embedding"}
+        ),
         data={"settings": settings},
         deployment=_DEPLOYMENT_DEFAULTS.get("gemini", "cloud"),
     )
@@ -937,6 +984,8 @@ def _apply_provider_to_category(
             options[CONF_OLLAMA_SUMMARIZATION_URL] = base_url
         if category == "embedding":
             options[CONF_OLLAMA_EMBEDDING_URL] = base_url
+        if category == "sentinel":
+            options[CONF_OLLAMA_SENTINEL_URL] = base_url
 
     if provider.provider_type == "openai" and (api_key := settings.get("api_key")):
         options[CONF_API_KEY] = api_key
@@ -980,11 +1029,13 @@ def _apply_feature_model_to_options(
             "chat": CONF_OLLAMA_CHAT_KEEPALIVE,
             "vlm": CONF_OLLAMA_VLM_KEEPALIVE,
             "summarization": CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
+            "sentinel": CONF_OLLAMA_SENTINEL_KEEPALIVE,
         }
         context_map = {
             "chat": CONF_OLLAMA_CHAT_CONTEXT_SIZE,
             "vlm": CONF_OLLAMA_VLM_CONTEXT_SIZE,
             "summarization": CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
+            "sentinel": CONF_OLLAMA_SENTINEL_CONTEXT_SIZE,
         }
         keepalive_key = keepalive_map.get(category)
         keepalive_val = model_data.get(CONF_FEATURE_MODEL_KEEPALIVE)
@@ -1014,7 +1065,86 @@ def _apply_feature_model_to_options(
             options[CONF_CHAT_REASONING_BY_MODEL] = dict(by_model)
 
 
-MODEL_CATEGORIES = ("chat", "vlm", "summarization", "embedding")
+MODEL_CATEGORIES = ("chat", "vlm", "summarization", "embedding", "sentinel")
+
+# Categories with no automatic provider: left unresolved, their consumer
+# falls back on its own. Sentinel without a "Sentinel Model" feature runs on
+# the chat model (#866); an automatic pick would move it to whichever
+# provider happens to be first.
+OPT_IN_CATEGORIES: frozenset[str] = frozenset({"sentinel"})
+
+
+def _drop_slot_clashes(
+    category_provider: dict[str, ModelProviderConfig], *, warn: bool
+) -> None:
+    """
+    Leave an opt-in category unresolved when it would take another's slot.
+
+    It never moves another category onto its provider's credentials or
+    server (#866); its consumer runs on the chat model instead.
+    """
+    for cat in OPT_IN_CATEGORIES:
+        provider = category_provider.get(cat)
+        if provider is None:
+            continue
+        clash = next(
+            (
+                other
+                for other_cat, other in category_provider.items()
+                if other_cat not in OPT_IN_CATEGORIES
+                # OpenAI-compatible embeddings have a URL and key of their own.
+                and not (
+                    other_cat == "embedding"
+                    and other.provider_type == "openai_compatible"
+                )
+                and shares_runtime_slot(
+                    provider.provider_type,
+                    provider.data.get("settings", {}),
+                    other.provider_type,
+                    other.data.get("settings", {}),
+                )
+            ),
+            None,
+        )
+        if clash is None:
+            continue
+        del category_provider[cat]
+        if warn:
+            LOGGER.warning(
+                "The %s provider '%s' and the %s provider '%s' are both %s "
+                "providers with different credentials or servers, and only one "
+                "of a type can be used at a time; %s runs on the Conversation "
+                "model instead. Choose '%s' or a provider of another type.",
+                cat,
+                provider.name,
+                next(c for c, p in category_provider.items() if p is clash),
+                clash.name,
+                provider.provider_type,
+                cat,
+                clash.name,
+            )
+
+
+def _warn_unserved_opt_in(
+    features: Mapping[str, FeatureConfig],
+    category_provider: Mapping[str, ModelProviderConfig],
+    providers_by_id: Mapping[str, ModelProviderConfig],
+) -> None:
+    """Log an opt-in feature that names no provider (none chosen, or deleted)."""
+    for feature in features.values():
+        cat = FEATURE_CATEGORY_MAP.get(feature.feature_type)
+        if (
+            cat in OPT_IN_CATEGORIES
+            and cat not in category_provider
+            and not providers_by_id.get(feature.model_provider_id or "")
+        ):
+            LOGGER.warning(
+                "Feature '%s' has no model provider (none chosen, or the "
+                "chosen one was deleted); %s runs on the Conversation model. "
+                "Choose a provider for the feature to use one of its own.",
+                feature.feature_type,
+                cat,
+            )
 
 
 def _resolve_category_providers(
@@ -1052,7 +1182,7 @@ def _resolve_category_providers(
             demoted.append((feature, cat, pinned))
 
     for cat in MODEL_CATEGORIES:
-        if cat in category_provider:
+        if cat in category_provider or cat in OPT_IN_CATEGORIES:
             continue
         # Without an embedding feature of its own, embeddings ride along with
         # the chat provider when it can serve them (legacy behaviour).
@@ -1070,7 +1200,10 @@ def _resolve_category_providers(
                 category_provider[cat] = provider
                 break
 
+    _drop_slot_clashes(category_provider, warn=warn)
+
     if warn:
+        _warn_unserved_opt_in(features, category_provider, providers_by_id)
         for feature, cat, pinned in demoted:
             replacement = category_provider.get(cat)
             LOGGER.warning(
@@ -1083,6 +1216,8 @@ def _resolve_category_providers(
                 cat,
                 f"using '{replacement.name}' instead"
                 if replacement
+                else "it runs on the Conversation model instead"
+                if cat in OPT_IN_CATEGORIES
                 else "no configured provider can serve it either",
                 cat,
             )
@@ -1192,7 +1327,9 @@ def resolve_fallback_chains(
         if not cat:
             continue
         chain = _feature_chain(feature, providers_by_id, cat)
-        if chain:
+        # An opt-in category the other resolvers left unresolved runs on the
+        # chat model, so a chain of its own would only be probed for nothing.
+        if chain and (cat in category_provider or cat not in OPT_IN_CATEGORIES):
             chains[cat] = chain
 
     # Every chain must start at the provider the other resolvers settled on:

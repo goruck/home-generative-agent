@@ -334,7 +334,8 @@
         "unknown": "Neočekávaná chyba.",
         "ollama_model_not_installed": "Model {model} není nainstalován v Ollama na adrese {url}. Spusťte tam `ollama pull {model}` nebo zvolte nainstalovaný model. Pokud jej server má pod jiným názvem nebo se jej chystáte stáhnout, odešlete formulář znovu a model se přesto uloží.",
         "ollama_embedding_dims_mismatch": "Model {model} vytváří v Ollama na adrese {url} embeddingy o {dims} dimenzích, ale paměťové úložiště uchovává vektory o {expected} dimenzích, takže by se jeho embeddingy nepodařilo uložit. Zvolte embeddingový model, který vytváří vektory o {expected} dimenzích (běžné modely uvádí dokumentace konfigurace). Pokud jste si jisti, že server velikost hlásí chybně, odešlete formulář znovu a model se přesto uloží.",
-        "ollama_fallback_embedding_dims_mismatch": "Ollama na adrese {url} vytváří s modelem {model} embeddingy o {dims} dimenzích, ale paměťové úložiště uchovává vektory o {expected} dimenzích, takže by se embeddingy této zálohy nepodařilo uložit. Pokud má kopie modelu {model} u hlavního poskytovatele správnou velikost, má tento server jiné sestavení modelu: spusťte tam `ollama pull {model}`. Jinak tento server odeberte ze záložních poskytovatelů. Pokud jste si jisti, že server velikost hlásí chybně, odešlete formulář znovu a model se přesto uloží."
+        "ollama_fallback_embedding_dims_mismatch": "Ollama na adrese {url} vytváří s modelem {model} embeddingy o {dims} dimenzích, ale paměťové úložiště uchovává vektory o {expected} dimenzích, takže by se embeddingy této zálohy nepodařilo uložit. Pokud má kopie modelu {model} u hlavního poskytovatele správnou velikost, má tento server jiné sestavení modelu: spusťte tam `ollama pull {model}`. Jinak tento server odeberte ze záložních poskytovatelů. Pokud jste si jisti, že server velikost hlásí chybně, odešlete formulář znovu a model se přesto uloží.",
+        "shared_provider_slot": "{other_provider} už obsluhuje jinou funkci se stejným typem poskytovatele, ale s jiným klíčem nebo serverem, a najednou lze použít jen jednoho poskytovatele daného typu: tato volba by tu funkci přesunula na nového. Pro {feature_name} zvolte {other_provider} nebo poskytovatele jiného typu."
       },
       "initiate_flow": {
         "reconfigure": "Přenastavit funkci",
@@ -358,10 +359,12 @@
           "data": {
             "camera_image_analysis": "Analýza obrazu z kamery",
             "conversation_summary": "Souhrn konverzace",
-            "embedding": "Embeddings"
+            "embedding": "Embeddings",
+            "sentinel_model": "Model Sentinelu"
           },
           "data_description": {
-            "embedding": "Embedding model pro sémantickou paměť a vyhledávání nástrojů. Pokud je vypnuto, poskytovatel je vybrán automaticky (poskytovatel konverzace, pokud podporuje embeddings)."
+            "embedding": "Embedding model pro sémantickou paměť a vyhledávání nástrojů. Pokud je vypnuto, poskytovatel je vybrán automaticky (poskytovatel konverzace, pokud podporuje embeddings).",
+            "sentinel_model": "Vlastní model pro triáž, objevování a vysvětlení Sentinelu, aby mohly běžet na malém modelu nebo druhém serveru Ollama místo sdílení modelu konverzace s hlasem a chatem. Při vypnutí běží Sentinel na modelu konverzace."
           }
         },
         "feature_provider": {
