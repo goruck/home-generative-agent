@@ -254,6 +254,10 @@ def _nested_sequences(node: Mapping[str, Any]) -> Iterator[Any]:
             yield node[key]
 
     choose = node.get("choose")
+    if isinstance(choose, dict):
+        # A raw config may hold a single option as a mapping; validation
+        # wraps it in a list.
+        choose = [choose]
     if isinstance(choose, (list, tuple)):
         for option in choose:
             if isinstance(option, dict):

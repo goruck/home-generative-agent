@@ -107,6 +107,7 @@ from .automation_targets import (
     service_exists,
 )
 from .camera_activity import get_camera_last_events_from_states
+from .critical_push import CriticalPushResult, apply_critical_push
 from .helpers import (
     PENDING_ACTION_TTL,
     PIN_AWAITING_USER_REPLY,
@@ -845,15 +846,51 @@ async def add_automation(  # noqa: D417
         )
         return describe_missing_targets(missing)
 
+    # A leak, smoke, gas or CO alert must not sit unseen in a notification
+    # group or behind a Focus mode (#869). Rewrite the config that is written
+    # (and held for the PIN), not the validated copy.
+    critical_push = apply_critical_push(hass, ha_automation_config, validated_config)
+    if critical_push.rewritten or critical_push.left_ordinary:
+        LOGGER.info(
+            "add_automation made %d push(es) in '%s' critical alerts; %d left "
+            "ordinary (not a mobile_app service, or a templated payload)",
+            critical_push.rewritten,
+            sanitize_tool_text(str(ha_automation_config.get("alias", "<unnamed>"))),
+            critical_push.left_ordinary,
+        )
+    install_note = _critical_push_note(critical_push)
+
     pin_challenge = _maybe_require_pin_for_automation(
         cfg=cast("ConfigurableData", config["configurable"]),
         validated_config=validated_config,
         ha_automation_config=ha_automation_config,
+        install_note=install_note,
     )
     if pin_challenge:
         return pin_challenge
 
-    return await _async_write_automation(hass, ha_automation_config)
+    return await _async_write_automation(hass, ha_automation_config) + install_note
+
+
+def _critical_push_note(critical_push: CriticalPushResult) -> str:
+    """Return what the install reply adds about a safety alarm's notifications."""
+    note = ""
+    if critical_push.rewritten:
+        note += (
+            ". Its phone notifications are sent as critical alerts, which sound "
+            "even in Do Not Disturb or a Focus mode; on iPhone the Home Assistant "
+            "app needs Critical Alerts allowed in its notification settings"
+        )
+    if critical_push.left_ordinary:
+        note += (
+            ". This automation fires on a leak, smoke, gas, carbon monoxide or "
+            f"safety alarm, but {critical_push.left_ordinary} of its "
+            "notifications are not sent through a phone's notify.mobile_app_* "
+            "service (or use a "
+            "templated payload), so they are not critical alerts; send them "
+            "with a notify.mobile_app_* service to make them critical"
+        )
+    return f"{note}." if note else ""
 
 
 def _maybe_require_pin_for_automation(
@@ -861,6 +898,7 @@ def _maybe_require_pin_for_automation(
     cfg: ConfigurableData,
     validated_config: Mapping[str, Any],
     ha_automation_config: dict[str, Any],
+    install_note: str = "",
 ) -> str | None:
     """
     Register a pending PIN confirmation when an automation is critical.
@@ -906,6 +944,8 @@ def _maybe_require_pin_for_automation(
         # What made it critical, so the fixed line names the unlock inside
         # it, not only the alias the model chose.
         "critical_calls": [call.describe() for call in critical_calls],
+        # So the confirmed reply can say which pushes are critical alerts.
+        "install_note": install_note,
         "user": cfg.get("user_id"),
         "thread_id": cfg.get("thread_id"),
         "turn_id": _turn_id(cfg),
@@ -1516,6 +1556,9 @@ async def _execute_pending_automation(
         return None, pin_msg(hass, "automation_outcome_unknown", err=type(err).__name__)
 
     _record_confirmed(cfg, action, PIN_OUTCOME_DONE)
+    install_note = action.get("install_note")
+    if isinstance(install_note, str):
+        result += install_note
     return json.dumps(
         {"status": "completed", "action_id": resolved_action_id, "result": result}
     ), None
