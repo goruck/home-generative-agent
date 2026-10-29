@@ -40,7 +40,6 @@ is a template.
 
 from __future__ import annotations
 
-import copy
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -49,6 +48,7 @@ from homeassistant.core import valid_entity_id
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import slugify
+from voluptuous import Invalid
 
 from .automation_pin import _MAX_STEP_DEPTH, _is_template, _TooDeepError, _walk_steps
 from .automation_targets import _step_service
@@ -110,6 +110,10 @@ _ANDROID_CRITICAL_DATA: dict[str, Any] = {
     "priority": "high",
 }
 
+# Mapping levels a config may nest. Each container step adds about three
+# (the step, an option, its data), so this is looser than the step cap.
+_MAX_TREE_DEPTH = 4 * _MAX_STEP_DEPTH
+
 # Step keys holding the notify call's data. HA renders `data`, then merges
 # the legacy `data_template` over it key by key.
 _STEP_DATA = "data"
@@ -127,6 +131,8 @@ class CriticalPushResult:
     # Notifications the alarm sends that could not be made critical: another
     # notify service, or a templated payload.
     left_ordinary: int = 0
+    # The alarm's steps nest too deeply to check, so none was rewritten.
+    unchecked: bool = False
 
 
 def _trigger_entity_ids(
@@ -168,14 +174,17 @@ def _fires_on_alarm(trigger: Mapping[str, Any], kind: Any) -> bool:
         return False
     if _ALARM_STATE in cv.ensure_list(trigger.get("not_to")):
         return False
-    to_states = cv.ensure_list(trigger.get("to"))
+    to_states = [state for state in cv.ensure_list(trigger.get("to")) if state]
     if to_states:
         return _ALARM_STATE in to_states
     from_states = set(cv.ensure_list(trigger.get("from")))
-    # Neither `to` nor `from` also fires on every attribute update (battery,
-    # signal), which must not sound through Do Not Disturb; a `from` alone is
-    # a state change, unless it can only be the alarm ending.
-    return bool(from_states) and from_states != {_ALARM_STATE}
+    if from_states == {_ALARM_STATE}:
+        # Only ever the alarm ending.
+        return False
+    # With none of to/from/not_to/not_from (`to: null` aside), HA also fires
+    # on every attribute update (battery, signal), which must not sound
+    # through Do Not Disturb; any of them limits it to state changes.
+    return any(key in trigger for key in ("to", "from", "not_to", "not_from"))
 
 
 def _is_alarm_trigger(hass: HomeAssistant, trigger: Mapping[str, Any]) -> bool:
@@ -254,63 +263,108 @@ def _gating_trigger_ids(conditions: Any, *, only: bool = False) -> set[str] | No
     return required
 
 
-def _unreachable_choose(
-    node: Mapping[str, Any], alarm: set[str], every: set[str]
-) -> Iterator[Any]:
-    """Yield the options, and the default, of a choose only non-alarms reach."""
-    # Trigger ids that can still reach `default`, while every option is
-    # gated on trigger ids alone.
-    default_ids: set[str] | None = set(every)
-    for option in cv.ensure_list(node.get("choose")):
-        if not isinstance(option, dict):
-            default_ids = None
-            continue
-        conditions = option.get("conditions")
-        ids = _gating_trigger_ids(conditions)
-        if ids is not None and not ids & alarm:
-            yield option.get("sequence")
-        pure = _gating_trigger_ids(conditions, only=True)
-        default_ids = (
-            None if pure is None or default_ids is None else default_ids - pure
-        )
-    if default_ids is not None and not default_ids & alarm:
-        yield node.get("default")
+def _is_disabled(step: Mapping[str, Any]) -> bool:
+    """Return True for a step HA skips: `enabled` false however it is spelled."""
+    enabled = step.get("enabled", True)
+    if enabled is True or _is_template(enabled):
+        return False
+    try:
+        return not cv.boolean(enabled)
+    except Invalid:
+        return False
 
 
-def _unreachable_if(
-    node: Mapping[str, Any], alarm: set[str], every: set[str]
-) -> Iterator[Any]:
-    """Yield the then, or the else, of an if that only non-alarms reach."""
-    ids = _gating_trigger_ids(node["if"])
-    if ids is not None and not ids & alarm:
-        yield node.get("then")
-    # `else` runs whenever the conditions fail, so only conditions that are
-    # all about the trigger say which triggers reach it.
-    pure = _gating_trigger_ids(node["if"], only=True)
-    if pure is not None and not (every - pure) & alarm:
-        yield node.get("else")
+_StepReach = tuple[dict[str, Any], frozenset[str]]
 
 
-def _unreachable_branches(
-    node: Any, alarm: set[str], every: set[str], depth: int = 0
-) -> Iterator[Any]:
-    """Yield every step list only non-alarm triggers can reach."""
+def _steps_with_reach(
+    node: Any, reach: frozenset[str], depth: int = 0
+) -> Iterator[_StepReach]:
+    """
+    Yield each service call step with the trigger ids that can run it.
+
+    A ``choose`` takes its first matching option, so an option gated on
+    trigger ids alone keeps those ids from the options after it and from
+    ``default``; an ``if`` sends the ids its trigger conditions exclude to
+    ``else``; a trigger condition step stops the rest of its sequence for
+    the other triggers. Depth counts container steps, as the existence
+    check's walker does.
+    """
     if depth > _MAX_STEP_DEPTH:
         raise _TooDeepError
     if isinstance(node, (list, tuple)):
-        for item in cast("list[Any]", node):
-            yield from _unreachable_branches(item, alarm, every, depth)
+        yield from _sequence_with_reach(cast("list[Any]", node), reach, depth)
         return
-    if not isinstance(node, dict):
+    if not isinstance(node, dict) or _is_disabled(cast("dict[str, Any]", node)):
         return
     node = cast("dict[str, Any]", node)
-    if "choose" in node:
-        yield from _unreachable_choose(node, alarm, every)
-    if "if" in node:
-        yield from _unreachable_if(node, alarm, every)
-    for value in node.values():
-        if isinstance(value, (list, tuple, dict)):
-            yield from _unreachable_branches(value, alarm, every, depth + 1)
+    try:
+        action_type: str | None = cv.determine_script_action(node)
+    except (ValueError, TypeError):
+        return
+    if action_type == cv.SCRIPT_ACTION_CALL_SERVICE:
+        yield node, reach
+    elif action_type == cv.SCRIPT_ACTION_CHOOSE:
+        yield from _choose_with_reach(node, reach, depth + 1)
+    elif action_type == cv.SCRIPT_ACTION_IF:
+        yield from _if_with_reach(node, reach, depth + 1)
+    elif action_type == cv.SCRIPT_ACTION_PARALLEL:
+        for branch in cv.ensure_list(node.get("parallel")):
+            yield from _steps_with_reach(branch, reach, depth + 1)
+    elif action_type == cv.SCRIPT_ACTION_REPEAT:
+        repeat = node.get("repeat")
+        if isinstance(repeat, dict):
+            yield from _steps_with_reach(repeat.get("sequence"), reach, depth + 1)
+    elif action_type == cv.SCRIPT_ACTION_SEQUENCE:
+        yield from _steps_with_reach(node.get("sequence"), reach, depth + 1)
+
+
+def _sequence_with_reach(
+    steps: list[Any], reach: frozenset[str], depth: int
+) -> Iterator[_StepReach]:
+    """Walk a step list; a trigger condition step narrows the rest of it."""
+    for step in steps:
+        if isinstance(step, dict):
+            step = cast("dict[str, Any]", step)
+            ids = None if _is_disabled(step) else _trigger_condition_ids(step)
+            if ids is not None:
+                reach &= ids
+                continue
+        yield from _steps_with_reach(step, reach, depth)
+
+
+def _choose_with_reach(
+    node: Mapping[str, Any], reach: frozenset[str], depth: int
+) -> Iterator[_StepReach]:
+    """Walk a choose: the first matching option runs, else `default`."""
+    remaining = reach
+    for option in cv.ensure_list(node.get("choose")):
+        if not isinstance(option, dict):
+            continue
+        conditions = option.get("conditions")
+        gate = _gating_trigger_ids(conditions)
+        option_reach = remaining if gate is None else remaining & gate
+        yield from _steps_with_reach(option.get("sequence"), option_reach, depth)
+        pure = _gating_trigger_ids(conditions, only=True)
+        if pure is not None:
+            remaining -= pure
+    yield from _steps_with_reach(node.get("default"), remaining, depth)
+
+
+def _if_with_reach(
+    node: Mapping[str, Any], reach: frozenset[str], depth: int
+) -> Iterator[_StepReach]:
+    """Walk an if: `then` when its conditions hold, `else` when they do not."""
+    gate = _gating_trigger_ids(node["if"])
+    yield from _steps_with_reach(
+        node.get("then"), reach if gate is None else reach & gate, depth
+    )
+    # `else` runs whenever the conditions fail, so only conditions that are
+    # all about the trigger say which triggers reach it.
+    pure = _gating_trigger_ids(node["if"], only=True)
+    yield from _steps_with_reach(
+        node.get("else"), reach if pure is None else reach - pure, depth
+    )
 
 
 def _unaliased(node: Any, depth: int = 0) -> Any:
@@ -320,7 +374,7 @@ def _unaliased(node: Any, depth: int = 0) -> Any:
     ``copy.deepcopy`` keeps shared references shared, which is what a YAML
     alias is.
     """
-    if depth > _MAX_STEP_DEPTH:
+    if depth > _MAX_TREE_DEPTH:
         raise _TooDeepError
     if isinstance(node, dict):
         return {
@@ -418,8 +472,7 @@ def _make_critical(step: dict[str, Any]) -> bool | None:
     key, source = _STEP_DATA, data
     if _PUSH_DATA in template:
         key, source = _STEP_DATA_TEMPLATE, template
-    # A copy: YAML anchors can share one mapping between several steps.
-    container = copy.deepcopy(source)
+    container = source
     payload: Any = container.get(_PUSH_DATA)
     if payload is None:
         payload = {}
@@ -468,35 +521,21 @@ def apply_critical_push(
     try:
         # One object per step: a YAML alias can share a step between the
         # alarm's branch and the all-clear's, which are rewritten differently.
-        actions = None
-        if key in config:
-            config[key] = actions = _unaliased(config[key])
-        steps = list(_walk_steps(actions))
-        unreachable = {
-            id(step)
-            for branch in _unreachable_branches(actions, alarm, every)
-            for step, _ in _walk_steps(branch)
-        }
+        actions = _unaliased(config.get(key))
+        steps = list(_steps_with_reach(actions, frozenset(every)))
     except _TooDeepError:
-        # The existence check refuses such a config before this runs.
-        return CriticalPushResult()
+        # Too deep to tell which steps the alarm reaches: rewrite nothing,
+        # and say so.
+        return CriticalPushResult(unchecked=True)
+    if key in config:
+        config[key] = actions
     mobile = _mobile_app_services(hass)
     rewritten = left_ordinary = 0
-    seen: set[int] = set()
-    for step, action_type in steps:
-        if (
-            action_type != cv.SCRIPT_ACTION_CALL_SERVICE
-            or id(step) in seen
-            or id(step) in unreachable
-        ):
-            continue
-        seen.add(id(step))
+    for step, reach in steps:
         service = _step_service(step)
-        if not _is_push(service):
+        if not reach & alarm or not _is_push(service):
             continue
-        outcome = (
-            _make_critical(cast("dict[str, Any]", step)) if service in mobile else False
-        )
+        outcome = _make_critical(step) if service in mobile else False
         if outcome:
             rewritten += 1
         elif outcome is False:

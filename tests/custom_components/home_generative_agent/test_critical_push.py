@@ -27,6 +27,7 @@ from custom_components.home_generative_agent.agent.helpers import (
     start_pin_turn,
 )
 from custom_components.home_generative_agent.agent.tools import (
+    _critical_push_note,
     add_automation,
     confirm_sensitive_action,
 )
@@ -237,7 +238,9 @@ async def test_a_leak_alert_through_another_notify_service_says_it_is_not_critic
 
     assert result.startswith("Added automation ")
     assert "1 of its notifications are not sent through" in result
-    assert "send them with a notify.mobile_app_* service" in result
+    # Installed already: another add_automation call would add a duplicate.
+    assert "do not add it again" in result
+    assert "Settings > Automations" in result
     assert "Critical Alerts allowed" not in result
     data = _written(automations_file)[0]["actions"][0]["data"]
     assert set(data) == {"title", "message"}
@@ -334,6 +337,10 @@ async def test_only_the_safety_device_classes_count(
         ({"to": "unavailable"}, False),
         ({"from": "on"}, False),
         ({"not_to": "on"}, False),
+        # Any of to/from/not_to/not_from limits HA to state changes.
+        ({"not_from": ["unavailable", "unknown"]}, True),
+        ({"not_to": ["unavailable"]}, True),
+        ({"to": None}, True),
         ({"attribute": "battery_level"}, False),
     ],
 )
@@ -778,3 +785,104 @@ actions:
     actions = _actions(config)
     assert actions[0]["data"] == {"message": "Leak"}
     assert actions[1]["data"] == {"message": "Leak", "data": CRITICAL_PAYLOAD}
+
+
+async def test_choose_takes_the_first_matching_option(hass: HomeAssistant) -> None:
+    """An option after one the alarm always takes is not reached by the alarm."""
+    cleared = {"condition": "state", "entity_id": MOISTURE, "state": "off"}
+    config: dict[str, Any] = {
+        "triggers": WET_DRY_TRIGGERS,
+        "actions": [
+            {
+                "choose": [
+                    {"conditions": _when("wet"), "sequence": [_push()]},
+                    {"conditions": [cleared], "sequence": [_push()]},
+                ]
+            },
+            # A state check first: the alarm may fall through to the next one.
+            {
+                "choose": [
+                    {"conditions": [cleared], "sequence": [_push()]},
+                    {"conditions": _when("wet"), "sequence": [_push()]},
+                ]
+            },
+        ],
+    }
+
+    assert await _apply(hass, config) == 3
+    first, second = _actions(config)
+    assert first["choose"][1]["sequence"][0]["data"] == {"message": "m"}
+    assert second["choose"][0]["sequence"][0]["data"] == _critical()
+
+
+async def test_a_trigger_condition_step_gates_the_rest_of_its_sequence(
+    hass: HomeAssistant,
+) -> None:
+    """A parallel branch that stops for the alarm keeps its push ordinary."""
+    config: dict[str, Any] = {
+        "triggers": WET_DRY_TRIGGERS,
+        "actions": [
+            {
+                "parallel": [
+                    [{"condition": "trigger", "id": "wet"}, _push()],
+                    [{"condition": "trigger", "id": "dry"}, _push()],
+                    # HA skips a disabled condition step.
+                    [{"condition": "trigger", "id": "dry", "enabled": False}, _push()],
+                ]
+            }
+        ],
+    }
+
+    assert await _apply(hass, config) == 2
+    wet, dry, disabled = _actions(config)[0]["parallel"]
+    assert wet[1]["data"] == _critical()
+    assert dry[1]["data"] == {"message": "m"}
+    assert disabled[1]["data"] == _critical()
+
+
+async def test_disabled_steps_are_neither_rewritten_nor_counted(
+    hass: HomeAssistant,
+) -> None:
+    """A step or container HA skips sends nothing, critical or not."""
+    config = _automation(
+        [
+            _push(),
+            {**_push(service="notify.family"), "enabled": False},
+            {"sequence": [_push()], "enabled": False},
+        ],
+        to="on",
+    )
+
+    assert await _result(hass, config) == CriticalPushResult(rewritten=1)
+    assert _actions(config)[2]["sequence"][0]["data"] == {"message": "m"}
+
+
+async def test_a_deep_but_valid_config_is_rewritten_and_a_too_deep_one_says_so(
+    hass: HomeAssistant,
+) -> None:
+    """Depth counts container steps, as the existence check does."""
+
+    def nested(levels: int) -> list[dict[str, Any]]:
+        actions: list[dict[str, Any]] = [_push()]
+        for _ in range(levels):
+            actions = [{"choose": [{"conditions": [], "sequence": actions}]}]
+        return actions
+
+    deep = _automation(nested(23), to="on")
+    assert await _result(hass, deep) == CriticalPushResult(rewritten=1)
+
+    too_deep = _automation(nested(60), to="on")
+    validated = {"triggers": cv.TRIGGER_SCHEMA(too_deep["triggers"])}
+    before = yaml.safe_dump(too_deep)
+    result = apply_critical_push(hass, too_deep, validated)
+    assert result == CriticalPushResult(unchecked=True)
+    assert yaml.safe_dump(too_deep) == before
+    assert "too deeply to check" in _critical_push_note(result)
+
+
+def test_the_note_never_asks_for_a_second_automation() -> None:
+    """The automation is installed already; the model must not add it again."""
+    note = _critical_push_note(CriticalPushResult(left_ordinary=1))
+
+    assert "do not add it again" in note
+    assert "Tell the user" in note

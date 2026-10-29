@@ -850,13 +850,18 @@ async def add_automation(  # noqa: D417
     # group or behind a Focus mode (#869). Rewrite the config that is written
     # (and held for the PIN), not the validated copy.
     critical_push = apply_critical_push(hass, ha_automation_config, validated_config)
-    if critical_push.rewritten or critical_push.left_ordinary:
+    if (
+        critical_push.rewritten
+        or critical_push.left_ordinary
+        or critical_push.unchecked
+    ):
         LOGGER.info(
             "add_automation made %d push(es) in '%s' critical alerts; %d left "
-            "ordinary (not a mobile_app service, or a templated payload)",
+            "ordinary (not a mobile_app service, or a templated payload)%s",
             critical_push.rewritten,
             sanitize_tool_text(str(ha_automation_config.get("alias", "<unnamed>"))),
             critical_push.left_ordinary,
+            "; too deeply nested to check" if critical_push.unchecked else "",
         )
     install_note = _critical_push_note(critical_push)
 
@@ -881,14 +886,22 @@ def _critical_push_note(critical_push: CriticalPushResult) -> str:
             "even in Do Not Disturb or a Focus mode; on iPhone the Home Assistant "
             "app needs Critical Alerts allowed in its notification settings"
         )
-    if critical_push.left_ordinary:
+    if critical_push.left_ordinary or critical_push.unchecked:
+        reason = (
+            "nests its steps too deeply to check its notifications"
+            if critical_push.unchecked
+            else f"{critical_push.left_ordinary} of its notifications are not sent "
+            "through a phone's notify.mobile_app_* service (or use a templated "
+            "payload)"
+        )
+        # The automation is already installed: another add_automation call
+        # would install a second one next to it.
         note += (
             ". This automation fires on a leak, smoke, gas, carbon monoxide or "
-            f"safety alarm, but {critical_push.left_ordinary} of its "
-            "notifications are not sent through a phone's notify.mobile_app_* "
-            "service (or use a "
-            "templated payload), so they are not critical alerts; send them "
-            "with a notify.mobile_app_* service to make them critical"
+            f"safety alarm, but it {reason}, so those are not critical alerts. "
+            "It is installed as written; do not add it again. Tell the user, "
+            "who can switch those notifications to a phone's notify.mobile_app_* "
+            "service in Settings > Automations"
         )
     return f"{note}." if note else ""
 
