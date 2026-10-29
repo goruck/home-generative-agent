@@ -2467,6 +2467,48 @@ label pair ("Server URL" vs "Base URL").
 
 ---
 
+### SDK retries can spend a short call budget before a refused connection fails over
+
+**What:** The OpenAI and Anthropic chat, VLM and embedding models are built with the SDK default of `max_retries=2` (only the STT/TTS client in `core/openai_endpoint.py` sets `max_retries=0`). On a refused or dropped connection the SDK retries twice with backoff before raising `APIConnectionError`. Since #880 that error moves the fallback chain on, but only once the retries are done. A short budget that is not split (Sentinel triage at 10 s, explanations, discovery, video summaries, where the primary keeps the whole limit) can run out during the retries, and the failure then surfaces as the caller's `TimeoutError` with the fallback never tried.
+
+**Why:** Found in the pre-landing review of the #880 fix (2026-10-29). docs/configuration.md promises those short calls "move on to a fallback only on a fast failure such as a refused connection"; a refused connection is fast for the transport but not after the SDK's retries. Predates #880.
+
+**How to apply:** Build chain members that have a next provider with `max_retries=0` (the chain is the retry), keeping the SDK default for a lone provider, or cap the SDK retries by the member's share of the budget. Test with a refused primary under a 10 s non-split budget: the fallback must answer.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
+### Header text echoed by h11 can still reach a log outside the chain error
+
+**What:** h11 rejects a malformed header value with `LocalProtocolError("Illegal header value b'Bearer <key>'")`, so an API key with a stray space or newline sits in that error's message. #880 keeps it out of `_safe_err_summary` for the SDKs' `APIConnectionError` and drops the cause chain from a chain error that ends on a connection error. Two paths remain: (1) a lone provider's error is re-raised as-is (`_chain_error` keeps a one-member chain's own error, #828), so a caller's `LOGGER.exception` prints the SDK error's cause chain with the key, as it did before #880; (2) a transport error raised unwrapped (langchain-ollama does not wrap httpx errors, and the Ollama client sends `Authorization: Bearer $OLLAMA_API_KEY` when that variable is set) prints its full message in `_safe_err_summary`, the WARNING lines and the chain error text.
+
+**Why:** Found in the final pre-landing review pass of #880 (2026-10-29); both predate it. The config flow's httpx validation normally rejects a padded key, but legacy-options migration (`core/subentry_resolver.py`) and older entries skip it.
+
+**How to apply:** Treat any `LocalProtocolError`/`ProtocolError` anywhere in the chain as type-only in `_safe_err_summary`, and for a lone provider either strip header-bearing causes before re-raising or log model failures without `exc_info` when `is_connection_error(err)`. Test with a real local socket and a key ending in `\n`, as the #880 probes did.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** None
+
+---
+
+### A chain whose primary timed out and whose fallback refused is not reported as a timeout
+
+**What:** `_chain_failed_error` picks `ModelChainTimeoutError` from the last member's error only. Since #880 a refused connection moves the chain on, so a chain whose primary timed out and whose fallback refused ends as a plain `HomeAssistantError`. Callers that count timeouts by type (the video analyzer's timeout metric, the `except (TimeoutError, ProviderStalledError)` in `agent/tools.py` `analyze_image`) undercount it, and `analyze_image` logs it with a traceback as a caption error instead.
+
+**Why:** Found in the final pre-landing review pass of #880 (2026-10-29). Before #880 the refusal propagated raw, so the mixed case did not arise.
+
+**How to apply:** Decide what the chain reports when its members failed differently: a timeout if any member timed out, or a distinct "chain unavailable" type. Then update the callers' `except` order to match, with a test for a timed-out primary followed by a refused fallback.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ### A frozen model server (connections never accepted) can hold a turn past its budget
 
 **What:** In the #828 beta.4 field test, a conversation turn against an Ollama server frozen with `kill -STOP` hung for more than four minutes, past the 180 s turn budget: no timeout fired, no provider was marked stalled. A frozen process leaves new connections sitting in the kernel's accept backlog, so the TCP connect completes but nothing is ever read or written. The budget from `model_call_budget` evidently does not cover that state, while a live server that hangs on `/api/chat` does time out as designed (Andy's second run).

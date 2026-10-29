@@ -268,11 +268,36 @@ def is_timeout_error(err: BaseException) -> bool:
     return False
 
 
+# openai/anthropic wrap a refused or dropped connection in their own
+# APIConnectionError ("Connection error."), which subclasses neither
+# ConnectionError nor the httpx errors; the transport error is its cause.
+_CONNECTION_ERROR_NAMES = frozenset({"APIConnectionError"})
+
+
+def is_connection_error(err: BaseException) -> bool:
+    """
+    Return True if the call failed in transport, not in the provider's answer (#880).
+
+    A refused or dropped connection, and also any transport timeout or pool
+    wait: callers that need to tell those apart check `is_timeout_error` first.
+    """
+    seen: BaseException | None = err
+    for _ in range(_MAX_CAUSE_DEPTH):
+        if seen is None:
+            return False
+        if isinstance(seen, (ConnectionError, *_HTTP_TRANSPORT_ERRORS)):
+            return True
+        if type(seen).__name__ in _CONNECTION_ERROR_NAMES:
+            return True
+        seen = seen.__cause__
+    return False
+
+
 def _is_retryable(err: Exception) -> bool:
     """Return True if the exception should trigger a fallback attempt."""
     if isinstance(err, FALLBACK_RETRYABLE_EXCEPTIONS):
         return True
-    if is_timeout_error(err):
+    if is_timeout_error(err) or is_connection_error(err):
         return True
     if is_model_not_found(err):
         # The next provider may have the model; a missing one at any position
@@ -304,7 +329,21 @@ def _safe_err_summary(err: Exception | None) -> str:
     """Return a truncated, safe error string for logging."""
     if err is None:
         return "No provider was available"
-    return f"{type(err).__name__}: {str(err)[:200]}"
+    summary = f"{type(err).__name__}: {str(err)[:200]}"
+    if type(err).__name__ not in _CONNECTION_ERROR_NAMES:
+        return summary
+    # The SDKs say only "Connection error." for anything raised while sending
+    # (a refused connection, a TLS failure, a bad header), so name the cause.
+    # Its type only: h11 puts a rejected header's value, the API key, in its
+    # message, and this text reaches the chat reply.
+    cause: BaseException = err
+    for _ in range(_MAX_CAUSE_DEPTH):
+        if cause.__cause__ is None:
+            break
+        cause = cause.__cause__
+    if cause is err:
+        return summary
+    return f"{summary} (cause: {type(cause).__name__})"
 
 
 def _merge_config(
@@ -497,8 +536,26 @@ def _chain_error(
     if len(chain) == 1 and last_err is not None:
         return last_err
     error = _chain_failed_error(kind, last_err)
-    error.__cause__ = last_err
+    error.__cause__ = _chain_cause(last_err)
     return error
+
+
+def _chain_cause(last_err: Exception | None) -> Exception | None:
+    """
+    Return the error a chain's failure is raised from, None to keep it out.
+
+    A connection error's causes can hold a rejected header's value, the API
+    key (h11 echoes it), and a caller's LOGGER.exception prints the whole
+    chain; the chain error's message already names the cause's type (#880).
+    A timeout keeps its cause: it carries no request text.
+    """
+    if (
+        last_err is not None
+        and is_connection_error(last_err)
+        and not is_timeout_error(last_err)
+    ):
+        return None
+    return last_err
 
 
 def _callable_members(
@@ -1386,7 +1443,7 @@ class FallbackEmbeddings:
                 self._record_success(provider_id)
                 return result
 
-        raise self._chain_error(last_err, skipped, held) from last_err
+        raise self._chain_error(last_err, skipped, held) from _chain_cause(last_err)
 
     async def aembed_query(self, text: str) -> list[float]:
         """Embed a query through the fallback chain."""
@@ -1436,7 +1493,7 @@ class FallbackEmbeddings:
                 self._record_success(provider_id)
                 return result
 
-        raise self._chain_error(last_err, skipped, held) from last_err
+        raise self._chain_error(last_err, skipped, held) from _chain_cause(last_err)
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         """Raise: synchronous embedding is not supported in async HA context."""
