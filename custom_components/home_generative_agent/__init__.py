@@ -336,6 +336,7 @@ from .core.subentry_resolver import (
     build_database_uri_from_entry,
     build_model_deployments,
     chosen_fallback_ids,
+    get_database_subentry,
     legacy_feature_configs,
     legacy_model_provider_configs,
     resolve_fallback_chains,
@@ -2145,6 +2146,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     _assign_first_provider_if_needed(hass, entry)
 
     db_uri = build_database_uri_from_entry(entry)
+    # The subentry this setup connects with, read now: one deleted during the
+    # rest of setup must still reload the entry (#870).
+    db_subentry = get_database_subentry(hass, entry)
+    db_subentry_id = db_subentry.subentry_id if db_subentry else None
 
     # "Configured" is a property of the entry, not of the connection: clear
     # the not-configured issue before connecting, so a database that is
@@ -4925,20 +4930,41 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         if s.subentry_type == SUBENTRY_TYPE_SENTINEL
     }
 
+    # Also reload when the Database subentry is deleted from the UI, which
+    # nothing else reloads, so the entry would keep the old pool and memory
+    # store until some later restart (#870). Only a deletion: the setup
+    # wizard is the one path that adds or changes the database, and it
+    # schedules its own reload, which HA does not deduplicate.
+
+    # Both diffs last until the reload replaces this listener, and the
+    # reload's own state changes (unload in progress) fire this signal too, so
+    # react once: a second pass would schedule a second full reload.
+    _reload_scheduled = False
+
     @callback
     def _on_entry_changed(
         change_type: ConfigEntryChange, changed_entry: HGAConfigEntry
     ) -> None:
+        nonlocal _reload_scheduled
         if changed_entry.entry_id != entry.entry_id:
             return
-        if change_type != ConfigEntryChange.UPDATED:
+        if change_type != ConfigEntryChange.UPDATED or _reload_scheduled:
             return
         current_snapshot = {
             s.subentry_id: dict(s.data)
             for s in changed_entry.subentries.values()
             if s.subentry_type == SUBENTRY_TYPE_SENTINEL
         }
-        if current_snapshot == _sentinel_snapshot:
+        sentinel_changed = current_snapshot != _sentinel_snapshot
+        database_removed = (
+            db_subentry_id is not None
+            and db_subentry_id not in changed_entry.subentries
+        )
+        if not sentinel_changed and not database_removed:
+            return
+        _reload_scheduled = True
+        if not sentinel_changed:
+            hass.config_entries.async_schedule_reload(entry.entry_id)
             return
         # Sentinel subentry was added, removed, or its data changed.
         # When removed, stop tasks immediately before the reload unloads the entry.
