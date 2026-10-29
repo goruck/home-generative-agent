@@ -9,6 +9,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import httpx2
 import openai
 import pytest
 from homeassistant.exceptions import HomeAssistantError
@@ -67,6 +68,11 @@ def test_is_retryable_non_retryable() -> None:
 def test_is_retryable_httpx_connect_error() -> None:
     """httpx.ConnectError (Ollama network failure) should be retryable."""
     assert _is_retryable(httpx.ConnectError("All connection attempts failed")) is True
+
+
+def test_is_retryable_httpx2_connect_error() -> None:
+    """The SDKs on httpx2 (openai 3, anthropic 2) fail over the same way (#878)."""
+    assert _is_retryable(httpx2.ConnectError("All connection attempts failed")) is True
 
 
 @pytest.mark.asyncio
