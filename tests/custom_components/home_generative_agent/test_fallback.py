@@ -18,6 +18,7 @@ from custom_components.home_generative_agent.const import EMBEDDING_MODEL_DIMS
 from custom_components.home_generative_agent.core.fallback import (
     DROPPABLE_SAMPLING_PARAMS,
     CircuitBreaker,
+    EmbeddingsUnavailableError,
     FallbackChatModel,
     FallbackEmbeddings,
     FallbackVLM,
@@ -73,6 +74,276 @@ def test_is_retryable_httpx_connect_error() -> None:
 def test_is_retryable_httpx2_connect_error() -> None:
     """The SDKs on httpx2 (openai 3, anthropic 2) fail over the same way (#878)."""
     assert _is_retryable(httpx2.ConnectError("All connection attempts failed")) is True
+
+
+def _sdk_connection_error(sdk: Any, *, cause: bool = True) -> Exception:
+    """Return the SDK's 'Connection error.' as its client raises it (#880)."""
+    err = sdk.APIConnectionError(request=httpx2.Request("POST", "https://api"))
+    if cause:
+        err.__cause__ = httpx2.ConnectError("[Errno 111] Connection refused")
+    return err
+
+
+@pytest.mark.parametrize("cause", [True, False], ids=["with_cause", "bare"])
+@pytest.mark.parametrize("sdk_name", ["openai", "anthropic"])
+def test_is_retryable_sdk_connection_error(sdk_name: str, *, cause: bool) -> None:
+    """A refused connection to OpenAI or Anthropic moves the chain on (#880)."""
+    sdk = pytest.importorskip(sdk_name)
+    assert _is_retryable(_sdk_connection_error(sdk, cause=cause)) is True
+
+
+def test_is_retryable_wrapped_transport_error() -> None:
+    """A provider wrapper that keeps the transport error as its cause fails over."""
+    err = RuntimeError("model call failed")
+    err.__cause__ = httpx2.ConnectError("[Errno 111] Connection refused")
+    assert _is_retryable(err) is True
+
+
+def _bad_input_raised_in_a_connection_error_handler() -> Exception:
+    """Return a ValueError raised while a connection error was handled."""
+    try:
+        try:
+            raise _sdk_connection_error(openai)
+        except openai.APIConnectionError:
+            msg = "bad input"
+            raise ValueError(msg) from None
+    except ValueError as err:
+        return err
+
+
+def test_is_retryable_connection_error_only_as_context() -> None:
+    """A connection error that is only context, not the cause, does not count."""
+    err = _bad_input_raised_in_a_connection_error_handler()
+    assert err.__context__ is not None
+    assert _is_retryable(err) is False
+
+
+@pytest.mark.asyncio
+async def test_fallback_chat_sdk_connection_error_uses_fallback() -> None:
+    """The chain answers from the fallback when the primary refuses (#880)."""
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = _sdk_connection_error(openai)
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("fallback")
+
+    model = FallbackChatModel(
+        chain=[(primary, "cloud", "p1"), (fallback, "edge", "p2")]
+    )
+    result = await model.ainvoke(["hello"])
+    assert result.content == "fallback"
+    assert fallback.ainvoke.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_fallback_chat_sdk_connection_error_counts_for_the_breaker() -> None:
+    """A refused connection is a failure the circuit breaker counts (#880)."""
+    import anthropic  # noqa: PLC0415
+
+    breaker = CircuitBreaker(threshold=1)
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = _sdk_connection_error(anthropic)
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("fallback")
+
+    model = FallbackChatModel(
+        chain=[(primary, "cloud", "p1"), (fallback, "edge", "p2")],
+        circuit_breaker=breaker,
+    )
+    await model.ainvoke(["hello"])
+    assert not breaker.is_available("p1")
+    assert breaker.is_available("p2")
+
+
+@pytest.mark.asyncio
+async def test_fallback_vlm_sdk_connection_error_uses_fallback() -> None:
+    """A camera frame goes to the fallback when the primary refuses (#880)."""
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = _sdk_connection_error(openai)
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("vlm fallback")
+
+    model = FallbackVLM(chain=[(primary, "cloud", "p1"), (fallback, "edge", "p2")])
+    result = await model.ainvoke(["image"])
+    assert result.content == "vlm fallback"
+
+
+@pytest.mark.parametrize("method", ["aembed_documents", "aembed_query"])
+@pytest.mark.asyncio
+async def test_fallback_embeddings_sdk_connection_error_uses_fallback(
+    method: str,
+) -> None:
+    """An embedding call goes to the fallback when the primary refuses (#880)."""
+    primary, fallback = AsyncMock(), AsyncMock()
+    getattr(primary, method).side_effect = _sdk_connection_error(openai)
+    getattr(fallback, method).return_value = [[0.3]]
+
+    emb = FallbackEmbeddings(
+        chain=[(primary, "cloud", "p1"), (fallback, "cloud", "p2")]
+    )
+    assert await _call(emb, method) == [[0.3]]
+
+
+@pytest.mark.parametrize("method", ["aembed_documents", "aembed_query"])
+@pytest.mark.asyncio
+async def test_fallback_embeddings_sdk_connection_error_keeps_a_held_fallback_out(
+    method: str,
+) -> None:
+    """A refused primary never lets in a fallback held until its build is checked."""
+    primary, fallback = AsyncMock(), AsyncMock()
+    getattr(primary, method).side_effect = _sdk_connection_error(openai)
+    getattr(fallback, method).return_value = [[0.3]]
+
+    emb = FallbackEmbeddings(chain=[(primary, "cloud", "p1"), (fallback, "edge", "p2")])
+    emb.hold_until_verified(["p2"], AsyncMock(return_value=False))
+    with pytest.raises(EmbeddingsUnavailableError):
+        await _call(emb, method)
+    getattr(fallback, method).assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fallback_chat_sdk_connection_error_logs_its_cause(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The SDK says only 'Connection error.', so the log names the cause (#880)."""
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = _sdk_connection_error(openai)
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("fallback")
+
+    model = FallbackChatModel(
+        chain=[(primary, "cloud", "p1"), (fallback, "edge", "p2")]
+    )
+    await model.ainvoke(["hello"])
+    assert "APIConnectionError: Connection error. (cause: ConnectError)" in caplog.text
+
+
+@pytest.mark.parametrize("cause", [True, False], ids=["with_cause", "bare"])
+@pytest.mark.asyncio
+async def test_all_providers_refused_message_names_the_cause_type(
+    *, cause: bool
+) -> None:
+    """The error a user sees names the cause's type, never its text."""
+    p1, p2 = AsyncMock(), AsyncMock()
+    p1.ainvoke.side_effect = _sdk_connection_error(openai, cause=cause)
+    p2.ainvoke.side_effect = _sdk_connection_error(openai, cause=cause)
+    model = FallbackChatModel(chain=[(p1, "cloud", "p1"), (p2, "edge", "p2")])
+    with pytest.raises(HomeAssistantError) as info:
+        await model.ainvoke(["hello"])
+    text = str(info.value)
+    assert "APIConnectionError: Connection error." in text
+    assert ("(cause: ConnectError)" in text) is cause
+    assert "Errno" not in text
+
+
+@pytest.mark.asyncio
+async def test_connection_error_cause_text_never_reaches_logs_or_errors(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A key in a rejected header (h11 echoes it) is never logged or shown (#880)."""
+    leaked = "sk-FAKE-KEY-0123456789"
+    err = openai.APIConnectionError(request=httpx2.Request("POST", "https://api"))
+    err.__cause__ = httpx2.LocalProtocolError(
+        f"Illegal header value b'Bearer {leaked}\\n'"
+    )
+    p1, p2 = AsyncMock(), AsyncMock()
+    p1.ainvoke.side_effect = err
+    p2.ainvoke.side_effect = err
+    model = FallbackChatModel(chain=[(p1, "cloud", "p1"), (p2, "edge", "p2")])
+    with pytest.raises(HomeAssistantError) as info:
+        await model.ainvoke(["hello"])
+    assert "(cause: LocalProtocolError)" in str(info.value)
+    assert leaked not in str(info.value)
+    assert leaked not in caplog.text
+
+
+_LEAKED_KEY = "sk-FAKE-KEY-0123456789"
+
+
+def _key_in_header_error() -> Exception:
+    """Return the SDK error for a key h11 rejected, its value in the cause."""
+    err = openai.APIConnectionError(request=httpx2.Request("POST", "https://api"))
+    err.__cause__ = httpx2.LocalProtocolError(
+        f"Illegal header value b'Bearer {_LEAKED_KEY}\\n'"
+    )
+    return err
+
+
+async def _chain_failure(kind: str) -> BaseException:
+    """Return what a two-member chain of `kind` raises when both refuse."""
+    p1, p2 = AsyncMock(), AsyncMock()
+    if kind == "embeddings":
+        p1.aembed_query.side_effect = _key_in_header_error()
+        p2.aembed_query.side_effect = _key_in_header_error()
+        emb = FallbackEmbeddings(chain=[(p1, "cloud", "p1"), (p2, "cloud", "p2")])
+        call = emb.aembed_query("hello")
+    else:
+        p1.ainvoke.side_effect = _key_in_header_error()
+        p2.ainvoke.side_effect = _key_in_header_error()
+        wrapper = FallbackVLM if kind == "vlm" else FallbackChatModel
+        model = wrapper(chain=[(p1, "cloud", "p1"), (p2, "edge", "p2")])
+        call = model.ainvoke(["hello"])
+    with pytest.raises(HomeAssistantError) as info:
+        await call
+    return info.value
+
+
+@pytest.mark.parametrize("kind", ["chat", "vlm", "embeddings"])
+@pytest.mark.asyncio
+async def test_a_logged_traceback_of_a_refused_chain_holds_no_key(
+    kind: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A caller's LOGGER.exception prints the cause chain: it must not hold the key."""
+    err = await _chain_failure(kind)
+    logger = logging.getLogger("test.caller")
+    with caplog.at_level(logging.DEBUG):
+        try:
+            raise err
+        except HomeAssistantError:
+            logger.exception("model call failed")
+    assert "LocalProtocolError" in caplog.text
+    assert _LEAKED_KEY not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_transport_error_summary_does_not_repeat_itself(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ollama's own transport error already says what failed: no cause suffix."""
+    inner = httpx2.ConnectError("All connection attempts failed")
+    outer = httpx2.ConnectError("All connection attempts failed")
+    outer.__cause__ = inner
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = outer
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("fallback")
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")]
+    )
+    await model.ainvoke(["hello"])
+    assert "ConnectError: All connection attempts failed" in caplog.text
+    assert "(cause:" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_fallback_chat_sdk_connection_error_is_not_stall_evidence() -> None:
+    """A refused connection fails over but never marks the provider stalled."""
+    tracker = MagicMock()
+    tracker.is_stalled.return_value = False
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = _sdk_connection_error(openai)
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("fallback")
+    model = FallbackChatModel(
+        chain=[(primary, "cloud", "p1"), (fallback, "edge", "p2")],
+        stall_tracker=tracker,
+    )
+    with patch(
+        "custom_components.home_generative_agent.core.fallback.counts_as_stall_evidence",
+        return_value=True,
+    ):
+        result = await model.ainvoke(["hello"])
+    assert result.content == "fallback"
+    tracker.record_timeout.assert_not_called()
 
 
 @pytest.mark.asyncio
