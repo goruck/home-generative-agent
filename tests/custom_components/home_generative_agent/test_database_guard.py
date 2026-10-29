@@ -12,11 +12,20 @@ message naming the fix, not the raw PostgreSQL error.
 from __future__ import annotations
 
 import logging
+from types import MappingProxyType
 from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
-from homeassistant.config_entries import ConfigEntryDisabler, ConfigEntryState
+from homeassistant.config_entries import (
+    SIGNAL_CONFIG_ENTRY_CHANGED,
+    ConfigEntryChange,
+    ConfigEntryDisabler,
+    ConfigEntryState,
+    ConfigSubentry,
+    ConfigSubentryData,
+)
+from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNAME
 from homeassistant.core import CoreState
 from homeassistant.exceptions import (
     ConfigEntryError,
@@ -25,13 +34,24 @@ from homeassistant.exceptions import (
 )
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers import translation
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from psycopg import OperationalError
 from psycopg import errors as pg_errors
 from psycopg_pool import PoolTimeout
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 import custom_components.home_generative_agent as hga_component
-from custom_components.home_generative_agent.const import DOMAIN
+from custom_components.home_generative_agent.const import (
+    CONF_DB_NAME,
+    DOMAIN,
+    RECOMMENDED_DB_HOST,
+    RECOMMENDED_DB_NAME,
+    RECOMMENDED_DB_PASSWORD,
+    RECOMMENDED_DB_PORT,
+    RECOMMENDED_DB_USERNAME,
+    SUBENTRY_TYPE_DATABASE,
+    SUBENTRY_TYPE_SENTINEL,
+)
 from custom_components.home_generative_agent.core import face_guard, pipeline_guard
 from custom_components.home_generative_agent.core.database_guard import (
     DATABASE_INVALID_SETTINGS,
@@ -386,6 +406,155 @@ def test_unreachable_message_keeps_only_the_first_line() -> None:
     assert err.translation_placeholders == {
         "error": 'connection to server at "db", port 5432 failed'
     }
+
+
+# ---------------------------------------------------------------------------
+# a Database subentry deleted from the UI reloads the entry (#870)
+# ---------------------------------------------------------------------------
+
+
+_DB_DATA = {
+    CONF_USERNAME: RECOMMENDED_DB_USERNAME,
+    CONF_PASSWORD: RECOMMENDED_DB_PASSWORD,
+    CONF_HOST: RECOMMENDED_DB_HOST,
+    CONF_PORT: RECOMMENDED_DB_PORT,
+    CONF_DB_NAME: RECOMMENDED_DB_NAME,
+}
+
+
+async def _setup_with_database_subentry(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, *, bootstrap: Any = _async_none
+) -> tuple[MockConfigEntry, MagicMock]:
+    """Set up an entry that has a Database subentry; return it and its reloads."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={},
+        subentries_data=[
+            ConfigSubentryData(
+                data=_DB_DATA,
+                subentry_type=SUBENTRY_TYPE_DATABASE,
+                title="Database",
+                unique_id=None,
+            )
+        ],
+    )
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    _patch_setup_dependencies(hass, monkeypatch, _fallback_setup_data())
+    _patch_configured_database(monkeypatch, _ReachablePool)
+    monkeypatch.setattr(hga_component, "_bootstrap_db_once", bootstrap)
+    # The caption backfill (#706) runs on the mock pool once setup is done.
+    monkeypatch.setattr(hga_component, "async_backfill_caption_cameras", _async_none)
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry) is True
+    reloads = MagicMock()
+    monkeypatch.setattr(hass.config_entries, "async_schedule_reload", reloads)
+    return entry, reloads
+
+
+def _database_subentry_id(entry: MockConfigEntry) -> str:
+    return next(
+        s.subentry_id
+        for s in entry.subentries.values()
+        if s.subentry_type == SUBENTRY_TYPE_DATABASE
+    )
+
+
+@pytest.mark.asyncio
+async def test_deleting_the_database_subentry_reloads_the_entry(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A UI deletion must not leave the entry on the old database (#870)."""
+    entry, reloads = await _setup_with_database_subentry(hass, monkeypatch)
+
+    hass.config_entries.async_remove_subentry(entry, _database_subentry_id(entry))
+    await hass.async_block_till_done()
+
+    reloads.assert_called_once_with(entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_a_wizard_database_write_is_left_to_the_wizards_own_reload(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A database update (the wizard's write) is left to the wizard's own reload."""
+    entry, reloads = await _setup_with_database_subentry(hass, monkeypatch)
+    subentry = entry.subentries[_database_subentry_id(entry)]
+
+    hass.config_entries.async_update_subentry(
+        entry, subentry, data={**_DB_DATA, CONF_HOST: "db.lan"}
+    )
+    await hass.async_block_till_done()
+
+    reloads.assert_not_called()
+
+
+def _signal_state_change(hass: Any, entry: MockConfigEntry) -> None:
+    """Send what HA sends on every state change, e.g. when an unload starts."""
+    async_dispatcher_send(
+        hass, SIGNAL_CONFIG_ENTRY_CHANGED, ConfigEntryChange.UPDATED, entry
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_database_deletion_reloads_once_through_the_unload(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reload's own state changes must not schedule a second reload."""
+    entry, reloads = await _setup_with_database_subentry(hass, monkeypatch)
+
+    hass.config_entries.async_remove_subentry(entry, _database_subentry_id(entry))
+    _signal_state_change(hass, entry)
+    await hass.async_block_till_done()
+
+    reloads.assert_called_once_with(entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_a_database_deleted_during_setup_still_reloads(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleted after setup connected, before the listener existed (#870)."""
+    deleted: list[str] = []
+
+    async def _delete_mid_setup(*_args: Any, **_kwargs: Any) -> None:
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        subentry_id = _database_subentry_id(entry)
+        hass.config_entries.async_remove_subentry(entry, subentry_id)
+        deleted.append(subentry_id)
+
+    entry, reloads = await _setup_with_database_subentry(
+        hass, monkeypatch, bootstrap=_delete_mid_setup
+    )
+    assert deleted
+    reloads.assert_not_called()
+
+    # HA signals the change to LOADED once setup returns.
+    _signal_state_change(hass, entry)
+    await hass.async_block_till_done()
+
+    reloads.assert_called_once_with(entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_a_sentinel_change_reloads_once_through_the_unload(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same for a Sentinel change: its diff from setup lasts until the reload."""
+    entry, reloads = await _setup_with_database_subentry(hass, monkeypatch)
+
+    hass.config_entries.async_add_subentry(
+        entry,
+        ConfigSubentry(
+            data=MappingProxyType({}),
+            subentry_type=SUBENTRY_TYPE_SENTINEL,
+            title="Sentinel",
+            unique_id=None,
+        ),
+    )
+    _signal_state_change(hass, entry)
+    await hass.async_block_till_done()
+
+    reloads.assert_called_once_with(entry.entry_id)
 
 
 # ---------------------------------------------------------------------------
