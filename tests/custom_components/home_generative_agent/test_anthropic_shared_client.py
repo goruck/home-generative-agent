@@ -270,9 +270,9 @@ async def test_real_sdk_reads_the_credential_file_once_off_the_loop() -> None:
     Issue #618 against the real SDK: no mocks around the client constructor.
 
     Counts every read of ``~/.config/anthropic/active_config`` while priming
-    and then serving five per-request copies, and asserts one read total, on
-    an executor thread. This is the only test that fails on the SDK behaviour
-    itself; the others patch ``anthropic.AsyncClient`` and cannot.
+    and then serving five per-request copies, and asserts at most one read
+    total, never on the event loop. This is the only test that fails on the
+    SDK behaviour itself; the others patch ``anthropic.AsyncClient`` and cannot.
     """
     from anthropic.lib.credentials import _constants as credentials  # noqa: PLC0415
 
@@ -298,6 +298,8 @@ async def test_real_sdk_reads_the_credential_file_once_off_the_loop() -> None:
             assert copy._async_client is primed
             copy._async_client.platform_headers()
 
-    assert len(reads) == 1
-    assert reads[0] != threading.current_thread().name
+    # The 0.x SDK reads the file once when the client is built; 2.x with an
+    # explicit API key never reads it (#878). Either way, never on the loop.
+    assert len(reads) <= 1
+    assert threading.current_thread().name not in reads
     assert "MainThread" not in reads

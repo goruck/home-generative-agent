@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 from time import monotonic
 from typing import TYPE_CHECKING, Any, cast
@@ -47,12 +48,21 @@ try:
 except ImportError:
     pass
 
-try:
-    import httpx
-
-    FALLBACK_RETRYABLE_EXCEPTIONS += (httpx.TransportError,)
-except ImportError:
-    httpx = None  # type: ignore[assignment]
+# The provider SDKs are moving from httpx to httpx2 (openai 3, anthropic 2;
+# langchain-ollama and the health checks stay on httpx), and neither
+# package's exceptions subclass the other's, so match both (#878).
+_HTTP_TRANSPORT_ERRORS: tuple[type[Exception], ...] = ()
+_HTTP_TIMEOUTS: tuple[type[Exception], ...] = ()
+_HTTP_POOL_TIMEOUTS: tuple[type[Exception], ...] = ()
+for _http_module in ("httpx", "httpx2"):
+    try:
+        _http = importlib.import_module(_http_module)
+    except ImportError:
+        continue
+    _HTTP_TRANSPORT_ERRORS += (_http.TransportError,)
+    _HTTP_TIMEOUTS += (_http.TimeoutException,)
+    _HTTP_POOL_TIMEOUTS += (_http.PoolTimeout,)
+FALLBACK_RETRYABLE_EXCEPTIONS += _HTTP_TRANSPORT_ERRORS
 
 try:
     from openai import BadRequestError as OpenAIBadRequestError
@@ -252,7 +262,7 @@ def is_timeout_error(err: BaseException) -> bool:
             _TIMEOUT_ERROR_NAMES
         ):
             return True
-        if httpx is not None and isinstance(seen, httpx.TimeoutException):
+        if isinstance(seen, _HTTP_TIMEOUTS):
             return True
         seen = seen.__cause__
     return False
@@ -553,7 +563,7 @@ def _is_client_pool_timeout(err: BaseException) -> bool:
     for _ in range(_MAX_CAUSE_DEPTH):
         if seen is None:
             return False
-        if httpx is not None and isinstance(seen, httpx.PoolTimeout):
+        if isinstance(seen, _HTTP_POOL_TIMEOUTS):
             return True
         seen = seen.__cause__
     return False

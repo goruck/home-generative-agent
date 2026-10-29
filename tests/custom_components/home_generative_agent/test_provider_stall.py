@@ -12,6 +12,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+import httpx2
 import openai
 import pytest
 from homeassistant.exceptions import HomeAssistantError
@@ -427,6 +428,8 @@ def test_sdk_timeouts_count_as_timeouts() -> None:
     wrapped.__cause__ = APITimeoutError("Request timed out.")
     assert is_timeout_error(TimeoutError())
     assert is_timeout_error(httpx.ReadTimeout("slow"))
+    # openai 3 and anthropic 2 raise httpx2's, which do not subclass httpx's (#878).
+    assert is_timeout_error(httpx2.ReadTimeout("slow"))
     assert is_timeout_error(APITimeoutError("Request timed out."))
     assert is_timeout_error(wrapped)
     assert not is_timeout_error(ConnectionRefusedError())
@@ -686,6 +689,7 @@ async def test_an_early_sdk_timeout_still_moves_on_in_an_unsplit_budget(
     [
         (APITimeoutError("Request timed out."), 0.0),  # gave up early
         (httpx.PoolTimeout("no free connection"), 0.3),  # our own pool
+        (httpx2.PoolTimeout("no free connection"), 0.3),  # same, on httpx2 (#878)
     ],
 )
 async def test_quick_or_client_side_timeouts_are_not_a_stall(
