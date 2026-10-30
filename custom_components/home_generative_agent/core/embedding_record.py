@@ -38,7 +38,9 @@ then: one holding another build is removed from the live chain and named in
 the same issue (#860). A removed fallback is not re-admitted, and nothing is
 reloaded. Until it is judged, the chain holds such a fallback: it answers
 nothing before its build is read and found to match, at its first call if
-that comes first (#857).
+that comes first (#857). One a check leaves held is named in a repair issue,
+and while one is held on the primary's build being unknown, that build is
+read again until it is known (#873).
 """
 
 from __future__ import annotations
@@ -87,6 +89,12 @@ LOGGER = logging.getLogger(__name__)
 
 ISSUE_EMBEDDING_MODEL_CHANGED = "embedding_model_changed"
 ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD = "embedding_fallback_other_build"
+# One issue per entry; its translation key says why the fallback is held.
+ISSUE_EMBEDDING_FALLBACK_HELD = "embedding_fallback_held"
+ISSUE_EMBEDDING_FALLBACK_HELD_UNREAD = f"{ISSUE_EMBEDDING_FALLBACK_HELD}_unread"
+ISSUE_EMBEDDING_FALLBACK_HELD_NO_REFERENCE = (
+    f"{ISSUE_EMBEDDING_FALLBACK_HELD}_no_reference"
+)
 
 _CREATE_RECORD_SQL = """
     CREATE TABLE IF NOT EXISTS hga_embedding_model (
@@ -244,6 +252,10 @@ DIGEST_FETCH_TIMEOUT_S = 5.0
 # Waits before each re-read of a build setup could not read. Quoted in
 # docs/configuration.md.
 _BUILD_REREAD_DELAYS_S = (0.0, 10.0, 30.0)
+# Wait between reads of the primary's build after those, while a fallback
+# stays held on it being unknown (#873). Quoted in docs/configuration.md and
+# in the embedding_fallback_held_no_reference issue strings.
+_PRIMARY_BUILD_WATCH_S = 300.0
 # Waits before trying again to note a removed fallback as a writer (#860): a
 # re-embed holds the record row for a batch at a time.
 _NOTE_RETRY_DELAYS_S = (10.0, 30.0, 60.0)
@@ -352,6 +364,25 @@ class FallbackBuild:
     digest: str | None = None
 
 
+class HoldReason(StrEnum):
+    """Why a held Ollama embedding fallback's build check admitted nothing (#873)."""
+
+    # Its own build could not be read.
+    UNREAD = "unread"
+    # Nothing to compare it with: the primary's build is unknown, and the
+    # store's record names no build it matches.
+    NO_REFERENCE = "no_reference"
+
+
+@dataclass(frozen=True)
+class HeldFallback:
+    """A fallback a build check left held, named in the held-fallback issue."""
+
+    provider_id: str
+    name: str
+    reason: HoldReason
+
+
 @dataclass(frozen=True)
 class EmbeddingFallbackGate:
     """
@@ -360,13 +391,18 @@ class EmbeddingFallbackGate:
     ``left_out`` names the fallbacks setup dropped for holding another build;
     ``unchecked`` are the kept ones it could not compare with the primary's
     live build (theirs unread, or the primary's), checked again after the
-    record check.
+    record check. ``held`` are the ones a build check left held since, until
+    one admits or removes them (#873).
     """
 
     primary: str
     model: str
     left_out: tuple[str, ...] = ()
     unchecked: tuple[FallbackBuild, ...] = ()
+    held: tuple[HeldFallback, ...] = ()
+    # Whether this run synced the held-fallback issue yet: it survives a
+    # reload, so the run's first update writes it, changed or not.
+    held_synced: bool = False
 
 
 @dataclass(frozen=True)
@@ -442,6 +478,10 @@ async def _read_record(
 
 def _changed_issue_id(entry_id: str) -> str:
     return f"{ISSUE_EMBEDDING_MODEL_CHANGED}_{entry_id}"
+
+
+def _held_issue_id(entry_id: str) -> str:
+    return f"{ISSUE_EMBEDDING_FALLBACK_HELD}_{entry_id}"
 
 
 def _other_build_issue_id(entry_id: str) -> str:
@@ -595,14 +635,45 @@ async def async_sync_embedding_record(hass: HomeAssistant, entry: ConfigEntry) -
     builds read alongside the record check, so one holding another build
     leaves the chain as soon as both are known (#860). Only for a primary
     that answered at setup, as for the record: with it down, the reload once
-    it is back runs setup's own check.
+    it is back runs setup's own check. A fallback still held then on the
+    primary's build being unknown keeps that build read (#873), alongside
+    the record check's retries after a database that did not answer, whose
+    waits must not hold up the end of a hold.
     """
+    try:
+        retry = await _async_sync_record_and_fallbacks(hass, entry)
+    except Exception:  # The watch still runs after it.
+        LOGGER.exception("The memory store's embedding model check failed")
+        retry = False
+    retrying = asyncio.Event()
+
+    async def _async_retry() -> None:
+        retrying.set()
+        try:
+            await _async_retry_model_record(hass, entry)
+        finally:
+            retrying.clear()
+
+    watch, *retried = await asyncio.gather(
+        _async_watch_primary_build(hass, entry, retrying),
+        *([_async_retry()] if retry else []),
+        return_exceptions=True,
+    )
+    if isinstance(watch, Exception):
+        LOGGER.error("The embedding primary's build is no longer read again: %r", watch)
+    for result in retried:
+        if isinstance(result, Exception):
+            LOGGER.error("The memory store's embedding model check failed: %r", result)
+
+
+async def _async_sync_record_and_fallbacks(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> bool:
+    """Run the record and fallback checks; True if the record check must retry."""
     rd = entry.runtime_data
     gate = rd.embedding_fallback_gate
     if gate is None or not gate.unchecked or not _primary_built(entry):
-        if not await _async_sync_model_record(hass, entry):
-            await _async_retry_model_record(hass, entry)
-        return
+        return not await _async_sync_model_record(hass, entry)
     # The record check's own errors are caught inside it; anything else must
     # not take the fallback check down with it.
     record_result, builds = await asyncio.gather(
@@ -626,8 +697,7 @@ async def async_sync_embedding_record(hass: HomeAssistant, entry: ConfigEntry) -
             ", ".join(fb.name for fb in gate.unchecked),
         )
     # After the fallback check, which the retry waits must not hold up.
-    if record_result is False:
-        await _async_retry_model_record(hass, entry)
+    return record_result is False
 
 
 async def _async_sync_model_record(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -799,6 +869,72 @@ async def _async_learn_primary_build(
     return current
 
 
+async def _async_watch_primary_build(
+    hass: HomeAssistant, entry: ConfigEntry, retrying: asyncio.Event
+) -> None:
+    """
+    Read the primary's build again while a fallback is held on it (#873).
+
+    The record check reads a build setup missed a few times, then gives up;
+    a fallback held because that build is unknown would then stay held until
+    a reload, even once the build can be read, and one admitted against the
+    store's record would never be checked against it. While either remains,
+    the build is read every `_PRIMARY_BUILD_WATCH_S`; once known, every held
+    fallback, the record admissions held again with them, is checked against
+    it at once, and the record check runs with it. `retrying` is set while
+    the record check's own retries run, which then cover this one's too.
+    """
+    rd = entry.runtime_data
+    current = rd.embedding_fingerprint
+    if (
+        current is None
+        or not current.undetermined
+        or rd.embedding_digest_source is None
+        or not _primary_built(entry)
+    ):
+        return
+    while True:
+        chain = rd.embeddings
+        if (
+            entry.state not in ACTIVE_ENTRY_STATES
+            or not isinstance(chain, FallbackEmbeddings)
+            or not (chain.unverified or chain.record_admitted)
+        ):
+            return
+        if rd.embedding_fingerprint is not current:
+            # Read meanwhile: confirming the repair reads it too.
+            await chain.recheck_held()
+            return
+        await asyncio.sleep(_PRIMARY_BUILD_WATCH_S)
+        if (
+            entry.state not in ACTIVE_ENTRY_STATES
+            or rd.embedding_fingerprint is not current
+        ):
+            continue
+        build = await _async_primary_build(hass, entry)
+        if (
+            build is None
+            or entry.state not in ACTIVE_ENTRY_STATES
+            or rd.embedding_fingerprint is not current
+        ):
+            continue
+        learned = replace(current, digest=build)
+        _learn_primary_fingerprint(entry, learned)
+        LOGGER.info(
+            "Read which build of %s the embedding primary serves; the held "
+            "embedding fallback(s) are checked against it.",
+            current.model,
+        )
+        await chain.recheck_held()
+        if (
+            entry.state in ACTIVE_ENTRY_STATES
+            and not await _async_apply_record_check(hass, entry, learned)
+            and not retrying.is_set()
+        ):
+            await _async_retry_model_record(hass, entry)
+        return
+
+
 def _learn_primary_fingerprint(
     entry: ConfigEntry, fingerprint: EmbeddingFingerprint
 ) -> None:
@@ -806,7 +942,8 @@ def _learn_primary_fingerprint(
     Set the primary's fingerprint, its build now read (#857).
 
     A fallback admitted against the store's record was not compared with
-    this build: it is held again, checked anew at its next call.
+    this build: it is held again, checked anew at its next call, or at once
+    by the watch on the primary's build (#873).
     """
     rd = entry.runtime_data
     rd.embedding_fingerprint = fingerprint
@@ -865,8 +1002,10 @@ async def _async_settle_fallback_builds(
     repair is raised, since its vectors may be in the store. One holding the
     same build is admitted: the chain no longer holds it (#857). One still
     unreadable stays in the chain, held until the chain's own check admits
-    it, and the log says so. With the primary's build still unknown there is
-    nothing to compare with: they stay held, and the log names them.
+    it, and the log and the held-fallback issue say so (#873). With the
+    primary's build still unknown, each goes through the chain's own check
+    now, against the store's record: one that matches is admitted until the
+    primary's build is read, and one left held is named in the issue.
 
     An unknown build decides nothing about the issue either: it is synced
     only with positive evidence (a fallback left out or removed), or once
@@ -884,11 +1023,14 @@ async def _async_settle_fallback_builds(
         LOGGER.warning(
             "The build of %s the embedding fallback(s) %s serve could not be "
             "compared with the primary's, which is unknown; they are checked "
-            "against the memory store's record when the chain needs them, and "
-            "again once the primary's build is read.",
+            "against the memory store's record now, and again once the "
+            "primary's build is read.",
             gate.model,
             ", ".join(fb.name for fb in gate.unchecked),
         )
+        # Through the chain's own check, which names one it leaves held in
+        # the held-fallback issue (#873).
+        await chain.recheck_held()
         return
     other = [
         fb
@@ -939,7 +1081,20 @@ async def _async_settle_fallback_builds(
         dict.fromkeys((*live.left_out, *gate.left_out, *(fb.name for fb in other)))
     )
     rd.embedding_fallback_gate = replace(live, left_out=left_out, unchecked=())
-    if entry.state not in ACTIVE_ENTRY_STATES or (unread and not left_out):
+    if entry.state not in ACTIVE_ENTRY_STATES:
+        return
+    _update_held(
+        hass,
+        entry,
+        # Read after the waits: one the chain admitted meanwhile is not held.
+        held=[
+            HeldFallback(fb.provider_id, fb.name, HoldReason.UNREAD)
+            for fb in unread
+            if fb.provider_id in chain.unverified
+        ],
+        released=[fb.provider_id for fb in gate.unchecked if fb not in unread],
+    )
+    if unread and not left_out:
         return
     async_sync_other_build_fallback_issue(
         hass, entry.entry_id, primary=gate.primary, model=gate.model, left_out=left_out
@@ -974,10 +1129,65 @@ async def async_verify_embedding_fallback(  # noqa: PLR0913
     warned: set[str] | None = None,
 ) -> bool:
     """
+    Check a held fallback's build; see `_async_check_fallback_build`.
+
+    The chain keeps one held on any error (#857), so the held-fallback issue
+    names it then too (#873).
+    """
+    try:
+        return await _async_check_fallback_build(
+            hass, entry, fallbacks, provider_id, chain=chain, warned=warned
+        )
+    except Exception:
+        fb = fallbacks.get(provider_id)
+        if fb is not None:
+            _note_held_by_check(
+                hass,
+                entry,
+                HeldFallback(provider_id, fb.name, HoldReason.UNREAD),
+                chain=chain,
+            )
+        raise
+
+
+@callback
+def _note_held_by_check(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    held: HeldFallback,
+    *,
+    chain: FallbackEmbeddings | None = None,
+) -> None:
+    """
+    Note a fallback the check left held, unless it is no longer held (#873).
+
+    `chain` is the chain that asked: one a reload replaced notes nothing in
+    the new run's issue.
+    """
+    live = getattr(getattr(entry, "runtime_data", None), "embeddings", None)
+    if (
+        isinstance(live, FallbackEmbeddings)
+        and (chain is None or live is chain)
+        and held.provider_id in live.unverified
+    ):
+        _update_held(hass, entry, held=[held])
+
+
+async def _async_check_fallback_build(  # noqa: PLR0913
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    fallbacks: Mapping[str, FallbackBuild],
+    provider_id: str,
+    *,
+    chain: FallbackEmbeddings | None = None,
+    warned: set[str] | None = None,
+) -> bool:
+    """
     Check a held Ollama embedding fallback's build before its first call (#857).
 
     The chain asks this when it needs a fallback setup could not compare
-    with the primary's build. Its build, read now, is
+    with the primary's build, and `recheck_held` when that build is read
+    (#873). Its build, read now, is
     compared with the primary's, or while that is unknown with the build the
     store's record names. The same build admits it. Another build removes it
     from the chain and names it in the other-build issue. Without both builds
@@ -1027,9 +1237,14 @@ async def async_verify_embedding_fallback(  # noqa: PLR0913
             logging.WARNING if first else logging.DEBUG,
             "Embedding fallback provider %s does not stand in for the primary: "
             "the build of %s it serves, or the one the memory store holds, "
-            "could not be read. It is checked again when the chain next needs it.",
+            "could not be read. It is checked again when the chain next needs it, "
+            "or once the primary's build is read.",
             fb.name,
             model,
+        )
+        reason = HoldReason.NO_REFERENCE if reference is None else HoldReason.UNREAD
+        _note_held_by_check(
+            hass, entry, HeldFallback(provider_id, fb.name, reason), chain=chain
         )
         return False
     if not builds_differ(build, reference):
@@ -1042,6 +1257,7 @@ async def async_verify_embedding_fallback(  # noqa: PLR0913
         if by_record and isinstance(live_chain, FallbackEmbeddings):
             # Held again once the primary's build is known (#857).
             live_chain.verify_provider(provider_id, by_record=True)
+        _update_held(hass, entry, released=[provider_id])
         return True
     if by_record and _primary_built(entry):
         # The primary answers but its build is unread, so the record may be
@@ -1058,6 +1274,12 @@ async def async_verify_embedding_fallback(  # noqa: PLR0913
             fb.name,
             model,
         )
+        _note_held_by_check(
+            hass,
+            entry,
+            HeldFallback(provider_id, fb.name, HoldReason.NO_REFERENCE),
+            chain=chain,
+        )
         return False
     live_chain = rd.embeddings
     if isinstance(live_chain, FallbackEmbeddings):
@@ -1068,6 +1290,7 @@ async def async_verify_embedding_fallback(  # noqa: PLR0913
         fb.name,
         model,
     )
+    _update_held(hass, entry, released=[provider_id])
     # The live gate, read after the waits: the record check may have settled
     # other fallbacks meanwhile (#857).
     gate = rd.embedding_fallback_gate
@@ -1986,3 +2209,81 @@ def async_sync_other_build_fallback_issue(
 def async_clear_other_build_fallback_issue(hass: HomeAssistant, entry_id: str) -> None:
     """Drop the other-build fallback issue on a disable and on entry removal."""
     ir.async_delete_issue(hass, DOMAIN, _other_build_issue_id(entry_id))
+
+
+@callback
+def _update_held(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    *,
+    held: Sequence[HeldFallback] = (),
+    released: Sequence[str] = (),
+) -> None:
+    """
+    Note fallbacks a build check left held, or admitted or removed (#873).
+
+    A held fallback answers no embedding call, so a primary outage then
+    fails every save with nothing but a log line to say why: the
+    held-fallback issue names each one and what would end the hold.
+    """
+    rd = entry.runtime_data
+    gate = rd.embedding_fallback_gate
+    if gate is None or entry.state not in ACTIVE_ENTRY_STATES:
+        return
+    by_id = {h.provider_id: h for h in gate.held}
+    for provider_id in released:
+        by_id.pop(provider_id, None)
+    # One noted again keeps its place, so an unchanged hold changes nothing.
+    by_id.update((h.provider_id, h) for h in held)
+    kept = tuple(by_id.values())
+    # The issue survives a reload (#810): the run's first update syncs it,
+    # changed or not, so one the last run raised does not outlive its hold.
+    if kept == gate.held and gate.held_synced:
+        return
+    chain = rd.embeddings
+    if (
+        not kept
+        and not gate.held_synced
+        and isinstance(chain, FallbackEmbeddings)
+        and set(chain.unverified) - set(released)
+    ):
+        # The last run's issue may name a fallback still held and not yet
+        # checked in this one: it stands, dismissal and all, until a check
+        # says otherwise.
+        return
+    rd.embedding_fallback_gate = gate = replace(gate, held=kept, held_synced=True)
+    issue_id = _held_issue_id(entry.entry_id)
+    if not kept:
+        ir.async_delete_issue(hass, DOMAIN, issue_id)
+        return
+    # Nothing to compare with holds every fallback, whatever else holds one.
+    no_reference = any(h.reason is HoldReason.NO_REFERENCE for h in kept)
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        issue_id,
+        is_fixable=False,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key=(
+            ISSUE_EMBEDDING_FALLBACK_HELD_NO_REFERENCE
+            if no_reference
+            else ISSUE_EMBEDDING_FALLBACK_HELD_UNREAD
+        ),
+        translation_placeholders={
+            "providers": ", ".join(dict.fromkeys(h.name for h in kept)),
+            "primary": gate.primary,
+            "model": gate.model,
+        },
+    )
+
+
+@callback
+def async_clear_held_fallback_issue(hass: HomeAssistant, entry_id: str) -> None:
+    """
+    Drop the held-fallback issue (#873).
+
+    On a disable, on entry removal, and at a setup that holds no fallback. A
+    reload keeps it, and the user's dismissal with it (#810): the new run's
+    first check syncs it.
+    """
+    ir.async_delete_issue(hass, DOMAIN, _held_issue_id(entry_id))

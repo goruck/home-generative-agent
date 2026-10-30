@@ -583,6 +583,14 @@
     "embedding_fallback_other_build": {
       "title": "备用嵌入提供方 {providers} 使用的是 {model} 的另一个版本",
       "description": "备用嵌入提供方 **{providers}** 的 Ollama 服务器上的 **{model}** 与主提供方 **{primary}**（或在主提供方不可用时，与填充记忆存储所用的版本）的版本不同（另一次拉取或另一种量化）。不同版本生成的嵌入不同，因此 Home Generative Agent 不会使用此备用提供方：混合它们的向量会导致记忆搜索返回错误结果。\n\n要重新使用它，请在两台服务器上拉取相同的版本（例如在每台服务器上运行 `ollama pull {model}`），然后重新加载 Home Generative Agent。当某次重新加载读取到两个版本并发现二者一致时，此问题会自动清除。"
+    },
+    "embedding_fallback_held_unread": {
+      "title": "备用嵌入提供方 {providers} 无法替代主提供方",
+      "description": "Home Generative Agent 无法读取备用嵌入提供方 **{providers}** 的 Ollama 服务器上 **{model}** 的版本：服务器没有响应，或者没有在 `/api/show` 中给出其权重（部分兼容 Ollama 的代理不会给出）。另一个版本的备用提供方会在记忆存储中混入不同模型，因此它保持暂停：主提供方 **{primary}** 不可用期间，保存记忆和摄像头描述会失败，记忆搜索只返回最近的记忆。\n\n要使用它，请让备用提供方指向一个会响应并给出其权重的服务器（普通 Ollama 服务器即可），并在上面使用与主提供方相同的 {model} 版本（例如在每台服务器上运行 `ollama pull {model}`）。读取到它的版本且二者一致后，此问题会自动清除；每次主提供方失败以及重新加载时都会检查。"
+    },
+    "embedding_fallback_held_no_reference": {
+      "title": "备用嵌入提供方 {providers} 没有可比较的版本",
+      "description": "Home Generative Agent 无法将备用嵌入提供方 **{providers}** 上 **{model}** 的版本与记忆存储的版本进行比较：主提供方 **{primary}** 的版本未知（启动时不可用，或其服务器没有在 `/api/show` 中给出权重），而存储记录中也没有与该备用提供方一致的版本。另一个版本的备用提供方会在记忆存储中混入不同模型，因此它保持暂停：主提供方不可用期间，保存记忆和摄像头描述会失败，记忆搜索只返回最近的记忆。\n\n要使用它，请在两台服务器上拉取相同的版本（例如在每台服务器上运行 `ollama pull {model}`），使用会给出权重的服务器（普通 Ollama 服务器即可），并在主提供方恢复后重新加载 Home Generative Agent。如果主提供方在启动时有响应，每 5 分钟会重新读取一次它的版本，读取到后会立即检查备用提供方；此问题随后会自动清除。"
     }
   }
 }

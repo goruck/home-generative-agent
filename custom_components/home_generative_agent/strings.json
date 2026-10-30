@@ -583,6 +583,14 @@
     "embedding_fallback_other_build": {
       "title": "Embedding fallback {providers} holds another build of {model}",
       "description": "The Ollama server of the embedding fallback **{providers}** holds a different build of **{model}** (another pull or quantization) than the primary provider **{primary}** (or, while the primary is down, than the build the memory store was filled with). Different builds embed differently, so Home Generative Agent leaves this fallback out: mixing their vectors would make memory search return wrong results.\n\nTo use it again, pull the same build on both servers (for example run `ollama pull {model}` on each) and reload Home Generative Agent. This issue clears on a reload that reads both builds and finds them the same."
+    },
+    "embedding_fallback_held_unread": {
+      "title": "Embedding fallback {providers} can't stand in for the primary",
+      "description": "Home Generative Agent can't read which build of **{model}** the Ollama server of the embedding fallback **{providers}** holds: it didn't answer, or it doesn't name its weights in `/api/show` (some Ollama-compatible proxies don't). A fallback of another build would mix models in the memory store, so this one stays held: while the primary **{primary}** is down, saving memories and camera captions fails, and memory search falls back to recent memories.\n\nTo use it, point the fallback at a server that answers and names its weights (a plain Ollama server does), holding the same build of {model} as the primary (for example run `ollama pull {model}` on each). This issue clears once its build is read and matches, which is checked each time the primary fails and on a reload."
+    },
+    "embedding_fallback_held_no_reference": {
+      "title": "Embedding fallback {providers} has no build to be compared with",
+      "description": "Home Generative Agent can't compare the build of **{model}** the embedding fallback **{providers}** holds with the memory store's: the build the primary **{primary}** serves is unknown (it was down at startup, or its server doesn't name its weights in `/api/show`), and the store's record names no build the fallback's matches. A fallback of another build would mix models in the memory store, so this one stays held: while the primary is down, saving memories and camera captions fails, and memory search falls back to recent memories.\n\nTo use it, pull the same build on both servers (for example run `ollama pull {model}` on each), use servers that name their weights (a plain Ollama server does), and reload Home Generative Agent once the primary is back. If the primary answered at startup, its build is read again every 5 minutes, and the fallback is checked as soon as it is read; this issue then clears."
     }
   }
 }

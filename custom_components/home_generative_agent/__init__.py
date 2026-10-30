@@ -282,6 +282,7 @@ from .core.embedding_record import (
     EmbeddingFallbackGate,
     FallbackBuild,
     async_clear_embedding_model_changed_issue,
+    async_clear_held_fallback_issue,
     async_clear_other_build_fallback_issue,
     async_recorded_ollama_digest,
     async_sync_embedding_record,
@@ -5075,6 +5076,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             model=ollama_embedding_model,
             left_out=embedding_other_build,
         )
+    # Only a fallback setup could not check is ever held, so none is now; one
+    # held in the last run is synced by this run's first check of it (#873).
+    if not embedding_fallback_unchecked:
+        async_clear_held_fallback_issue(hass, entry.entry_id)
     # Same placement, same reason: one read of the store's model record, and
     # a write when there is none (#855). It also resumes a re-embed the
     # repair started.
@@ -5260,11 +5265,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
     async_clear_database_issue(hass, entry.entry_id)
     async_clear_ollama_embedding_model_issue(hass, entry.entry_id)
     async_clear_embedding_size_issue(hass, entry.entry_id)
-    # Same for the left-out embedding fallback: setup re-syncs it, so a reload
-    # keeps the user's dismissal; a disable drops it.
+    # Same for the left-out and the held embedding fallbacks: setup re-syncs
+    # them, so a reload keeps the user's dismissal; a disable drops them.
     if entry.disabled_by is not None:
         async_clear_other_model_fallback_issue(hass, entry.entry_id)
         async_clear_other_build_fallback_issue(hass, entry.entry_id)
+        async_clear_held_fallback_issue(hass, entry.entry_id)
         async_clear_embedding_model_changed_issue(hass, entry.entry_id)
     # A disabled entry runs no rules at all, so singling four out is wrong the
     # same way. A reload (every Sentinel config save) keeps it: deleting it
@@ -5288,6 +5294,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> None
     async_clear_embedding_size_issue(hass, entry.entry_id)
     async_clear_other_model_fallback_issue(hass, entry.entry_id)
     async_clear_other_build_fallback_issue(hass, entry.entry_id)
+    async_clear_held_fallback_issue(hass, entry.entry_id)
     async_clear_embedding_model_changed_issue(hass, entry.entry_id)
     async_clear_pin_pipeline_issue(hass, entry.entry_id)
     async_clear_unknown_person_issue(hass, entry.entry_id)
