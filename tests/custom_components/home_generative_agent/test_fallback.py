@@ -763,6 +763,9 @@ async def test_fallback_embeddings_a_lone_member_ignores_its_open_breaker(
     getattr(primary, method).return_value = [[0.1]]
     breaker = MagicMock()
     breaker.is_available.return_value = False
+    # Tried a moment ago: no half-open try this call (#881).
+    breaker.due_for_probe.return_value = []
+    breaker.next_probe_in.return_value = 5.0
     emb = FallbackEmbeddings(
         chain=[(primary, "edge", "p1"), (fallback, "edge", "p2")],
         circuit_breaker=breaker,
@@ -888,21 +891,590 @@ async def test_fallback_chat_circuit_breaker_skips_broken() -> None:
 
 @pytest.mark.asyncio
 async def test_fallback_chat_all_circuit_broken_reports_no_provider() -> None:
-    """All-skipped providers should raise a clean HomeAssistantError."""
+    """After a half-open try, a refused call names the open breakers (#881)."""
     primary = AsyncMock()
+    primary.ainvoke.side_effect = TimeoutError()
     fallback = AsyncMock()
-    cb = CircuitBreaker(threshold=1, window_seconds=10, cooldown_seconds=60)
-    cb.record_failure("p1")
-    cb.record_failure("p2")
-
+    fallback.ainvoke.side_effect = TimeoutError()
     model = FallbackChatModel(
         chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
-        circuit_breaker=cb,
+        circuit_breaker=_all_open(),
     )
-    with pytest.raises(HomeAssistantError, match="No provider was available"):
+    # The first call tries both, in chain order.
+    with pytest.raises(HomeAssistantError, match="All LLM providers failed"):
         await model.ainvoke(["hello"])
-    primary.ainvoke.assert_not_awaited()
+    primary.ainvoke.assert_awaited_once()
+    fallback.ainvoke.assert_awaited_once()
+    # Then neither is due: the call is refused at once, and says why.
+    with pytest.raises(
+        HomeAssistantError,
+        match=r"No LLM provider was tried: p1, p2 failed repeatedly, so their "
+        r"circuit breakers are open\. One is tried again in \d+ s\.",
+    ):
+        await model.ainvoke(["hello"])
+    assert primary.ainvoke.await_count == 1
+    assert fallback.ainvoke.await_count == 1
+
+
+def _all_open(probe_interval: float = 10.0) -> CircuitBreaker:
+    """Return a breaker open for p1 and p2, both due a half-open try."""
+    breaker = CircuitBreaker(
+        threshold=1,
+        window_seconds=10,
+        cooldown_seconds=120,
+        probe_interval_seconds=probe_interval,
+    )
+    breaker.record_failure("p1")
+    breaker.record_failure("p2")
+    breaker._last_probe.clear()  # Opened over an interval ago.
+    return breaker
+
+
+async def _hang(*_args: Any, **_kwargs: Any) -> None:
+    await asyncio.Event().wait()
+
+
+@pytest.mark.asyncio
+async def test_a_chain_back_after_a_network_drop_answers_at_once() -> None:
+    """Every breaker open, the network back: the first call is answered (#881)."""
+    primary = AsyncMock()
+    primary.ainvoke.return_value = FakeAIMessage("back")
+    fallback = AsyncMock()
+    breaker = _all_open()
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        circuit_breaker=breaker,
+    )
+
+    result = await model.ainvoke(["hello"])
+
+    assert result.content == "back"
     fallback.ainvoke.assert_not_awaited()
+    # Its answer closes its breaker: the chain is back to normal.
+    assert breaker.is_available("p1")
+    assert not breaker.is_available("p2")
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Drive the breaker's clock by hand."""
+    now = [1000.0]
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.fallback.monotonic",
+        lambda: now[0],
+    )
+    return now
+
+
+@pytest.mark.asyncio
+async def test_a_half_open_try_is_retried_after_its_interval(
+    clock: list[float],
+) -> None:
+    """Between tries a call fails fast; after the interval one is tried again."""
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = [TimeoutError(), FakeAIMessage("back")]
+    fallback = AsyncMock()
+    fallback.ainvoke.side_effect = TimeoutError()
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        circuit_breaker=_all_open(),
+    )
+    with pytest.raises(HomeAssistantError, match="All LLM providers failed"):
+        await model.ainvoke(["hello"])
+    with pytest.raises(HomeAssistantError, match="One is tried again in 10 s"):
+        await model.ainvoke(["hello"])
+
+    clock[0] += 10.0
+
+    assert (await model.ainvoke(["hello"])).content == "back"
+
+
+def test_a_breaker_that_just_opened_waits_an_interval_before_its_try(
+    clock: list[float],
+) -> None:
+    """A provider that just failed repeatedly is not tried again at once."""
+    breaker = CircuitBreaker(threshold=1, window_seconds=10, cooldown_seconds=120)
+    breaker.record_failure("p1")
+
+    assert breaker.due_for_probe(["p1"]) == []
+    clock[0] += 10.0
+    assert breaker.due_for_probe(["p1"]) == ["p1"]
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_member_is_not_tried_half_open() -> None:
+    """Stalled and circuit-broken: the stall tracker's probe owns it (#828)."""
+    primary = AsyncMock()
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("fallback")
+    stall = MagicMock()
+    stall.is_stalled.side_effect = lambda provider_id: provider_id == "p1"
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        circuit_breaker=_all_open(),
+        stall_tracker=stall,
+    )
+
+    assert (await model.ainvoke(["hello"])).content == "fallback"
+    primary.ainvoke.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_names_providers_by_their_readable_names() -> None:
+    """The reply names the providers the user configured, not their ids."""
+    stall = MagicMock()
+    stall.is_stalled.return_value = False
+    stall.name.side_effect = {"p1": "OpenAI", "p2": "Anthropic"}.get
+    breaker = _all_open(probe_interval=60.0)
+    for provider_id in ("p1", "p2"):
+        assert breaker.begin_probe(provider_id)
+        breaker.end_probe(provider_id)
+    model = FallbackChatModel(
+        chain=[(AsyncMock(), "cloud", "p1"), (AsyncMock(), "cloud", "p2")],
+        circuit_breaker=breaker,
+        stall_tracker=stall,
+    )
+
+    with pytest.raises(HomeAssistantError, match="tried: OpenAI, Anthropic failed"):
+        await model.ainvoke(["hello"])
+
+
+@pytest.mark.asyncio
+async def test_a_vlm_chain_back_after_a_network_drop_answers_at_once() -> None:
+    """The camera path recovers the same way."""
+    primary = AsyncMock()
+    primary.ainvoke.return_value = FakeAIMessage("a car")
+    model = FallbackVLM(
+        chain=[(primary, "edge", "p1"), (AsyncMock(), "cloud", "p2")],
+        circuit_breaker=_all_open(),
+    )
+
+    assert (await model.ainvoke(["image"])).content == "a car"
+
+
+@pytest.mark.parametrize("method", ["aembed_documents", "aembed_query"])
+@pytest.mark.asyncio
+async def test_an_embedding_chain_back_after_a_network_drop_answers(
+    method: str,
+) -> None:
+    """The memory store recovers the same way, through its first member."""
+    primary, fallback = AsyncMock(), AsyncMock()
+    getattr(primary, method).return_value = (
+        [[0.1]] if method == "aembed_documents" else [0.1]
+    )
+    emb = FallbackEmbeddings(
+        chain=[(primary, "edge", "p1"), (fallback, "edge", "p2")],
+        circuit_breaker=_all_open(),
+    )
+
+    assert await _call(emb, method)
+    getattr(fallback, method).assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_recovered_fallback_is_not_starved_by_a_failing_primary(
+    clock: list[float],
+) -> None:
+    """Every due member is tried, primary first, once old failures age out."""
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = TimeoutError()
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("fallback")
+    breaker = CircuitBreaker()
+    for provider_id in ("p1", "p2"):
+        for _ in range(3):
+            breaker.record_failure(provider_id)
+        clock[0] += 1.0
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        circuit_breaker=breaker,
+    )
+    clock[0] += 70.0  # The failures that opened both are out of the window.
+
+    assert (await model.ainvoke(["hello"])).content == "fallback"
+    primary.ainvoke.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_slow_try_of_the_primary_does_not_hold_back_the_fallback() -> None:
+    """Each member is reserved only as its own try starts."""
+    answered = asyncio.Event()
+
+    async def slow(*_args: Any, **_kwargs: Any) -> FakeAIMessage:
+        await answered.wait()
+        return FakeAIMessage("back")
+
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = slow
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("fallback")
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        circuit_breaker=_all_open(),
+    )
+    first = asyncio.create_task(model.ainvoke(["hello"]))
+    await asyncio.sleep(0)
+
+    # The primary is being tried: this call goes on to the fallback.
+    assert (await model.ainvoke(["hello"])).content == "fallback"
+    primary.ainvoke.assert_awaited_once()
+    answered.set()
+    assert (await first).content == "back"
+
+
+@pytest.mark.asyncio
+async def test_the_interval_runs_from_the_end_of_a_try(clock: list[float]) -> None:
+    """A try that waits out its limit is not repeated by the next call at once."""
+
+    async def slow_failure(*_args: Any, **_kwargs: Any) -> None:
+        clock[0] += 30.0
+        raise TimeoutError
+
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = slow_failure
+    fallback = AsyncMock()
+    fallback.ainvoke.side_effect = TimeoutError()
+    breaker = _all_open()
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        circuit_breaker=breaker,
+    )
+    with pytest.raises(HomeAssistantError, match="All LLM providers failed"):
+        await model.ainvoke(["hello"])
+
+    assert breaker.due_for_probe(["p1"]) == []
+    clock[0] += 10.0
+    assert breaker.due_for_probe(["p1"]) == ["p1"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_try_leaves_the_cooldown_as_it_was(
+    clock: list[float],
+) -> None:
+    """Being tried does not keep a provider skipped longer (#881)."""
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = TimeoutError()
+    fallback = AsyncMock()
+    fallback.ainvoke.side_effect = TimeoutError()
+    breaker = _all_open()
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        circuit_breaker=breaker,
+    )
+    clock[0] += 100.0
+    with pytest.raises(HomeAssistantError, match="All LLM providers failed"):
+        await model.ainvoke(["hello"])
+
+    clock[0] += 20.0  # 120 s after both opened.
+    assert breaker.is_available("p1")
+    assert breaker.is_available("p2")
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_during_running_tries_says_one_is_being_tried() -> None:
+    """No wait is promised while every open member is being tried."""
+    primary, fallback = AsyncMock(), AsyncMock()
+    primary.ainvoke.side_effect = _hang
+    fallback.ainvoke.side_effect = _hang
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        circuit_breaker=_all_open(),
+    )
+    tries = [asyncio.create_task(model.ainvoke(["hello"])) for _ in range(2)]
+    await asyncio.sleep(0)
+
+    with pytest.raises(HomeAssistantError, match=r"One is being tried now\.$"):
+        await model.ainvoke(["hello"])
+    for task in tries:
+        task.cancel()
+    await asyncio.gather(*tries, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_half_open_try_releases_its_member(
+    clock: list[float],
+) -> None:
+    """A caller giving up on the call does not leave the member held forever."""
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = _hang
+    breaker = _all_open()
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (AsyncMock(), "cloud", "p2")],
+        circuit_breaker=breaker,
+    )
+    call = asyncio.create_task(model.ainvoke(["hello"]))
+    await asyncio.sleep(0)
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    clock[0] += 10.0
+
+    assert breaker.due_for_probe(["p1", "p2"]) == ["p1", "p2"]
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_embedding_try_releases_its_member(
+    clock: list[float],
+) -> None:
+    """The embedding chain releases a cancelled try the same way."""
+    primary = AsyncMock()
+    primary.aembed_query.side_effect = _hang
+    breaker = _all_open()
+    emb = FallbackEmbeddings(
+        chain=[(primary, "edge", "p1"), (AsyncMock(), "edge", "p2")],
+        circuit_breaker=breaker,
+    )
+    call = asyncio.create_task(emb.aembed_query("hello"))
+    await asyncio.sleep(0)
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    clock[0] += 10.0
+
+    assert breaker.due_for_probe(["p1", "p2"]) == ["p1", "p2"]
+
+
+def test_the_wait_quoted_ends_with_the_cooldown_if_that_comes_first(
+    clock: list[float],
+) -> None:
+    """A breaker closing before the next try is due is the wait to quote."""
+    breaker = CircuitBreaker(
+        threshold=1, window_seconds=10, cooldown_seconds=5, probe_interval_seconds=10
+    )
+    breaker.record_failure("p1")
+
+    assert breaker.next_probe_in(["p1"]) == 5.0
+    clock[0] += 3.0
+    assert breaker.next_probe_in(["p1"]) == 2.0
+
+
+def test_the_breaker_opening_is_logged_once_per_opening(
+    clock: list[float], caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failure while open says nothing new; a later opening is said again."""
+    breaker = CircuitBreaker(threshold=1, window_seconds=10, cooldown_seconds=60)
+    with caplog.at_level(logging.WARNING):
+        breaker.record_failure("p1")
+        breaker.record_failure("p1")
+    assert caplog.text.count("Circuit breaker opened for provider p1") == 1
+
+    clock[0] += 61.0
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        breaker.record_failure("p1")
+    assert "Circuit breaker opened for provider p1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_failed_half_open_try_is_not_logged_as_a_new_outage(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The breaker opening was logged once; each failed try is debug only."""
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = TimeoutError()
+    fallback = AsyncMock()
+    fallback.ainvoke.side_effect = TimeoutError()
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        circuit_breaker=_all_open(),
+    )
+    caplog.clear()
+
+    with (
+        caplog.at_level(logging.DEBUG),
+        pytest.raises(HomeAssistantError, match="All LLM providers failed"),
+    ):
+        await model.ainvoke(["hello"])
+
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+    assert "half-open try of provider p1 failed" in caplog.text
+
+
+@pytest.mark.parametrize("method", ["aembed_documents", "aembed_query"])
+@pytest.mark.asyncio
+async def test_an_embedding_refusal_says_when_one_is_tried_again(
+    method: str, clock: list[float]
+) -> None:
+    """Both tried once; the next call is refused and says when (#881)."""
+    primary, fallback = AsyncMock(), AsyncMock()
+    getattr(primary, method).side_effect = TimeoutError()
+    getattr(fallback, method).side_effect = TimeoutError()
+    emb = FallbackEmbeddings(
+        chain=[(primary, "edge", "p1"), (fallback, "edge", "p2")],
+        circuit_breaker=_all_open(),
+    )
+    with pytest.raises(HomeAssistantError, match="All embedding providers failed"):
+        await _call(emb, method)
+    clock[0] += 4.0
+
+    with pytest.raises(
+        HomeAssistantError,
+        match=r"circuit breaker is open for p1, p2 \(one is tried again in 6 s\)",
+    ):
+        await _call(emb, method)
+    assert getattr(primary, method).await_count == 1
+    assert getattr(fallback, method).await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_an_embedding_fallback_held_for_its_build_does_not_block_a_try(
+    clock: list[float],
+) -> None:
+    """A primary whose breaker opened beside a held fallback is tried (#873)."""
+    primary, fallback = AsyncMock(), AsyncMock()
+    primary.aembed_query.return_value = [0.1]
+    breaker = CircuitBreaker(threshold=1, window_seconds=10, cooldown_seconds=120)
+    breaker.record_failure("p1")
+    emb = FallbackEmbeddings(
+        chain=[(primary, "edge", "p1"), (fallback, "edge", "p2")],
+        circuit_breaker=breaker,
+    )
+    emb.hold_until_verified(["p2"], AsyncMock(return_value=False))
+    clock[0] += 10.0
+
+    assert await emb.aembed_query("hello") == [0.1]
+    fallback.aembed_query.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_member_closed_by_another_call_is_tried_as_usual() -> None:
+    """A fallback another call's try just closed is not refused as taken."""
+    failed = asyncio.Event()
+
+    async def slow_failure(*_args: Any, **_kwargs: Any) -> None:
+        await failed.wait()
+        raise TimeoutError
+
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = slow_failure
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("fallback")
+    breaker = _all_open()
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        circuit_breaker=breaker,
+    )
+    first = asyncio.create_task(model.ainvoke(["hello"]))
+    await asyncio.sleep(0)
+    # Meanwhile another call tries the fallback, which answers.
+    assert (await model.ainvoke(["hello"])).content == "fallback"
+    assert breaker.is_available("p2")
+
+    failed.set()
+
+    assert (await first).content == "fallback"
+    assert fallback.ainvoke.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_member_another_call_is_trying_is_skipped() -> None:
+    """Reserved by another call meanwhile: this call does not try it too."""
+    failed = asyncio.Event()
+
+    async def slow_failure(*_args: Any, **_kwargs: Any) -> None:
+        await failed.wait()
+        raise TimeoutError
+
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = slow_failure
+    fallback = AsyncMock()
+    fallback.ainvoke.side_effect = _hang
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        circuit_breaker=_all_open(),
+    )
+    first = asyncio.create_task(model.ainvoke(["hello"]))
+    await asyncio.sleep(0)
+    second = asyncio.create_task(model.ainvoke(["hello"]))  # Tries p2.
+    await asyncio.sleep(0)
+    failed.set()
+
+    with pytest.raises(HomeAssistantError, match="All LLM providers failed"):
+        await first
+    fallback.ainvoke.assert_awaited_once()
+    second.cancel()
+    await asyncio.gather(second, return_exceptions=True)
+
+
+def test_a_member_not_yet_due_holds_back_those_after_it(
+    clock: list[float],
+) -> None:
+    """Tries go from the primary down, never to a fallback alone (#881)."""
+    breaker = CircuitBreaker(threshold=1, window_seconds=10, cooldown_seconds=120)
+    breaker.record_failure("p1")
+    clock[0] += 8.0
+    breaker.record_failure("p2")
+    clock[0] += 2.0
+
+    assert breaker.due_for_probe(["p1", "p2"]) == ["p1"]
+    assert breaker.begin_probe("p1")
+    breaker.end_probe("p1")
+    clock[0] += 8.0  # p2 is due, p1 is not.
+    assert breaker.due_for_probe(["p1", "p2"]) == []
+    clock[0] += 2.0
+    assert breaker.due_for_probe(["p1", "p2"]) == ["p1", "p2"]
+
+
+@pytest.mark.asyncio
+async def test_an_embedding_fallback_waits_for_the_active_members_try() -> None:
+    """A slow try of the store's provider does not let another take over."""
+    primary, fallback = AsyncMock(), AsyncMock()
+    primary.aembed_query.side_effect = _hang
+    fallback.aembed_query.return_value = [0.2]
+    emb = FallbackEmbeddings(
+        chain=[(primary, "edge", "p1"), (fallback, "edge", "p2")],
+        circuit_breaker=_all_open(),
+    )
+    first = asyncio.create_task(emb.aembed_query("hello"))
+    await asyncio.sleep(0)
+
+    with pytest.raises(HomeAssistantError, match="one is being tried now"):
+        await emb.aembed_query("hello")
+    fallback.aembed_query.assert_not_awaited()
+    first.cancel()
+    await asyncio.gather(first, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_embedding_try_leaves_the_cooldown_as_it_was(
+    clock: list[float],
+) -> None:
+    """As for the chat chain: being tried does not keep it skipped longer."""
+    primary, fallback = AsyncMock(), AsyncMock()
+    primary.aembed_query.side_effect = TimeoutError()
+    fallback.aembed_query.side_effect = TimeoutError()
+    breaker = _all_open()
+    emb = FallbackEmbeddings(
+        chain=[(primary, "edge", "p1"), (fallback, "edge", "p2")],
+        circuit_breaker=breaker,
+    )
+    clock[0] += 100.0
+    with pytest.raises(HomeAssistantError, match="All embedding providers failed"):
+        await emb.aembed_query("hello")
+
+    clock[0] += 20.0
+    assert breaker.is_available("p1")
+    assert breaker.is_available("p2")
+
+
+@pytest.mark.asyncio
+async def test_a_half_open_try_without_the_model_is_still_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A missing model stays visible, even on a half-open try (#752)."""
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = _model_not_found_errors()[0]
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("fallback")
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        circuit_breaker=_all_open(),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        assert (await model.ainvoke(["hello"])).content == "fallback"
+
+    assert "does not have the configured model" in caplog.text
 
 
 @pytest.mark.asyncio
