@@ -83,6 +83,24 @@ def test_legacy_service_key_is_screened() -> None:
             id="choose",
         ),
         pytest.param(
+            # A raw config may hold one option as a mapping (Sentinel and the
+            # indirect PIN screen read raw sequences).
+            [
+                {
+                    "choose": {
+                        "conditions": [],
+                        "sequence": [
+                            {
+                                "action": "lock.unlock",
+                                "target": {"entity_id": "lock.front_door"},
+                            }
+                        ],
+                    }
+                }
+            ],
+            id="choose-single-mapping",
+        ),
+        pytest.param(
             [
                 {
                     "choose": [],

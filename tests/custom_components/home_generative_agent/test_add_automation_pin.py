@@ -16,6 +16,9 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.agent import tools as tools_module
+from custom_components.home_generative_agent.agent.critical_push import (
+    CriticalPushResult,
+)
 from custom_components.home_generative_agent.agent.helpers import (
     MAX_PENDING_ACTIONS,
     PIN_AWAITING_USER_REPLY,
@@ -172,6 +175,10 @@ def _stub_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     # it has its own tests in test_automation_targets.py.
     monkeypatch.setattr(
         tools_module, "find_missing_automation_targets", lambda *_a, **_k: []
+    )
+    # So does the critical push rewrite (#869), tested in test_critical_push.py.
+    monkeypatch.setattr(
+        tools_module, "apply_critical_push", lambda *_a, **_k: CriticalPushResult()
     )
 
 
