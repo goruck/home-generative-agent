@@ -1221,19 +1221,40 @@ class FallbackEmbeddings:
         """Members held out until their build is checked."""
         return frozenset(self._unverified)
 
-    async def _admitted(self, provider_id: str) -> bool:
-        """Return True if `provider_id` may answer; check a held one's build first."""
+    @property
+    def record_admitted(self) -> frozenset[str]:
+        """Members admitted against the store's record, held again later (#873)."""
+        return frozenset(self._by_record)
+
+    async def recheck_held(self) -> None:
+        """
+        Check every held member's build now, not at its next call (#873).
+
+        For when the reference it is compared with changed (the primary's
+        build was read), so a hold ends without waiting for a primary outage.
+        A refusal a moment ago, even one landing while this waits for a check
+        in flight, does not skip it.
+        """
+        for provider_id in tuple(self._unverified):
+            await self._admitted(provider_id, force=True)
+
+    async def _admitted(self, provider_id: str, *, force: bool = False) -> bool:
+        """
+        Return True if `provider_id` may answer; check a held one's build first.
+
+        `force` checks it even if it was refused a moment ago.
+        """
         if provider_id not in self._unverified:
             return True
-        if monotonic() < self._verify_after.get(provider_id, 0.0):
+        if not force and monotonic() < self._verify_after.get(provider_id, 0.0):
             # Refused a moment ago: no wait on a check in flight either.
             return False
         lock = self._verify_locks.setdefault(provider_id, asyncio.Lock())
         async with lock:
             if provider_id not in self._unverified:
                 return self._is_member(provider_id)
-            if self._verifier is None or monotonic() < self._verify_after.get(
-                provider_id, 0.0
+            if self._verifier is None or (
+                not force and monotonic() < self._verify_after.get(provider_id, 0.0)
             ):
                 return False
             try:

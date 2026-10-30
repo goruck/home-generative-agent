@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import asdict, replace
+from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -36,6 +37,9 @@ from custom_components.home_generative_agent.const import (
 from custom_components.home_generative_agent.core import embedding_record as er
 from custom_components.home_generative_agent.core import utils
 from custom_components.home_generative_agent.core.embedding_record import (
+    ISSUE_EMBEDDING_FALLBACK_HELD,
+    ISSUE_EMBEDDING_FALLBACK_HELD_NO_REFERENCE,
+    ISSUE_EMBEDDING_FALLBACK_HELD_UNREAD,
     ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD,
     ISSUE_EMBEDDING_MODEL_CHANGED,
     EmbeddingFallbackGate,
@@ -3800,6 +3804,7 @@ async def test_unload_cancels_the_reembed_and_a_disable_drops_the_issues(
         severity=ir.IssueSeverity.WARNING,
         translation_key=ISSUE_EMBEDDING_MODEL_CHANGED,
     )
+    _raise_held_issue(hass, entry.entry_id)
     run = asyncio.get_running_loop().create_task(asyncio.sleep(3600))
     entry.runtime_data.reembed_task = run
     monkeypatch.setattr(
@@ -3812,12 +3817,31 @@ async def test_unload_cancels_the_reembed_and_a_disable_drops_the_issues(
     assert entry.runtime_data.reembed_task is None
     assert _issue(hass, ISSUE_EMBEDDING_MODEL_CHANGED, entry.entry_id) is not None
     assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD, entry.entry_id)
+    # A reload keeps a dismissal of the held-fallback issue too (#873, #810).
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_HELD, entry.entry_id) is not None
 
     monkeypatch.setattr(entry, "disabled_by", "user")
     assert await hga_component.async_unload_entry(hass, entry)
 
     assert _issue(hass, ISSUE_EMBEDDING_MODEL_CHANGED, entry.entry_id) is None
     assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD, entry.entry_id) is None
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_HELD, entry.entry_id) is None
+
+
+@pytest.mark.asyncio
+async def test_a_setup_with_nothing_to_hold_drops_a_held_issue(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both builds read and the same at setup: no fallback can be held (#873)."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    _raise_held_issue(hass, entry.entry_id)
+
+    await _setup_two_ollama_servers(
+        hass, monkeypatch, {"http://ollama": "w:a1", FALLBACK_URL: "w:a1"}, entry=entry
+    )
+
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_HELD, entry.entry_id) is None
 
 
 @pytest.mark.asyncio
@@ -3865,7 +3889,11 @@ async def test_no_database_starts_no_caption_backfill(
 async def test_removal_drops_the_issues(hass: Any) -> None:
     """A removed entry leaves neither issue behind."""
     entry = MockConfigEntry(domain=DOMAIN, entry_id="entry1")
-    for key in (ISSUE_EMBEDDING_MODEL_CHANGED, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD):
+    for key in (
+        ISSUE_EMBEDDING_MODEL_CHANGED,
+        ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD,
+        ISSUE_EMBEDDING_FALLBACK_HELD,
+    ):
         ir.async_create_issue(
             hass,
             DOMAIN,
@@ -3879,6 +3907,7 @@ async def test_removal_drops_the_issues(hass: Any) -> None:
 
     assert _issue(hass, ISSUE_EMBEDDING_MODEL_CHANGED) is None
     assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD) is None
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_HELD) is None
 
 
 # --- A fallback held until its build is checked (#857) ----------------------
@@ -4032,6 +4061,7 @@ def _held_in_entry(  # noqa: PLR0913
         read_at_setup=read_at_setup,
     )
     monkeypatch.setattr(er, "_async_recorded_build", AsyncMock(return_value=recorded))
+    chain.hold_until_verified([FALLBACK_ID], AsyncMock(return_value=False))
     fallbacks = {
         fb.provider_id: fb
         for fb in entry.runtime_data.embedding_fallback_gate.unchecked
@@ -5364,3 +5394,634 @@ async def test_a_discarded_answer_counts_its_member_as_held() -> None:
 
     with pytest.raises(EmbeddingsUnavailableError, match="not yet known"):
         await call
+
+
+# --- A fallback left held is named, and the primary's build read on (#873) --
+
+HELD_ISSUE = ISSUE_EMBEDDING_FALLBACK_HELD
+
+
+def _raise_held_issue(hass: Any, entry_id: str) -> None:
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        f"{ISSUE_EMBEDDING_FALLBACK_HELD}_{entry_id}",
+        is_fixable=False,
+        severity=ir.IssueSeverity.WARNING,
+        translation_key=ISSUE_EMBEDDING_FALLBACK_HELD_UNREAD,
+    )
+
+
+def _hold_through_the_verifier(
+    hass: Any, entry: MockConfigEntry, chain: FallbackEmbeddings
+) -> None:
+    """Hold the secondary server as setup does, behind the real verifier."""
+    fallbacks = {
+        fb.provider_id: fb
+        for fb in entry.runtime_data.embedding_fallback_gate.unchecked
+    }
+    chain.hold_until_verified(
+        [FALLBACK_ID],
+        partial(
+            er.async_verify_embedding_fallback,
+            hass,
+            entry,
+            fallbacks,
+            chain=chain,
+            warned=set(),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("fallback_build", "fingerprint", "recorded", "key"),
+    [
+        (None, OLLAMA_A, None, ISSUE_EMBEDDING_FALLBACK_HELD_UNREAD),
+        ("w:a1", OLLAMA_UNREAD, None, ISSUE_EMBEDDING_FALLBACK_HELD_NO_REFERENCE),
+        # The primary answers but is unread: the record may be stale.
+        ("w:b2", OLLAMA_UNREAD, "w:a1", ISSUE_EMBEDDING_FALLBACK_HELD_NO_REFERENCE),
+    ],
+    ids=["its_build_unread", "nothing_to_compare_with", "unlike_the_record"],
+)
+@pytest.mark.asyncio
+async def test_a_fallback_the_verifier_leaves_held_is_named_in_an_issue(  # noqa: PLR0913
+    hass: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    fallback_build: str | None,
+    fingerprint: EmbeddingFingerprint,
+    recorded: str | None,
+    key: str,
+) -> None:
+    """Failover silently doing nothing: the issue says which one, and why."""
+    entry, chain, fallbacks = _held_in_entry(
+        hass,
+        monkeypatch,
+        fallback_build=fallback_build,
+        fingerprint=fingerprint,
+        recorded=recorded,
+    )
+
+    assert not await er.async_verify_embedding_fallback(
+        hass, entry, fallbacks, FALLBACK_ID
+    )
+
+    assert _chain_ids(chain) == ["p1", "p2"]
+    issue = _issue(hass, HELD_ISSUE)
+    assert issue is not None
+    assert issue.translation_key == key
+    assert not issue.is_fixable
+    assert issue.translation_placeholders == {
+        "providers": SECONDARY,
+        "primary": "Ollama",
+        "model": "mxbai-embed-large",
+    }
+    reason = (
+        er.HoldReason.UNREAD
+        if key == ISSUE_EMBEDDING_FALLBACK_HELD_UNREAD
+        else er.HoldReason.NO_REFERENCE
+    )
+    assert entry.runtime_data.embedding_fallback_gate.held == (
+        er.HeldFallback(FALLBACK_ID, SECONDARY, reason),
+    )
+
+
+@pytest.mark.asyncio
+async def test_admitting_a_held_fallback_clears_its_issue(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its build read and matching on a later check: the issue goes."""
+    entry, chain, fallbacks = _held_in_entry(hass, monkeypatch, fallback_build=None)
+    await er.async_verify_embedding_fallback(hass, entry, fallbacks, FALLBACK_ID)
+    assert _issue(hass, HELD_ISSUE) is not None
+    monkeypatch.setattr(er, "fetch_ollama_model_digest", AsyncMock(return_value="w:a1"))
+
+    assert await er.async_verify_embedding_fallback(hass, entry, fallbacks, FALLBACK_ID)
+
+    assert _issue(hass, HELD_ISSUE) is None
+    assert entry.runtime_data.embedding_fallback_gate.held == ()
+    assert _chain_ids(chain) == ["p1", "p2"]
+
+
+@pytest.mark.asyncio
+async def test_removing_a_held_fallback_hands_it_to_the_other_build_issue(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read later as another build: no longer held, but left out."""
+    entry, chain, fallbacks = _held_in_entry(hass, monkeypatch, fallback_build=None)
+    await er.async_verify_embedding_fallback(hass, entry, fallbacks, FALLBACK_ID)
+    monkeypatch.setattr(er, "fetch_ollama_model_digest", AsyncMock(return_value="w:b2"))
+
+    assert not await er.async_verify_embedding_fallback(
+        hass, entry, fallbacks, FALLBACK_ID
+    )
+
+    assert _chain_ids(chain) == ["p1"]
+    assert _issue(hass, HELD_ISSUE) is None
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_held_fallback_names_nothing_for_an_unloaded_entry(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unload during the read raises no issue the unload already cleared."""
+    entry, _chain, fallbacks = _held_in_entry(hass, monkeypatch, fallback_build=None)
+
+    async def _unloaded(*_args: Any, **_kwargs: Any) -> None:
+        entry.mock_state(hass, ConfigEntryState.NOT_LOADED)
+
+    monkeypatch.setattr(er, "fetch_ollama_model_digest", _unloaded)
+
+    assert not await er.async_verify_embedding_fallback(
+        hass, entry, fallbacks, FALLBACK_ID
+    )
+    assert _issue(hass, HELD_ISSUE) is None
+
+
+@pytest.mark.asyncio
+async def test_a_fallback_the_background_check_cannot_read_is_named(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After the background check's last try, the issue names it."""
+    entry, chain, _removed, _waits = _kept_unchecked(
+        hass, monkeypatch, [None, None, None, None]
+    )
+    _hold_through_the_verifier(hass, entry, chain)
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert chain.unverified == frozenset({FALLBACK_ID})
+    issue = _issue(hass, HELD_ISSUE)
+    assert issue is not None
+    assert issue.translation_key == ISSUE_EMBEDDING_FALLBACK_HELD_UNREAD
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD) is None
+
+
+@pytest.mark.asyncio
+async def test_a_fallback_the_background_check_admits_raises_nothing(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read on the second try and matching: admitted, no held issue."""
+    entry, chain, _removed, _waits = _kept_unchecked(hass, monkeypatch, [None, "w:a1"])
+    _hold_through_the_verifier(hass, entry, chain)
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert chain.unverified == frozenset()
+    assert _issue(hass, HELD_ISSUE) is None
+
+
+def _held_on_the_primary(
+    hass: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    primary_reads: list[str | None],
+    fallback_reads: list[str | None],
+) -> tuple[MockConfigEntry, FallbackEmbeddings, list[float]]:
+    """Set up a primary that answers but whose build setup and the record check missed."""
+    entry, chain, _removed, waits = _kept_unchecked(
+        hass,
+        monkeypatch,
+        [],
+        fingerprint=OLLAMA_UNREAD,
+        answers={OLLAMA_SOURCE[0]: primary_reads, FALLBACK_URL: fallback_reads},
+    )
+    entry.runtime_data.embedding_digest_source = OLLAMA_SOURCE
+    monkeypatch.setattr(er, "_async_recorded_build", AsyncMock(return_value=None))
+    _hold_through_the_verifier(hass, entry, chain)
+    return entry, chain, waits
+
+
+@pytest.mark.asyncio
+async def test_a_primary_build_read_late_ends_the_hold_without_a_reload(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record check gave up on the primary's build: it is read on (#873)."""
+    entry, chain, waits = _held_on_the_primary(
+        hass,
+        monkeypatch,
+        # The record check's three reads, then two of the watch's.
+        [None, None, None, None, "w:a1"],
+        # The background read, the chain's check against the record, then
+        # its check against the primary's build once read.
+        ["w:a1", "w:a1", "w:a1"],
+    )
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert waits.count(er._PRIMARY_BUILD_WATCH_S) == 2
+    assert entry.runtime_data.embedding_fingerprint == OLLAMA_A
+    assert chain.unverified == frozenset()
+    assert _issue(hass, HELD_ISSUE) is None
+
+
+@pytest.mark.asyncio
+async def test_a_primary_build_never_read_keeps_the_hold_named(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing to compare with: named as such, while the read goes on."""
+    entry, chain, waits = _held_on_the_primary(
+        hass, monkeypatch, [None, None, None, None], ["w:a1", "w:a1"]
+    )
+
+    async def _sleep(delay: float) -> None:
+        waits.append(delay)
+        # Stop the watch after its first read.
+        if delay == er._PRIMARY_BUILD_WATCH_S and waits.count(delay) > 1:
+            entry.mock_state(hass, ConfigEntryState.NOT_LOADED)
+        await _REAL_SLEEP(0)
+
+    monkeypatch.setattr(er.asyncio, "sleep", _sleep)
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert waits.count(er._PRIMARY_BUILD_WATCH_S) == 2
+    assert er.fetch_ollama_model_digest.await_count == 6  # type: ignore[attr-defined]
+    assert entry.runtime_data.embedding_fingerprint == OLLAMA_UNREAD
+    assert chain.unverified == frozenset({FALLBACK_ID})
+    issue = _issue(hass, HELD_ISSUE)
+    assert issue is not None
+    assert issue.translation_key == ISSUE_EMBEDDING_FALLBACK_HELD_NO_REFERENCE
+
+
+@pytest.mark.asyncio
+async def test_a_record_admission_keeps_the_primarys_build_read(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Admitted against the record, then the primary's build is read unlike it."""
+    entry, chain, waits = _held_on_the_primary(
+        hass,
+        monkeypatch,
+        # The record check's three reads, then the watch's: pulled meanwhile.
+        [None, None, None, "w:b2"],
+        # The background read, the check against the record, then the one
+        # against the primary's build once read.
+        ["w:a1", "w:a1", "w:a1"],
+    )
+    monkeypatch.setattr(er, "_async_recorded_build", AsyncMock(return_value="w:a1"))
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert waits.count(er._PRIMARY_BUILD_WATCH_S) == 1
+    assert entry.runtime_data.embedding_fingerprint.digest == "w:b2"
+    assert _chain_ids(chain) == ["p1"]
+    assert _issue(hass, HELD_ISSUE) is None
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_primary_build_read_late_removes_a_held_other_build(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Held with nothing to compare with, then found to be another build."""
+    entry, chain, _waits = _held_on_the_primary(
+        hass,
+        monkeypatch,
+        [None, None, None, None, "w:a1"],
+        ["w:b2", "w:b2", "w:b2"],
+    )
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert _chain_ids(chain) == ["p1"]
+    assert entry.runtime_data.embedding_fallback_gate.held == ()
+    assert _issue(hass, HELD_ISSUE) is None
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_build_the_repair_reads_revokes_a_record_admission_too(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Confirming the re-embed reads the build during the watch's wait."""
+    entry, chain, waits = _held_on_the_primary(
+        hass, monkeypatch, [None, None, None], ["w:a1", "w:a1", "w:a1"]
+    )
+    monkeypatch.setattr(er, "_async_recorded_build", AsyncMock(return_value="w:a1"))
+
+    async def _sleep(delay: float) -> None:
+        waits.append(delay)
+        if delay == er._PRIMARY_BUILD_WATCH_S:
+            er._learn_primary_fingerprint(entry, replace(OLLAMA_UNREAD, digest="w:b2"))
+        await _REAL_SLEEP(0)
+
+    monkeypatch.setattr(er.asyncio, "sleep", _sleep)
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert _chain_ids(chain) == ["p1"]
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_record_check_that_fails_does_not_hold_up_the_watch(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The database down at the check: its retries run beside the watch."""
+    entry, chain, _waits = _held_on_the_primary(
+        hass, monkeypatch, [None, None, None, "w:a1"], ["w:a1", "w:a1", "w:a1"]
+    )
+    order: list[str] = []
+    real_recheck = chain.recheck_held
+
+    async def _recheck() -> None:
+        order.append("recheck")
+        await real_recheck()
+
+    async def _retry(_hass: Any, _entry: Any) -> None:
+        order.append("retry starts")
+        await _REAL_SLEEP(0.05)
+        order.append("retry ends")
+
+    monkeypatch.setattr(chain, "recheck_held", _recheck)
+    monkeypatch.setattr(er, "_async_apply_record_check", AsyncMock(return_value=False))
+    monkeypatch.setattr(er, "_async_retry_model_record", _retry)
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert order.index("recheck", 1) < order.index("retry ends")
+    # The watch's own failed check leaves it to the loop already running.
+    assert order.count("retry starts") == 1
+    assert chain.unverified == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_the_watch_checks_the_record_with_the_build_it_read(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record check runs with the learned build, and retries if it fails."""
+    entry, _chain, _waits = _held_on_the_primary(
+        hass, monkeypatch, [None, None, None, "w:a1"], ["w:a1", "w:a1", "w:a1"]
+    )
+    # The setup check landed; the watch's own does not.
+    applied = AsyncMock(side_effect=[True, False])
+    retried = AsyncMock()
+    monkeypatch.setattr(er, "_async_apply_record_check", applied)
+    monkeypatch.setattr(er, "_async_retry_model_record", retried)
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert applied.await_count == 2
+    assert applied.await_args_list[1].args[2].digest == "w:a1"
+    retried.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_releasing_one_of_two_held_fallbacks_keeps_the_other_named(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing to compare with outranks an unread build; a release renames it."""
+    entry, _chain, _fallbacks = _held_in_entry(hass, monkeypatch, fallback_build=None)
+    er._update_held(
+        hass,
+        entry,
+        held=[
+            er.HeldFallback("p2", "B", er.HoldReason.UNREAD),
+            er.HeldFallback("p3", "C", er.HoldReason.NO_REFERENCE),
+        ],
+    )
+    issue = _issue(hass, HELD_ISSUE)
+    assert issue is not None
+    assert issue.translation_key == ISSUE_EMBEDDING_FALLBACK_HELD_NO_REFERENCE
+    assert (issue.translation_placeholders or {})["providers"] == "B, C"
+
+    er._update_held(hass, entry, released=["p3"])
+
+    issue = _issue(hass, HELD_ISSUE)
+    assert issue is not None
+    assert issue.translation_key == ISSUE_EMBEDDING_FALLBACK_HELD_UNREAD
+    assert (issue.translation_placeholders or {})["providers"] == "B"
+
+
+@pytest.mark.asyncio
+async def test_a_fallback_noted_again_keeps_its_place(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same hold noted twice changes nothing, so the issue is not redone."""
+    entry, _chain, _fallbacks = _held_in_entry(hass, monkeypatch, fallback_build=None)
+    first = er.HeldFallback("p2", "B", er.HoldReason.UNREAD)
+    second = er.HeldFallback("p3", "C", er.HoldReason.UNREAD)
+    er._update_held(hass, entry, held=[first, second])
+    created = MagicMock(wraps=ir.async_create_issue)
+    monkeypatch.setattr(er.ir, "async_create_issue", created)
+
+    er._update_held(hass, entry, held=[first])
+
+    assert entry.runtime_data.embedding_fallback_gate.held == (first, second)
+    created.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_standing_issue_from_the_last_run_is_synced_by_its_first_check(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It survives the reload; the first check of the new run decides it."""
+    entry, _chain, fallbacks = _held_in_entry(hass, monkeypatch, fallback_build="w:a1")
+    _raise_held_issue(hass, entry.entry_id)
+
+    assert await er.async_verify_embedding_fallback(hass, entry, fallbacks, FALLBACK_ID)
+
+    assert _issue(hass, HELD_ISSUE) is None
+
+
+@pytest.mark.asyncio
+async def test_a_fallback_admitted_during_the_background_reads_is_not_named(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its call-time check admitted it while the background check could not read."""
+    entry, chain, _removed, waits = _kept_unchecked(
+        hass, monkeypatch, [None, None, None, None]
+    )
+    chain.hold_until_verified([FALLBACK_ID], AsyncMock(return_value=False))
+
+    async def _sleep(delay: float) -> None:
+        waits.append(delay)
+        chain.verify_provider(FALLBACK_ID)
+        await _REAL_SLEEP(0)
+
+    monkeypatch.setattr(er.asyncio, "sleep", _sleep)
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert entry.runtime_data.embedding_fallback_gate.held == ()
+    assert _issue(hass, HELD_ISSUE) is None
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_for_a_fallback_admitted_meanwhile_names_nothing(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The background check admitted it while this read waited."""
+    entry, chain, fallbacks = _held_in_entry(hass, monkeypatch, fallback_build=None)
+
+    async def _admitted_meanwhile(*_args: Any, **_kwargs: Any) -> None:
+        chain.verify_provider(FALLBACK_ID)
+
+    monkeypatch.setattr(er, "fetch_ollama_model_digest", _admitted_meanwhile)
+
+    assert not await er.async_verify_embedding_fallback(
+        hass, entry, fallbacks, FALLBACK_ID
+    )
+    assert _issue(hass, HELD_ISSUE) is None
+
+
+@pytest.mark.asyncio
+async def test_a_check_that_raises_still_names_the_held_fallback(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The chain keeps it held on any error; the issue says so too."""
+    entry, _chain, fallbacks = _held_in_entry(hass, monkeypatch, fallback_build=None)
+    monkeypatch.setattr(
+        er, "fetch_ollama_model_digest", AsyncMock(side_effect=RuntimeError("boom"))
+    )
+
+    with pytest.raises(RuntimeError):
+        await er.async_verify_embedding_fallback(hass, entry, fallbacks, FALLBACK_ID)
+
+    issue = _issue(hass, HELD_ISSUE)
+    assert issue is not None
+    assert issue.translation_key == ISSUE_EMBEDDING_FALLBACK_HELD_UNREAD
+
+
+@pytest.mark.asyncio
+async def test_rechecking_held_members_skips_no_recent_refusal() -> None:
+    """A reference that changed is checked at once, not after the retry wait."""
+    verifier = AsyncMock(side_effect=[False, True])
+    chain = FallbackEmbeddings(
+        [(FakeEmbeddings("primary"), "edge", "p1"), (FakeEmbeddings("f"), "edge", "p2")]
+    )
+    chain.hold_until_verified(["p2"], verifier)
+    await chain.recheck_held()
+    assert chain.unverified == frozenset({"p2"})
+
+    await chain.recheck_held()
+
+    assert verifier.await_count == 2
+    assert chain.unverified == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_a_primary_build_read_meanwhile_ends_the_hold_too(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Confirming the repair read the build during the wait: checked at once."""
+    entry, chain, waits = _held_on_the_primary(
+        hass, monkeypatch, [None, None, None], ["w:a1", "w:a1", "w:a1"]
+    )
+
+    async def _sleep(delay: float) -> None:
+        waits.append(delay)
+        if delay == er._PRIMARY_BUILD_WATCH_S:
+            entry.runtime_data.embedding_fingerprint = OLLAMA_A
+        await _REAL_SLEEP(0)
+
+    monkeypatch.setattr(er.asyncio, "sleep", _sleep)
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert waits.count(er._PRIMARY_BUILD_WATCH_S) == 1
+    assert chain.unverified == frozenset()
+    assert _issue(hass, HELD_ISSUE) is None
+
+
+@pytest.mark.asyncio
+async def test_rechecking_runs_even_after_a_refusal_inside_the_lock() -> None:
+    """A call-time refusal landing while the recheck waits does not skip it."""
+    chain = FallbackEmbeddings(
+        [(FakeEmbeddings("primary"), "edge", "p1"), (FakeEmbeddings("f"), "edge", "p2")]
+    )
+    release = asyncio.Event()
+    answers = [False, True]
+
+    async def _verifier(_provider_id: str) -> bool:
+        if len(answers) == 2:
+            await release.wait()
+        return answers.pop(0)
+
+    chain.hold_until_verified(["p2"], _verifier)
+    in_flight = asyncio.get_running_loop().create_task(chain._admitted("p2"))
+    await asyncio.sleep(0)
+    recheck = asyncio.get_running_loop().create_task(chain.recheck_held())
+    await asyncio.sleep(0)
+    release.set()
+
+    assert not await in_flight
+    await recheck
+
+    assert answers == []
+    assert chain.unverified == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_a_primary_build_read_late_names_a_fallback_still_unread(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Something to compare with at last, but the fallback's own build is unread."""
+    entry, chain, _waits = _held_on_the_primary(
+        hass, monkeypatch, [None, None, None, None, "w:a1"], ["w:a1", "w:a1", None]
+    )
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert chain.unverified == frozenset({FALLBACK_ID})
+    issue = _issue(hass, HELD_ISSUE)
+    assert issue is not None
+    assert issue.translation_key == ISSUE_EMBEDDING_FALLBACK_HELD_UNREAD
+
+
+@pytest.mark.asyncio
+async def test_the_background_check_admitting_a_fallback_clears_its_issue(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A call-time refusal named it; the background check's read admits it."""
+    entry, chain, _removed, _waits = _kept_unchecked(hass, monkeypatch, [None, "w:a1"])
+    _hold_through_the_verifier(hass, entry, chain)
+    er._update_held(
+        hass,
+        entry,
+        held=[er.HeldFallback(FALLBACK_ID, SECONDARY, er.HoldReason.UNREAD)],
+    )
+    assert _issue(hass, HELD_ISSUE) is not None
+
+    await er.async_sync_embedding_record(hass, entry)
+
+    assert chain.unverified == frozenset()
+    assert entry.runtime_data.embedding_fallback_gate.held == ()
+    assert _issue(hass, HELD_ISSUE) is None
+
+
+@pytest.mark.asyncio
+async def test_a_release_first_in_a_run_keeps_the_issue_of_one_still_held(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a reload: another fallback admitted first, this one not yet checked."""
+    entry, chain, _fallbacks = _held_in_entry(hass, monkeypatch, fallback_build=None)
+    _raise_held_issue(hass, entry.entry_id)
+
+    er._update_held(hass, entry, released=["p3"])
+
+    assert chain.unverified == frozenset({FALLBACK_ID})
+    assert _issue(hass, HELD_ISSUE) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_check_from_a_replaced_chain_names_nothing(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reload replaced the chain while its check ran: the new run is untouched."""
+    entry, chain, fallbacks = _held_in_entry(hass, monkeypatch, fallback_build=None)
+    new = FallbackEmbeddings(list(chain.chain))
+    new.hold_until_verified([FALLBACK_ID], AsyncMock(return_value=False))
+
+    async def _reloaded_then_failed(*_args: Any, **_kwargs: Any) -> None:
+        entry.runtime_data.embeddings = new
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(er, "fetch_ollama_model_digest", _reloaded_then_failed)
+
+    with pytest.raises(RuntimeError):
+        await er.async_verify_embedding_fallback(
+            hass, entry, fallbacks, FALLBACK_ID, chain=chain
+        )
+
+    assert _issue(hass, HELD_ISSUE) is None
