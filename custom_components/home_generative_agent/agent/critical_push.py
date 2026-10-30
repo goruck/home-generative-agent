@@ -50,7 +50,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.util import slugify
 from voluptuous import Invalid
 
-from .automation_pin import _MAX_STEP_DEPTH, _is_template, _TooDeepError, _walk_steps
+from .automation_pin import _MAX_STEP_DEPTH, _is_template, _TooDeepError
 from .automation_targets import _step_service
 
 if TYPE_CHECKING:
@@ -81,6 +81,7 @@ _ALARM_PURPOSE_TRIGGERS = frozenset(
 )
 
 _ALARM_STATE = "on"
+_CLEAR_STATE = "off"
 
 _NOTIFY_DOMAIN = "notify"
 _MOBILE_APP_DOMAIN = "mobile_app"
@@ -110,9 +111,10 @@ _ANDROID_CRITICAL_DATA: dict[str, Any] = {
     "priority": "high",
 }
 
-# Mapping levels a config may nest. Each container step adds about three
-# (the step, an option, its data), so this is looser than the step cap.
-_MAX_TREE_DEPTH = 4 * _MAX_STEP_DEPTH
+# Mapping and list levels a config may nest. Each container step adds about
+# four (the step, its option list, an option, its sequence), leaving room for
+# nested data under the step cap.
+_MAX_TREE_DEPTH = 6 * _MAX_STEP_DEPTH
 
 # Step keys holding the notify call's data. HA renders `data`, then merges
 # the legacy `data_template` over it key by key.
@@ -177,9 +179,12 @@ def _fires_on_alarm(trigger: Mapping[str, Any], kind: Any) -> bool:
     to_states = [state for state in cv.ensure_list(trigger.get("to")) if state]
     if to_states:
         return _ALARM_STATE in to_states
-    from_states = set(cv.ensure_list(trigger.get("from")))
-    if from_states == {_ALARM_STATE}:
-        # Only ever the alarm ending.
+    # The alarm starts from `off`: a trigger that excludes it fires on the
+    # alarm ending or the sensor going offline or coming back.
+    from_states = [state for state in cv.ensure_list(trigger.get("from")) if state]
+    if (from_states and _CLEAR_STATE not in from_states) or _CLEAR_STATE in (
+        cv.ensure_list(trigger.get("not_from"))
+    ):
         return False
     # With none of to/from/not_to/not_from (`to: null` aside), HA also fires
     # on every attribute update (battery, signal), which must not sound
@@ -231,47 +236,60 @@ def is_safety_automation(
     return bool(_alarm_trigger_ids(hass, validated_config)[0])
 
 
+def _enabled(item: Mapping[str, Any]) -> bool | None:
+    """Return a raw step's or condition's `enabled`, or None if a template."""
+    enabled = item.get("enabled", True)
+    if enabled is True:
+        return True
+    if _is_template(enabled):
+        return None
+    try:
+        return cv.boolean(enabled)
+    except Invalid:
+        return None
+
+
+def _is_disabled(item: Mapping[str, Any]) -> bool:
+    """Return True for a step or condition HA skips."""
+    return _enabled(item) is False
+
+
 def _trigger_condition_ids(condition: Any) -> set[str] | None:
     """Return the ids an enabled trigger condition requires, else None."""
     if (
         not isinstance(condition, dict)
         or condition.get("condition") != "trigger"
-        # HA skips a disabled condition, and decides a templated one later.
-        or condition.get("enabled", True) is not True
+        # A templated `enabled` is decided when the condition runs.
+        or _enabled(condition) is not True
     ):
         return None
     return {str(value) for value in cv.ensure_list(condition.get("id"))}
 
 
-def _gating_trigger_ids(conditions: Any, *, only: bool = False) -> set[str] | None:
+def _branch_reach(
+    conditions: Any, reach: frozenset[str]
+) -> tuple[frozenset[str], frozenset[str]]:
     """
-    Return the trigger ids a branch's conditions require, or None if any.
+    Return (ids that may take a branch, ids that may pass it by).
 
     Conditions in a list must all hold, so each trigger condition narrows the
-    set; anything else (``or``, templates, state checks) is not about which
-    trigger fired. With ``only``, every condition must be a trigger condition,
-    as when the result decides the branch taken when they do not hold.
+    ids taking it; HA skips a disabled one. Only when every condition is a
+    trigger condition do they also say which ids pass it by: anything else
+    (``or``, templates, state checks) can fail for any trigger. No enabled
+    condition at all always holds.
     """
-    required: set[str] | None = None
+    gate: set[str] | None = None
+    pure = True
     for condition in cv.ensure_list(conditions):
+        if isinstance(condition, dict) and _is_disabled(condition):
+            continue
         ids = _trigger_condition_ids(condition)
         if ids is None:
-            if only:
-                return None
+            pure = False
             continue
-        required = ids if required is None else required & ids
-    return required
-
-
-def _is_disabled(step: Mapping[str, Any]) -> bool:
-    """Return True for a step HA skips: `enabled` false however it is spelled."""
-    enabled = step.get("enabled", True)
-    if enabled is True or _is_template(enabled):
-        return False
-    try:
-        return not cv.boolean(enabled)
-    except Invalid:
-        return False
+        gate = ids if gate is None else gate & ids
+    taken = reach if gate is None else reach & gate
+    return taken, (reach - taken if pure else reach)
 
 
 _StepReach = tuple[dict[str, Any], frozenset[str]]
@@ -325,8 +343,8 @@ def _sequence_with_reach(
     """Walk a step list; a trigger condition step narrows the rest of it."""
     for step in steps:
         if isinstance(step, dict):
-            step = cast("dict[str, Any]", step)
-            ids = None if _is_disabled(step) else _trigger_condition_ids(step)
+            # None for a disabled one, which HA skips.
+            ids = _trigger_condition_ids(cast("dict[str, Any]", step))
             if ids is not None:
                 reach &= ids
                 continue
@@ -341,13 +359,8 @@ def _choose_with_reach(
     for option in cv.ensure_list(node.get("choose")):
         if not isinstance(option, dict):
             continue
-        conditions = option.get("conditions")
-        gate = _gating_trigger_ids(conditions)
-        option_reach = remaining if gate is None else remaining & gate
-        yield from _steps_with_reach(option.get("sequence"), option_reach, depth)
-        pure = _gating_trigger_ids(conditions, only=True)
-        if pure is not None:
-            remaining -= pure
+        taken, remaining = _branch_reach(option.get("conditions"), remaining)
+        yield from _steps_with_reach(option.get("sequence"), taken, depth)
     yield from _steps_with_reach(node.get("default"), remaining, depth)
 
 
@@ -355,16 +368,9 @@ def _if_with_reach(
     node: Mapping[str, Any], reach: frozenset[str], depth: int
 ) -> Iterator[_StepReach]:
     """Walk an if: `then` when its conditions hold, `else` when they do not."""
-    gate = _gating_trigger_ids(node["if"])
-    yield from _steps_with_reach(
-        node.get("then"), reach if gate is None else reach & gate, depth
-    )
-    # `else` runs whenever the conditions fail, so only conditions that are
-    # all about the trigger say which triggers reach it.
-    pure = _gating_trigger_ids(node["if"], only=True)
-    yield from _steps_with_reach(
-        node.get("else"), reach if pure is None else reach - pure, depth
-    )
+    taken, passed = _branch_reach(node["if"], reach)
+    yield from _steps_with_reach(node.get("then"), taken, depth)
+    yield from _steps_with_reach(node.get("else"), passed, depth)
 
 
 def _unaliased(node: Any, depth: int = 0) -> Any:
@@ -382,7 +388,7 @@ def _unaliased(node: Any, depth: int = 0) -> Any:
             for key, value in cast("dict[Any, Any]", node).items()
         }
     if isinstance(node, (list, tuple)):
-        return [_unaliased(item, depth) for item in cast("list[Any]", node)]
+        return [_unaliased(item, depth + 1) for item in cast("list[Any]", node)]
     return node
 
 
@@ -510,12 +516,13 @@ def apply_critical_push(
         try:
             pushes = sum(
                 1
-                for step, action_type in _walk_steps(validated_config.get("actions"))
-                if action_type == cv.SCRIPT_ACTION_CALL_SERVICE
-                and _is_push(_step_service(step))
+                for step, reach in _steps_with_reach(
+                    validated_config.get("actions"), frozenset(every)
+                )
+                if reach & alarm and _is_push(_step_service(step))
             )
         except _TooDeepError:
-            pushes = 0
+            return CriticalPushResult(unchecked=True)
         return CriticalPushResult(left_ordinary=pushes)
     key = "actions" if "actions" in config else "action"
     try:

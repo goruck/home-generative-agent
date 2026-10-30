@@ -888,20 +888,20 @@ def _critical_push_note(critical_push: CriticalPushResult) -> str:
         )
     if critical_push.left_ordinary or critical_push.unchecked:
         reason = (
-            "nests its steps too deeply to check its notifications"
+            "it is nested too deeply to check its notifications, so none of them are"
             if critical_push.unchecked
             else f"{critical_push.left_ordinary} of its notifications are not sent "
             "through a phone's notify.mobile_app_* service (or use a templated "
-            "payload)"
+            "payload), so those are not"
         )
         # The automation is already installed: another add_automation call
-        # would install a second one next to it.
+        # would install a second one next to it. A blueprint's pushes are not
+        # in the automation, so the note names no editor.
         note += (
             ". This automation fires on a leak, smoke, gas, carbon monoxide or "
-            f"safety alarm, but it {reason}, so those are not critical alerts. "
-            "It is installed as written; do not add it again. Tell the user, "
-            "who can switch those notifications to a phone's notify.mobile_app_* "
-            "service in Settings > Automations"
+            f"safety alarm, but {reason} critical alerts. It is installed as "
+            "written; do not add it again. Tell the user, who can switch those "
+            "notifications to a phone's notify.mobile_app_* service"
         )
     return f"{note}." if note else ""
 

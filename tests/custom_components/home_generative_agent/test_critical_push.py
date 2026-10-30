@@ -237,10 +237,10 @@ async def test_a_leak_alert_through_another_notify_service_says_it_is_not_critic
     result = await add_automation_tool(automation_yaml=text, config=_config(hass))
 
     assert result.startswith("Added automation ")
-    assert "1 of its notifications are not sent through" in result
+    assert "alarm, but 1 of its notifications are not sent through" in result
+    assert "templated payload), so those are not critical alerts" in result
     # Installed already: another add_automation call would add a duplicate.
     assert "do not add it again" in result
-    assert "Settings > Automations" in result
     assert "Critical Alerts allowed" not in result
     data = _written(automations_file)[0]["actions"][0]["data"]
     assert set(data) == {"title", "message"}
@@ -336,6 +336,12 @@ async def test_only_the_safety_device_classes_count(
         ({"to": "off"}, False),
         ({"to": "unavailable"}, False),
         ({"from": "on"}, False),
+        # The alarm starts from `off`; these fire on it ending or the sensor
+        # going offline or coming back.
+        ({"from": ["on", "unavailable"]}, False),
+        ({"from": "unavailable"}, False),
+        ({"not_from": "off"}, False),
+        ({"not_from": ["off", "unavailable"]}, False),
         ({"not_to": "on"}, False),
         # Any of to/from/not_to/not_from limits HA to state changes.
         ({"not_from": ["unavailable", "unknown"]}, True),
@@ -474,7 +480,14 @@ async def test_only_mobile_app_phones_are_rewritten_wherever_they_nest(
     config = _automation(
         [
             {
-                "choose": [{"conditions": [], "sequence": [_push()]}],
+                "choose": [
+                    {
+                        "conditions": [
+                            {"condition": "state", "entity_id": DOOR, "state": "on"}
+                        ],
+                        "sequence": [_push()],
+                    }
+                ],
                 "default": [{"if": [], "then": [_push()]}],
             },
             {"choose": {"conditions": [], "sequence": [_push()]}},
@@ -877,7 +890,107 @@ async def test_a_deep_but_valid_config_is_rewritten_and_a_too_deep_one_says_so(
     result = apply_critical_push(hass, too_deep, validated)
     assert result == CriticalPushResult(unchecked=True)
     assert yaml.safe_dump(too_deep) == before
-    assert "too deeply to check" in _critical_push_note(result)
+    note = _critical_push_note(result)
+    assert "alarm, but it is nested too deeply to check its notifications" in note
+    assert "so none of them are critical alerts" in note
+
+
+async def test_deeply_nested_data_says_so_instead_of_crashing(
+    hass: HomeAssistant,
+) -> None:
+    """Lists count toward the depth cap, so nested data cannot recurse unbounded."""
+    blob: Any = "x"
+    for _ in range(2000):
+        blob = [blob]
+    config = _automation(
+        [{"action": PHONE, "data": {"message": "m", "x": blob}}], to="on"
+    )
+    validated = {"triggers": cv.TRIGGER_SCHEMA(config["triggers"])}
+
+    assert apply_critical_push(hass, config, validated) == CriticalPushResult(
+        unchecked=True
+    )
+
+
+async def test_a_trigger_condition_enabled_as_a_string_still_gates(
+    hass: HomeAssistant,
+) -> None:
+    """The raw config may spell `enabled: true` any way cv.boolean reads it."""
+    dry = _when("dry", enabled="true")
+    config: dict[str, Any] = {
+        "triggers": WET_DRY_TRIGGERS,
+        "actions": [
+            {"choose": [{"conditions": dry, "sequence": [_push()]}]},
+            {"sequence": [*dry, _push()]},
+        ],
+    }
+
+    assert await _result(hass, config) == CriticalPushResult()
+    choose, sequence = _actions(config)
+    assert choose["choose"][0]["sequence"][0]["data"] == {"message": "m"}
+    assert sequence["sequence"][1]["data"] == {"message": "m"}
+
+
+async def test_branches_after_one_that_always_runs_stay_ordinary(
+    hass: HomeAssistant,
+) -> None:
+    """An option with no enabled condition always runs, so nothing after it does."""
+    door = [{"condition": "state", "entity_id": DOOR, "state": "on"}]
+    config = _automation(
+        [
+            {
+                "choose": [
+                    {"conditions": [], "sequence": [_push()]},
+                    {"conditions": door, "sequence": [_push()]},
+                ],
+                "default": [_push()],
+            },
+            {
+                "choose": [
+                    {
+                        "conditions": [{**door[0], "enabled": False}],
+                        "sequence": [_push()],
+                    }
+                ],
+                "default": [_push()],
+            },
+            {"if": [], "then": [_push()], "else": [_push()]},
+        ],
+        to="on",
+    )
+
+    assert await _result(hass, config) == CriticalPushResult(rewritten=3)
+    first, second, branch = _actions(config)
+    assert first["choose"][0]["sequence"][0]["data"] == _critical()
+    assert first["choose"][1]["sequence"][0]["data"] == {"message": "m"}
+    assert first["default"][0]["data"] == {"message": "m"}
+    assert second["choose"][0]["sequence"][0]["data"] == _critical()
+    assert second["default"][0]["data"] == {"message": "m"}
+    assert branch["then"][0]["data"] == _critical()
+    assert branch["else"][0]["data"] == {"message": "m"}
+
+
+async def test_a_blueprint_counts_only_the_pushes_the_alarm_reaches(
+    hass: HomeAssistant,
+) -> None:
+    """The all-clear branch and disabled steps of a blueprint are not counted."""
+    validated = {
+        "triggers": WET_DRY_TRIGGERS,
+        "actions": [
+            {
+                "choose": [
+                    {"conditions": _when("wet"), "sequence": [_push()]},
+                    {"conditions": _when("dry"), "sequence": [_push()]},
+                ]
+            },
+            {**_push(), "enabled": False},
+        ],
+    }
+    config: dict[str, Any] = {"use_blueprint": {"path": "x.yaml", "input": {}}}
+
+    assert apply_critical_push(hass, config, validated) == CriticalPushResult(
+        left_ordinary=1
+    )
 
 
 def test_the_note_never_asks_for_a_second_automation() -> None:
@@ -886,3 +999,5 @@ def test_the_note_never_asks_for_a_second_automation() -> None:
 
     assert "do not add it again" in note
     assert "Tell the user" in note
+    # A blueprint's pushes are not in the automation editor.
+    assert "Settings > Automations" not in note

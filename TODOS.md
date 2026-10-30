@@ -411,6 +411,19 @@
 
 ---
 
+### Critical-push reach walker duplicates the automation step walker
+
+**What:** `agent/critical_push.py` walks automation actions with its own `_steps_with_reach` (choose / if / parallel / repeat / sequence, plus disabled steps and trigger-condition gating), next to `automation_pin._walk_steps` / `_nested_sequences`, which the existence check and the PIN screen use. They share `_MAX_STEP_DEPTH` but nothing else, and `_walk_steps` does not skip disabled steps. A new HA action type or a raw-config shape added to one is easy to miss in the other, which would make the depth limit or the push count disagree between the existence check and the critical rewrite.
+
+**Why:** Built-in code-review of PR #885 (#869), 2026-10-29. Left as is: merging them means giving `_walk_steps` a reach-propagation hook, a refactor of the PIN screen's walker that was out of scope for a safety fix.
+
+**How to apply:** Give `_walk_steps` an optional per-branch callback (or yield `(step, branch_context)`) so the critical-push walker supplies only the reach rules, then drop `_steps_with_reach`'s own container dispatch. Keep `test_automation_pin.py` and `test_critical_push.py` green.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** None
+
+---
 ### Tie the screener's action-type lists to Home Assistant's schema
 
 **What:** `automation_pin.py` classifies steps with `cv.determine_script_action` and then dispatches on `_CONTAINER_ACTION_TYPES` / `_INERT_ACTION_TYPES`, which are hand-maintained mirrors of HA's script taxonomy. An unknown type already fails closed, so a new HA construct causes over-prompting rather than a hole — but nothing tells a maintainer that HA grew a construct worth classifying properly.
