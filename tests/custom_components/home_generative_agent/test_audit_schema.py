@@ -398,11 +398,16 @@ async def test_append_finding_records_shown_and_named_ids() -> None:
         suppression_reason_code="not_suppressed",
         shown_anomaly_id="door",
         named_anomaly_ids=["window"],
+        constituent_reasons={"door": "not_suppressed", "alarm": "pending_prompt"},
     )
 
     notification = store._records[-1]["notification"]
     assert notification["shown_anomaly_id"] == "door"
     assert notification["named_anomaly_ids"] == ["window"]
+    assert notification["constituent_reasons"] == {
+        "door": "not_suppressed",
+        "alarm": "pending_prompt",
+    }
 
 
 # ---------------------------------------------------------------------------

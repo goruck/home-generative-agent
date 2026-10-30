@@ -73,15 +73,17 @@ async def async_enrich_alarm_last_changed(
     hass: HomeAssistant, snapshot: FullStateSnapshot
 ) -> None:
     """Correct last_changed for disarmed alarm entities reset by HA startup."""
-    if DATA_INSTANCE not in getattr(hass, "data", {}):
-        return
-
     disarmed_alarms = [
         e
         for e in snapshot["entities"]
         if e["domain"] == "alarm_control_panel" and e["state"] == _DISARMED
     ]
     if not disarmed_alarms:
+        return
+    if DATA_INSTANCE not in getattr(hass, "data", {}):
+        # The raw last_changed stays, and with it a different anomaly id for
+        # an alarm-disarmed finding than a run with the recorder (#732).
+        _LOGGER.debug("Recorder not loaded; alarm last_changed left as reported")
         return
 
     instance = get_recorder_instance(hass)

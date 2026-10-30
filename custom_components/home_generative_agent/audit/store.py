@@ -8,6 +8,8 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from homeassistant.core import HomeAssistant
 
     from custom_components.home_generative_agent.sentinel.models import (
@@ -229,13 +231,16 @@ class AuditStore:
         action_outcome: dict[str, Any] | None = None,
         shown_anomaly_id: str | None = None,
         named_anomaly_ids: list[str] | None = None,
+        constituent_reasons: Mapping[str, str] | None = None,
     ) -> None:
         """
         Append a finding audit record.
 
         For a compound finding, *shown_anomaly_id* is the constituent the push
         showed (its buttons answer for it alone) and *named_anomaly_ids* the
-        partners its "Also: ..." line named.
+        partners its "Also: ..." line named. *constituent_reasons* maps each
+        constituent's anomaly id to its own suppression reason code, so a
+        push that left a partner out says why (issue #732).
         """
         notification: dict[str, Any] = {
             "explanation": explanation,
@@ -245,6 +250,8 @@ class AuditStore:
             notification["shown_anomaly_id"] = shown_anomaly_id
         if named_anomaly_ids:
             notification["named_anomaly_ids"] = list(named_anomaly_ids)
+        if constituent_reasons:
+            notification["constituent_reasons"] = dict(constituent_reasons)
         record = AuditRecord(
             snapshot_ref=_snapshot_ref(snapshot),
             finding=finding.as_dict(),
