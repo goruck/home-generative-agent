@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+import math
 from time import monotonic
 from typing import TYPE_CHECKING, Any, cast
 
@@ -21,7 +22,14 @@ from .provider_stall import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+    from collections.abc import (
+        AsyncIterator,
+        Awaitable,
+        Callable,
+        Collection,
+        Iterable,
+        Sequence,
+    )
 
     from langchain_core.language_models import LanguageModelInput
     from langchain_core.messages import BaseMessage
@@ -33,6 +41,9 @@ LOGGER = logging.getLogger(__name__)
 # How long an embedding fallback whose build could not be checked is skipped
 # before its build is read again (#857).
 _VERIFY_RETRY_S = 60.0
+# How often a chain whose every member's circuit breaker is open still tries
+# one of them (#881). Quoted in docs/configuration.md.
+HALF_OPEN_PROBE_INTERVAL_S = 10.0
 
 FALLBACK_RETRYABLE_EXCEPTIONS: tuple[type[Exception], ...] = (
     TimeoutError,
@@ -400,20 +411,32 @@ def _raise_for_retryable_empty_response(result: Any) -> None:
 
 
 class CircuitBreaker:
-    """Simple in-memory circuit breaker for model providers."""
+    """
+    Simple in-memory circuit breaker for model providers.
+
+    A breaker only helps by skipping to another provider. A chain whose
+    every member is held out would refuse every call for the whole cooldown,
+    even with a provider already back (#881), so it still tries them, each
+    at most once every `probe_interval_seconds` and one try at a time
+    (`due_for_probe`, `begin_probe`, `end_probe`).
+    """
 
     def __init__(
         self,
         threshold: int = 3,
         window_seconds: float = 60.0,
         cooldown_seconds: float = 120.0,
+        probe_interval_seconds: float = HALF_OPEN_PROBE_INTERVAL_S,
     ) -> None:
         """Initialize circuit breaker with thresholds."""
         self.threshold = threshold
         self.window_seconds = window_seconds
         self.cooldown_seconds = cooldown_seconds
+        self.probe_interval_seconds = probe_interval_seconds
         self._failures: dict[str, list[float]] = {}
         self._disabled_until: dict[str, float] = {}
+        self._last_probe: dict[str, float] = {}
+        self._probing: set[str] = set()
 
     def record_failure(self, provider_id: str) -> None:
         """Record a failure for the given provider."""
@@ -423,12 +446,16 @@ class CircuitBreaker:
             t for t in self._failures[provider_id] if now - t <= self.window_seconds
         ]
         if len(self._failures[provider_id]) >= self.threshold:
+            already_open = now < self._disabled_until.get(provider_id, 0.0)
             self._disabled_until[provider_id] = now + self.cooldown_seconds
-            LOGGER.warning(
-                "Circuit breaker opened for provider %s (disabled for %.0fs)",
-                provider_id,
-                self.cooldown_seconds,
-            )
+            if not already_open:
+                # It just failed: its first half-open try waits an interval.
+                self._last_probe[provider_id] = now
+                LOGGER.warning(
+                    "Circuit breaker opened for provider %s (disabled for %.0fs)",
+                    provider_id,
+                    self.cooldown_seconds,
+                )
 
     def record_success(self, provider_id: str) -> None:
         """Clear failures for a provider that succeeded."""
@@ -440,6 +467,113 @@ class CircuitBreaker:
         """Return True if the provider is not currently circuit-broken."""
         until = self._disabled_until.get(provider_id, 0.0)
         return monotonic() >= until
+
+    def due_for_probe(
+        self, provider_ids: Sequence[str], *, in_turn: bool = False
+    ) -> list[str]:
+        """
+        Return those of `provider_ids` whose half-open try is due (#881).
+
+        `provider_ids` are a chain's members held out only by their breakers,
+        in the order the chain tries them, when no other member can be called.
+        A member is due once `probe_interval_seconds` have passed since its
+        breaker opened or its last try ended, unless a try of it is running;
+        none due means a real outage still fails fast between tries. A member
+        not yet due holds back those after it, so the chain is tried from the
+        primary down and a fallback is not used alone while the primary may
+        be back; one being tried does not, so a slow try of the primary does
+        not hold back the rest, unless `in_turn` (a chain whose answering
+        member becomes the one it uses from then on).
+        """
+        now = monotonic()
+        due: list[str] = []
+        for p in provider_ids:
+            if p in self._probing:
+                if in_turn:
+                    break
+                continue
+            if now - self._last_probe.get(p, -math.inf) < self.probe_interval_seconds:
+                break
+            due.append(p)
+        return due
+
+    def begin_probe(self, provider_id: str) -> bool:
+        """
+        Reserve a due member for a half-open try; False if no longer due.
+
+        Reserved only as its own try starts, so a slow try of the primary
+        does not hold the others back. The caller ends it with `end_probe`
+        however the try ends; an answer closes the breaker, and a failure
+        leaves its cooldown as it was.
+        """
+        if not self.due_for_probe([provider_id]):
+            return False
+        self._probing.add(provider_id)
+        self._last_probe[provider_id] = monotonic()
+        LOGGER.debug(
+            "Every provider's circuit breaker is open; trying %s anyway.",
+            provider_id,
+        )
+        return True
+
+    def end_probe(self, provider_id: str) -> None:
+        """Release a member `begin_probe` reserved; its next try waits an interval."""
+        self._probing.discard(provider_id)
+        self._last_probe[provider_id] = monotonic()
+
+    def next_probe_in(
+        self, provider_ids: Sequence[str], *, in_turn: bool = False
+    ) -> float | None:
+        """
+        Return the seconds until one of them can be tried again.
+
+        As in `due_for_probe`, the first member not being tried decides it;
+        None while every one is being tried, or with `in_turn` while the
+        first one is.
+        """
+        now = monotonic()
+        for p in provider_ids:
+            if p in self._probing:
+                if in_turn:
+                    return None
+                continue
+            until = min(
+                self._disabled_until.get(p, 0.0),
+                self._last_probe.get(p, -math.inf) + self.probe_interval_seconds,
+            )
+            return max(0.0, until - now)
+        return None
+
+
+def _retry_hint(
+    circuit_breaker: CircuitBreaker,
+    provider_ids: Sequence[str],
+    *,
+    in_turn: bool = False,
+) -> str:
+    """Say when one of `provider_ids`, all held out by the breaker, is tried."""
+    wait = circuit_breaker.next_probe_in(provider_ids, in_turn=in_turn)
+    if wait is None:
+        return "one is being tried now"
+    return f"one is tried again in {max(1, math.ceil(wait))} s"
+
+
+def _held_open(circuit_breaker: CircuitBreaker | None, provider_id: str) -> bool:
+    """Return True if the breaker still holds `provider_id` out of a call."""
+    return circuit_breaker is not None and not circuit_breaker.is_available(provider_id)
+
+
+def _begin_probe(circuit_breaker: CircuitBreaker | None, provider_id: str) -> bool:
+    """Reserve a half-open try of `provider_id` (see `begin_probe`)."""
+    return circuit_breaker is not None and circuit_breaker.begin_probe(provider_id)
+
+
+def _end_probe(
+    circuit_breaker: CircuitBreaker | None, provider_id: str, *, half_open: bool
+) -> None:
+    """End a half-open try of `provider_id`, if it was one (see `end_probe`)."""
+    if half_open and circuit_breaker is not None:
+        circuit_breaker.end_probe(provider_id)
 
 
 def _default_alert(
@@ -562,18 +696,77 @@ def _callable_members(
     chain: list[tuple[Any, str, str]],
     circuit_breaker: CircuitBreaker | None,
     stall_tracker: ProviderStallTracker | None,
-) -> list[int]:
-    """Return the chain positions to try: not circuit-broken, not stalled."""
+) -> tuple[list[int], list[str]]:
+    """
+    Return the chain positions to try (not circuit-broken, not stalled).
+
+    With none left, those held out only by their circuit breakers are tried
+    anyway when due (#881), so a provider back after a network drop is used
+    again within `HALF_OPEN_PROBE_INTERVAL_S`, not after the whole cooldown.
+    Their ids come second: the caller reserves each as its try starts.
+    """
     members: list[int] = []
+    broken: list[int] = []
     for i, (_model, _deployment, provider_id) in enumerate(chain):
-        if circuit_breaker and not circuit_breaker.is_available(provider_id):
-            LOGGER.debug("Provider %s is circuit-broken; skipping.", provider_id)
-            continue
         if stall_tracker and stall_tracker.is_stalled(provider_id):
             LOGGER.debug("Provider %s is stalled; skipping.", provider_id)
             continue
+        if circuit_breaker and not circuit_breaker.is_available(provider_id):
+            LOGGER.debug("Provider %s is circuit-broken; skipping.", provider_id)
+            broken.append(i)
+            continue
         members.append(i)
-    return members
+    probes: list[str] = []
+    if not members and broken and circuit_breaker:
+        probes = circuit_breaker.due_for_probe([chain[i][2] for i in broken])
+        members = [i for i in broken if chain[i][2] in probes]
+    return members, probes
+
+
+def _no_member_error(
+    chain: list[tuple[Any, str, str]],
+    kind: str,
+    circuit_breaker: CircuitBreaker | None,
+    stall_tracker: ProviderStallTracker | None,
+) -> Exception:
+    """
+    Return the error for a call no member could be tried for.
+
+    Stalled members are named as before (#828); otherwise the providers
+    whose circuit breakers are open, and when one is tried again (#881).
+    """
+    if stalled := _stalled_chain_error(chain, stall_tracker):
+        return stalled
+    ids = [
+        provider_id
+        for _model, _deployment, provider_id in chain
+        if circuit_breaker and not circuit_breaker.is_available(provider_id)
+    ]
+    if not ids or circuit_breaker is None:
+        return _chain_error(chain, kind, None)
+    names = [stall_tracker.name(p) if stall_tracker else p for p in ids]
+    hint = _retry_hint(circuit_breaker, ids)
+    msg = (
+        f"No {kind} provider was tried: {', '.join(names)} failed repeatedly, "
+        f"so their circuit breakers are open. {hint[0].upper()}{hint[1:]}."
+    )
+    return HomeAssistantError(msg)
+
+
+def _exhausted_error(
+    wrapper: FallbackChatModel | FallbackVLM,
+    kind: str,
+    last_err: Exception | None,
+    *,
+    taken: bool,
+) -> Exception:
+    """Return the error for a call that went through its members unanswered."""
+    if last_err is None and taken:
+        # Every due member was taken by another call's try meanwhile (#881).
+        return _no_member_error(
+            wrapper.chain, kind, wrapper.circuit_breaker, wrapper.stall_tracker
+        )
+    return _chain_error(wrapper.chain, kind, last_err)
 
 
 def _stalled_chain_error(
@@ -653,12 +846,17 @@ def _handle_member_failure(  # noqa: PLR0913
     started: float,
     deadline: float | None,
     split: bool,
+    half_open: bool = False,
 ) -> bool:
     """
     Log and count a failed member; announce the provider tried next.
 
     Returns True when the call should stop here: the budget was not split and
     this member used it up, so the next provider would get only the margin.
+    A failed half-open try (#881) is logged at debug, since its breaker
+    opening was logged already and an outage would repeat it every few
+    seconds, unless the provider lacks the model; it leaves the cooldown as
+    it was, so a provider is not skipped longer for having been tried.
     """
     i = members[pos]
     _model, _deployment, provider_id = wrapper.chain[i]
@@ -669,9 +867,16 @@ def _handle_member_failure(  # noqa: PLR0913
         # A lone provider's caller reports the error, as it did before every
         # model was wrapped (#828); there is no next provider to announce.
         LOGGER.debug("%s failed for provider %s: %s", kind, provider_id, err)
+    elif half_open and not is_model_not_found(err):
+        LOGGER.debug(
+            "%s half-open try of provider %s failed: %s",
+            kind,
+            provider_id,
+            _safe_err_summary(err),
+        )
     else:
         _log_provider_failure(kind, provider_id, i + 1, len(wrapper.chain), err)
-    if wrapper.circuit_breaker:
+    if wrapper.circuit_breaker and not half_open:
         wrapper.circuit_breaker.record_failure(provider_id)
     # Only a long wait is evidence of a hang: a slow model missing a short
     # Sentinel deadline, or our own connection pool timing out, is not a
@@ -685,7 +890,7 @@ def _handle_member_failure(  # noqa: PLR0913
         wrapper.stall_tracker.record_timeout(
             provider_id, _probe_call(_probe_model(wrapper, i))
         )
-    if lone or spent:
+    if lone or spent or half_open:
         return spent
     next_provider = wrapper.chain[members[pos + 1]] if pos + 1 < len(members) else None
     wrapper.alert_callback(
@@ -865,20 +1070,28 @@ class FallbackChatModel:
         ``member_timeout``), so a hung one times out here, is counted toward a
         stall, and the next provider still has time to answer (#828).
         """
-        last_err: Exception | None = None
-        members = _callable_members(
+        members, probes = _callable_members(
             self.chain, self.circuit_breaker, self.stall_tracker
         )
-        if not members and (
-            stalled := _stalled_chain_error(self.chain, self.stall_tracker)
-        ):
-            raise stalled
+        if not members:
+            raise _no_member_error(
+                self.chain, "LLM", self.circuit_breaker, self.stall_tracker
+            )
+        last_err: Exception | None = None
         split = budget_is_split()
+        taken = False
         for pos, i in enumerate(members):
             model, _deployment, provider_id = self.chain[i]
             timeout_s = member_timeout(last=pos == len(members) - 1)
             if _budget_used_up(timeout_s):
                 break
+            # Closed meanwhile by another call's answer: tried as usual.
+            half_open = provider_id in probes and _held_open(
+                self.circuit_breaker, provider_id
+            )
+            if half_open and not _begin_probe(self.circuit_breaker, provider_id):
+                taken = True  # Another call is trying it (#881).
+                continue
             # The sampling-param retry below shares this member's deadline.
             deadline = _deadline(timeout_s)
             started = asyncio.get_running_loop().time()
@@ -924,14 +1137,17 @@ class FallbackChatModel:
                     started=started,
                     deadline=deadline,
                     split=split,
+                    half_open=half_open,
                 ):
                     break
                 continue
             else:
                 _record_answer(self.circuit_breaker, self.stall_tracker, provider_id)
                 return result
+            finally:
+                _end_probe(self.circuit_breaker, provider_id, half_open=half_open)
 
-        raise _chain_error(self.chain, "LLM", last_err)
+        raise _exhausted_error(self, "LLM", last_err, taken=taken)
 
     async def astream(
         self,
@@ -1000,20 +1216,28 @@ class FallbackVLM:
         **kwargs: Any,
     ) -> BaseMessage:
         """Invoke the VLM chain, falling back on retryable failures (see chat)."""
-        last_err: Exception | None = None
-        members = _callable_members(
+        members, probes = _callable_members(
             self.chain, self.circuit_breaker, self.stall_tracker
         )
-        if not members and (
-            stalled := _stalled_chain_error(self.chain, self.stall_tracker)
-        ):
-            raise stalled
+        if not members:
+            raise _no_member_error(
+                self.chain, "VLM", self.circuit_breaker, self.stall_tracker
+            )
+        last_err: Exception | None = None
         split = budget_is_split()
+        taken = False
         for pos, i in enumerate(members):
             model, _deployment, provider_id = self.chain[i]
             timeout_s = member_timeout(last=pos == len(members) - 1)
             if _budget_used_up(timeout_s):
                 break
+            # Closed meanwhile by another call's answer: tried as usual.
+            half_open = provider_id in probes and _held_open(
+                self.circuit_breaker, provider_id
+            )
+            if half_open and not _begin_probe(self.circuit_breaker, provider_id):
+                taken = True  # Another call is trying it (#881).
+                continue
             deadline = _deadline(timeout_s)
             started = asyncio.get_running_loop().time()
             try:
@@ -1034,6 +1258,7 @@ class FallbackVLM:
                     started=started,
                     deadline=deadline,
                     split=split,
+                    half_open=half_open,
                 ):
                     break
                 continue
@@ -1042,8 +1267,10 @@ class FallbackVLM:
                 # stall tracker needs it to clear a provider that answers.
                 _record_answer(self.circuit_breaker, self.stall_tracker, provider_id)
                 return result
+            finally:
+                _end_probe(self.circuit_breaker, provider_id, half_open=half_open)
 
-        raise _chain_error(self.chain, "VLM", last_err)
+        raise _exhausted_error(self, "VLM", last_err, taken=taken)
 
 
 def with_member_configurable(
@@ -1273,23 +1500,53 @@ class FallbackEmbeddings:
             self._verify_after[provider_id] = monotonic() + _VERIFY_RETRY_S
             return False
 
-    def _is_open(self, provider_id: str) -> bool:
+    def _is_open(self, provider_id: str, probes: Collection[str] = ()) -> bool:
         """
         Return True if the circuit breaker holds `provider_id` out of a call.
 
         A chain down to one member is the unwrapped provider setup would have
         built (#860): it is tried every time, breaker or not, so a removal
-        does not leave a recovered primary skipped for the cooldown.
+        does not leave a recovered primary skipped for the cooldown. `probes`
+        are the members `_through_chain` picked for a half-open try in this
+        call (#881): they are tried.
         """
         return (
-            len(self.chain) > 1
+            provider_id not in probes
+            and len(self.chain) > 1
             and self.circuit_breaker is not None
             and not self.circuit_breaker.is_available(provider_id)
         )
 
+    def _probe_candidates(self, chain: list[tuple[Any, str, str]]) -> list[str]:
+        """
+        Return the members a call may try although their breakers are open.
+
+        Only when no other member could be called (#881): each is held out by
+        its breaker or held until its build is checked (#857). A held member
+        is left out, since it is refused before it is called, and must not
+        hold back a try of the others: a primary whose breaker opened beside
+        a held fallback is the common case. As for the chat chain, a provider
+        back after a network drop is then used again within
+        `HALF_OPEN_PROBE_INTERVAL_S`, the active one first so recovery does
+        not switch the store's.
+        """
+        if self.circuit_breaker is None or len(self.chain) <= 1:
+            return []
+        candidates: list[str] = []
+        for _model, _deployment, provider_id in chain:
+            if not self._is_member(provider_id) or provider_id in self._unverified:
+                continue
+            if not self._is_open(provider_id):
+                return []
+            candidates.append(provider_id)
+        return candidates
+
     @staticmethod
     def _all_failed(
-        last_err: Exception | None, skipped: list[str], held: list[str]
+        last_err: Exception | None,
+        skipped: list[str],
+        held: list[str],
+        retry: str | None = None,
     ) -> str:
         held_reason = (
             "the build of the model on "
@@ -1304,19 +1561,28 @@ class FallbackEmbeddings:
             )
         reasons = []
         if skipped:
-            reasons.append("the circuit breaker is open for " + ", ".join(skipped))
+            reasons.append(
+                "the circuit breaker is open for "
+                + ", ".join(skipped)
+                + (f" ({retry})" if retry else "")
+            )
         if held:
             reasons.append(held_reason)
         if reasons:
             return "No embedding provider was tried: " + "; ".join(reasons)
         return "No embedding provider is left in the chain"
 
-    @classmethod
     def _chain_error(
-        cls, last_err: Exception | None, skipped: list[str], held: list[str]
+        self, last_err: Exception | None, skipped: list[str], held: list[str]
     ) -> HomeAssistantError:
         """Return the error for a call no member answered."""
-        msg = cls._all_failed(last_err, skipped, held)
+        candidates = self._probe_candidates(self._ordered_chain())
+        retry = (
+            _retry_hint(self.circuit_breaker, candidates, in_turn=True)
+            if candidates and self.circuit_breaker is not None
+            else None
+        )
+        msg = self._all_failed(last_err, skipped, held, retry)
         if held or (last_err is None and not skipped):
             # A member held until its build is checked, or none left: the
             # store's embeddings are unavailable, not failing.
@@ -1386,6 +1652,8 @@ class FallbackEmbeddings:
 
     def _record_success(self, provider_id: str) -> None:
         """Record the provider used successfully for future embedding calls."""
+        if self.circuit_breaker:
+            self.circuit_breaker.record_success(provider_id)
         self.served.add(provider_id)
         previous_provider_id = self._active_provider_id
         self._active_provider_id = provider_id
@@ -1417,39 +1685,91 @@ class FallbackEmbeddings:
 
     async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
         """Embed documents through the fallback chain."""
+        return await self._through_chain(
+            "Embedding call", lambda model: self._aembed_documents(model, texts)
+        )
+
+    async def aembed_query(self, text: str) -> list[float]:
+        """Embed a query through the fallback chain."""
+        return await self._through_chain(
+            "Embedding query", lambda model: self._aembed_query(model, text)
+        )
+
+    def _record_failure(
+        self,
+        label: str,
+        provider_id: str,
+        err: Exception,
+        place: tuple[int, int],
+        *,
+        half_open: bool,
+    ) -> None:
+        """Log and count a member's retryable failure (see chat's)."""
+        if half_open and not is_model_not_found(err):
+            # Its breaker opening was logged; an outage repeats this (#881).
+            LOGGER.debug(
+                "%s half-open try of provider %s failed: %s",
+                label,
+                provider_id,
+                _safe_err_summary(err),
+            )
+        else:
+            _log_provider_failure(label, provider_id, *place, err)
+        if self.circuit_breaker and not half_open:
+            self.circuit_breaker.record_failure(provider_id)
+
+    async def _through_chain[T](
+        self, label: str, call: Callable[[Any], Awaitable[T]]
+    ) -> T:
+        """Run `call` on each member in turn until one answers."""
+        chain = self._ordered_chain()
+        # Members to try although their breakers are open (#881).
+        probes = (
+            self.circuit_breaker.due_for_probe(
+                self._probe_candidates(chain), in_turn=True
+            )
+            if self.circuit_breaker
+            else []
+        )
         last_err: Exception | None = None
         failed_providers: list[str] = []
         skipped: list[str] = []
         held: list[str] = []
-        chain = self._ordered_chain()
         for i, (model, _deployment, provider_id) in enumerate(chain):
             # The chain can lose a member while this call runs (#860).
             if not self._is_member(provider_id):
                 continue
-            if self._is_open(provider_id):
+            if self._is_open(provider_id, probes):
                 skipped.append(provider_id)
                 continue
             if not await self._admitted(provider_id):
                 held.append(provider_id)
                 continue
+            # Closed meanwhile by another call's answer: tried as usual.
+            half_open = provider_id in probes and self._is_open(provider_id)
+            if half_open and not _begin_probe(self.circuit_breaker, provider_id):
+                skipped.append(provider_id)  # Another call is trying it.
+                continue
             admission = self._admissions.get(provider_id, 0)
             try:
-                result = await self._aembed_documents(model, texts)
+                result = await call(model)
             except Exception as err:
                 last_err = err
                 if not _is_retryable(err):
                     raise
                 failed_providers.append(provider_id)
-                _log_provider_failure(
-                    "Embedding call", provider_id, i + 1, len(chain), err
+                self._record_failure(
+                    label,
+                    provider_id,
+                    err,
+                    (i + 1, len(chain)),
+                    half_open=half_open,
                 )
-                if self.circuit_breaker:
-                    self.circuit_breaker.record_failure(provider_id)
                 continue
             else:
-                if self._removed_meanwhile("Embedding call", provider_id):
+                if self._removed_meanwhile(label, provider_id):
                     continue
-                if self._held_meanwhile("Embedding call", provider_id, admission):
+                if self._held_meanwhile(label, provider_id, admission):
                     held.append(provider_id)
                     continue
                 if failed_providers:
@@ -1459,60 +1779,10 @@ class FallbackEmbeddings:
                         provider_id,
                         ", ".join(failed_providers),
                     )
-                if self.circuit_breaker:
-                    self.circuit_breaker.record_success(provider_id)
                 self._record_success(provider_id)
                 return result
-
-        raise self._chain_error(last_err, skipped, held) from _chain_cause(last_err)
-
-    async def aembed_query(self, text: str) -> list[float]:
-        """Embed a query through the fallback chain."""
-        last_err: Exception | None = None
-        failed_providers: list[str] = []
-        skipped: list[str] = []
-        held: list[str] = []
-        chain = self._ordered_chain()
-        for i, (model, _deployment, provider_id) in enumerate(chain):
-            if not self._is_member(provider_id):
-                continue
-            if self._is_open(provider_id):
-                skipped.append(provider_id)
-                continue
-            if not await self._admitted(provider_id):
-                held.append(provider_id)
-                continue
-            admission = self._admissions.get(provider_id, 0)
-            try:
-                result = await self._aembed_query(model, text)
-            except Exception as err:
-                last_err = err
-                if not _is_retryable(err):
-                    raise
-                failed_providers.append(provider_id)
-                _log_provider_failure(
-                    "Embedding query", provider_id, i + 1, len(chain), err
-                )
-                if self.circuit_breaker:
-                    self.circuit_breaker.record_failure(provider_id)
-                continue
-            else:
-                if self._removed_meanwhile("Embedding query", provider_id):
-                    continue
-                if self._held_meanwhile("Embedding query", provider_id, admission):
-                    held.append(provider_id)
-                    continue
-                if failed_providers:
-                    LOGGER.warning(
-                        "Embedding fallback activated: provider %s succeeded "
-                        "after failed provider(s): %s",
-                        provider_id,
-                        ", ".join(failed_providers),
-                    )
-                if self.circuit_breaker:
-                    self.circuit_breaker.record_success(provider_id)
-                self._record_success(provider_id)
-                return result
+            finally:
+                _end_probe(self.circuit_breaker, provider_id, half_open=half_open)
 
         raise self._chain_error(last_err, skipped, held) from _chain_cause(last_err)
 
