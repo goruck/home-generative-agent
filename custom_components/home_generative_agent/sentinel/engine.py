@@ -7,7 +7,7 @@ import contextlib
 import fnmatch
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
@@ -118,7 +118,12 @@ from .network_inventory import (
     client_key,
     client_observation,
 )
-from .notifier import canary_line, is_security_copy, related_findings_line
+from .notifier import (
+    AlsoPartners,
+    canary_line,
+    is_security_copy,
+    related_findings_line,
+)
 from .power_enrichment import async_enrich_power_last_changed
 from .rules.alarm_disarmed_external_threat import AlarmDisarmedDuringExternalThreatRule
 from .rules.appliance_power_duration import AppliancePowerDurationRule
@@ -172,8 +177,10 @@ from .rules.zwave_inclusion_active import ZwaveInclusionActiveRule
 from .rules.zwave_insecure_security_class import ZwaveInsecureSecurityClassRule
 from .suppression import (
     SUPPRESSION_REASON_AUTONOMY_PASSIVE,
+    SUPPRESSION_REASON_ENTITY_COOLDOWN,
     SUPPRESSION_REASON_NOT_SUPPRESSED,
     SUPPRESSION_REASON_NOTIFIER_DUPLICATE,
+    SUPPRESSION_REASON_PENDING_PROMPT,
     SUPPRESSION_REASON_POLICY_BLOCKED,
     SUPPRESSION_REASON_TRIAGE_SUPPRESSED,
     SUPPRESSION_REASON_TYPE_COOLDOWN,
@@ -229,6 +236,17 @@ NETWORK_AUDIT_DISABLED_NOTE = (
     "audit'). Turn it on to run these checks."
 )
 
+
+# What may hold a constituent, its pending prompt set aside, when only its own
+# reminder clock does: a grouped push may name it and restart the clock
+# (issue #736).
+_REMINDER_CLOCK_REASONS: frozenset[str] = frozenset(
+    {
+        SUPPRESSION_REASON_NOT_SUPPRESSED,
+        SUPPRESSION_REASON_TYPE_COOLDOWN,
+        SUPPRESSION_REASON_ENTITY_COOLDOWN,
+    }
+)
 
 # Why a finding was stopped, when that stop is the user's or triage's final
 # word rather than a timing matter: a new-device alert stopped this way is
@@ -2699,6 +2717,13 @@ class SentinelEngine:
         comes due again after its cooldown instead of waiting out the prompt
         TTL behind its partner (issue #723); it is shown or named then unless
         the push is policy-blocked.
+
+        A constituent held back only by its own reminder clock (the pending
+        prompt from an earlier push, and any cooldown) may be named too when
+        it is about the shown door or window and no more severe than the shown
+        one, and then its pending prompt restarts with the push (issue #736):
+        one window's rules first alerted at different times, and would
+        otherwise each come due, and push, on its own.
         """
         suppress_kwargs = _build_suppress_kwargs(self._options, snapshot)
         effective_autonomy = (
@@ -2812,17 +2837,69 @@ class SentinelEngine:
         # A partner the policy would auto-execute or block is never named:
         # holding it would delay its action by the prompt TTL, or announce a
         # finding the policy keeps from the user.  It is shown on its own.
+        def _nameable(constituent: AnomalyFinding) -> bool:
+            return self._execution_service.evaluate_canary(
+                constituent, snapshot, effective_autonomy, now
+            ).action_policy_path not in {
+                ACTION_POLICY_AUTO_EXECUTE,
+                ACTION_POLICY_BLOCKED,
+            }
+
+        # A partner not due yet may be named by its condition when only its
+        # own reminder clock holds it (#736). Worked out after the awaits
+        # above, so a False Alarm or snooze pressed meanwhile counts.
+        def _held_by_clock(constituent: AnomalyFinding) -> bool:
+            # Only one whose pending prompt from an earlier push still runs: a
+            # new episode, or one held by another device's alert of its type,
+            # keeps its own first push.
+            if (
+                any(constituent is due for due, _reason in passing)
+                or should_suppress(
+                    self._suppression.state,
+                    constituent,
+                    now,
+                    cooldown_type,
+                    cooldown_entity,
+                    **suppress_kwargs,
+                ).reason_code
+                != SUPPRESSION_REASON_PENDING_PROMPT
+            ):
+                return False
+            # The pending prompt is checked first: set it aside to see whether
+            # a snooze, presence grace or quiet hours holds the partner too.
+            decision = should_suppress(
+                replace(self._suppression.state, pending_prompts={}),
+                constituent,
+                now,
+                cooldown_type,
+                cooldown_entity,
+                **suppress_kwargs,
+            )
+            return (
+                decision.reason_code in _REMINDER_CLOCK_REASONS
+                and false_alarm_cooldown(
+                    self._suppression.state, constituent, now, cooldown_entity
+                )
+                is None
+                # A more severe one keeps its own, louder reminder.
+                and SEVERITY_RANK.get(constituent.severity, 0)
+                <= SEVERITY_RANK.get(best.severity, 0)
+            )
+
         also_line, named = related_findings_line(
             best,
-            [
-                constituent
-                for constituent, _reason in passing
-                if constituent is not best
-                and self._execution_service.evaluate_canary(
-                    constituent, snapshot, effective_autonomy, now
-                ).action_policy_path
-                not in {ACTION_POLICY_AUTO_EXECUTE, ACTION_POLICY_BLOCKED}
-            ],
+            AlsoPartners(
+                due=[
+                    constituent
+                    for constituent, _reason in passing
+                    if constituent is not best and _nameable(constituent)
+                ],
+                held=[
+                    constituent
+                    for constituent in compound.constituent_findings
+                    if _held_by_clock(constituent) and _nameable(constituent)
+                ],
+            ),
             snapshot,
             self._options,
             self._hass,

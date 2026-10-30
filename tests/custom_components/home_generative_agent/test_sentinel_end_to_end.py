@@ -19,6 +19,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_AUTO_EXECUTION_ENABLED,
     CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS,
+    SNOOZE_PERMANENT,
 )
 from custom_components.home_generative_agent.sentinel import engine as engine_module
 from custom_components.home_generative_agent.sentinel.engine import (
@@ -40,6 +41,8 @@ from custom_components.home_generative_agent.sentinel.suppression import (
     SUPPRESSION_REASON_TRIAGE_SUPPRESSED,
     SuppressionManager,
     SuppressionState,
+    register_snooze,
+    resolve_prompt,
 )
 from custom_components.home_generative_agent.sentinel.triage import (
     TRIAGE_SUPPRESS,
@@ -1227,6 +1230,293 @@ async def test_grouped_push_keeps_an_unphrased_same_door_rule_due(
     assert notifier.calls[1]["finding"] is openings
 
 
+def _disarmed(anomaly_id: str = "disarmed-id") -> AnomalyFinding:
+    return _standing_finding(
+        anomaly_id,
+        "alarm_disarmed_open_entry",
+        severity="low",
+        entities=["binary_sensor.front_door"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_grouped_push_restarts_a_held_same_door_conditions_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    One door's rules come due together after a push about the door.
+
+    Issue #736: each rule on one open window kept the reminder clock its own
+    first alert started, so they came due one at a time and the window pushed
+    every hour or two all night. A push about the door now names a condition
+    on it that is not due yet and restarts its clock, so the next reminder
+    covers both.
+    """
+    engine, notifier, audit = _make_engine(monkeypatch, _make_snapshot())
+    suppression = cast("DummySuppression", cast("Any", engine)._suppression)
+    t0 = datetime(2025, 1, 1, 20, 0, tzinfo=UTC)
+    door = _open_door("door-id", "binary_sensor.front_door")
+    disarmed = _disarmed()
+
+    assert await _dispatch_group(engine, disarmed, at=t0)
+    t1 = t0 + timedelta(hours=1)
+    assert await _dispatch_group(engine, door, disarmed, at=t1)
+
+    assert notifier.calls[1]["finding"] is door
+    assert notifier.calls[1]["also_line"] == "Also: Front Door (alarm disarmed)"
+    assert audit.calls[-1]["named_anomaly_ids"] == ["disarmed-id"]
+    assert suppression.state.pending_prompts["disarmed-id"] == t1.isoformat()
+    # Only its prompt restarts: its device stamps, which the alarm panel's
+    # other entries share, are left as they were.
+    assert (
+        suppression.state.last_by_entity["binary_sensor.front_door"][
+            "alarm_disarmed_open_entry"
+        ]
+        == t0.isoformat()
+    )
+    # Its first clock would have run out here: nothing pushes on its own.
+    assert not await _dispatch_group(
+        engine, door, disarmed, at=t0 + timedelta(hours=4, minutes=1)
+    )
+    # Both come due together: one reminder names the other.
+    assert await _dispatch_group(
+        engine, door, disarmed, at=t1 + timedelta(hours=4, minutes=1)
+    )
+    assert notifier.calls[2]["finding"] is door
+    assert notifier.calls[2]["also_line"] == "Also: Front Door (alarm disarmed)"
+    assert len(notifier.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_grouped_push_leaves_a_snoozed_same_door_condition_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A condition the user snoozed is held by the user, not a clock.
+
+    It was snoozed after its own push, so its pending prompt still runs, and
+    that prompt is checked before the snooze: it must not hide the snooze.
+    """
+    engine, notifier, _audit = _make_engine(monkeypatch, _make_snapshot())
+    suppression = cast("DummySuppression", cast("Any", engine)._suppression)
+    t0 = datetime(2025, 1, 1, 20, 0, tzinfo=UTC)
+    disarmed = _disarmed()
+    assert await _dispatch_group(engine, disarmed, at=t0)
+    register_snooze(
+        suppression.state, "alarm_disarmed_open_entry", SNOOZE_PERMANENT, t0
+    )
+
+    t1 = t0 + timedelta(hours=1)
+    assert await _dispatch_group(
+        engine, _open_door("door-id", "binary_sensor.front_door"), disarmed, at=t1
+    )
+
+    assert notifier.calls[1]["also_line"] is None
+    assert suppression.state.pending_prompts["disarmed-id"] == t0.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_grouped_push_leaves_an_answered_condition_to_its_own_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A condition the user answered has no reminder hold to line up."""
+    engine, notifier, _audit = _make_engine(monkeypatch, _make_snapshot())
+    suppression = cast("DummySuppression", cast("Any", engine)._suppression)
+    t0 = datetime(2025, 1, 1, 20, 0, tzinfo=UTC)
+    disarmed = _disarmed()
+    assert await _dispatch_group(engine, disarmed, at=t0)
+    resolve_prompt(suppression.state, "disarmed-id")
+
+    t1 = t0 + timedelta(minutes=10)
+    assert await _dispatch_group(
+        engine, _open_door("door-id", "binary_sensor.front_door"), disarmed, at=t1
+    )
+
+    assert notifier.calls[1]["also_line"] is None
+    assert "disarmed-id" not in suppression.state.pending_prompts
+
+
+@pytest.mark.asyncio
+async def test_grouped_push_leaves_a_condition_in_presence_grace_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A condition presence grace holds is not named, prompt or not."""
+    engine, notifier, _audit = _make_engine(monkeypatch, _make_snapshot())
+    suppression = cast("DummySuppression", cast("Any", engine)._suppression)
+    t0 = datetime(2025, 1, 1, 20, 0, tzinfo=UTC)
+    door = _open_door("door-id", "binary_sensor.front_door")
+    assert await _dispatch_group(engine, door, at=t0)
+
+    t1 = t0 + timedelta(hours=1)
+    suppression.state.presence_grace_until["person.someone"] = (
+        t1 + timedelta(minutes=10)
+    ).isoformat()
+    disarmed = _standing_finding(
+        "disarmed-id",
+        "alarm_disarmed_open_entry",
+        severity="high",
+        entities=["binary_sensor.front_door"],
+    )
+    assert await _dispatch_group(engine, door, disarmed, at=t1)
+
+    assert notifier.calls[1]["finding"] is disarmed
+    assert notifier.calls[1]["also_line"] is None
+    assert suppression.state.pending_prompts["door-id"] == t0.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_grouped_push_names_an_equally_severe_held_condition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A held condition as severe as the shown one is folded in."""
+    engine, notifier, _audit = _make_engine(monkeypatch, _make_snapshot())
+    suppression = cast("DummySuppression", cast("Any", engine)._suppression)
+    t0 = datetime(2025, 1, 1, 20, 0, tzinfo=UTC)
+    disarmed = _standing_finding(
+        "disarmed-id",
+        "alarm_disarmed_open_entry",
+        severity="high",
+        entities=["binary_sensor.front_door"],
+    )
+    assert await _dispatch_group(engine, disarmed, at=t0)
+
+    t1 = t0 + timedelta(hours=1)
+    door = _open_door("door-id", "binary_sensor.front_door", confidence=0.95)
+    assert await _dispatch_group(engine, door, disarmed, at=t1)
+
+    assert notifier.calls[1]["finding"] is door
+    assert notifier.calls[1]["also_line"] == "Also: Front Door (alarm disarmed)"
+    assert suppression.state.pending_prompts["disarmed-id"] == t1.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_grouped_push_leaves_a_condition_that_never_alerted_to_its_push(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    One held only by another door's alert of its type keeps its first push.
+
+    The type cooldown is shared: the kitchen door's alarm-disarmed alert holds
+    the front door's too, though the front door's never alerted.
+    """
+    engine, notifier, _audit = _make_engine(monkeypatch, _make_snapshot())
+    suppression = cast("DummySuppression", cast("Any", engine)._suppression)
+    t0 = datetime(2025, 1, 1, 20, 0, tzinfo=UTC)
+    # The front door's own alert two days ago left its stamps, not a prompt.
+    assert await _dispatch_group(engine, _disarmed(), at=t0 - timedelta(days=2))
+    kitchen = _standing_finding(
+        "kitchen-disarmed-id",
+        "alarm_disarmed_open_entry",
+        severity="low",
+        entities=["binary_sensor.kitchen_door"],
+    )
+    assert await _dispatch_group(engine, kitchen, at=t0)
+
+    t1 = t0 + timedelta(minutes=10)
+    assert await _dispatch_group(
+        engine, _open_door("door-id", "binary_sensor.front_door"), _disarmed(), at=t1
+    )
+
+    assert notifier.calls[-1]["also_line"] is None
+    assert "disarmed-id" not in suppression.state.pending_prompts
+
+
+@pytest.mark.asyncio
+async def test_grouped_push_keeps_a_more_severe_held_condition_on_its_own_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A held condition more severe than the shown one keeps its own reminder."""
+    engine, notifier, _audit = _make_engine(monkeypatch, _make_snapshot())
+    suppression = cast("DummySuppression", cast("Any", engine)._suppression)
+    t0 = datetime(2025, 1, 1, 20, 0, tzinfo=UTC)
+    door = _open_door("door-id", "binary_sensor.front_door")
+    assert await _dispatch_group(engine, door, at=t0)
+
+    disarmed = _disarmed()
+    t1 = t0 + timedelta(hours=1)
+    assert await _dispatch_group(engine, door, disarmed, at=t1)
+
+    assert notifier.calls[1]["finding"] is disarmed
+    assert notifier.calls[1]["also_line"] is None
+    assert suppression.state.pending_prompts["door-id"] == t0.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_grouped_push_sees_a_false_alarm_pressed_while_it_was_built(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A False Alarm pressed during the push's awaits is not undone."""
+    engine, notifier, _audit = _make_engine(monkeypatch, _make_snapshot())
+    suppression = cast("DummySuppression", cast("Any", engine)._suppression)
+    t0 = datetime(2025, 1, 1, 20, 0, tzinfo=UTC)
+    disarmed = _disarmed()
+    assert await _dispatch_group(engine, disarmed, at=t0)
+
+    async def _pressed_meanwhile() -> None:
+        resolve_prompt(suppression.state, "disarmed-id")
+        suppression.state.learned_cooldown_multipliers[
+            "alarm_disarmed_open_entry:binary_sensor.front_door"
+        ] = 8
+
+    monkeypatch.setattr(suppression, "async_save", _pressed_meanwhile)
+    assert await _dispatch_group(
+        engine,
+        _open_door("door-id", "binary_sensor.front_door"),
+        disarmed,
+        at=t0 + timedelta(hours=1),
+    )
+
+    assert notifier.calls[1]["also_line"] is None
+    assert "disarmed-id" not in suppression.state.pending_prompts
+
+
+@pytest.mark.asyncio
+async def test_grouped_push_leaves_a_condition_marked_false_alarm_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cooldown a False Alarm press lengthened is not restarted or named."""
+    engine, notifier, _audit = _make_engine(monkeypatch, _make_snapshot())
+    suppression = cast("DummySuppression", cast("Any", engine)._suppression)
+    t0 = datetime(2025, 1, 1, 20, 0, tzinfo=UTC)
+    disarmed = _disarmed()
+    assert await _dispatch_group(engine, disarmed, at=t0)
+    suppression.state.learned_cooldown_multipliers[
+        "alarm_disarmed_open_entry:binary_sensor.front_door"
+    ] = 4  # The 15 min entity cooldown now holds it for an hour.
+
+    t1 = t0 + timedelta(minutes=30)
+    assert await _dispatch_group(
+        engine, _open_door("door-id", "binary_sensor.front_door"), disarmed, at=t1
+    )
+
+    assert notifier.calls[1]["also_line"] is None
+    assert suppression.state.pending_prompts["disarmed-id"] == t0.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_grouped_push_names_a_held_finding_only_by_its_condition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Another door's held finding is not named: its device alone says nothing new.
+
+    It was pushed when it first came due, and keeps its own clock.
+    """
+    engine, notifier, _audit = _make_engine(monkeypatch, _make_snapshot())
+    suppression = cast("DummySuppression", cast("Any", engine)._suppression)
+    t0 = datetime(2025, 1, 1, 20, 0, tzinfo=UTC)
+    kitchen = _open_door("kitchen-id", "binary_sensor.kitchen_door", confidence=0.5)
+    assert await _dispatch_group(engine, kitchen, at=t0)
+
+    t1 = t0 + timedelta(hours=1)
+    assert await _dispatch_group(
+        engine, _open_door("door-id", "binary_sensor.front_door"), kitchen, at=t1
+    )
+
+    assert notifier.calls[1]["also_line"] is None
+    assert suppression.state.pending_prompts["kitchen-id"] == t0.isoformat()
+
+
 @pytest.mark.asyncio
 async def test_grouped_push_never_names_a_partner_the_policy_acts_on(
     monkeypatch: pytest.MonkeyPatch,
@@ -1258,6 +1548,44 @@ async def test_grouped_push_never_names_a_partner_the_policy_acts_on(
 
     assert notifier.calls[0]["also_line"] is None
     assert "kitchen-id" not in suppression.state.pending_prompts
+
+
+@pytest.mark.asyncio
+async def test_grouped_push_never_names_a_held_condition_the_policy_acts_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A held condition bound for auto-execution keeps its own clock (#736)."""
+    engine, notifier, _audit = _make_engine(monkeypatch, _make_snapshot())
+    suppression = cast("DummySuppression", cast("Any", engine)._suppression)
+    t0 = datetime(2025, 1, 1, 20, 0, tzinfo=UTC)
+    disarmed = _disarmed()
+    assert await _dispatch_group(engine, disarmed, at=t0)
+    real = cast("Any", engine)._execution_service.evaluate_canary
+
+    def _evaluate(finding: AnomalyFinding, *args: Any) -> ActionPolicyResult:
+        result = real(finding, *args)
+        if finding is disarmed:
+            return ActionPolicyResult(
+                action_policy_path=ACTION_POLICY_AUTO_EXECUTE,
+                data_quality=result.data_quality,
+                data_quality_details={},
+                execution_id=None,
+                block_reason=None,
+            )
+        return result
+
+    monkeypatch.setattr(
+        cast("Any", engine)._execution_service, "evaluate_canary", _evaluate
+    )
+    assert await _dispatch_group(
+        engine,
+        _open_door("door-id", "binary_sensor.front_door"),
+        disarmed,
+        at=t0 + timedelta(hours=1),
+    )
+
+    assert notifier.calls[1]["also_line"] is None
+    assert suppression.state.pending_prompts["disarmed-id"] == t0.isoformat()
 
 
 @pytest.mark.asyncio
