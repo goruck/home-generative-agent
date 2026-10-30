@@ -30,6 +30,7 @@ from custom_components.home_generative_agent.sentinel.models import AnomalyFindi
 from custom_components.home_generative_agent.sentinel.notifier import (
     MAX_ALSO_LINE_CHARS,
     MAX_MOBILE_MESSAGE_CHARS,
+    AlsoPartners,
     SentinelNotifier,
     _alarm_disarmed_mobile_message,
     _alarm_disarmed_open_entry_mobile_message,
@@ -3262,7 +3263,7 @@ def _also(
 ) -> tuple[str | None, list[AnomalyFinding]]:
     return related_findings_line(
         shown,
-        related,
+        AlsoPartners(related),
         snapshot if snapshot is not None else _minimal_snapshot(),  # type: ignore[arg-type]
         options or {},
         hass,
@@ -3619,6 +3620,7 @@ async def test_grouped_push_is_never_held_for_the_burst_batch() -> None:
 
 _GARAGE = "binary_sensor.garage_and_play_room_windows"
 _PANEL = "alarm_control_panel.home_alarm"
+_KITCHEN = "binary_sensor.kitchen_bay_window_upstairs"
 
 
 def _rule_finding(
@@ -3732,6 +3734,46 @@ def test_related_line_folds_one_windows_conditions_into_one_push() -> None:
         "(alarm disarmed, open while home, open too long)"
     )
     assert {f.anomaly_id for f in named} == {"disarmed", "home", "duration"}
+
+
+def test_related_line_gives_held_conditions_only_the_room_due_ones_leave() -> None:
+    """
+    A due window is named before any held condition takes the room (#736).
+
+    Held conditions placed first pushed a due window off the line, so it got
+    its own push after its cooldown: the extra push #736 removes.
+    """
+    shown, partners = _garage_group()
+    kitchen = _rule_finding(
+        "kitchen",
+        "open_entry_at_night_when_home_window",
+        {"template_id": "open_entry_at_night_when_home", "entry_entity_id": _KITCHEN},
+        [_KITCHEN],
+    )
+    snapshot = _garage_snapshot()
+    snapshot["entities"].append(
+        {
+            **snapshot["entities"][0],
+            "entity_id": _KITCHEN,
+            "friendly_name": "Kitchen Bay Window Upstairs",
+        }
+    )
+
+    line, named = related_findings_line(
+        shown,
+        AlsoPartners(
+            due=[kitchen],
+            held=[partners["disarmed"], partners["home"], partners["duration"]],
+        ),
+        cast("Any", snapshot),
+        {},
+    )
+
+    assert line == (
+        "Also: Garage and Play Room Windows (alarm disarmed, open while home), "
+        "Kitchen Bay Window Upstairs"
+    )
+    assert {f.anomaly_id for f in named} == {"kitchen", "disarmed", "home"}
 
 
 def test_related_line_never_uses_an_approved_rules_own_label() -> None:

@@ -27,7 +27,7 @@ import math
 import re
 import unicodedata
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from homeassistant.core import callback
 from homeassistant.helpers.event import async_call_later, async_track_time_change
@@ -1733,9 +1733,17 @@ def _entity_display_name(entity_id: str, names: Mapping[str, str]) -> str | None
     return name
 
 
+class AlsoPartners(NamedTuple):
+    """The constituents a grouped push may name besides the one it shows."""
+
+    due: Sequence[AnomalyFinding]
+    # Not due yet, held back only by their own reminder clock (issue #736).
+    held: Sequence[AnomalyFinding] = ()
+
+
 def related_findings_line(
     shown: AnomalyFinding,
-    related: Sequence[AnomalyFinding],
+    partners: AlsoPartners,
     snapshot: FullStateSnapshot,
     options: Mapping[str, Any],
     hass: HomeAssistant | None = None,
@@ -1743,11 +1751,11 @@ def related_findings_line(
     """
     Return the "Also: ..." line for a grouped push and the findings it names.
 
-    A grouped push shows *shown*; the other due constituents in *related* are
-    named by their devices (issue #727), most severe first, until the line
-    reaches ``MAX_ALSO_LINE_CHARS``. The engine holds every returned finding
-    as alerted, so a finding is returned only when the push really tells the
-    user about it:
+    A grouped push shows *shown*; the other due constituents in
+    ``partners.due`` are named by their devices (issue #727), most severe
+    first, until the line reaches ``MAX_ALSO_LINE_CHARS``. The engine holds
+    every returned finding as alerted, so a finding is returned only when
+    the push really tells the user about it:
 
     * it has a device of its own, not one of *shown*'s, and every such device
       is on the line, so nothing is held without a mention. A device *shown*
@@ -1772,19 +1780,31 @@ def related_findings_line(
       another area's phone is not held after reaching the wrong one.
 
     Any other finding is left out and keeps coming due on its own.
+
+    The constituents in ``partners.held`` are not due yet, held back only by
+    their own reminder clock. One about *shown*'s door or window is named with
+    its condition like a due one (issue #736), in the room the due ones leave:
+    the engine then restarts its clock with the push, so one window's rules,
+    which first alerted at different times, come due together and make one
+    reminder instead of one push each. A held finding is never named by its device
+    alone, since that would not say what is still wrong.
     """
     names = {
         str(entity["entity_id"]): str(entity.get("friendly_name") or "").strip()
         for entity in snapshot.get("entities", [])
         if entity.get("entity_id")
     }
-    owners = _name_owners(shown, related, names)
+    owners = _name_owners(shown, partners.due, names)
     target = _resolve_notify_service(shown, snapshot, options)
-    ordered = sorted(
-        related,
-        key=lambda f: (SEVERITY_RANK.get(f.severity, 0), f.confidence),
-        reverse=True,
-    )
+
+    def _by_severity(findings: Sequence[AnomalyFinding]) -> list[AnomalyFinding]:
+        return sorted(
+            findings,
+            key=lambda f: (SEVERITY_RANK.get(f.severity, 0), f.confidence),
+            reverse=True,
+        )
+
+    ordered = _by_severity(partners.due)
     # Room for the "+N more" suffix is kept from the start: it can only grow
     # as later findings fail to fit.
     budget = MAX_ALSO_LINE_CHARS - len(
@@ -1797,6 +1817,7 @@ def related_findings_line(
         shown, ordered, snapshot, options, names, owners, budget, hass
     )
     head: list[str] = []
+    same_device: list[AnomalyFinding] = []
     if conditions is not None:
         head_text, same_device = conditions
         named.extend(same_device)
@@ -1837,6 +1858,29 @@ def related_findings_line(
         listed.update(shown_new)
         named.append(finding)
     left_out.difference_update(listed)
+    if conditions is not None and partners.held:
+        # Held conditions go in only the room the due findings left, so one
+        # never takes a due finding's place on the line (#736).
+        names_room = len(_also_text(["", *listed.values()], 0, hass)) - len(
+            _also_text([""], 0, hass)
+        )
+        with_held = _same_device_conditions(
+            shown,
+            [*ordered, *_by_severity(partners.held)],
+            snapshot,
+            options,
+            names,
+            owners,
+            budget - names_room,
+            hass,
+        )
+        if (
+            with_held is not None
+            and with_held[0]
+            and all(finding in with_held[1] for finding in same_device)
+        ):
+            head = [with_held[0]]
+            named.extend(f for f in with_held[1] if f not in same_device)
     if not head and not listed:
         # Nothing on the line: hold nothing, so a push the batch or a failed
         # delivery loses can never take a partner down with it.
