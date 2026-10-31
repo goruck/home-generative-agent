@@ -440,14 +440,19 @@ async def _setup_with_database_subentry(
     )
     entry.add_to_hass(hass)
     hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    # The domain setup HA runs before any entry: it registers the watcher.
+    assert await hga_component.async_setup(hass, {}) is True
     _patch_setup_dependencies(hass, monkeypatch, _fallback_setup_data())
     _patch_configured_database(monkeypatch, _ReachablePool)
     monkeypatch.setattr(hga_component, "_bootstrap_db_once", bootstrap)
     # The caption backfill (#706) runs on the mock pool once setup is done.
     monkeypatch.setattr(hga_component, "async_backfill_caption_cameras", _async_none)
+    # The states HA puts the entry in around a setup it runs itself.
+    entry.mock_state(hass, ConfigEntryState.SETUP_IN_PROGRESS)
     assert await cast("Any", hga_component).async_setup_entry(hass, entry) is True
     reloads = MagicMock()
     monkeypatch.setattr(hass.config_entries, "async_schedule_reload", reloads)
+    entry.mock_state(hass, ConfigEntryState.LOADED)
     return entry, reloads
 
 
@@ -526,13 +531,206 @@ async def test_a_database_deleted_during_setup_still_reloads(
         hass, monkeypatch, bootstrap=_delete_mid_setup
     )
     assert deleted
-    reloads.assert_not_called()
-
-    # HA signals the change to LOADED once setup returns.
+    # Reloaded on the change to LOADED, which the helper made; no second
+    # reload for the state changes of the reload itself.
+    reloads.assert_called_once_with(entry.entry_id)
     _signal_state_change(hass, entry)
     await hass.async_block_till_done()
 
     reloads.assert_called_once_with(entry.entry_id)
+
+
+# ---------------------------------------------------------------------------
+# a Database subentry deleted while the entry is down on it reloads it (#883)
+# ---------------------------------------------------------------------------
+
+
+async def _fail_setup_on_the_database(
+    hass: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    state: ConfigEntryState = ConfigEntryState.SETUP_RETRY,
+    while_connecting: Any = _async_none,
+) -> tuple[MockConfigEntry, MagicMock]:
+    """Set up an entry whose database is down; leave it in `state`."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={},
+        subentries_data=[
+            ConfigSubentryData(
+                data=_DB_DATA,
+                subentry_type=SUBENTRY_TYPE_DATABASE,
+                title="Database",
+                unique_id=None,
+            )
+        ],
+    )
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    assert await hga_component.async_setup(hass, {}) is True
+    _patch_setup_dependencies(hass, monkeypatch, _fallback_setup_data())
+    _patch_configured_database(monkeypatch, _UnreachablePool)
+
+    async def _unreachable(*_args: Any, **_kwargs: Any) -> None:
+        await while_connecting()
+        raise ConfigEntryNotReady
+
+    monkeypatch.setattr(hga_component, "async_check_database_reachable", _unreachable)
+    # What HA does around a setup it runs, by hand: this calls it directly.
+    entry.mock_state(hass, ConfigEntryState.SETUP_IN_PROGRESS)
+    with pytest.raises(ConfigEntryNotReady):
+        await cast("Any", hga_component).async_setup_entry(hass, entry)
+    reloads = MagicMock()
+    monkeypatch.setattr(hass.config_entries, "async_schedule_reload", reloads)
+    entry.mock_state(hass, state)
+    return entry, reloads
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "state", [ConfigEntryState.SETUP_RETRY, ConfigEntryState.SETUP_ERROR]
+)
+async def test_deleting_the_database_of_an_entry_that_is_down_reloads_it(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, state: ConfigEntryState
+) -> None:
+    """Retrying or failed on the database: the deletion reloads it at once (#883)."""
+    entry, reloads = await _fail_setup_on_the_database(hass, monkeypatch, state=state)
+
+    hass.config_entries.async_remove_subentry(entry, _database_subentry_id(entry))
+    await hass.async_block_till_done()
+
+    reloads.assert_called_once_with(entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_a_down_entrys_database_deletion_reloads_once(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reload's own state changes, and a second failed setup, add no reload."""
+    entry, reloads = await _fail_setup_on_the_database(hass, monkeypatch)
+    # A retry attempt changes nothing about the deletion.
+    entry.mock_state(hass, ConfigEntryState.SETUP_IN_PROGRESS)
+    with pytest.raises(ConfigEntryNotReady):
+        await cast("Any", hga_component).async_setup_entry(hass, entry)
+    entry.mock_state(hass, ConfigEntryState.SETUP_RETRY)
+
+    hass.config_entries.async_remove_subentry(entry, _database_subentry_id(entry))
+    _signal_state_change(hass, entry)
+    entry.mock_state(hass, ConfigEntryState.SETUP_ERROR)
+    _signal_state_change(hass, entry)
+    await hass.async_block_till_done()
+
+    reloads.assert_called_once_with(entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_a_down_entry_is_not_reloaded_for_other_changes(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A state change or an edit of the database settings is not a deletion."""
+    entry, reloads = await _fail_setup_on_the_database(hass, monkeypatch)
+    subentry = entry.subentries[_database_subentry_id(entry)]
+
+    _signal_state_change(hass, entry)
+    hass.config_entries.async_update_subentry(
+        entry, subentry, data={**_DB_DATA, CONF_HOST: "db.lan"}
+    )
+    await hass.async_block_till_done()
+
+    reloads.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_database_deleted_during_a_retry_attempt_reloads_when_it_fails(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleted while the retry waits on its connect: reloaded as it fails (#883)."""
+
+    async def _delete_while_connecting() -> None:
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        hass.config_entries.async_remove_subentry(entry, _database_subentry_id(entry))
+
+    entry, reloads = await _fail_setup_on_the_database(
+        hass, monkeypatch, while_connecting=_delete_while_connecting
+    )
+    await hass.async_block_till_done()
+
+    # Once, on the change to SETUP_RETRY that the helper made.
+    reloads.assert_called_once_with(entry.entry_id)
+    _signal_state_change(hass, entry)
+    await hass.async_block_till_done()
+    reloads.assert_called_once_with(entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_a_database_added_back_during_the_attempt_is_left_to_the_wizard(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleted and re-added (the wizard) while a setup runs: the wizard reloads."""
+
+    async def _replace_while_connecting() -> None:
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        hass.config_entries.async_remove_subentry(entry, _database_subentry_id(entry))
+        hass.config_entries.async_add_subentry(
+            entry,
+            ConfigSubentry(
+                data=MappingProxyType(_DB_DATA),
+                subentry_type=SUBENTRY_TYPE_DATABASE,
+                title="Database",
+                unique_id=None,
+            ),
+        )
+
+    entry, reloads = await _fail_setup_on_the_database(
+        hass, monkeypatch, while_connecting=_replace_while_connecting
+    )
+    _signal_state_change(hass, entry)
+    await hass.async_block_till_done()
+
+    reloads.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_database_deleted_from_an_unloaded_entry_schedules_nothing(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not loaded and not retrying: the next setup reads the entry as it is."""
+    entry, reloads = await _fail_setup_on_the_database(
+        hass, monkeypatch, state=ConfigEntryState.NOT_LOADED
+    )
+
+    hass.config_entries.async_remove_subentry(entry, _database_subentry_id(entry))
+    await hass.async_block_till_done()
+
+    reloads.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_deleting_one_entrys_database_leaves_another_down_entry_alone(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The watcher is per domain; the reload is per entry."""
+    first, reloads = await _fail_setup_on_the_database(hass, monkeypatch)
+    second = MockConfigEntry(
+        domain=DOMAIN,
+        data={},
+        subentries_data=[
+            ConfigSubentryData(
+                data=_DB_DATA,
+                subentry_type=SUBENTRY_TYPE_DATABASE,
+                title="Database",
+                unique_id=None,
+            )
+        ],
+    )
+    second.add_to_hass(hass)
+    second.mock_state(hass, ConfigEntryState.SETUP_RETRY)
+
+    hass.config_entries.async_remove_subentry(second, _database_subentry_id(second))
+    await hass.async_block_till_done()
+
+    reloads.assert_called_once_with(second.entry_id)
+    assert first.entry_id not in [c.args[0] for c in reloads.call_args_list]
 
 
 @pytest.mark.asyncio
