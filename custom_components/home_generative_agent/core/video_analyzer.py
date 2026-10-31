@@ -105,7 +105,7 @@ from .event_recording import (
     thin_frames,
 )
 from .fallback import (
-    ProviderStalledError,
+    ProviderRefusedError,
     ainvoke_dropping_unsupported_params,
     with_member_configurable,
 )
@@ -873,6 +873,7 @@ class _Metrics:
     analyzed: int = 0
     sentinel_dropped: int = 0
     timeouts: int = 0
+    refused: int = 0  # no provider was called: stalled, or every breaker open
     semaphore_timeouts: int = 0
     snapshot_failures: int = 0
     recording_frames: int = 0
@@ -1076,7 +1077,7 @@ class VideoAnalyzer:
                 "captured=%d enqueued=%d skipped_duplicate=%d "
                 "dropped_stale=%d dropped_backlog=%d analyzed=%d "
                 "sentinel_dropped=%d "
-                "timeouts=%d semaphore_timeouts=%d snapshot_failures=%d "
+                "timeouts=%d refused=%d semaphore_timeouts=%d snapshot_failures=%d "
                 "recording_frames=%d recording_failures=%d "
                 "replaced_by_recording=%d "
                 "unknown_merged=%d unknown_merge_refused_cooccurrence=%d "
@@ -1096,6 +1097,7 @@ class VideoAnalyzer:
                 m.analyzed,
                 m.sentinel_dropped,
                 m.timeouts,
+                m.refused,
                 m.semaphore_timeouts,
                 m.snapshot_failures,
                 m.recording_frames,
@@ -1591,7 +1593,7 @@ class VideoAnalyzer:
                     except TimeoutError as exc:
                         LOGGER.warning("[%s] Summary timed out: %s", camera_id, exc)
                         return None
-                    except (ValueError, ProviderStalledError) as exc:
+                    except (ValueError, ProviderRefusedError) as exc:
                         LOGGER.warning("[%s] Summary failed: %s", camera_id, exc)
                         return None
                 finally:
@@ -1610,7 +1612,7 @@ class VideoAnalyzer:
             except TimeoutError as exc:
                 LOGGER.warning("[%s] Summary timed out: %s", camera_id, exc)
                 return None
-            except (ValueError, ProviderStalledError) as exc:
+            except (ValueError, ProviderRefusedError) as exc:
                 LOGGER.warning("[%s] Summary failed: %s", camera_id, exc)
                 return None
 
@@ -2652,15 +2654,25 @@ class VideoAnalyzer:
 
         return recognized
 
+    def _count_and_log_snapshot_error(
+        self, camera_id: str, path: Path, exc: Exception
+    ) -> None:
+        """Count a frame no provider was called for, then log the error (#890)."""
+        if isinstance(exc, ProviderRefusedError):
+            self._m_inc(camera_id, "refused")
+        self._log_snapshot_error(camera_id, path, exc)
+
     def _log_snapshot_error(self, camera_id: str, path: Path, exc: Exception) -> None:
         """Log errors from snapshot processing."""
         if isinstance(exc, FileNotFoundError):
             LOGGER.warning("[%s] Snapshot not found: %s", camera_id, path)
         elif isinstance(exc, TimeoutError):
             LOGGER.warning("[%s] Image analysis timed out for %s", camera_id, path)
-        elif isinstance(exc, ProviderStalledError):
-            # Already reported once by the stall tracker (#828); a traceback
-            # per frame while it is stalled would only bury that warning.
+        elif isinstance(exc, ProviderRefusedError):
+            # Already reported once, by the stall tracker (#828) or when the
+            # breaker opened (#881); a traceback per frame for the rest of
+            # the outage would only bury that warning. The `refused` metric
+            # keeps the count (#890).
             LOGGER.debug("[%s] Skipped %s: %s", camera_id, path, exc)
         elif isinstance(exc, HomeAssistantError):
             LOGGER.error("[%s] Error analyzing %s", camera_id, path, exc_info=exc)
@@ -2806,7 +2818,7 @@ class VideoAnalyzer:
                 self._log_snapshot_error(camera_id, path, exc)
                 return {}, face_hits
         except (FileNotFoundError, HomeAssistantError, OllamaResponseError) as exc:
-            self._log_snapshot_error(camera_id, path, exc)
+            self._count_and_log_snapshot_error(camera_id, path, exc)
             return {}, face_hits
         else:
             dur_ms = (monotonic() - start_ns) * 1000.0

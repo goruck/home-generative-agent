@@ -24,6 +24,7 @@ from custom_components.home_generative_agent.core.fallback import (
     FallbackChatModel,
     FallbackVLM,
     ModelChainTimeoutError,
+    ProviderCircuitOpenError,
     ProviderStalledError,
     is_timeout_error,
     with_member_configurable,
@@ -601,12 +602,17 @@ def test_member_configurable_reads_each_providers_own_settings() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "error", [ModelChainTimeoutError("slow"), ProviderStalledError("stalled")]
+    "error",
+    [
+        ModelChainTimeoutError("slow"),
+        ProviderStalledError("stalled"),
+        ProviderCircuitOpenError("breakers open"),
+    ],
 )
 async def test_analyze_image_leaves_timeouts_and_stalls_to_the_caller(
     error: Exception,
 ) -> None:
-    """Camera analysis counts these itself; they are not an error caption."""
+    """Camera analysis counts these itself; they are not an error caption (#890)."""
     model = AsyncMock()
     model.ainvoke.side_effect = error
 
@@ -737,13 +743,16 @@ def test_member_configurable_keeps_the_sampling_rebind_sources() -> None:
     assert rebind[1] == [{"name": "t"}]
 
 
-def test_a_stalled_provider_is_not_logged_as_an_error_per_frame(
-    caplog: pytest.LogCaptureFixture,
+@pytest.mark.parametrize(
+    "error", [ProviderStalledError("stalled"), ProviderCircuitOpenError("open")]
+)
+def test_a_refused_provider_is_not_logged_as_an_error_per_frame(
+    caplog: pytest.LogCaptureFixture, error: Exception
 ) -> None:
-    """The tracker already warned once; frames skipped while stalled stay quiet."""
+    """Warned once already (stall tracker, breaker opening); frames stay quiet (#890)."""
     with caplog.at_level(logging.DEBUG):
         VideoAnalyzer._log_snapshot_error(
-            cast("VideoAnalyzer", None), "cam", Path("x.jpg"), ProviderStalledError("s")
+            cast("VideoAnalyzer", None), "cam", Path("x.jpg"), error
         )
 
     assert [r.levelno for r in caplog.records] == [logging.DEBUG]

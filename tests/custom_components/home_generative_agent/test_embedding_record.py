@@ -52,7 +52,10 @@ from custom_components.home_generative_agent.core.embedding_store import (
     EmbeddingsUnavailableError,
     UnavailableEmbeddings,
 )
-from custom_components.home_generative_agent.core.fallback import FallbackEmbeddings
+from custom_components.home_generative_agent.core.fallback import (
+    EmbeddingsCircuitOpenError,
+    FallbackEmbeddings,
+)
 from custom_components.home_generative_agent.core.utils import configured_ollama_urls
 
 from .test_fallback_setup import (
@@ -2455,6 +2458,39 @@ async def test_a_failed_embedding_is_retried_before_the_run_stops(
     embeddings.aembed_documents = AsyncMock(return_value=[])
     with pytest.raises(ValueError, match="0 vectors for 1 texts"):
         await er._embed_with_retry(embeddings, ["a"])
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_between_half_open_tries_is_retried_not_a_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every breaker open is a wait, not a stop; a held or missing chain stops (#890)."""
+    sleeps: list[float] = []
+
+    async def _sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(er.asyncio, "sleep", _sleep)
+    refused = EmbeddingsCircuitOpenError("circuit breaker is open for p1, p2")
+    embeddings = MagicMock()
+    embeddings.aembed_documents = AsyncMock(side_effect=[refused, [[1.0]]])
+
+    vectors, _took = await er._embed_with_retry(embeddings, ["a"])
+    assert vectors == [[1.0]]
+    assert sleeps == [er._RETRY_DELAYS_S[0]]
+
+    embeddings.aembed_documents = AsyncMock(side_effect=refused)
+    with pytest.raises(EmbeddingsCircuitOpenError):
+        await er._embed_with_retry(embeddings, ["a"])
+    assert sleeps == [er._RETRY_DELAYS_S[0], *er._RETRY_DELAYS_S]
+
+    sleeps.clear()
+    embeddings.aembed_documents = AsyncMock(
+        side_effect=EmbeddingsUnavailableError("held for its build check")
+    )
+    with pytest.raises(EmbeddingsUnavailableError):
+        await er._embed_with_retry(embeddings, ["a"])
+    assert sleeps == []
 
 
 @pytest.mark.asyncio

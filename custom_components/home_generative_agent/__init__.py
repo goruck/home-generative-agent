@@ -319,6 +319,7 @@ from .core.fallback import (
     FallbackChatModel,
     FallbackEmbeddings,
     FallbackVLM,
+    ProviderRefusedError,
     _safe_err_summary,
 )
 from .core.lifecycle import defer_start_until_hass_started
@@ -2005,6 +2006,12 @@ def _register_services(hass: HomeAssistant, entry: HGAConfigEntry) -> None:
             except OllamaResponseError as err:
                 msg = f"VLM analysis failed for {camera_id}: {err}"
                 raise HomeAssistantError(msg) from err
+            except ProviderRefusedError as err:
+                # No provider was called (stalled, or every breaker open):
+                # the snapshot is still published and announced, without a
+                # summary, and the other cameras are still taken (#890).
+                LOGGER.warning("VLM analysis skipped for %s: %s", camera_id, err)
+                summary = None
 
             face_hits = await video_analyzer.recognize_faces(img_bytes, camera_id)
             people: list[str] = [hit.name for hit in face_hits]

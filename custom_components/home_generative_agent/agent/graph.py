@@ -3641,12 +3641,14 @@ async def _search_memories(store: BaseStore, user_id: str, query: str | None) ->
             "recency-based memory retrieval. Check the /v1/embeddings response "
             "format of your OpenAI-compatible server."
         )
-    except EmbeddingsUnavailableError:
-        # No embedding provider can answer: none was up at setup (#751), or
-        # the fallback is held until its build is checked (#857). Each is
+    except EmbeddingsUnavailableError as err:
+        # No embedding provider can answer: none was up at setup (#751), the
+        # fallback is held until its build is checked (#857), or every
+        # provider's circuit breaker is open between tries (#890). Each is
         # logged where it happens (setup, the chain's provider failures, the
-        # build check), so recent memories without a warning per turn.
-        pass
+        # build check, the breaker opening), so recent memories without a
+        # warning per turn.
+        LOGGER.debug("Memory semantic search skipped: %s", err)
     except psycopg.DataError as err:
         LOGGER.warning(
             "Memory semantic search failed due to vector store data mismatch: %s. "
