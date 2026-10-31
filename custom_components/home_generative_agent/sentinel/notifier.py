@@ -56,6 +56,7 @@ from custom_components.home_generative_agent.sentinel.models import (
     SEMANTIC_KEY_SLUG_PREFIX,
     SEVERITY_RANK,
     enrolled_people,
+    subject_entity,
     trust_device_ids,
 )
 from custom_components.home_generative_agent.sentinel.notifier_messages import (
@@ -1273,10 +1274,21 @@ def _state_duration_subtitle(
 def _fallback_message(
     finding: AnomalyFinding, hass: HomeAssistant | None = None
 ) -> str:
+    """
+    Return the fixed body for a finding with no explanation and no template.
+
+    Names the device the finding is about (see `_subject_entity`), not the
+    first triggering entity: the motion-while-alarm-disarmed templates list
+    the alarm panel first, and "Motion at night, alarm disarmed: Home Alarm"
+    told the user nothing about where the motion was (#731).
+    """
     summary = _display_type(finding, hass)
+    subject = _subject_entity(finding) or (
+        finding.triggering_entities[0] if finding.triggering_entities else None
+    )
     entity = (
-        _friendly_entity(finding.triggering_entities[0])
-        if finding.triggering_entities
+        _friendly_entity(subject)
+        if subject
         else notif_msg(hass, "fallback_unknown_entity")
     )
     return notif_msg(
@@ -2073,21 +2085,8 @@ def _subject_text(name: str, phrases: list[str]) -> str:
 
 
 def _subject_entity(finding: AnomalyFinding) -> str | None:
-    """
-    Return the device *finding* is about, or None.
-
-    The entry an open-entry or alarm-disarmed finding names, the entity a
-    duration finding watches, else the single triggering entity. The alarm
-    panel an alarm-disarmed finding also carries is context, not subject.
-    """
-    evidence = finding.evidence
-    for key in ("entry_entity_id", "entity_id"):
-        value = evidence.get(key)
-        if isinstance(value, str) and value:
-            return value
-    if len(finding.triggering_entities) == 1:
-        return finding.triggering_entities[0]
-    return None
+    """Return the device *finding* is about (see `models.subject_entity`)."""
+    return subject_entity(finding)
 
 
 # Curated condition phrases for same-device folding, by template id (approved
@@ -2352,9 +2351,14 @@ def _persistent_message(
     if finding.type == "appliance_power_duration":
         return _appliance_power_duration_mobile_message(finding, hass)
 
-    entities = ", ".join(
-        _friendly_entity(entity) for entity in finding.triggering_entities
-    )
+    # The device the finding is about first; the context it also carries
+    # (an alarm panel, the presence entities) after it (#731).
+    subject = _subject_entity(finding)
+    ordered = [
+        *([subject] if subject in finding.triggering_entities else []),
+        *(entity for entity in finding.triggering_entities if entity != subject),
+    ]
+    entities = ", ".join(_friendly_entity(entity) for entity in ordered)
     entities = entities or notif_msg(hass, "fallback_unknown_entity")
     severity_key = _SEVERITY_WORD_KEYS.get(finding.severity)
     severity_word = notif_msg(hass, severity_key) if severity_key else finding.severity

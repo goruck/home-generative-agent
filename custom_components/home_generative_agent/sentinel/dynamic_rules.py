@@ -420,9 +420,9 @@ def _eval_motion_while_away_common(
     # Only sensors actually reporting motion are triggering entities: the
     # engine's exclusion filter drops a finding when ANY triggering entity
     # is user-excluded, so listing an idle sensor would let its exclusion
-    # silently kill a genuine alert from the sensor that fired — and
-    # notifications name triggering_entities[0] (issue #518 Codex P1;
-    # applies to the night template too).
+    # silently kill a genuine alert from the sensor that fired (issue #518
+    # Codex P1; applies to the night template too). Notifications name the
+    # first sensor reporting motion (models.motion_subject, #731).
     triggering = [
         motion_id
         for motion_id, motion in resolved.items()

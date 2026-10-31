@@ -741,3 +741,35 @@ async def test_english_still_gets_compact_fallback() -> None:
     result = await explainer.async_explain(_finding())
     assert result is not None
     assert "Urgent:" in result
+
+
+def test_compact_fallback_names_the_motion_sensor_not_the_alarm_panel() -> None:
+    """The explainer's own fallback names the same device as the notifier's (#731)."""
+    from custom_components.home_generative_agent.explain.llm_explain import (  # noqa: PLC0415
+        _compact_fallback,
+    )
+    from custom_components.home_generative_agent.sentinel.models import (  # noqa: PLC0415
+        AnomalyFinding,
+    )
+
+    finding = AnomalyFinding(
+        anomaly_id="m1",
+        type="motion_at_night_disarmed",
+        severity="low",
+        confidence=0.6,
+        triggering_entities=[
+            "alarm_control_panel.home_alarm",
+            "binary_sensor.backyard_motion",
+        ],
+        evidence={
+            "template_id": "motion_detected_at_night_while_alarm_disarmed",
+            "alarm_entity_id": "alarm_control_panel.home_alarm",
+            "motion_entity_ids": ["binary_sensor.backyard_motion"],
+            "motion_states": {"binary_sensor.backyard_motion": "on"},
+        },
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+    text = _compact_fallback(finding)
+    assert text.startswith("Motion at night, alarm disarmed: Backyard Motion.")
+    assert "Home Alarm" not in text

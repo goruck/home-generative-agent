@@ -19,6 +19,7 @@ from custom_components.home_generative_agent.sentinel.models import (
     RULE_NAMED_TEMPLATES,
     SEMANTIC_KEY_SLUG_PREFIX,
     enrolled_people,
+    subject_entity,
 )
 from custom_components.home_generative_agent.sentinel.redaction import (
     redact_network_identifiers,
@@ -271,10 +272,21 @@ def _friendly_entity(entity_id: str) -> str:
 
 
 def _compact_fallback(finding: AnomalyFinding) -> str:
+    """
+    Return the fixed text used when the model's answer is empty or too long.
+
+    Names the device the finding is about (`subject_entity`), as the
+    notifier's own fallback does: a motion-while-disarmed finding lists the
+    alarm panel first, and this text once named it instead of the motion
+    sensor, on the push and in the panel alike (#731).
+    """
     summary = _display_type(finding)
     entity = "an entry"
-    if finding.triggering_entities:
-        entity = _friendly_entity(finding.triggering_entities[0])
+    subject = subject_entity(finding) or (
+        finding.triggering_entities[0] if finding.triggering_entities else None
+    )
+    if subject:
+        entity = _friendly_entity(subject)
     message = f"{summary}: {entity}. {_severity_action_hint(finding.severity)}"
     return message[:MAX_EXPLANATION_CHARS].rstrip()
 
