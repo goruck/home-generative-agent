@@ -3868,6 +3868,155 @@ def _garage_group() -> tuple[AnomalyFinding, dict[str, AnomalyFinding]]:
     return shown, partners
 
 
+def _motion_finding(
+    motion_states: dict[str, str] | None,
+    *,
+    template_id: str = "motion_detected_at_night_while_alarm_disarmed",
+) -> AnomalyFinding:
+    """Return a motion-while-disarmed finding as its template builds it: panel first."""
+    motion_ids = (
+        list(motion_states) if motion_states else ["binary_sensor.backyard_motion"]
+    )
+    evidence: dict[str, Any] = {
+        "template_id": template_id,
+        "alarm_entity_id": _PANEL,
+        "alarm_state": "disarmed",
+        "motion_entity_ids": motion_ids,
+    }
+    if motion_states is not None:
+        evidence["motion_states"] = motion_states
+    return _rule_finding(
+        "motion", "motion_at_night_disarmed", evidence, [_PANEL, *motion_ids], "low"
+    )
+
+
+def test_motion_fallback_text_names_the_motion_not_the_alarm_panel() -> None:
+    """The panel is context; the push says where the motion was (#731)."""
+    finding = _motion_finding({"binary_sensor.backyard_motion": "on"})
+    body = _notifier_mod._fallback_message(finding)
+    assert body.startswith("Motion at night, alarm disarmed: Backyard Motion.")
+    assert "Home Alarm" not in body
+    assert _mobile_message(None, finding).startswith(
+        "Motion at night, alarm disarmed: Backyard Motion."
+    )
+
+
+def test_motion_fallback_names_the_sensor_that_is_on() -> None:
+    """Two sensors watched, the second one tripped: the second is named."""
+    finding = _motion_finding(
+        {
+            "binary_sensor.front_gate_motion": "off",
+            "binary_sensor.backyard_motion": "on",
+        }
+    )
+    assert _notifier_mod._subject_entity(finding) == "binary_sensor.backyard_motion"
+    assert "Backyard Motion" in _notifier_mod._fallback_message(finding)
+    # Without states (an older stored finding) the first listed sensor is named.
+    assert _notifier_mod._subject_entity(_motion_finding(None)) == (
+        "binary_sensor.backyard_motion"
+    )
+
+
+def test_motion_persistent_fallback_lists_the_motion_before_the_panel() -> None:
+    finding = _motion_finding({"binary_sensor.backyard_motion": "on"})
+    persistent = _persistent_message(None, finding)
+    assert persistent.index("Backyard Motion") < persistent.index("Home Alarm")
+
+
+def test_motion_home_present_persistent_lists_motion_before_panel_and_person() -> None:
+    """The home-present template: motion first, then the panel and presence (#731)."""
+    finding = _rule_finding(
+        "home_present",
+        "motion_while_disarmed_home",
+        {
+            "template_id": "motion_while_alarm_disarmed_and_home_present",
+            "alarm_entity_id": _PANEL,
+            "alarm_state": "disarmed",
+            "motion_entity_ids": ["binary_sensor.backyard_motion"],
+            "motion_states": {"binary_sensor.backyard_motion": "on"},
+            "home_entity_ids": ["person.lindo"],
+            "home_states": {"person.lindo": "home"},
+        },
+        [_PANEL, "binary_sensor.backyard_motion", "person.lindo"],
+        "low",
+    )
+    assert _notifier_mod._subject_entity(finding) == "binary_sensor.backyard_motion"
+    assert "Backyard Motion" in _notifier_mod._fallback_message(finding)
+    persistent = _persistent_message(None, finding)
+    assert (
+        persistent.index("Backyard Motion")
+        < persistent.index("Home Alarm")
+        < persistent.index("Lindo")
+    )
+
+
+def test_motion_away_subject_is_the_tripped_sensor_not_the_first_configured() -> None:
+    """The away templates list every configured sensor but trigger on the tripped ones."""
+    finding = _rule_finding(
+        "away",
+        "motion_while_away",
+        {
+            "template_id": "motion_detected_while_away",
+            "anyone_home": False,
+            "motion_entity_ids": [
+                "binary_sensor.front_gate_motion",
+                "binary_sensor.backyard_motion",
+            ],
+            "motion_states": {
+                "binary_sensor.front_gate_motion": "off",
+                "binary_sensor.backyard_motion": "on",
+            },
+            "unresolved_entity_ids": [],
+        },
+        ["binary_sensor.backyard_motion"],
+        "medium",
+    )
+    subject = _notifier_mod._subject_entity(finding)
+    assert subject == "binary_sensor.backyard_motion"
+    assert subject in finding.triggering_entities
+
+
+@pytest.mark.parametrize(
+    ("evidence", "expected"),
+    [
+        ({"motion_entity_ids": "binary_sensor.x"}, None),
+        ({"motion_entity_ids": [["nested"], 5, None]}, None),
+        (
+            {"motion_entity_ids": ["binary_sensor.idle", "binary_sensor.x"]},
+            "binary_sensor.x",
+        ),
+        (
+            {
+                "motion_entity_ids": ["binary_sensor.idle", "binary_sensor.x"],
+                "motion_states": ["on"],
+            },
+            "binary_sensor.x",
+        ),
+    ],
+)
+def test_motion_subject_survives_odd_stored_evidence(
+    evidence: dict[str, Any], expected: str | None
+) -> None:
+    """A hand-edited rule's evidence neither raises nor names an untripped sensor."""
+    finding = _rule_finding(
+        "odd", "motion_at_night_disarmed", evidence, [_PANEL, "binary_sensor.x"]
+    )
+    assert _notifier_mod._subject_entity(finding) == expected
+
+
+def test_fallback_text_still_names_the_first_entity_without_a_subject() -> None:
+    """A multi-entity finding with no nameable subject reads as before."""
+    finding = _rule_finding(
+        "two",
+        "multiple_openings_simultaneous",
+        {"template_id": "multiple_entries_open"},
+        ["binary_sensor.garage_door", _GARAGE],
+        "high",
+    )
+    assert _notifier_mod._subject_entity(finding) is None
+    assert "Garage Door" in _notifier_mod._fallback_message(finding)
+
+
 def _garage_snapshot(
     friendly_name: str = "Garage and Play Room Windows",
     device_class: str | None = "window",
@@ -4145,6 +4294,65 @@ def test_related_line_refuses_a_name_that_looks_like_conditions() -> None:
         [partners["disarmed"]],
         _garage_snapshot(friendly_name="Garage Window (open too long)"),
     )
+
+    assert line is None
+    assert named == []
+
+
+def test_a_motion_rule_on_a_door_folds_an_open_entry_push_about_that_door() -> None:
+    """
+    A motion finding can head a fold since #731: its subject is its sensor.
+
+    Only when that sensor is a door or window device with a partner whose
+    curated phrase is true of it; the phrase names the device the push is
+    about, so the fold is the design's intent.
+    """
+    shown = _rule_finding(
+        "motion",
+        "motion_at_night_disarmed",
+        {
+            "template_id": "motion_detected_at_night_while_alarm_disarmed",
+            "alarm_entity_id": _PANEL,
+            "motion_entity_ids": [_GARAGE],
+            "motion_states": {_GARAGE: "on"},
+        },
+        [_PANEL, _GARAGE],
+        "low",
+    )
+    _shown, partners = _garage_group()
+
+    line, named = _also(shown, [partners["home"]], _garage_snapshot())
+
+    assert line == "Also: Garage and Play Room Windows (open while home)"
+    assert [f.anomaly_id for f in named] == ["home"]
+
+
+def test_a_motion_rule_on_a_motion_sensor_folds_nothing() -> None:
+    """An ordinary motion sensor has no curated phrase: the line is as before #731."""
+    shown = _rule_finding(
+        "motion",
+        "motion_at_night_disarmed",
+        {
+            "template_id": "motion_detected_at_night_while_alarm_disarmed",
+            "alarm_entity_id": _PANEL,
+            "motion_entity_ids": ["binary_sensor.backyard_motion"],
+            "motion_states": {"binary_sensor.backyard_motion": "on"},
+        },
+        [_PANEL, "binary_sensor.backyard_motion"],
+        "low",
+    )
+    snapshot = _garage_snapshot()
+    snapshot["entities"].append(
+        {
+            **snapshot["entities"][0],
+            "entity_id": "binary_sensor.backyard_motion",
+            "friendly_name": "Backyard Motion",
+            "attributes": {"device_class": "motion"},
+        }
+    )
+    _shown, partners = _garage_group()
+
+    line, named = _also(shown, list(partners.values()), snapshot)
 
     assert line is None
     assert named == []

@@ -15,7 +15,10 @@ from custom_components.home_generative_agent.const import (
     DOMAIN,
 )
 from custom_components.home_generative_agent.core.utils import extract_final
-from custom_components.home_generative_agent.sentinel.models import trust_device_ids
+from custom_components.home_generative_agent.sentinel.models import (
+    subject_entity,
+    trust_device_ids,
+)
 from custom_components.home_generative_agent.sentinel.suppression import (
     SuppressionManager,
     record_cooldown_feedback,
@@ -367,7 +370,8 @@ def _build_execute_prompt(finding: AnomalyFinding) -> str:
     """Build a natural-language prompt for non-sensitive execute actions."""
     if finding.evidence.get("template_id") == "entity_staleness":
         return _build_entity_staleness_execute_prompt(finding)
-    entity_id = finding.evidence.get("entity_id") or (
+    # The device the push named (#731): the agent is told the same primary.
+    entity_id = subject_entity(finding) or (
         finding.triggering_entities[0] if finding.triggering_entities else None
     )
     friendly = finding.evidence.get("friendly_name") or (
@@ -411,7 +415,8 @@ def _build_execute_prompt(finding: AnomalyFinding) -> str:
 
 def _build_ask_prompt(finding: AnomalyFinding) -> str:
     """Build a natural-language prompt from a finding for agent handoff."""
-    entity_id = finding.evidence.get("entity_id") or (
+    # The device the push named (#731): the agent is told the same primary.
+    entity_id = subject_entity(finding) or (
         finding.triggering_entities[0] if finding.triggering_entities else None
     )
     friendly = finding.evidence.get("friendly_name") or (

@@ -1153,6 +1153,20 @@ Also: `_anomaly_type_for_state` attributes every image-entity wake-up to `unknow
 
 ---
 
+### The dynamic-rule params patch service copies `params` with no shape check
+
+**What:** The service that patches an approved rule's params (`__init__.py`, the `params` handler around `_async_patch_rule_params`) copies `call.data["params"]` as given. A `motion_entity_ids` holding a nested list makes `entity_map.get(list)` raise `TypeError` inside `_eval_motion_detected_at_night_while_alarm_disarmed` or `_eval_motion_while_alarm_disarmed_and_home_present` (`sentinel/dynamic_rules.py`, `_resolve_required_entities`), which aborts the whole dynamic-rules pass for that cycle; the away evaluator already `isinstance`-guards its ids. The notification side is guarded since #731 (`sentinel/models.py` `motion_subject` keeps string ids only).
+
+**Why:** Claude adversarial pass in the #731 review (2026-10-31); pre-existing and outside that diff.
+
+**How to apply:** Validate the patched params against the template's schema (lists of entity-id strings, a single alarm id) in the service before saving, and have `_resolve_required_entities` skip non-string ids like the away evaluator does. Pin with a test that patches a nested list and asserts the cycle's other rules still evaluate.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ## Sentinel Network Audit
 
 ### Network security plan steps 7–11 (router adapters, redaction, audit tool)

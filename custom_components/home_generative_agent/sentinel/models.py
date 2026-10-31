@@ -352,6 +352,55 @@ class CompoundFinding:
 type Finding = AnomalyFinding | CompoundFinding
 
 
+def subject_entity(finding: AnomalyFinding) -> str | None:
+    """
+    Return the device *finding* is about, or None.
+
+    The entry an open-entry or alarm-disarmed finding names, the entity a
+    duration finding watches, the motion sensor a motion finding saw (#731),
+    else the single triggering entity. The alarm panel an alarm-disarmed or
+    motion-while-disarmed finding also carries is context, not subject.
+    Shared by the notifier's fallback copy, the explainer's compact fallback
+    and the Ask/Execute prompts, so every text about one finding names the
+    same device.
+    """
+    evidence = finding.evidence
+    for key in ("entry_entity_id", "entity_id"):
+        value = evidence.get(key)
+        if isinstance(value, str) and value:
+            return value
+    if (motion := motion_subject(finding)) is not None:
+        return motion
+    if len(finding.triggering_entities) == 1:
+        return finding.triggering_entities[0]
+    return None
+
+
+def motion_subject(finding: AnomalyFinding) -> str | None:
+    """
+    Return the motion sensor a motion finding is about, or None.
+
+    The templates that watch motion (at night while the alarm is disarmed,
+    while away, while home) carry their sensors as `motion_entity_ids` with
+    `motion_states`: the first sensor that is on, else the first listed
+    among the triggering entities, else the first listed. Only string ids
+    count, so a stored rule's odd evidence cannot raise here or name a
+    device that is not one. A finding without that evidence is not a
+    motion finding.
+    """
+    raw = finding.evidence.get("motion_entity_ids")
+    ids = [i for i in raw if isinstance(i, str) and i] if isinstance(raw, list) else []
+    if not ids:
+        return None
+    states = finding.evidence.get("motion_states")
+    if isinstance(states, dict):
+        for motion_id in ids:
+            if states.get(motion_id) == "on":
+                return motion_id
+    triggering = set(finding.triggering_entities)
+    return next((i for i in ids if i in triggering), ids[0])
+
+
 def trust_device_ids(finding: AnomalyFinding) -> list[str]:
     """
     Return the inventory ids a trust finding names, strings only.

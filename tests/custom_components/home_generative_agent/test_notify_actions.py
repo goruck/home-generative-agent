@@ -944,3 +944,34 @@ async def test_trust_action_reports_a_failed_save() -> None:
     inventory.async_set_trusted = _fail  # type: ignore[method-assign]
     await handler.handle_action(f"{ACTION_PREFIX}trust_new-1", {}, user_id="admin")
     assert audit.updates[0]["outcome"] == {"status": "save_failed"}
+
+
+def test_prompts_name_the_motion_sensor_as_the_primary_device() -> None:
+    """Ask and Execute tell the agent about the device the push named (#731)."""
+    from custom_components.home_generative_agent.sentinel.models import (  # noqa: PLC0415
+        AnomalyFinding,
+    )
+
+    finding = AnomalyFinding(
+        anomaly_id="m1",
+        type="motion_at_night_disarmed",
+        severity="low",
+        confidence=0.6,
+        triggering_entities=[
+            "alarm_control_panel.home_alarm",
+            "binary_sensor.backyard_motion",
+        ],
+        evidence={
+            "template_id": "motion_detected_at_night_while_alarm_disarmed",
+            "motion_entity_ids": ["binary_sensor.backyard_motion"],
+            "motion_states": {"binary_sensor.backyard_motion": "on"},
+        },
+        suggested_actions=["arm_alarm"],
+        is_sensitive=False,
+    )
+    for prompt in (_build_ask_prompt(finding), _build_execute_prompt(finding)):
+        assert (
+            "Primary device: Backyard Motion (entity_id: binary_sensor.backyard_motion)"
+            in prompt
+        )
+        assert "Also involved: alarm_control_panel.home_alarm" in prompt
