@@ -18,11 +18,15 @@ from custom_components.home_generative_agent.const import EMBEDDING_MODEL_DIMS
 from custom_components.home_generative_agent.core.fallback import (
     DROPPABLE_SAMPLING_PARAMS,
     CircuitBreaker,
+    EmbeddingsCircuitOpenError,
     EmbeddingsUnavailableError,
     FallbackChatModel,
     FallbackEmbeddings,
     FallbackVLM,
+    ProviderCircuitOpenError,
+    ProviderRefusedError,
     _is_retryable,
+    _no_member_error,
     ainvoke_dropping_unsupported_params,
     invoke_dropping_unsupported_params,
     is_model_not_found,
@@ -770,7 +774,11 @@ async def test_fallback_embeddings_a_lone_member_ignores_its_open_breaker(
         chain=[(primary, "edge", "p1"), (fallback, "edge", "p2")],
         circuit_breaker=breaker,
     )
-    with pytest.raises(HomeAssistantError, match="circuit breaker is open for p1, p2"):
+    # Nothing failed this call: memory search falls back to recent memories
+    # quietly, and a re-embed waits for the next try (#890).
+    with pytest.raises(
+        EmbeddingsCircuitOpenError, match="circuit breaker is open for p1, p2"
+    ):
         await _call(emb, method)
 
     assert emb.remove_provider("p2")
@@ -905,11 +913,59 @@ async def test_fallback_chat_all_circuit_broken_reports_no_provider() -> None:
         await model.ainvoke(["hello"])
     primary.ainvoke.assert_awaited_once()
     fallback.ainvoke.assert_awaited_once()
-    # Then neither is due: the call is refused at once, and says why.
+    # Then neither is due: the call is refused at once, and says why, as its
+    # own type so per-frame and per-turn callers keep it quiet (#890).
     with pytest.raises(
-        HomeAssistantError,
+        ProviderCircuitOpenError,
         match=r"No LLM provider was tried: p1, p2 failed repeatedly, so their "
         r"circuit breakers are open\. One is tried again in \d+ s\.",
+    ):
+        await model.ainvoke(["hello"])
+    assert primary.ainvoke.await_count == 1
+    assert fallback.ainvoke.await_count == 1
+
+
+def test_a_refusal_whose_breakers_closed_meanwhile_is_still_a_refusal() -> None:
+    """Found open, closed by another call's try before the error is built (#890)."""
+    breaker = MagicMock()
+    breaker.is_available.return_value = True
+    chain = [(MagicMock(), "edge", "p1"), (MagicMock(), "cloud", "p2")]
+
+    err = _no_member_error(chain, "VLM", breaker, None)
+
+    assert isinstance(err, ProviderCircuitOpenError)
+    assert isinstance(err, ProviderRefusedError)
+    assert "No VLM provider was tried" in str(err)
+    assert "have closed since" in str(err)
+
+
+def test_a_refusal_without_a_breaker_is_the_chain_error() -> None:
+    """No breaker, nothing stalled: the plain exhausted-chain error, as before."""
+    chain = [(MagicMock(), "edge", "p1")]
+
+    err = _no_member_error(chain, "LLM", None, None)
+
+    assert not isinstance(err, ProviderRefusedError)
+    assert "All LLM providers failed" in str(err)
+
+
+@pytest.mark.asyncio
+async def test_fallback_vlm_all_circuit_broken_refuses_as_circuit_open() -> None:
+    """A camera frame between tries gets the breaker refusal type (#890)."""
+    primary = AsyncMock()
+    primary.ainvoke.side_effect = TimeoutError()
+    fallback = AsyncMock()
+    fallback.ainvoke.side_effect = TimeoutError()
+    model = FallbackVLM(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        circuit_breaker=_all_open(),
+    )
+    with pytest.raises(HomeAssistantError, match="All VLM providers failed"):
+        await model.ainvoke(["hello"])
+
+    with pytest.raises(
+        ProviderCircuitOpenError,
+        match=r"No VLM provider was tried: p1, p2 failed repeatedly",
     ):
         await model.ainvoke(["hello"])
     assert primary.ainvoke.await_count == 1
@@ -1307,13 +1363,40 @@ async def test_an_embedding_refusal_says_when_one_is_tried_again(
         await _call(emb, method)
     clock[0] += 4.0
 
+    # Refused with nothing failed: memory search falls back to recent
+    # memories without a traceback, and a re-embed waits for the try (#890).
     with pytest.raises(
-        HomeAssistantError,
+        EmbeddingsCircuitOpenError,
         match=r"circuit breaker is open for p1, p2 \(one is tried again in 6 s\)",
     ):
         await _call(emb, method)
     assert getattr(primary, method).await_count == 1
     assert getattr(fallback, method).await_count == 1
+
+
+@pytest.mark.parametrize("method", ["aembed_documents", "aembed_query"])
+@pytest.mark.asyncio
+async def test_an_embedding_call_whose_try_another_call_holds_is_refused_quietly(
+    method: str,
+) -> None:
+    """Both due, both being tried by another call: nothing failed here (#890)."""
+    primary, fallback = AsyncMock(), AsyncMock()
+    breaker = MagicMock()
+    breaker.is_available.return_value = False
+    breaker.due_for_probe.return_value = ["p1", "p2"]
+    breaker.begin_probe.return_value = False  # Another call's try is waiting.
+    breaker.next_probe_in.return_value = None
+    emb = FallbackEmbeddings(
+        chain=[(primary, "edge", "p1"), (fallback, "edge", "p2")],
+        circuit_breaker=breaker,
+    )
+    with pytest.raises(
+        EmbeddingsCircuitOpenError,
+        match=r"circuit breaker is open for p1, p2 \(one is being tried now\)",
+    ):
+        await _call(emb, method)
+    getattr(primary, method).assert_not_awaited()
+    getattr(fallback, method).assert_not_awaited()
 
 
 @pytest.mark.asyncio

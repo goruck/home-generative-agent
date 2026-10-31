@@ -612,6 +612,17 @@ class EmbeddingsUnavailableError(HomeAssistantError):
     """
 
 
+class EmbeddingsCircuitOpenError(EmbeddingsUnavailableError):
+    """
+    Every embedding provider is held out by its circuit breaker; nothing was called.
+
+    Refused at once between half-open tries (#881). Memory search falls back
+    to recent memories as for any unavailable chain, but a re-embed does not
+    stop: a provider is tried again within seconds, so it waits and tries
+    again as it does after a failed call (#890).
+    """
+
+
 class ModelChainTimeoutError(HomeAssistantError, TimeoutError):
     """
     Every provider tried timed out.
@@ -622,12 +633,33 @@ class ModelChainTimeoutError(HomeAssistantError, TimeoutError):
     """
 
 
-class ProviderStalledError(HomeAssistantError):
+class ProviderRefusedError(HomeAssistantError):
+    """
+    The chain refused the call at once; no provider was called.
+
+    The outage was reported once already, when the provider stalled (#828)
+    or its breaker opened (#881), and during an outage most calls end here.
+    Callers that run per frame or per turn catch this one type and keep it
+    quiet: a debug line or a warning with the reason, never a traceback or
+    an error caption (#890).
+    """
+
+
+class ProviderStalledError(ProviderRefusedError):
     """
     Every usable provider in the chain is stalled; nothing was called.
 
     Not a TimeoutError: the call failed at once, and its message names the
     stalled provider so the user is told what is wrong (#828).
+    """
+
+
+class ProviderCircuitOpenError(ProviderRefusedError):
+    """
+    Every provider in the chain is held out by its circuit breaker; nothing was called.
+
+    Refused at once between half-open tries (#881), or because another
+    call's try closed the breakers after this call found them open (#890).
     """
 
 
@@ -733,7 +765,8 @@ def _no_member_error(
     Return the error for a call no member could be tried for.
 
     Stalled members are named as before (#828); otherwise the providers
-    whose circuit breakers are open, and when one is tried again (#881).
+    whose circuit breakers are open, and when one is tried again (#881), as
+    a `ProviderCircuitOpenError` so callers can keep it quiet (#890).
     """
     if stalled := _stalled_chain_error(chain, stall_tracker):
         return stalled
@@ -742,15 +775,24 @@ def _no_member_error(
         for _model, _deployment, provider_id in chain
         if circuit_breaker and not circuit_breaker.is_available(provider_id)
     ]
-    if not ids or circuit_breaker is None:
+    if circuit_breaker is None:
         return _chain_error(chain, kind, None)
+    if not ids:
+        # Open when this call looked, closed since by another call's
+        # half-open try answering: nothing was called, and the next call is
+        # tried as usual (#890).
+        msg = (
+            f"No {kind} provider was tried: its providers' circuit breakers "
+            "were open and have closed since. The next call is tried as usual."
+        )
+        return ProviderCircuitOpenError(msg)
     names = [stall_tracker.name(p) if stall_tracker else p for p in ids]
     hint = _retry_hint(circuit_breaker, ids)
     msg = (
         f"No {kind} provider was tried: {', '.join(names)} failed repeatedly, "
         f"so their circuit breakers are open. {hint[0].upper()}{hint[1:]}."
     )
-    return HomeAssistantError(msg)
+    return ProviderCircuitOpenError(msg)
 
 
 def _exhausted_error(
@@ -1587,6 +1629,12 @@ class FallbackEmbeddings:
             # A member held until its build is checked, or none left: the
             # store's embeddings are unavailable, not failing.
             return EmbeddingsUnavailableError(msg)
+        if last_err is None:
+            # Every member held out by its breaker between tries, or being
+            # tried by another call: nothing failed this call, so memory
+            # search falls back to recent memories without a traceback, and
+            # a re-embed waits for the next try instead of stopping (#890).
+            return EmbeddingsCircuitOpenError(msg)
         return HomeAssistantError(msg)
 
     def _held_meanwhile(self, label: str, provider_id: str, admission: int) -> bool:

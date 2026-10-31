@@ -68,7 +68,11 @@ from .embedding_store import (
     OLLAMA,
     UnavailableEmbeddings,
 )
-from .fallback import EmbeddingsUnavailableError, FallbackEmbeddings
+from .fallback import (
+    EmbeddingsCircuitOpenError,
+    EmbeddingsUnavailableError,
+    FallbackEmbeddings,
+)
 from .utils import (
     builds_differ,
     fetch_ollama_model_digest,
@@ -1492,22 +1496,29 @@ async def _embed_with_retry(
         try:
             async with asyncio.timeout(_EMBED_TIMEOUT_S):
                 vectors = await generate_embeddings(embeddings, texts)
+        except EmbeddingsCircuitOpenError as err:
+            # Refused between half-open tries (#890): a provider is tried
+            # again within seconds, so this waits like a failed call would.
+            if delay is None:
+                raise
+            failed: Exception = err
         except EmbeddingsUnavailableError:
             raise
         except Exception as err:
             # An input rejected stays rejected: straight to one text at a time.
             if delay is None or _rejects_the_input(err):
                 raise
-            LOGGER.warning(
-                "Re-embedding the memory store: embedding failed (%s); "
-                "trying again in %d s.",
-                type(err).__name__,
-                delay,
-            )
-            await asyncio.sleep(delay)
-            continue
-        took = time.monotonic() - started
-        return _checked_vectors(vectors, len(texts)), took
+            failed = err
+        else:
+            took = time.monotonic() - started
+            return _checked_vectors(vectors, len(texts)), took
+        LOGGER.warning(
+            "Re-embedding the memory store: embedding failed (%s); "
+            "trying again in %d s.",
+            type(failed).__name__,
+            delay,
+        )
+        await asyncio.sleep(delay)
     raise AssertionError  # unreachable: the last attempt returns or raises
 
 

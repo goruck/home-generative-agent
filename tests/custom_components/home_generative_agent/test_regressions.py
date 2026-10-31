@@ -37,6 +37,9 @@ from custom_components.home_generative_agent.agent.graph import (
     _tool_loop_guard,
 )
 from custom_components.home_generative_agent.const import SIGNAL_HGA_RECOGNIZED
+from custom_components.home_generative_agent.core.fallback import (
+    EmbeddingsUnavailableError,
+)
 from custom_components.home_generative_agent.core.image_entity import LastEventImage
 from custom_components.home_generative_agent.core.person_gallery import PersonGalleryDAO
 from custom_components.home_generative_agent.core.recognized_sensor import (
@@ -654,6 +657,33 @@ async def test_search_memories_falls_back_to_recency_on_attribute_error(
     assert result is fallback
     assert "incompatible response" in caplog.text
     # Second call must omit query= (recency-only)
+    _, recency_kwargs = store.asearch.call_args_list[1]
+    assert "query" not in recency_kwargs
+
+
+@pytest.mark.asyncio
+async def test_search_memories_falls_back_quietly_while_breakers_are_open(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A refusal between half-open tries still injects recent memories (#890)."""
+    store = MagicMock()
+    fallback = [MagicMock()]
+    store.asearch = AsyncMock(
+        side_effect=[
+            EmbeddingsUnavailableError(
+                "No embedding provider was tried: the circuit breaker is open "
+                "for p1 (one is tried again in 6 s)"
+            ),
+            fallback,
+        ]
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        result = await _search_memories(store, "user-1", "some query")
+
+    assert result is fallback
+    assert all(r.levelno == logging.DEBUG for r in caplog.records)
+    assert "circuit breaker is open" in caplog.text
     _, recency_kwargs = store.asearch.call_args_list[1]
     assert "query" not in recency_kwargs
 
