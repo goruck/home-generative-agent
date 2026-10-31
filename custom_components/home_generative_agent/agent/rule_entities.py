@@ -80,12 +80,23 @@ while the group is unavailable), else from the group helper's config entry. A
 group helper whose members cannot be read is held. Membership and device
 class are read when the check runs: a member added to a group after an
 automation is written is not checked again.
+
+The security audit reads the same index through ``audit_reach`` (#793): the
+entities the index knows to be sensitive that their snapshot state does not
+show, the groups holding a sensitive entity, and the groups it could not read
+in full. It reports where the PIN gates, so it follows only the groups whose
+member list Home Assistant wrote itself (a group helper, or a ZHA or MQTT
+group publishing ``group_entities``) in the member's domain: a voice
+assistant drives an old-style ``group.*`` through ``homeassistant.turn_on``,
+which skips covers and locks, and an ``entity_id`` attribute on anything else
+is a reference. It skips the switch wrappers and template drives (#898).
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.const import (
@@ -104,7 +115,7 @@ from .template_actions import action_scripts, driven_entities, template_entities
 LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Collection, Iterable, Mapping
 
     from homeassistant.core import HomeAssistant, State
 
@@ -113,6 +124,11 @@ if TYPE_CHECKING:
 _ATTR_GROUP_ENTITIES = "group_entities"
 # The integration whose entities are group helpers (cover, light, ... groups).
 _GROUP_PLATFORM = "group"
+# Who is reading the index: the PIN gate logs an unreadable entity with its
+# traceback (it is held); the audit reads every cycle, so it logs once.
+_PIN_PURPOSE = "Critical Action PIN"
+_AUDIT_PURPOSE = "Security audit"
+_LOGGED_UNREADABLE: set[tuple[str, str, str]] = set()
 # Scenes and scripts list the entities they set in `entity_id` too, but they
 # are opened and screened by `indirect_pin`, not followed as groups here.
 _NOT_GROUP_DOMAINS = ("script.", "scene.")
@@ -254,8 +270,11 @@ class _EntityIndex:
         hass: HomeAssistant,
         wrapped: dict[str, tuple[str, bool]] | None = None,
         drives: dict[str, set[str]] | None = None,
+        *,
+        purpose: str = _PIN_PURPOSE,
     ) -> None:
         self._hass = hass
+        self._purpose = purpose
         registry = er.async_get(hass)
         self._devices = dr.async_get(hass)
         # Every class an entity has been given: the one HA reports, the one
@@ -267,6 +286,19 @@ class _EntityIndex:
         self.members: dict[str, list[str]] = {}
         self.unreadable_groups: set[str] = set()
         self.unknown: set[str] = set()
+        # Entities whose read raised: held by the PIN, named by the audit.
+        self.unreadable: set[str] = set()
+        # Registry entries disabled by the user or an integration: held by
+        # the PIN (an automation may run after one is enabled), skipped by
+        # the audit (no assistant can reach one).
+        self.disabled: set[str] = set()
+        # Groups whose member list Home Assistant wrote itself: a group helper
+        # (platform ``group``), or an integration group (ZHA, MQTT) publishing
+        # ``group_entities``, which MQTT blocks from a device's own JSON
+        # attributes. An old-style ``group.*`` is here too, since its platform
+        # name is its domain: the audit keeps it out by requiring the member's
+        # own domain (`_audit_holders`).
+        self.ha_groups: set[str] = set()
         for state in hass.states.async_all():
             entity_id = state.entity_id.lower()
             self._read(entity_id, registry.async_get(entity_id), state)
@@ -362,17 +394,43 @@ class _EntityIndex:
         self, entity_id: str, entry: er.RegistryEntry | None, state: State | None
     ) -> None:
         """Add one entity; one that cannot be read is held, not the whole call."""
+        # Read before anything that can raise: the audit must skip a disabled
+        # entity even when the rest of it cannot be read.
+        if entry is not None and entry.disabled:
+            self.disabled.add(entity_id)
         try:
             self._add(entity_id, entry, state)
-        except Exception:
-            # Without this, one bad entity fails every guarded call in the
-            # house. It is held instead: it could be anything.
-            LOGGER.exception(
-                "Critical Action PIN: could not read %s; it is held", entity_id
-            )
+        except Exception as err:  # noqa: BLE001 - one bad entity must not fail the read
+            self._log_unreadable(entity_id, err)
             self.classes.setdefault(entity_id, set())
             self.names.setdefault(entity_id, [])
             self.unknown.add(entity_id)
+            self.unreadable.add(entity_id)
+
+    def _log_unreadable(self, entity_id: str, err: Exception) -> None:
+        """Log an unreadable entity: a traceback for the PIN, once for the audit."""
+        if self._purpose == _PIN_PURPOSE:
+            # Without this, one bad entity fails every guarded call in the
+            # house. It is held instead: it could be anything.
+            LOGGER.error(
+                "Critical Action PIN: could not read %s; it is held",
+                entity_id,
+                exc_info=err,
+            )
+            return
+        # The audit builds the index every cycle, so a persistently broken
+        # entity would otherwise log a traceback every few minutes.
+        key = (self._purpose, entity_id, type(err).__name__)
+        if key in _LOGGED_UNREADABLE:
+            return
+        _LOGGED_UNREADABLE.add(key)
+        LOGGER.warning(
+            "%s: could not read %s (%s: %s); its class, name and members are unknown",
+            self._purpose,
+            entity_id,
+            type(err).__name__,
+            err,
+        )
 
     def _add(
         self, entity_id: str, entry: er.RegistryEntry | None, state: State | None
@@ -420,12 +478,15 @@ class _EntityIndex:
             self.unknown.add(entity_id)
         if entity_id.startswith(_NOT_GROUP_DOMAINS):
             return
-        members = _text_list(attributes.get(ATTR_ENTITY_ID)) or _text_list(
-            attributes.get(_ATTR_GROUP_ENTITIES)
-        )
-        if not members and self._platform(entity_id, entry) == _GROUP_PLATFORM:
+        listed = _text_list(attributes.get(ATTR_ENTITY_ID))
+        published = _text_list(attributes.get(_ATTR_GROUP_ENTITIES))
+        members = listed or published
+        is_helper = self._platform(entity_id, entry) == _GROUP_PLATFORM
+        if is_helper or published:
+            self.ha_groups.add(entity_id)
+        if not members and is_helper:
             # An unavailable group helper writes no member list.
-            members, complete = self._helper_members(entry)
+            members, complete = self._helper_members(entity_id, entry)
             if not members or not complete:
                 # A member it names by an id the registry does not know
                 # could be the relay (#804): fail closed.
@@ -450,16 +511,25 @@ class _EntityIndex:
         get_entity = getattr(component, "get_entity", None)
         return get_entity(entity_id) if callable(get_entity) else None
 
-    def _helper_members(self, entry: er.RegistryEntry | None) -> tuple[list[str], bool]:
+    def _helper_members(
+        self, entity_id: str, entry: er.RegistryEntry | None
+    ) -> tuple[list[str], bool]:
         """
-        Return the members a group helper's config entry lists, and if all are known.
+        Return the members a group helper lists, and whether all are known.
 
-        The helper may list a member by its registry id, which is resolved to
-        its entity id: unresolved, a hidden relay listed that way was not seen
-        as a member, and an area call reaching the group skipped it (#804).
+        From its config entry, which may list a member by its registry id,
+        resolved to its entity id: unresolved, a hidden relay listed that way
+        was not seen as a member, and an area call reaching the group skipped
+        it (#804). A YAML group has no config entry: while it is unavailable
+        its state carries no member list, but the loaded entity keeps it
+        (Home Assistant's ``GroupEntity._entity_ids``), so a hub outage does
+        not empty the group (#793).
         """
         if entry is None or entry.config_entry_id is None:
-            return [], False
+            loaded = _text_list(
+                getattr(self._loaded_entity(entity_id), "_entity_ids", None)
+            )
+            return loaded, bool(loaded)
         config_entry = self._hass.config_entries.async_get_entry(entry.config_entry_id)
         if config_entry is None:
             return [], False
@@ -478,7 +548,7 @@ class _EntityIndex:
         """Return every entity a rule on ``domain`` with this match reaches."""
         # A word with no letter next to it: "Gate1" and "Barn Doors" match,
         # "Gatekeeper" and "Indoor" do not.
-        word = re.compile(rf"(?<![a-z]){re.escape(_plain(match))}(?:e?s)?(?![a-z])")
+        word = _word_pattern(match)
         # An id is read as the rule reads a direct call's target: the word
         # anywhere in it. `cover.backdoor` is held when opened directly, so a
         # group holding it is held too.
@@ -513,6 +583,143 @@ class _EntityIndex:
             if in_domain(entity_id)
         }
         return self.climb(matched)
+
+
+@dataclass(frozen=True)
+class AuditReach:
+    """What the security audit learns from the entity index (#793)."""
+
+    # Entities the index knows to be sensitive that their snapshot state does
+    # not show: a cover classed or named as an entry only in the registry
+    # (the integration's class under a user's "Show as", an alias), and a
+    # lock or alarm panel present only in the registry. Not already seeds,
+    # not disabled.
+    sensitive: list[str] = field(default_factory=list)
+    # Group helper -> the sensitive entities it holds, at any depth.
+    groups: dict[str, list[str]] = field(default_factory=dict)
+    # Group helpers whose members could not all be read: reported with the
+    # members that could be, so what they hold may be incomplete.
+    unreadable_groups: list[str] = field(default_factory=list)
+    # Entities whose read raised, in a sensitive domain: not followed.
+    unreadable: list[str] = field(default_factory=list)
+
+
+def audit_reach(
+    hass: HomeAssistant,
+    entity_ids: Iterable[str],
+    *,
+    cover_classes: Collection[str],
+    sensitive_domains: Collection[str],
+) -> AuditReach:
+    """
+    Return what the security audit reaches from the sensitive ``entity_ids``.
+
+    Membership is read as the Critical Action PIN reads it: a group's state,
+    ``group_entities`` for a ZHA or MQTT group, or a helper's config entry or
+    loaded entity while it is unavailable, to any depth. This read reports
+    where the PIN gates, so it differs from the PIN in four ways. An entity
+    counts by any class, name or id word the index knows for it, so a garage
+    opener shown as a blind, or aliased "Garage Door", is in ``sensitive``,
+    and so is a lock or alarm panel present only in the registry. Only a
+    group whose member list Home Assistant wrote itself, in the member's own
+    domain, is followed (a cover group holding covers, a lock group holding
+    locks): an old-style ``group.*`` is not, because every voice path drives
+    it through ``homeassistant.turn_on``, which skips covers and locks, and
+    ``homeassistant.toggle``, which would reach a cover, has no Assist
+    sentences and is not an Assist LLM tool (pinned by a test); and an
+    ``entity_id`` attribute on anything else is a reference, not a group. A
+    disabled entity is skipped, since no assistant can reach it. A group whose
+    members cannot all be read, or that lists a member Home Assistant does not
+    know, is reported with the members that could be read and named in
+    ``unreadable_groups``, not held. A seed is never listed as holding
+    another. Switch wrappers and template drives are not followed (#898).
+    """
+    index = _EntityIndex(hass, wrapped={}, drives={}, purpose=_AUDIT_PURPOSE)
+    wanted = {entity_id.lower() for entity_id in entity_ids}
+    classes = {c.lower() for c in cover_classes}
+    words = [_word_pattern(word) for word in cover_classes]
+    always = {domain.lower() for domain in sensitive_domains}
+
+    def is_sensitive(entity_id: str) -> bool:
+        domain = _domain(entity_id)
+        if domain in always:
+            return True
+        if domain != "cover":
+            return False
+        if not index.classes[entity_id].isdisjoint(classes):
+            return True
+        texts = [_plain(entity_id), *index.names[entity_id]]
+        return any(word.search(text) for text in texts for word in words)
+
+    sensitive = sorted(
+        entity_id
+        for entity_id in index.classes
+        if entity_id not in wanted
+        and entity_id not in index.disabled
+        and is_sensitive(entity_id)
+    )
+    seeds = wanted | set(sensitive)
+    held: dict[str, set[str]] = {}
+    for entity_id in seeds:
+        for group_id in _audit_holders(index, entity_id):
+            if group_id not in seeds:
+                held.setdefault(group_id, set()).add(entity_id)
+    domains = always | {"cover"}
+
+    def named(entity_ids: Iterable[str]) -> list[str]:
+        return sorted(
+            entity_id
+            for entity_id in entity_ids
+            if entity_id not in index.disabled and _domain(entity_id) in domains
+        )
+
+    # A group listing a member Home Assistant knows nothing about (a YAML id
+    # with no state and no registry entry) may hold more than it shows.
+    partial = index.unreadable_groups | {
+        group_id
+        for group_id in index.ha_groups
+        if any(
+            member not in index.classes for member in index.members.get(group_id, ())
+        )
+    }
+    return AuditReach(
+        sensitive=sensitive,
+        groups={
+            group_id: sorted(members) for group_id, members in sorted(held.items())
+        },
+        unreadable_groups=named(partial & index.ha_groups),
+        unreadable=named(index.unreadable),
+    )
+
+
+def _word_pattern(word: str) -> re.Pattern[str]:
+    """Return the PIN's name match for ``word``: whole word, plural allowed."""
+    return re.compile(rf"(?<![a-z]){re.escape(_plain(word))}(?:e?s)?(?![a-z])")
+
+
+def _audit_holders(index: _EntityIndex, entity_id: str) -> set[str]:
+    """Return the groups holding ``entity_id``, however deep, in its own domain."""
+    found: set[str] = set()
+    pending = [entity_id]
+    while pending:
+        member = pending.pop()
+        for group_id in index.holders.get(member, ()):
+            if group_id in found or group_id in index.disabled:
+                continue
+            # A group Home Assistant wrote the member list of, in the member's
+            # own domain, is one a voice assistant opens or unlocks through.
+            # The domain check is what keeps an old-style group.* out (its
+            # platform name is its domain, so it is in ha_groups): see
+            # audit_reach for why it is no voice path to a cover or lock.
+            if group_id not in index.ha_groups or _domain(group_id) != _domain(member):
+                continue
+            found.add(group_id)
+            pending.append(group_id)
+    return found
+
+
+def _domain(entity_id: str) -> str:
+    return entity_id.split(".", 1)[0]
 
 
 def relay_wrappers_reached(hass: HomeAssistant, targets: Iterable[str]) -> list[str]:

@@ -9,6 +9,7 @@ from custom_components.home_generative_agent.snapshot.network import ha_cap
 from .network_common import (
     POSTURE_COOLDOWN_MINUTES,
     ha_security,
+    listed,
     make_finding,
     noun,
     plural,
@@ -32,6 +33,10 @@ _ASSISTANT_LABELS = {
 # Assist exposure is shared by every conversation agent, so the PIN silences
 # it only when every Assist pipeline runs on this integration's agent.
 _PIN_GATED_ASSISTANTS = frozenset({"conversation"})
+# Held members named per group. What a group holds comes after every
+# exposure and its assistant and PIN wording, so the push's 220-character cut
+# takes the detail, never the warning (#793).
+_MAX_HELD_SHOWN = 3
 
 
 class HaSensitiveEntityExposedWithoutPinRule:
@@ -61,6 +66,13 @@ class HaSensitiveEntityExposedWithoutPinRule:
         # Unknown pipeline coverage never counts as covered.
         assist_gated = bool(pin) and outside == []
         exposed: dict[str, list[str]] = ha.get("exposed_sensitive_entities") or {}
+        # An exposed group is followed by what it holds, so the reader sees
+        # why "All Covers" counts (#793).
+        held_raw = ha.get("exposed_sensitive_groups") or {}
+        held = {
+            str(group_id): sorted(str(m) for m in members)
+            for group_id, members in held_raw.items()
+        }
         exposures: dict[str, list[str]] = {}
         for assistant, entity_ids in sorted(exposed.items()):
             if not entity_ids or (assist_gated and assistant in _PIN_GATED_ASSISTANTS):
@@ -69,6 +81,13 @@ class HaSensitiveEntityExposedWithoutPinRule:
         if not exposures:
             return []
         all_ids = sorted({e for ids in exposures.values() for e in ids})
+        groups = {
+            entity_id: held[entity_id] for entity_id in all_ids if entity_id in held
+        }
+        holds = "".join(
+            f" {group_id} holds {listed(members, _MAX_HELD_SHOWN)}."
+            for group_id, members in groups.items()
+        )
         parts = []
         actions = []
         for assistant, ids in exposures.items():
@@ -108,13 +127,17 @@ class HaSensitiveEntityExposedWithoutPinRule:
                 severity="high",
                 triggering_entities=all_ids,
                 evidence={"exposures": exposures},
+                # What a group holds is display: the exposure is the group's,
+                # and a member briefly losing its class must not mint a new
+                # id and a new push. Present only when there are groups.
                 display={
                     "critical_action_pin_enabled": bool(pin),
                     "assist_agents_outside_pin": outside,
+                    **({"groups": groups} if groups else {}),
                 },
                 summary=(
                     f"{plural(len(all_ids), 'sensitive entity', 'sensitive entities')} "
-                    f"exposed: {'; '.join(parts)}."
+                    f"exposed: {'; '.join(parts)}.{holds}"
                 ),
                 suggested_actions=actions,
             )

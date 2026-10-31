@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, cast
 
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.agent.automation_pin import (
@@ -43,6 +44,8 @@ from custom_components.home_generative_agent.agent.indirect_pin import (
     stored_action_calls,
 )
 from custom_components.home_generative_agent.agent.rule_entities import (
+    AuditReach,
+    audit_reach,
     expand_critical_rules,
 )
 from custom_components.home_generative_agent.const import DOMAIN
@@ -143,6 +146,8 @@ SECURITY_DOMAINS: frozenset[str] = frozenset({"lock", "alarm_control_panel", "ca
 # Cover device classes / name hints that make a cover an entry point. The
 # hints are word-bounded so "indoor" / "outdoor" shades do not match.
 _ENTRY_COVER_CLASSES: frozenset[str] = frozenset({"door", "garage", "gate"})
+# Domains whose every entity is sensitive to voice exposure.
+_SENSITIVE_DOMAINS: frozenset[str] = frozenset({"lock", "alarm_control_panel"})
 _ENTRY_COVER_HINT_RE = re.compile(r"\b(door|garage|gate)\b")
 
 # Config-flow sources that mean "Home Assistant found this on the LAN".
@@ -679,6 +684,12 @@ class HaNativeInputs:
     auth: list[ObservedUser] | None = None
     failed_login_notification_present: bool | None = None
     exposed: dict[str, list[str]] | None = None  # assistant -> exposed ids
+    # What the entity index adds to the sensitive entities (#793): entities
+    # sensitive by registry class or name alone, the group helpers holding
+    # one (an exposed group is as sensitive as its members) and the groups it
+    # could not read in full. Read with `hass`. The default is a read that
+    # found nothing to add; None means the read itself failed.
+    sensitive_reach: AuditReach | None = field(default_factory=AuditReach)
     cloud_remote_ui_enabled: bool | None = None
     http: HttpInput | None = None
     trusted_networks_bypass_login: bool | None = None
@@ -704,18 +715,22 @@ class HaNativeInputs:
     device_domains: Mapping[str, set[str]] = field(default_factory=dict)
 
 
-def log_input_failure(name: str, err: Exception) -> None:
+def log_input_failure(
+    name: str,
+    err: Exception,
+    consequence: str = "the related checks are reported as missing capabilities",
+) -> None:
     """Log a failed runtime read once per input and exception class."""
     key = f"{name}:{type(err).__name__}"
     if key in _LOGGED_INPUT_FAILURES:
         return
     _LOGGED_INPUT_FAILURES.add(key)
     LOGGER.warning(
-        "Network audit: could not read %s (%s: %s); the related checks are "
-        "reported as missing capabilities.",
+        "Network audit: could not read %s (%s: %s); %s.",
         name,
         type(err).__name__,
         err,
+        consequence,
     )
 
 
@@ -805,7 +820,15 @@ def _collect_exposed(
     explicitly configured but fall under an assistant's default exposure
     (covers are a default-exposed domain) count as exposed, exactly as the
     assistant itself would treat them. Only the handful of sensitive entities
-    is asked about, not the whole registry.
+    is asked about, not the whole registry. That helper writes its answer into
+    the entity's options the first time it is asked, so an assistant whose
+    "Expose new entities" setting is off (the default for Alexa and Google
+    Assistant until the user turns it on under Settings, Voice assistants) is
+    not asked about an entity with no stored setting: the answer is "no" and
+    would be pinned for when the setting is turned on. An entity with no
+    state is not asked about either: nothing can act on it today, and the
+    answer would pin a default the assistant never computed; a setting
+    stored by hand still counts.
     """
     try:
         from homeassistant.components.homeassistant.const import (  # noqa: PLC0415
@@ -813,6 +836,7 @@ def _collect_exposed(
         )
         from homeassistant.components.homeassistant.exposed_entities import (  # noqa: PLC0415
             KNOWN_ASSISTANTS,
+            async_get_entity_settings,
             async_should_expose,
         )
 
@@ -820,16 +844,64 @@ def _collect_exposed(
             # The exposed-entities registry is created by the homeassistant
             # component at startup; absent means we cannot audit exposure.
             return None
+        exposed_entities = hass.data[DATA_EXPOSED_ENTITIES]
+
+        def is_exposed(assistant: str, entity_id: str) -> bool:
+            try:
+                stored = (
+                    async_get_entity_settings(hass, entity_id)
+                    .get(assistant, {})
+                    .get("should_expose")
+                )
+            except HomeAssistantError:
+                stored = None  # not in the registry and never configured
+            if isinstance(stored, bool):
+                return stored
+            if hass.states.get(entity_id) is None:
+                return False
+            if not exposed_entities.async_get_expose_new_entities(assistant):
+                return False
+            return async_should_expose(hass, assistant, entity_id)
+
         return {
             assistant: sorted(
                 entity_id
                 for entity_id in entity_ids
-                if async_should_expose(hass, assistant, entity_id)
+                if is_exposed(assistant, entity_id)
             )
             for assistant in KNOWN_ASSISTANTS
         }
     except Exception as err:  # noqa: BLE001
         _log_input_failure("exposed entities", err)
+        return None
+
+
+def _collect_sensitive_reach(
+    hass: HomeAssistant, sensitive_ids: Sequence[str]
+) -> AuditReach | None:
+    """
+    Return what the entity index adds to the sensitive entities (#793).
+
+    Opening ``cover.all_covers`` opens the garage door in it, so an exposed
+    group counts like its members, and a garage opener shown as a blind is
+    still a garage opener. Read as the Critical Action PIN reads membership
+    (`audit_reach`). None when the read failed, logged once: the entities
+    themselves are still audited, and the adapter says what is not.
+    """
+    try:
+        return audit_reach(
+            hass,
+            sensitive_ids,
+            cover_classes=_ENTRY_COVER_CLASSES,
+            sensitive_domains=_SENSITIVE_DOMAINS,
+        )
+    except Exception as err:  # noqa: BLE001 - one input must not fail the snapshot
+        _log_input_failure(
+            "group membership and registry device classes",
+            err,
+            "the exposed entities are still audited, the groups holding them "
+            "and the entities sensitive by registry class or name alone are not",
+        )
         return None
 
 
@@ -1136,13 +1208,16 @@ async def async_collect_ha_native_inputs(  # noqa: PLR0913
         auth = await async_collect_auth_observation(hass, context.pseudonymizer)
     unconfigured, ignored = _collect_discovery(hass)
     sensitive_ids = [e["entity_id"] for e in entities if is_sensitive_entity(e)]
+    reach = _collect_sensitive_reach(hass, sensitive_ids)
+    reach_ids = [*reach.sensitive, *reach.groups] if reach is not None else []
     automations = _collect_automations(hass)
     critical_actions = _collect_critical_actions(hass, context, automations)
     return HaNativeInputs(
         now=now,
         auth=auth,
         failed_login_notification_present=_collect_failed_login(hass),
-        exposed=_collect_exposed(hass, sensitive_ids),
+        exposed=_collect_exposed(hass, [*sensitive_ids, *reach_ids]),
+        sensitive_reach=reach,
         cloud_remote_ui_enabled=_collect_cloud(hass),
         http=_collect_http(hass),
         trusted_networks_bypass_login=_collect_auth_providers(hass),
@@ -1185,12 +1260,16 @@ def is_sensitive_entity(entity: SnapshotEntity) -> bool:
     Return True for an entity whose voice exposure is a security concern.
 
     Locks and alarm panels always; covers only when they are a door, gate,
-    or garage (by device class or name). The Critical Action PIN also holds
-    a group holding such a cover (`agent/rule_entities.py`); this check does
-    not follow groups yet (#793).
+    or garage (by the device class its state shows, or by name). This judges
+    one snapshot entity on its own. A group holding such an entity has none
+    of these marks, and a garage opener shown as a blind hides its own, so
+    the audit adds both through `agent/rule_entities.audit_reach`: group
+    helpers and ZHA or MQTT groups in the member's domain, at any depth, and
+    entities sensitive by registry class or name alone (#793). An old-style
+    ``group.*`` is not followed; `audit_reach` says why.
     """
     domain = entity["domain"]
-    if domain in {"lock", "alarm_control_panel"}:
+    if domain in _SENSITIVE_DOMAINS:
         return True
     if domain != "cover":
         return False
@@ -1352,6 +1431,70 @@ def _addon_fields(inputs: HaNativeInputs, result: AdapterResult) -> None:
         )
 
 
+def _some(ids: Sequence[str], limit: int = 5) -> str:
+    """Return up to ``limit`` ids, then how many more."""
+    rest = len(ids) - limit
+    return ", ".join(ids[:limit]) + (f" and {rest} more" if rest > 0 else "")
+
+
+def _exposed_fields(
+    inputs: HaNativeInputs,
+    entities: Sequence[SnapshotEntity],
+    result: AdapterResult,
+) -> None:
+    """
+    Write the exposed sensitive entities and, for exposed groups, what they hold.
+
+    An entity counts when the snapshot shows it is sensitive, or when the
+    entity index said so (sensitive by registry class or name alone, or a
+    group helper holding a sensitive entity, #793); an exposed one with no
+    state in the snapshot is kept, since a setting stored by hand exposed it.
+    A membership read that failed, a group it could not read in full and an
+    entity it could not read are said in the section's notes, so the audit
+    report shows the gap instead of silence.
+    """
+    if inputs.exposed is None:
+        return
+    ha = result.ha_security
+    by_id = {e["entity_id"]: e for e in entities}
+    reach = inputs.sensitive_reach
+    extra = set(reach.sensitive) | set(reach.groups) if reach is not None else set()
+    ha["exposed_sensitive_entities"] = {
+        assistant: sorted(
+            entity_id
+            for entity_id in ids
+            if entity_id in extra
+            or (entity_id in by_id and is_sensitive_entity(by_id[entity_id]))
+        )
+        for assistant, ids in inputs.exposed.items()
+    }
+    if reach is None:
+        result.notes.append(
+            "Group membership and registry device classes could not be read; "
+            "an exposed group holding a lock or entry cover, or a cover that is "
+            "an entry only by its registry class or name, is not audited."
+        )
+        return
+    exposed_all = {entity_id for ids in inputs.exposed.values() for entity_id in ids}
+    exposed_groups = {
+        group_id: list(members)
+        for group_id, members in reach.groups.items()
+        if group_id in exposed_all
+    }
+    if exposed_groups:
+        ha["exposed_sensitive_groups"] = exposed_groups
+    if reach.unreadable_groups:
+        result.notes.append(
+            f"Membership of {_some(reach.unreadable_groups)} could not be read "
+            "in full; an exposed one may hold more than the audit reports."
+        )
+    if reach.unreadable:
+        result.notes.append(
+            f"{_some(reach.unreadable)} could not be read; class, name and members "
+            "are unknown to the audit."
+        )
+
+
 def ha_native_adapter(  # noqa: PLR0912 - one branch per input, kept flat on purpose
     inputs: HaNativeInputs,
     entities: Sequence[SnapshotEntity],
@@ -1368,16 +1511,7 @@ def ha_native_adapter(  # noqa: PLR0912 - one branch per input, kept flat on pur
             inputs.failed_login_notification_present
         )
 
-    if inputs.exposed is not None:
-        by_id = {e["entity_id"]: e for e in entities}
-        ha["exposed_sensitive_entities"] = {
-            assistant: sorted(
-                entity_id
-                for entity_id in ids
-                if entity_id in by_id and is_sensitive_entity(by_id[entity_id])
-            )
-            for assistant, ids in inputs.exposed.items()
-        }
+    _exposed_fields(inputs, entities, result)
 
     if context.options is not None:
         ha["critical_action_pin_enabled"] = resolve_critical_action_policy(

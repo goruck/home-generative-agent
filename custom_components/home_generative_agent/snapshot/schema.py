@@ -165,6 +165,8 @@ class HaSecurityPosture(TypedDict, total=False):
     new_long_lived_tokens: list[str]  # token labels, vs. the auth inventory
     failed_login_notification_present: bool
     exposed_sensitive_entities: dict[str, list[str]]  # assistant -> entity_ids
+    # group -> the sensitive entity_ids it holds; only exposed groups (#793)
+    exposed_sensitive_groups: dict[str, list[str]]
     critical_action_pin_enabled: bool
     assist_agents_outside_pin: list[str]  # pipeline agents the PIN does not cover
     cloud_remote_ui_enabled: bool

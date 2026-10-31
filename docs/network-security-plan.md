@@ -186,6 +186,7 @@ class HaSecurityPosture(TypedDict, total=False):
     refresh_tokens_from_new_ip: list[str]  # client names
     failed_login_notification_present: bool
     exposed_sensitive_entities: dict[str, list[str]]  # assistant -> entity_ids
+    exposed_sensitive_groups: dict[str, list[str]]  # group -> sensitive ids held
     critical_action_pin_enabled: bool
     cloud_remote_ui_enabled: bool
     pending_updates: list[str]  # update.* entity_ids
@@ -470,8 +471,19 @@ snapshot hash and HA's auth objects have no history.
 - **Failed logins.** Presence of the `http-login` persistent notification.
 - **Exposed entities.** Via the `homeassistant.exposed_entities` helpers, for
   each assistant list exposed entities whose domain is `lock`,
-  `alarm_control_panel`, or `cover` with a door/gate/garage hint, reusing the
-  critical-action matcher in `agent/helpers.py`.
+  `alarm_control_panel`, or `cover` with a door/gate/garage hint
+  (`is_sensitive_entity`), plus the entities the entity index knows to be
+  sensitive by registry class or name alone and every group in the member's
+  domain holding one whose member list Home Assistant wrote (group helpers,
+  ZHA and MQTT groups), at any depth, read as the Critical Action PIN reads
+  membership (`agent/rule_entities.py`, `audit_reach`; an old-style `group.*`
+  is not followed, since every voice path drives it through
+  `homeassistant.turn_on`, which skips covers and locks);
+  `exposed_sensitive_groups` says what each exposed group holds, and the
+  section's notes name the groups whose membership could not be read in full.
+  An assistant whose "Expose new entities" setting is off, or an entity with
+  no state, is not asked about an entity with no stored setting, since asking
+  writes a "not exposed" default.
 - **Critical-action PIN.** From the config entry options.
 - **Cloud remote UI.** From the cloud integration's state when loaded.
 - **Pending updates.** Every `update.*` entity in state `on`, tagged as a
