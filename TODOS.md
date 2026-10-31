@@ -1137,6 +1137,22 @@ validation.
 
 ---
 
+### Camera rules date and identify a third-party caption by HGA's own recognition event
+
+**What:** `extract_camera_activity` (`snapshot/camera_activity.py`) takes `snapshot_summary` from the camera state's own caption attribute when it has one, but `recognized_people` and `recognition_last_event` from HGA's image entity, which describe a different frame. `sighting_timestamp` prefers the recognition event, so for such a camera the pet rule (and the unknown-person and alarm-disarm rules, which share the helper) date the caption by HGA's last analysis, hash the anomaly id on it (every analysis within the freshness window re-mints the id for an unchanged caption, so it re-pushes once the type cooldown allows), and read the enrolled-person veto from a frame the caption did not come from. On a camera with no image entity the fallback is `last_activity`, which any motion refreshes, so a pet that keeps triggering motion mints a new id per evaluation. Separately, a frame whose analysis was refused (`ProviderRefusedError`, #890) keeps the previous summary while new people and a new timestamp are published, so an old caption can acquire a fresh timestamp; and `recognized_people` is published from the frames that survived the summary while the summarizer's `sole_person` comes from the whole batch, so a resident whose own frame's VLM call timed out can be named in the caption yet be missing from the list the pet rule's enrolled-person veto reads. Also: `_PET_WORDS` is English-only, so a caption model writing in the HA language (cs, zh) never fires the rule although its copy is localized; and possessives or "a stuffed dog" still count as the animal.
+
+**Why:** Codex and the Claude adversarial pass in the #730 review (2026-10-31), items left out of PR #895 because the provenance split is pre-existing and shared with the sibling camera rules; the pet rule now carries the same limits as they do.
+
+Also: `_anomaly_type_for_state` attributes every image-entity wake-up to `unknown_person_camera_no_home`, so a camera excluded from that rule wakes nothing, and the pet rule's 10-minute window then depends on the poll interval alone.
+
+**How to apply:** Attribute image-entity wake-ups to every camera rule type and suppress only when the camera is excluded from all of them. Bind the caption, the recognition labels and the capture timestamp to one event in `CameraActivity` (a `summary_last_event` next to `recognition_last_event`, stamped by whichever source supplied the summary), and have `sighting_timestamp` prefer the summary's own event; invalidate the stored summary when an analysis is refused. For the vocabulary, either match the caption in the VLM response language or ask the VLM for an `animals` field alongside the prose.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ## Sentinel Network Audit
 
 ### Network security plan steps 7–11 (router adapters, redaction, audit tool)

@@ -44,7 +44,10 @@ from custom_components.home_generative_agent.sentinel.notifier import (
     _is_power_class_evidence,
     _mobile_message,
     _persistent_message,
+    _pet_mobile_message,
     _redact_if_sensitive,
+    escape_markdown,
+    is_security_copy,
     related_findings_line,
 )
 from custom_components.home_generative_agent.sentinel.suppression import (
@@ -1122,6 +1125,179 @@ def _alarm_finding(
         evidence=evidence or {},
         suggested_actions=["arm_alarm"],
         is_sensitive=False,
+    )
+
+
+def _pet_finding(evidence: dict[str, Any]) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id="pet1",
+        type="pet_detected_at_night_no_occupancy",
+        severity="low",
+        confidence=0.85,
+        triggering_entities=["camera.playroomdoor"],
+        evidence=evidence,
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+
+
+_PET_EVIDENCE: dict[str, Any] = {
+    "camera_entity_id": "camera.playroomdoor",
+    "camera_friendly_name": "Playroom Door",
+    "animal": "cat",
+    "snapshot_summary": "Lindo walks across the grass with a black cat.",
+    "camera_activity_age_minutes": 13.2,
+}
+_PET_BODY = "Playroom Door saw a cat 13 min ago. Presence shows no one home."
+_PARAPHRASE = "Lindo was seen on the porch and near a bush while you are away."
+
+
+def test_pet_mobile_message_names_the_animal_and_camera() -> None:
+    """The push is about the animal, with the sighting age (#730)."""
+    assert _pet_mobile_message(_pet_finding(_PET_EVIDENCE)) == _PET_BODY
+
+
+@pytest.mark.parametrize(
+    ("evidence", "expected"),
+    [
+        ({}, "A camera saw a pet. Presence shows no one home."),
+        (
+            {"camera_entity_id": "camera.back_yard", "animal": "dog"},
+            "Back Yard saw a dog. Presence shows no one home.",
+        ),
+        (
+            {
+                "camera_entity_id": "camera.x",
+                "animal": "dog",
+                "camera_activity_age_minutes": 0.0,
+            },
+            "X saw a dog 1 min ago. Presence shows no one home.",
+        ),
+        (
+            {
+                "camera_entity_id": "camera.x",
+                "animal": "dog",
+                "camera_activity_age_minutes": "soon",
+            },
+            "X saw a dog. Presence shows no one home.",
+        ),
+        (
+            {
+                "camera_entity_id": "camera.x",
+                "animal": "dog",
+                "camera_activity_age_minutes": float("inf"),
+            },
+            "X saw a dog. Presence shows no one home.",
+        ),
+        (
+            {"camera_entity_id": "camera.x", "animal": "ferret"},
+            "X saw a pet. Presence shows no one home.",
+        ),
+        (
+            {
+                "camera_entity_id": "camera.x",
+                "camera_friendly_name": "# Porch\u202eCam\nDISARM",
+                "animal": "cat",
+            },
+            "# PorchCam DISARM saw a cat. Presence shows no one home.",
+        ),
+        (
+            {
+                "camera_entity_id": "camera.x",
+                "camera_friendly_name": "Front\u2028Porch   ALARM",
+                "animal": "cat",
+            },
+            "Front Porch ALARM saw a cat. Presence shows no one home.",
+        ),
+        (
+            {
+                "camera_entity_id": "camera.x",
+                "camera_friendly_name": "Playroom Door Camera Facing The Yard",
+                "animal": "cat",
+            },
+            "Playroom Door Camera Facing T\u2026 saw a cat. Presence shows no one home.",
+        ),
+    ],
+)
+def test_pet_mobile_message_fallbacks(evidence: dict[str, Any], expected: str) -> None:
+    """Missing or foreign evidence (an older stored finding) still renders a body."""
+    assert _pet_mobile_message(_pet_finding(evidence)) == expected
+
+
+def test_every_pet_word_has_a_label_in_every_language() -> None:
+    """An animal the rule can name is named in the notification language."""
+    from custom_components.home_generative_agent.sentinel.notifier_messages import (
+        _MESSAGES,
+    )
+    from custom_components.home_generative_agent.sentinel.rules.pet_detected_at_night_no_occupancy import (
+        _PET_WORDS,
+    )
+
+    for language, table in _MESSAGES.items():
+        missing = {f"animal_{word}" for word in set(_PET_WORDS.values())} - set(table)
+        assert not missing, (language, missing)
+
+
+def test_persistent_copy_escapes_a_camera_name_that_opens_markdown() -> None:
+    """A camera named "# Porch" must not render as a heading in the panel."""
+    finding = _pet_finding(
+        {
+            "camera_entity_id": "camera.x",
+            "camera_friendly_name": "# Porch",
+            "animal": "cat",
+        }
+    )
+    assert _persistent_message(None, finding).startswith("\\# Porch saw a cat")
+    assert escape_markdown("- item") == "\\- item"
+    assert escape_markdown("1. item") == "1\\. item"
+    assert escape_markdown("1) item") == "1\\) item"
+    assert escape_markdown("Porch 1. ok") == "Porch 1. ok"
+
+
+def test_alarm_disarmed_open_entry_persistent_copy_is_the_fixed_body() -> None:
+    """The approved open-entry template is never-paraphrased on the persistent path too."""
+    finding = _open_entry_finding()
+    assert _persistent_message(
+        "The alarm is disarmed and a window is open.", finding
+    ) == (escape_markdown(_alarm_disarmed_open_entry_mobile_message(finding)))
+    assert "Family Room Right Window" in _persistent_message(None, finding)
+
+
+def test_pet_mobile_message_is_localized_including_the_animal() -> None:
+    """A Czech or Chinese install reads the animal in its language, not 'cat'."""
+    hass_cs = SimpleNamespace(config=SimpleNamespace(language="cs"))
+    assert (
+        _pet_mobile_message(_pet_finding(_PET_EVIDENCE), hass_cs)  # type: ignore[arg-type]
+        == "Playroom Door: kočka před 13 min. Podle přítomnosti nikdo není doma."
+    )
+    hass_zh = SimpleNamespace(config=SimpleNamespace(language="zh-Hans"))
+    assert (
+        _pet_mobile_message(_pet_finding(_PET_EVIDENCE), hass_zh)  # type: ignore[arg-type]
+        == "Playroom Door在 13 分钟前拍到猫。在家状态显示无人在家。"
+    )
+
+
+def test_pet_copy_is_never_the_caption_paraphrase() -> None:
+    """Fixed text on every path, whatever the response language (#730)."""
+    finding = _pet_finding(_PET_EVIDENCE)
+    assert is_security_copy(finding)
+    assert _mobile_message(_PARAPHRASE, finding) == _PET_BODY
+    assert _mobile_message(_PARAPHRASE, finding, "cs") == _PET_BODY
+    assert _persistent_message(_PARAPHRASE, finding) == _PET_BODY
+    assert "Lindo" not in _persistent_message(_PARAPHRASE, finding)
+
+
+def test_alarm_disarmed_persistent_copy_is_the_fixed_body() -> None:
+    """The persistent notification carries the camera, age and alarm time too."""
+    ev: dict[str, Any] = {
+        "camera_friendly_name": "Front Door",
+        "camera_entity_id": "camera.front_door",
+        "camera_activity_age_minutes": 3.0,
+        "alarm_last_changed": "2025-01-01T18:14:00+00:00",
+    }
+    finding = _alarm_finding(evidence=ev)
+    assert _persistent_message(None, finding) == escape_markdown(
+        _alarm_disarmed_mobile_message(finding)
     )
 
 
