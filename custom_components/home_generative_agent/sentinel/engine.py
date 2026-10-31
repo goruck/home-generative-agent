@@ -2454,11 +2454,13 @@ class SentinelEngine:
         """
         Return the explainer to run for *finding*, or None to skip it.
 
-        Security copy (the network / HA-security family and the alarm-disarm
-        rules) is rendered from the finding's own deterministic summary in
-        both the mobile push and the persistent notification, and nothing
-        reads the stored explanation back, so the model call would be pure
-        waste. Everything else follows the ``explain_enabled`` option.
+        Never-paraphrased copy (the network / HA-security family, the
+        alarm-disarm rules and the pet-at-night rule, see
+        ``notifier.is_security_copy``) is rendered from the finding's own
+        fixed body in both the mobile push and the persistent notification,
+        and nothing reads the stored explanation back, so the model call
+        would be pure waste. Everything else follows the ``explain_enabled``
+        option.
         """
         if not explain_enabled or is_security_copy(finding):
             return None

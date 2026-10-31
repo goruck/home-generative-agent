@@ -3262,6 +3262,208 @@ def test_pet_detected_at_night_no_occupancy_no_trigger_no_motion_context() -> No
     assert len(findings) == 0
 
 
+def _pet_snapshot(
+    summary: str,
+    people: list[str] | None = None,
+    *,
+    last_activity: str | None = "2025-01-01T00:04:00+00:00",
+    recognition_last_event: str | None = None,
+    generated_at: str = "2025-01-01T00:05:00+00:00",
+) -> FullStateSnapshot:
+    """Return a night snapshot, nobody home, one camera captioned `summary`."""
+    snapshot = _base_snapshot()
+    snapshot["generated_at"] = generated_at
+    snapshot["derived"]["is_night"] = True
+    snapshot["derived"]["anyone_home"] = False
+    snapshot["derived"]["people_away"] = ["person.lindo"]
+    snapshot["entities"] = [
+        {
+            "entity_id": "camera.playroomdoor",
+            "state": "idle",
+            "domain": "camera",
+            "area": "Outside",
+            "friendly_name": "Playroom Door",
+            "attributes": {},
+            "last_changed": "2025-01-01T00:00:00+00:00",
+            "last_updated": "2025-01-01T00:00:00+00:00",
+        }
+    ]
+    activity = _camera_activity(
+        "camera.playroomdoor",
+        snapshot_summary=summary,
+        recognized_people=people,
+        last_activity=last_activity,
+        motion_entities=["binary_sensor.playroom_motion"],
+    )
+    if recognition_last_event is not None:
+        activity["recognition_last_event"] = recognition_last_event
+    snapshot["camera_activity"] = [activity]
+    return snapshot
+
+
+_FIELD_CAPTION = (
+    "Lindo stands on the porch holding items, then walks across the grass "
+    "toward a bush with a black cat nearby."
+)
+
+
+def test_pet_rule_skips_a_camera_where_a_known_person_was_recognized() -> None:
+    """A resident on the camera means someone is home, whatever presence says (#730)."""
+    snapshot = _pet_snapshot(_FIELD_CAPTION, ["Lindo", "Indeterminate"])
+    assert PetDetectedAtNightNoOccupancyRule().evaluate(snapshot) == []
+
+
+def test_pet_rule_fires_past_reserved_recognition_labels() -> None:
+    """Only an enrolled name vetoes; the pipeline's reserved labels do not."""
+    snapshot = _pet_snapshot(
+        "A black cat sits by the door.", ["Unknown Person", "Indeterminate"]
+    )
+    [finding] = PetDetectedAtNightNoOccupancyRule().evaluate(snapshot)
+    assert finding.evidence["recognized_people"] == ["Unknown Person", "Indeterminate"]
+
+
+def test_pet_rule_names_the_animal_the_camera_and_the_sighting_age() -> None:
+    """The finding carries what the fixed push body renders (#730)."""
+    [finding] = PetDetectedAtNightNoOccupancyRule().evaluate(
+        _pet_snapshot("Two cats cross the lawn near a bush.")
+    )
+    assert finding.evidence["animal"] == "cat"
+    assert finding.evidence["camera_friendly_name"] == "Playroom Door"
+    assert finding.evidence["camera_activity_age_minutes"] == 1.0
+    assert finding.evidence["sighting_last_event"] == "2025-01-01T00:04:00+00:00"
+    assert finding.is_sensitive is False
+
+
+def test_pet_rule_dates_the_sighting_by_the_recognition_event() -> None:
+    """The caption's own event dates it, not the camera's later motion refresh."""
+    snapshot = _pet_snapshot(
+        "A dog sniffs at the door.",
+        last_activity="2025-01-01T00:04:30+00:00",
+        recognition_last_event="2024-12-31T23:58:00+00:00",
+    )
+    [finding] = PetDetectedAtNightNoOccupancyRule().evaluate(snapshot)
+    assert finding.evidence["sighting_last_event"] == "2024-12-31T23:58:00+00:00"
+    assert finding.evidence["camera_activity_age_minutes"] == 7.0
+
+
+@pytest.mark.parametrize(
+    ("last_activity", "recognition_last_event"),
+    [
+        ("2024-12-31T17:00:00+00:00", None),  # an afternoon caption at nightfall
+        ("2025-01-01T00:04:00+00:00", "2024-12-31T23:40:00+00:00"),  # stale event
+        (None, None),  # no timestamp at all: freshness cannot be proven
+        ("2025-01-01T01:00:00+00:00", None),  # a camera clock in the future
+    ],
+)
+def test_pet_rule_skips_a_sighting_that_is_not_fresh(
+    last_activity: str | None, recognition_last_event: str | None
+) -> None:
+    """Fresh sightings only, like the other camera rules (#730 review)."""
+    snapshot = _pet_snapshot(
+        "A cat on the porch.",
+        last_activity=last_activity,
+        recognition_last_event=recognition_last_event,
+    )
+    assert PetDetectedAtNightNoOccupancyRule().evaluate(snapshot) == []
+
+
+def test_pet_rule_anomaly_id_is_the_sighting_not_the_age_or_the_labels() -> None:
+    """One sighting keeps one id across evaluations and label flips."""
+    first = PetDetectedAtNightNoOccupancyRule().evaluate(
+        _pet_snapshot("A dog sniffs at the door.", ["Indeterminate"])
+    )[0]
+    later = PetDetectedAtNightNoOccupancyRule().evaluate(
+        _pet_snapshot(
+            "A dog sniffs at the door.",
+            ["Unknown Person", "Indeterminate"],
+            generated_at="2025-01-01T00:09:00+00:00",
+        )
+    )[0]
+    assert first.anomaly_id == later.anomaly_id
+    assert first.evidence["camera_activity_age_minutes"] == 1.0
+    assert later.evidence["camera_activity_age_minutes"] == 5.0
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "Leaves scattered on the carpet.",
+        "A trumpet rests on a chair.",
+        "The cat door is closed.",
+        "A dog bed by the wall and a bird feeder on the post.",
+        "An empty dog-bed by the wall and two cat-trees.",
+        "Someone eats a hot dog on the porch.",
+        "A hot-dog on the table.",
+        "A bird\u2011feeder on the post.",  # a non-ASCII hyphen
+        "A sign reads cat\u00e9gorie.",  # an accented word is one word
+        "No people or pets are visible.",
+        "No people, pets or vehicles are visible.",
+        "The scene is empty; no dog or cat present.",
+        "No dogs, cats or birds in view.",
+        "This is not a cat but a raccoon.",
+        "A cat is not visible.",
+        "The dog is no longer in view.",
+        "No sign of a cat tonight.",
+    ],
+)
+def test_pet_rule_matches_animals_not_objects_fragments_or_absences(
+    summary: str,
+) -> None:
+    """A pet word inside another word, an object compound or a negation is not a pet."""
+    assert PetDetectedAtNightNoOccupancyRule().evaluate(_pet_snapshot(summary)) == []
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "A k\u0131tten by the door.",  # dotless i
+        "A K\u0130TTEN by the door.",  # capital dotted I
+        "A ham\u017fter and no people.",  # long s
+    ],
+)
+def test_pet_rule_survives_unicode_case_folding(summary: str) -> None:
+    """A dotless i or a long s must not raise and take the cycle's findings (#730 review)."""
+    assert PetDetectedAtNightNoOccupancyRule().evaluate(_pet_snapshot(summary)) == []
+
+
+def test_pet_rule_caps_and_scans_a_long_caption_once() -> None:
+    """A third-party caption is uncapped; the scan is linear and bounded (#730 review)."""
+    repeated = "No cats. " * 3000  # 27 000 chars, every word a negated animal
+    assert PetDetectedAtNightNoOccupancyRule().evaluate(_pet_snapshot(repeated)) == []
+    beyond_cap = "The porch is empty. " * 150 + "A cat sits on the step."
+    assert PetDetectedAtNightNoOccupancyRule().evaluate(_pet_snapshot(beyond_cap)) == []
+    within_cap = "The porch is empty. " * 50 + "A cat sits on the step."
+    [finding] = PetDetectedAtNightNoOccupancyRule().evaluate(_pet_snapshot(within_cap))
+    assert finding.evidence["animal"] == "cat"
+
+
+@pytest.mark.parametrize(
+    ("summary", "animal"),
+    [
+        ("Two cats on the lawn.", "cat"),
+        ("A cat-like shape near the bush.", "cat"),
+        ("Three puppies tumble on the grass.", "puppy"),
+        ("A cat door is closed while a dog waits beside it.", "dog"),
+        ("No people are visible, but a cat sits on the step.", "cat"),
+        ("A cat sits by the door, no people visible.", "cat"),
+        ("No people are visible, a cat is sitting on the counter.", "cat"),
+        ("The room is empty with no one present, and a dog lies on the floor.", "dog"),
+        ("A dark porch with no people, while a cat walks by.", "cat"),
+        ("No motion detected, dog visible near the door.", "dog"),
+        ("A dog, not a cat, sits by the door.", "dog"),
+        ("No cat but the dog is here.", "dog"),
+        ("Nobody is around; the cat sleeps.", "cat"),
+        ("A child pets a rabbit.", "rabbit"),
+        ("Someone pets an animal by the door.", "pet"),
+        ("No people are visible, only a cat on the sofa.", "cat"),
+        ("There are no people in the frame, just a dog by the door.", "dog"),
+    ],
+)
+def test_pet_rule_names_the_animal_in_the_singular(summary: str, animal: str) -> None:
+    [finding] = PetDetectedAtNightNoOccupancyRule().evaluate(_pet_snapshot(summary))
+    assert finding.evidence["animal"] == animal
+
+
 def test_pet_detected_at_night_no_occupancy_no_trigger_no_summary() -> None:
     """No finding when camera has no snapshot summary."""
     snapshot = _base_snapshot()

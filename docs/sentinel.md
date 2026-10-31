@@ -99,7 +99,7 @@ These rules run on every detection cycle without any configuration or approval.
 | Rule | Description |
 |---|---|
 | `vehicle_detected_near_camera_home` | Vehicle detected on any monitored camera while residents are home |
-| `pet_detected_at_night_no_occupancy` | Pet detected on any monitored camera at night while no residents are home (informational; no suggested action) |
+| `pet_detected_at_night_no_occupancy` | Pet detected on any monitored camera at night while no residents are home (informational; no suggested action). Fires on a sighting at most 10 minutes old, so it needs a poll or an event wake-up within that window: a camera whose image entity is excluded from the unknown-person rules gets no wake-up and is seen only at the Sentinel interval. The push is fixed text naming the animal and the camera, never a person, and no model explanation is written for it. A camera on which face recognition saw an enrolled person is skipped: someone is home, whatever presence says |
 | `camera_missing_snapshot_night_home` | Any monitored camera (with active motion sensors) has no snapshot summary at night while the home is occupied |
 
 **Devices**

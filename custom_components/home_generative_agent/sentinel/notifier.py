@@ -879,6 +879,7 @@ _KNOWN_TYPE_LABEL_KEYS = {
     "motion_detected_while_away": "type_motion_detected_while_away",
     "unlocked_lock_at_night": "type_unlocked_lock_at_night",
     "camera_entry_unsecured": "type_camera_entry_unsecured",
+    "pet_detected_at_night_no_occupancy": "type_pet_detected_at_night_no_occupancy",
     "alarm_disarmed_during_external_threat": (
         "type_alarm_disarmed_during_external_threat"
     ),
@@ -1318,19 +1319,10 @@ def _alarm_disarmed_mobile_message(
     """Deterministic mobile copy for alarm_disarmed_during_external_threat."""
     ev = finding.evidence
 
-    cam_name: str = (ev.get("camera_friendly_name") or "").strip()[:30]
-    if not cam_name:
-        cam_id = str(ev.get("camera_entity_id", ""))
-        if cam_id:
-            cam_name = cam_id.partition(".")[2].replace("_", " ").title()[:30]
-        else:
-            cam_name = ""
-    if not cam_name:
-        cam_name = notif_msg(hass, "body_a_camera")
+    cam_name = _camera_name(ev, hass)
 
-    age = ev.get("camera_activity_age_minutes")
-    if age is not None:
-        age_mins = max(1, round(float(age)))
+    age_mins = _age_minutes(ev)
+    if age_mins is not None:
         activity_phrase = notif_msg(
             hass, "body_alarm_camera_seen_ago", camera=cam_name, minutes=age_mins
         )
@@ -1356,6 +1348,84 @@ def _alarm_disarmed_mobile_message(
     cta = notif_msg(hass, "body_alarm_cta")
     msg = f"{activity_phrase} {alarm_phrase} {cta}"
     return msg[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
+
+
+def _age_minutes(evidence: Mapping[str, Any]) -> int | None:
+    """
+    Return the sighting age in whole minutes (at least 1), or None.
+
+    None when the evidence has no age, or carries one that is not a number
+    (a stored finding edited by hand): the body then drops the "ago" phrase
+    instead of the push being lost to a ValueError.
+    """
+    age = evidence.get("camera_activity_age_minutes")
+    if age is None:
+        return None
+    try:
+        minutes = float(age)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(minutes):
+        return None
+    return max(1, round(minutes))
+
+
+def _camera_name(evidence: Mapping[str, Any], hass: HomeAssistant | None) -> str:
+    """
+    Return the camera's name for a fixed body: friendly name, else its id.
+
+    A friendly name is an entity attribute the integration behind the
+    camera chose, sometimes from the device itself: `sanitize_label` drops
+    control and format characters, collapses every kind of whitespace
+    (line and paragraph separators included), so a name cannot add a line
+    to the push, and cuts it to 30 characters with an ellipsis so it cannot
+    crowd out the rest of the body.
+    """
+    name = sanitize_label(evidence.get("camera_friendly_name"), limit=30)
+    if name:
+        return name
+    camera_id = str(evidence.get("camera_entity_id") or "")
+    if camera_id:
+        return _friendly_entity(camera_id)[:30]
+    return notif_msg(hass, "body_a_camera")
+
+
+def _pet_mobile_message(
+    finding: AnomalyFinding, hass: HomeAssistant | None = None
+) -> str:
+    """
+    Return the fixed copy for pet_detected_at_night_no_occupancy.
+
+    Names the animal and the camera, never a person: the rule fires on a
+    caption that can describe a person alongside the pet, and a paraphrase
+    of that caption was once a push about a recognized resident (#730). The
+    occupancy clause states what the rule checked, presence now, not who
+    was home when the frame was taken.
+    """
+    ev = finding.evidence
+    camera = _camera_name(ev, hass)
+    animal = _animal_word(str(ev.get("animal") or "pet"), hass)
+    age_mins = _age_minutes(ev)
+    if age_mins is not None:
+        msg = notif_msg(
+            hass, "body_pet_seen_ago", camera=camera, animal=animal, minutes=age_mins
+        )
+    else:
+        msg = notif_msg(hass, "body_pet_seen", camera=camera, animal=animal)
+    return msg[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
+
+
+def _animal_word(animal: str, hass: HomeAssistant | None) -> str:
+    """
+    Return *animal* in the notification language.
+
+    An animal the tables do not know (a stored finding edited by hand, or a
+    word added to the rule without its labels) reads as the generic "pet":
+    the body never echoes a value it did not curate.
+    """
+    key = f"animal_{animal}"
+    word = notif_msg(hass, key)
+    return notif_msg(hass, "animal_pet") if word == key else word
 
 
 def _alarm_disarmed_open_entry_mobile_message(
@@ -1529,6 +1599,13 @@ _TEMPLATE_MOBILE_FORMATTERS: dict[
     "entity_staleness": _entity_staleness_mobile_message,
 }
 
+# Deterministic mobile bodies keyed on a built-in rule's finding type.
+_TYPE_MOBILE_FORMATTERS: dict[str, Any] = {
+    "alarm_disarmed_during_external_threat": _alarm_disarmed_mobile_message,
+    "appliance_power_duration": _appliance_power_duration_mobile_message,
+    "pet_detected_at_night_no_occupancy": _pet_mobile_message,
+}
+
 
 # Deterministic copy that carries security actuation detail — which camera,
 # which entry, when the alarm was disarmed, and what to do about it. An LLM
@@ -1540,8 +1617,13 @@ _TEMPLATE_MOBILE_FORMATTERS: dict[
 # The network / HA-security family qualifies as a whole: its summaries carry
 # the exact token label, port, account, or device an attacker would want
 # blurred, and parts of that evidence originate from untrusted sources.
+# The pet rule qualifies for privacy, not security: it fires on a camera
+# caption that can describe a person alongside the pet, and a paraphrase of
+# that caption was once a push about a recognized resident (#730). Its fixed
+# body names the animal and the camera, on every path and in every language.
 _SECURITY_MESSAGE_TYPES = frozenset(
-    {"alarm_disarmed_during_external_threat"} | NETWORK_RULE_TYPES
+    {"alarm_disarmed_during_external_threat", "pet_detected_at_night_no_occupancy"}
+    | NETWORK_RULE_TYPES
 )
 _SECURITY_MESSAGE_TEMPLATE_IDS = frozenset(
     {"alarm_disarmed_open_entry", *NETWORK_TEMPLATES}
@@ -1556,9 +1638,24 @@ _SECURITY_MESSAGE_TEMPLATE_IDS = frozenset(
 _MARKDOWN_ESCAPE_RE = re.compile(r"([\\`*_\[\]<>~|])")
 
 
+# What starts a heading, a list item or a numbered item ("1." or "1)") when
+# it opens a line.
+_MARKDOWN_LINE_START_RE = re.compile(r"^([#+-])|^(\d+)([.)])")
+
+
 def escape_markdown(text: str) -> str:
-    """Return *text* with Markdown syntax characters backslash-escaped."""
-    return _MARKDOWN_ESCAPE_RE.sub(r"\\\1", text)
+    """
+    Return *text* with Markdown syntax characters backslash-escaped.
+
+    A leading "#", "-", "+", "1." or "1)" is escaped too: a fixed body opens
+    with a camera's friendly name, and one named "# Porch" would otherwise
+    render as a heading in the persistent notification.
+    """
+    escaped = _MARKDOWN_ESCAPE_RE.sub(r"\\\1", text)
+    return _MARKDOWN_LINE_START_RE.sub(
+        lambda m: f"\\{m.group(1)}" if m.group(1) else f"{m.group(2)}\\{m.group(3)}",
+        escaped,
+    )
 
 
 def _security_device_summary(
@@ -1654,10 +1751,8 @@ def _deterministic_mobile_message(
     around the figures follow ``hass.config.language`` (English when *hass* is
     None or the language has no table).
     """
-    if finding.type == "alarm_disarmed_during_external_threat":
-        return _alarm_disarmed_mobile_message(finding, hass)
-    if finding.type == "appliance_power_duration":
-        return _appliance_power_duration_mobile_message(finding, hass)
+    if type_formatter := _TYPE_MOBILE_FORMATTERS.get(finding.type):
+        return type_formatter(finding, hass)
     if (summary := _network_summary(finding, hass)) is not None:
         hint = _trust_hint(finding, hass)
         if hint is None:
@@ -2242,6 +2337,13 @@ def _persistent_message(
         hint = _trust_hint(finding, hass)
         text = escape_markdown(summary)
         return f"{text}\n\n{escape_markdown(hint)}" if hint else text
+    if is_security_copy(finding) and (
+        fixed := _deterministic_mobile_message(finding, hass)
+    ):
+        # The same fixed body as the push: the explainer is not called for
+        # these (see is_security_copy), and the generic fallback below would
+        # drop the camera, the animal or the alarm time it carries.
+        return escape_markdown(fixed)
     if explanation:
         text = _normalize_text(explanation)
         if text:

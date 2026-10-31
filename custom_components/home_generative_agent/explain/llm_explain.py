@@ -161,6 +161,7 @@ _KNOWN_TYPE_LABELS = {
     "motion_detected_while_away": "Motion while away",
     "unlocked_lock_at_night": "Door lock left unlocked",
     "camera_entry_unsecured": "Activity near unsecured entry",
+    "pet_detected_at_night_no_occupancy": "Pet on camera at night while away",
     "alarm_disarmed_during_external_threat": "Outdoor activity while alarm disarmed",
     "ha_sensitive_entity_exposed_without_pin": "Sensitive entity exposed without PIN",
     "ha_new_admin_or_token": "New administrator or access token",
