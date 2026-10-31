@@ -322,7 +322,10 @@ from .core.fallback import (
     ProviderRefusedError,
     _safe_err_summary,
 )
-from .core.lifecycle import defer_start_until_hass_started
+from .core.lifecycle import (
+    async_watch_database_deletion,
+    defer_start_until_hass_started,
+)
 from .core.migrations import migrate_person_gallery
 from .core.person_gallery import PersonGalleryDAO
 from .core.pipeline_guard import async_clear_pin_pipeline_issue
@@ -338,7 +341,6 @@ from .core.subentry_resolver import (
     build_database_uri_from_entry,
     build_model_deployments,
     chosen_fallback_ids,
-    get_database_subentry,
     legacy_feature_configs,
     legacy_model_provider_configs,
     resolve_fallback_chains,
@@ -440,6 +442,18 @@ LOGGER = logging.getLogger(__name__)
 _SERVICE_RESPONSE_ONLY = SupportsResponse.ONLY
 
 PLATFORMS = (Platform.CONVERSATION, Platform.STT, Platform.TTS, "image", "sensor")
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
+    """Set up what is per domain, before any config entry: once per run."""
+    hass.data.setdefault(DOMAIN, {})
+    # Watches every entry of the domain, including one whose setup attempts
+    # all fail and so never registers a listener of its own (#870, #883).
+    async_watch_database_deletion(hass)
+    return True
+
 
 SERVICE_ENROLL_PERSON = "enroll_person"
 SERVICE_GET_AUDIT_RECORDS = "get_audit_records"
@@ -2154,10 +2168,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     _assign_first_provider_if_needed(hass, entry)
 
     db_uri = build_database_uri_from_entry(entry)
-    # The subentry this setup connects with, read now: one deleted during the
-    # rest of setup must still reload the entry (#870).
-    db_subentry = get_database_subentry(hass, entry)
-    db_subentry_id = db_subentry.subentry_id if db_subentry else None
 
     # "Configured" is a property of the entry, not of the connection: clear
     # the not-configured issue before connecting, so a database that is
@@ -4938,13 +4948,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         if s.subentry_type == SUBENTRY_TYPE_SENTINEL
     }
 
-    # Also reload when the Database subentry is deleted from the UI, which
-    # nothing else reloads, so the entry would keep the old pool and memory
-    # store until some later restart (#870). Only a deletion: the setup
-    # wizard is the one path that adds or changes the database, and it
-    # schedules its own reload, which HA does not deduplicate.
+    # A Database subentry deleted from the UI is reloaded for by the domain's
+    # own watcher (`async_watch_database_deletion`, #870, #883), which also
+    # covers an entry that never finished a setup; not here.
 
-    # Both diffs last until the reload replaces this listener, and the
+    # The diff lasts until the reload replaces this listener, and the
     # reload's own state changes (unload in progress) fire this signal too, so
     # react once: a second pass would schedule a second full reload.
     _reload_scheduled = False
@@ -4963,17 +4971,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             for s in changed_entry.subentries.values()
             if s.subentry_type == SUBENTRY_TYPE_SENTINEL
         }
-        sentinel_changed = current_snapshot != _sentinel_snapshot
-        database_removed = (
-            db_subentry_id is not None
-            and db_subentry_id not in changed_entry.subentries
-        )
-        if not sentinel_changed and not database_removed:
+        if current_snapshot == _sentinel_snapshot:
             return
         _reload_scheduled = True
-        if not sentinel_changed:
-            hass.config_entries.async_schedule_reload(entry.entry_id)
-            return
         # Sentinel subentry was added, removed, or its data changed.
         # When removed, stop tasks immediately before the reload unloads the entry.
         if not current_snapshot:

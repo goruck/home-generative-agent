@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
 from homeassistant.config_entries import (
-    ConfigEntryState,
     ConfigSubentry,
     ConfigSubentryFlow,
     SubentryFlowResult,
@@ -37,6 +36,7 @@ from ..const import (  # noqa: TID252
     SUBENTRY_TYPE_DATABASE,
 )
 from ..core.db_utils import build_postgres_uri  # noqa: TID252
+from ..core.lifecycle import DATABASE_DOWN_STATES  # noqa: TID252
 from ..core.utils import (  # noqa: TID252
     CannotConnectError,
     InvalidAuthError,
@@ -68,7 +68,7 @@ class PgVectorDbSubentryFlow(ConfigSubentryFlow):
         # An entry waiting to retry, or failed, on these settings has no
         # update listener to reload it; reload now so the fix applies at once
         # instead of at the next retry, up to 10 minutes away (#748).
-        if entry.state in (ConfigEntryState.SETUP_RETRY, ConfigEntryState.SETUP_ERROR):
+        if entry.state in DATABASE_DOWN_STATES:
             self.hass.config_entries.async_schedule_reload(entry.entry_id)
         return result
 
