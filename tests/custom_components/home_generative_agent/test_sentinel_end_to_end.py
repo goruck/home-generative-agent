@@ -121,6 +121,7 @@ class DummyAudit:
                 "suppression_reason_code": kwargs.get("suppression_reason_code"),
                 "shown_anomaly_id": kwargs.get("shown_anomaly_id"),
                 "named_anomaly_ids": kwargs.get("named_anomaly_ids"),
+                "constituent_reasons": kwargs.get("constituent_reasons"),
                 "triage_decision": kwargs.get("triage_decision"),
                 "triage_reason_code": kwargs.get("triage_reason_code"),
                 "canary_would_execute": kwargs.get("canary_would_execute"),
@@ -939,6 +940,9 @@ async def test_compound_blocked_finding_audit_reason(
         audit.calls[0]["suppression_reason_code"] == SUPPRESSION_REASON_POLICY_BLOCKED
     )
     assert audit.calls[0]["action_policy_path"] == ACTION_POLICY_BLOCKED
+    assert audit.calls[0]["constituent_reasons"] == {
+        "test-compound-1": "not_suppressed"
+    }
 
 
 @pytest.mark.asyncio
@@ -1285,6 +1289,40 @@ async def test_grouped_push_restarts_a_held_same_door_conditions_clock(
     assert notifier.calls[2]["finding"] is door
     assert notifier.calls[2]["also_line"] == "Also: Front Door (alarm disarmed)"
     assert len(notifier.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_grouped_push_audits_each_constituents_own_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The audit says why each partner was or was not due (#732).
+
+    Two runs half a second apart each sent a push, the second about findings
+    the first held back; the record showed only the compound's own reason.
+    """
+    engine, _notifier, audit = _make_engine(monkeypatch, _make_snapshot())
+    t0 = datetime(2025, 1, 1, 20, 0, tzinfo=UTC)
+    disarmed = _disarmed()
+    assert await _dispatch_group(engine, disarmed, at=t0)
+
+    assert await _dispatch_group(
+        engine,
+        _open_door("door-id", "binary_sensor.front_door"),
+        disarmed,
+        at=t0 + timedelta(hours=1),
+    )
+
+    assert audit.calls[-1]["constituent_reasons"] == {
+        "door-id": "not_suppressed",
+        "disarmed-id": "pending_prompt",
+    }
+    # A run that holds every constituent says why for each, too.
+    assert not await _dispatch_group(
+        engine, disarmed, at=t0 + timedelta(hours=1, minutes=1)
+    )
+    assert audit.calls[-1]["suppression_reason_code"] == "suppressed"
+    assert audit.calls[-1]["constituent_reasons"] == {"disarmed-id": "pending_prompt"}
 
 
 @pytest.mark.asyncio
@@ -1928,6 +1966,47 @@ async def test_level_zero_set_while_an_alert_is_prepared_stops_it(
     assert audit.calls[-1]["suppression_reason_code"] == "autonomy_passive"
     state = cast("Any", engine)._suppression.state
     assert "late" not in state.pending_prompts
+
+
+@pytest.mark.asyncio
+async def test_level_zero_set_while_a_grouped_push_is_prepared_audits_reasons(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A grouped push level 0 overtook still audits each constituent (#732)."""
+    engine, notifier, audit = _make_engine(
+        monkeypatch, _make_snapshot(), cooldown_minutes=0
+    )
+    engine._entry_id = "passive-entry"
+    level = [1]
+    monkeypatch.setattr(engine, "get_autonomy_level", lambda _entry_id: level[0])
+
+    class _SlowExplainer:
+        last_call_deferred = False
+        deployment = "edge"
+
+        async def async_explain(self, _finding: Any) -> str:
+            level[0] = 0  # set while the explanation was being written
+            return "explained"
+
+    monkeypatch.setattr(engine, "_explainer_for", lambda *_a: _SlowExplainer())
+    door = _open_door("door-id", "binary_sensor.front_door")
+
+    sent = await engine._dispatch_compound(
+        CompoundFinding.from_findings([door, _disarmed()]),
+        _make_snapshot(),
+        datetime.now(UTC),
+        timedelta(0),
+        timedelta(0),
+        explain_enabled=True,
+    )
+
+    assert sent is False
+    assert notifier.calls == []
+    assert audit.calls[-1]["suppression_reason_code"] == "autonomy_passive"
+    assert audit.calls[-1]["constituent_reasons"] == {
+        "door-id": "not_suppressed",
+        "disarmed-id": "not_suppressed",
+    }
 
 
 async def test_late_silence_leaves_no_cooldown_or_prompt_behind(

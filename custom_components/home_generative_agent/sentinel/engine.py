@@ -1223,6 +1223,7 @@ class SentinelEngine:
         *,
         reason: str | None = None,
         audit: bool = True,
+        constituent_reasons: dict[str, str] | None = None,
     ) -> bool:
         """
         Stop a dispatch (level 0, a suppression, or nothing due), return False.
@@ -1230,7 +1231,8 @@ class SentinelEngine:
         ``reason`` overrides the audit reason (a suppression's own, or a
         compound with no finding due); with nothing held, the stop is always
         audited. ``audit=False`` skips the audit entirely (an owed replay
-        waiting out a cooldown).
+        waiting out a cooldown). ``constituent_reasons`` is a compound's
+        per-constituent reasons, audited with it (#732).
         """
         reason = reason or SUPPRESSION_REASON_AUTONOMY_PASSIVE
         held = await self._hold_passive(findings, now, window)
@@ -1242,6 +1244,7 @@ class SentinelEngine:
                 None,
                 reason,
                 trigger_source=trigger_source,
+                constituent_reasons=constituent_reasons,
             )
         self._last_dispatch_reason = reason
         return False
@@ -1255,6 +1258,8 @@ class SentinelEngine:
         now: datetime,
         window: timedelta,
         trigger_source: str,
+        *,
+        constituent_reasons: dict[str, str] | None = None,
     ) -> bool:
         """
         Stop a dispatch that level 0 overtook, undoing what it already wrote.
@@ -1277,6 +1282,7 @@ class SentinelEngine:
             now,
             window,
             trigger_source,
+            constituent_reasons=constituent_reasons,
         )
 
     def _canary_kwargs(
@@ -2735,6 +2741,9 @@ class SentinelEngine:
         )
 
         passing: list[tuple[AnomalyFinding, str]] = []
+        # Each constituent's own reason as the dispatch starts, audited with
+        # the compound (#732): whether it was due, not whether it was named.
+        reasons: dict[str, str] = {}
         for constituent in compound.constituent_findings:
             decision = should_suppress(
                 self._suppression.state,
@@ -2744,6 +2753,7 @@ class SentinelEngine:
                 cooldown_entity,
                 **suppress_kwargs,
             )
+            reasons[constituent.anomaly_id] = decision.reason_code
             if not decision.suppress:
                 passing.append((constituent, decision.reason_code))
 
@@ -2756,6 +2766,7 @@ class SentinelEngine:
                 cooldown_type,
                 trigger_source,
                 reason="suppressed" if not passing else None,
+                constituent_reasons=reasons,
             )
 
         # The push shows one finding, so show one that is due: picking from
@@ -2802,6 +2813,7 @@ class SentinelEngine:
                 action_policy_path=exec_result.action_policy_path,
                 autonomy_level_at_decision=effective_autonomy,
                 trigger_source=trigger_source,
+                constituent_reasons=reasons,
             )
             return False
 
@@ -2914,6 +2926,7 @@ class SentinelEngine:
                 now,
                 cooldown_type,
                 trigger_source,
+                constituent_reasons=reasons,
             )
         sent = await self._notifier.async_notify(
             best,
@@ -2937,6 +2950,7 @@ class SentinelEngine:
             _delivered_reason(SUPPRESSION_REASON_NOT_SUPPRESSED, sent=sent),
             shown_anomaly_id=best.anomaly_id,
             named_anomaly_ids=[constituent.anomaly_id for constituent in named],
+            constituent_reasons=reasons,
             triage_decision=None,
             triage_reason_code=None,
             triage_confidence=None,
@@ -3246,6 +3260,7 @@ async def _append_finding_audit(  # noqa: PLR0913
     trigger_source: str | None = None,
     shown_anomaly_id: str | None = None,
     named_anomaly_ids: list[str] | None = None,
+    constituent_reasons: dict[str, str] | None = None,
 ) -> None:
     """Append a finding to audit with suppression reason and execution metadata."""
     await audit_store.async_append_finding(
@@ -3269,4 +3284,5 @@ async def _append_finding_audit(  # noqa: PLR0913
         trigger_source=trigger_source,
         shown_anomaly_id=shown_anomaly_id,
         named_anomaly_ids=named_anomaly_ids,
+        constituent_reasons=constituent_reasons,
     )
