@@ -1167,6 +1167,20 @@ Also: `_anomaly_type_for_state` attributes every image-entity wake-up to `unknow
 
 ---
 
+### The network audit builds the entity index twice per run and discards most of it
+
+**What:** Since #793 `async_collect_ha_native_inputs` (`snapshot/network.py`) builds `_EntityIndex` (`agent/rule_entities.py`) on every Sentinel run through `audit_reach`, and when any automation has a public webhook `expand_critical_rules` builds it again a few microseconds later with the switch wrappers and template drives on top. `audit_reach` reads `classes`, `names`, `holders`, `helper_groups`, `disabled` and the unreadable sets; the device-registry lookups it needs only for the names, and the `unknown` bookkeeping, are computed for every entity and mostly dropped.
+
+**Why:** Performance specialist in the #793 review (2026-10-31), measured at ~10 us per entity on desktop hardware (10 ms at 1000 entities, 59 ms at 6000; roughly 4-6x on a Raspberry Pi 4), synchronous in the event loop, every 300 s plus triggered runs. Acceptable, so accepted for 3.45.0; the relay follow-up (#898) will want the wrappers in the audit's index anyway, which makes one shared build the natural shape.
+
+**How to apply:** Build one `_EntityIndex` per run in `async_collect_ha_native_inputs` (with wrappers and drives when a public webhook exists, or when #898 lands) and let `audit_reach` and `expand_critical_rules` accept a prebuilt index; add a `members_only` mode that skips `_add`'s name and device work for callers that never match names.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ## Sentinel Network Audit
 
 ### Network security plan steps 7–11 (router adapters, redaction, audit tool)

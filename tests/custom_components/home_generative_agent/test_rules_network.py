@@ -362,6 +362,103 @@ def test_sensitive_exposed_pin_gates_assist_only() -> None:
     assert rule.evaluate(unknown) == []
 
 
+def test_sensitive_exposed_group_is_named_with_what_it_holds() -> None:
+    """An exposed group counts like its members and says why (#793)."""
+    rule = HaSensitiveEntityExposedWithoutPinRule()
+    finding = _only(
+        rule.evaluate(
+            _snapshot(
+                ha_security={
+                    "exposed_sensitive_entities": {
+                        "cloud.alexa": ["cover.all_covers", "lock.front"],
+                    },
+                    "exposed_sensitive_groups": {
+                        "cover.all_covers": ["cover.garage", "cover.gate"],
+                    },
+                    "critical_action_pin_enabled": True,
+                    "assist_agents_outside_pin": [],
+                }
+            )
+        )
+    )
+    assert finding.triggering_entities == ["cover.all_covers", "lock.front"]
+    assert finding.evidence["summary"] == (
+        "2 sensitive entities exposed: cover.all_covers, lock.front to Alexa. "
+        "cover.all_covers holds cover.garage, cover.gate."
+    )
+    assert finding.evidence["groups"] == {
+        "cover.all_covers": ["cover.garage", "cover.gate"]
+    }
+    # A group listed as sensitive but exposed nowhere adds nothing.
+    plain = _only(
+        rule.evaluate(
+            _snapshot(
+                ha_security={
+                    "exposed_sensitive_entities": {"cloud.alexa": ["lock.front"]},
+                    "exposed_sensitive_groups": {"group.openers": ["cover.garage"]},
+                    "critical_action_pin_enabled": False,
+                }
+            )
+        )
+    )
+    assert "groups" not in plain.evidence
+    assert "lock.front to Alexa" in plain.evidence["summary"]
+
+
+def test_sensitive_exposed_group_member_list_is_capped_and_not_hashed() -> None:
+    """Three members are named, the rest counted; the list never changes the id."""
+    rule = HaSensitiveEntityExposedWithoutPinRule()
+    base = {
+        "exposed_sensitive_entities": {"cloud.alexa": ["cover.all_covers"]},
+        "critical_action_pin_enabled": False,
+    }
+    five = [f"cover.g{i}" for i in range(5)]
+    full = _only(
+        rule.evaluate(
+            _snapshot(
+                ha_security={
+                    **base,
+                    "exposed_sensitive_groups": {"cover.all_covers": five},
+                }
+            )
+        )
+    )
+    # The warning comes first; the detail, capped, follows and is cut first.
+    assert full.evidence["summary"] == (
+        "1 sensitive entity exposed: cover.all_covers to Alexa. "
+        "cover.all_covers holds cover.g0, cover.g1, cover.g2, and 2 more."
+    )
+    assert full.evidence["groups"] == {"cover.all_covers": five}
+    three = _only(
+        rule.evaluate(
+            _snapshot(
+                ha_security={
+                    **base,
+                    "exposed_sensitive_groups": {"cover.all_covers": five[:3]},
+                }
+            )
+        )
+    )
+    assert three.evidence["summary"].endswith(
+        "cover.all_covers holds cover.g0, cover.g1, cover.g2."
+    )
+    fewer = _only(
+        rule.evaluate(
+            _snapshot(
+                ha_security={
+                    **base,
+                    "exposed_sensitive_groups": {"cover.all_covers": five[:1]},
+                }
+            )
+        )
+    )
+    # A member briefly losing its class must not mint a new id and a new push.
+    assert fewer.anomaly_id == full.anomaly_id
+    assert (
+        _only(rule.evaluate(_snapshot(ha_security=base))).anomaly_id == full.anomaly_id
+    )
+
+
 def test_new_admin_or_token_one_finding_per_cycle() -> None:
     """Every change in a cycle rides in one finding; the id follows the set."""
     rule = HaNewAdminOrTokenRule()
