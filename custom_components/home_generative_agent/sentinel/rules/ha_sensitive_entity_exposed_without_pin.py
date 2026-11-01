@@ -16,6 +16,8 @@ from .network_common import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
     from custom_components.home_generative_agent.snapshot.schema import (
         FullStateSnapshot,
@@ -53,6 +55,71 @@ class HaSensitiveEntityExposedWithoutPinRule:
     )
     cooldown_minutes = POSTURE_COOLDOWN_MINUTES
 
+    def __init__(
+        self, is_entity_excluded: Callable[[str, str], bool] | None = None
+    ) -> None:
+        """
+        Initialise the rule with the engine's exclusion check.
+
+        ``is_entity_excluded(entity_id, anomaly_type)`` is the engine's
+        ``_entity_excluded_for_type``. The rule applies it per exposure so an
+        exclusion removes that entity from the report instead of letting the
+        engine's generic filter drop the whole aggregate, and so an excluded
+        member stays excluded when it is reached through a group (#899).
+        """
+        self._is_excluded = is_entity_excluded
+
+    def _excluded(self, entity_id: str) -> bool:
+        return self._is_excluded is not None and self._is_excluded(
+            entity_id, self.rule_id
+        )
+
+    def _held_in_scope(
+        self, held_raw: dict[str, list[str]], partial: set[str]
+    ) -> tuple[dict[str, list[str]], set[str]]:
+        """
+        Return each group's members left after exclusions, and the dropped groups.
+
+        A group whose every sensitive member is excluded is dropped; one with
+        some excluded members keeps and names the rest (#899). A group read
+        only in part is never dropped this way, since it may hold a member
+        the audit could not see.
+        """
+        held: dict[str, list[str]] = {}
+        dropped: set[str] = set()
+        for group_id, members in held_raw.items():
+            names = sorted(str(m) for m in members)
+            kept = [m for m in names if not self._excluded(m)]
+            held[str(group_id)] = kept
+            if names and not kept and str(group_id) not in partial:
+                dropped.add(str(group_id))
+        return held, dropped
+
+    def _exposures_in_scope(
+        self,
+        exposed: dict[str, list[str]],
+        dropped: set[str],
+        *,
+        assist_gated: bool,
+    ) -> dict[str, list[str]]:
+        """
+        Return each ungated assistant's exposures that exclusions leave (#899).
+
+        A group whose members are unknown counts by its own id alone.
+        """
+        exposures: dict[str, list[str]] = {}
+        for assistant, entity_ids in sorted(exposed.items()):
+            if assist_gated and assistant in _PIN_GATED_ASSISTANTS:
+                continue
+            ids = sorted(
+                str(e)
+                for e in entity_ids or []
+                if not self._excluded(str(e)) and str(e) not in dropped
+            )
+            if ids:
+                exposures[assistant] = ids
+        return exposures
+
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:
         """Return one finding covering every ungated exposure."""
         ha = ha_security(snapshot)
@@ -68,21 +135,19 @@ class HaSensitiveEntityExposedWithoutPinRule:
         exposed: dict[str, list[str]] = ha.get("exposed_sensitive_entities") or {}
         # An exposed group is followed by what it holds, so the reader sees
         # why "All Covers" counts (#793).
-        held_raw = ha.get("exposed_sensitive_groups") or {}
-        held = {
-            str(group_id): sorted(str(m) for m in members)
-            for group_id, members in held_raw.items()
-        }
-        exposures: dict[str, list[str]] = {}
-        for assistant, entity_ids in sorted(exposed.items()):
-            if not entity_ids or (assist_gated and assistant in _PIN_GATED_ASSISTANTS):
-                continue
-            exposures[assistant] = sorted(entity_ids)
+        held_raw: dict[str, list[str]] = ha.get("exposed_sensitive_groups") or {}
+        # Exclusions apply per exposure, so one excluded entity never drops
+        # the whole report, and a member's exclusion reaches its groups (#899).
+        partial = {str(g) for g in ha.get("exposed_sensitive_groups_partial") or []}
+        held, dropped = self._held_in_scope(held_raw, partial)
+        exposures = self._exposures_in_scope(
+            exposed, dropped, assist_gated=assist_gated
+        )
         if not exposures:
             return []
         all_ids = sorted({e for ids in exposures.values() for e in ids})
         groups = {
-            entity_id: held[entity_id] for entity_id in all_ids if entity_id in held
+            entity_id: held[entity_id] for entity_id in all_ids if held.get(entity_id)
         }
         holds = "".join(
             f" {group_id} holds {listed(members, _MAX_HELD_SHOWN)}."
