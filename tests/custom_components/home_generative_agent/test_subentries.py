@@ -3,10 +3,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Self, cast
 
 import pytest
 import voluptuous as vol
@@ -105,6 +106,9 @@ from custom_components.home_generative_agent.core.subentry_types import (
 from custom_components.home_generative_agent.core.utils import (
     CannotConnectError,
     InvalidAuthError,
+)
+from custom_components.home_generative_agent.flows import (
+    feature_subentry_flow as feature_flow_module,
 )
 from custom_components.home_generative_agent.flows.feature_subentry_flow import (
     FeatureSubentryFlow,
@@ -2922,6 +2926,245 @@ async def test_feature_basic_setup_creates_all_features(hass: HomeAssistant) -> 
     assert db_subentry is not None
 
 
+def _basic_entry() -> DummyEntry:
+    entry = DummyEntry()
+    provider = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Provider",
+        {"provider_type": "openai", "capabilities": ["chat", "vlm", "summarization"]},
+    )
+    entry.subentries[provider.subentry_id] = provider
+    return entry
+
+
+def _database(entry: DummyEntry) -> Any:
+    return next(
+        (
+            s
+            for s in entry.subentries.values()
+            if s.subentry_type == SUBENTRY_TYPE_DATABASE
+        ),
+        None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_basic_setup_tests_the_default_database_before_saving_it(
+    hass: HomeAssistant, default_database_reachable: list[str]
+) -> None:
+    """Reachable: the defaults are tested once and saved, and the screen says so."""
+    entry = _basic_entry()
+    flow = _make_feature_flow_for_basic(hass, entry)
+
+    result = await flow.async_step_setup_mode({"setup_mode": "basic"})
+
+    assert default_database_reachable == [_DEFAULT_URI]
+    assert _database(entry) is not None
+    placeholders = result.get("description_placeholders") or {}
+    assert placeholders.get("database_status") == "Configured"
+
+
+_DEFAULT_URI = "postgresql://ha_user:ha_password@localhost:5432/ha_db?sslmode=disable"
+
+
+def _features(entry: DummyEntry) -> list[Any]:
+    return [
+        s for s in entry.subentries.values() if s.subentry_type == SUBENTRY_TYPE_FEATURE
+    ]
+
+
+@pytest.mark.parametrize("error", [CannotConnectError, InvalidAuthError, RuntimeError])
+@pytest.mark.asyncio
+async def test_basic_setup_saves_no_database_it_cannot_reach(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+) -> None:
+    """
+    Unreachable: no Database subentry is written, and the screen says why.
+
+    Settings that cannot connect left the entry in "Failed to set up, will
+    retry" with nothing at setup time saying so (#765). A refused connection,
+    a rejected sign-in and an unexpected error are all "unreachable"; the
+    features are still saved and the reload still scheduled.
+    """
+
+    async def _refuse(_hass: Any, _db_uri: str) -> None:
+        raise error
+
+    monkeypatch.setattr(feature_flow_module, "validate_db_uri", _refuse)
+    entry = _basic_entry()
+    flow = _make_feature_flow_for_basic(hass, entry)
+    reloads: list[bool] = []
+    flow._schedule_reload = lambda: reloads.append(True)  # type: ignore[assignment]
+
+    result = await flow.async_step_setup_mode({"setup_mode": "basic"})
+
+    assert result.get("step_id") == "setup_status"
+    assert _database(entry) is None
+    assert _features(entry)
+    assert reloads == [True]
+    assert flow._basic_db_state == "unreachable"
+    status = (result.get("description_placeholders") or {}).get("database_status")
+    assert status is not None
+    assert status.startswith(
+        "Not configured. Basic setup could not connect to or sign in"
+    )
+    assert "Advanced setup" in status
+    assert "face recognition" in status
+
+
+@pytest.mark.asyncio
+async def test_basic_setup_tests_the_database_before_writing_anything(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancelled or slow test leaves nothing half-saved: it runs first."""
+    entry = _basic_entry()
+    seen: list[int] = []
+
+    async def _probe(_hass: Any, _db_uri: str) -> None:
+        seen.append(len(_features(entry)))
+
+    monkeypatch.setattr(feature_flow_module, "validate_db_uri", _probe)
+    flow = _make_feature_flow_for_basic(hass, entry)
+
+    await flow.async_step_setup_mode({"setup_mode": "basic"})
+
+    assert seen == [0]
+    assert _features(entry)
+
+
+@pytest.mark.asyncio
+async def test_basic_setup_tests_an_existing_database_and_never_changes_it(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    An install already stuck by #765 learns why instead of reading "Configured".
+
+    Its Database subentry is tested with its own settings and left as it is.
+    """
+    entry = _basic_entry()
+    data = {
+        "username": "ha_user",
+        "password": "ha_password",
+        "host": "localhost",
+        "port": 5432,
+        "db_name": "ha_db",
+    }
+    db = DummySubentry("db1", SUBENTRY_TYPE_DATABASE, "Database", dict(data))
+    entry.subentries[db.subentry_id] = db
+    tested: list[str] = []
+
+    async def _refuse(_hass: Any, db_uri: str) -> None:
+        tested.append(db_uri)
+        raise CannotConnectError
+
+    monkeypatch.setattr(feature_flow_module, "validate_db_uri", _refuse)
+    flow = _make_feature_flow_for_basic(hass, entry)
+
+    result = await flow.async_step_setup_mode({"setup_mode": "basic"})
+
+    assert tested == ["postgresql://ha_user:ha_password@localhost:5432/ha_db"]
+    assert _database(entry) is db
+    assert dict(db.data) == data
+    status = (result.get("description_placeholders") or {}).get("database_status")
+    assert status is not None
+    assert status.startswith("Configured, but it cannot connect just now,")
+    assert "Advanced setup" in status
+    assert "delete the Database entry" in status
+
+
+@pytest.mark.asyncio
+async def test_basic_setup_says_legacy_database_settings_are_still_used(
+    hass: HomeAssistant, default_database_reachable: list[str]
+) -> None:
+    """
+    An install from before subentries keeps its database, even if the defaults work.
+
+    A default Database subentry would override its options and move it to
+    another database, losing its history.
+    """
+    entry = _basic_entry()
+    entry.options = {"db_uri": "postgresql://u:p@nas:5432/hga"}
+    flow = _make_feature_flow_for_basic(hass, entry)
+
+    result = await flow.async_step_setup_mode({"setup_mode": "basic"})
+
+    assert _database(entry) is None
+    assert flow._basic_db_state == "legacy"
+    assert default_database_reachable == []
+    status = (result.get("description_placeholders") or {}).get("database_status")
+    assert status is not None
+    assert "uses database settings saved before Database entries existed" in status
+
+
+@pytest.mark.asyncio
+async def test_basic_setup_adds_no_second_database_if_one_appeared_meanwhile(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checked again after the test: a flow finishing meanwhile wins."""
+    entry = _basic_entry()
+    other = DummySubentry("db_other", SUBENTRY_TYPE_DATABASE, "Database", {})
+
+    async def _probe(_hass: Any, _db_uri: str) -> None:
+        entry.subentries[other.subentry_id] = other
+
+    monkeypatch.setattr(feature_flow_module, "validate_db_uri", _probe)
+    flow = _make_feature_flow_for_basic(hass, entry)
+
+    await flow.async_step_setup_mode({"setup_mode": "basic"})
+
+    databases = [
+        s
+        for s in entry.subentries.values()
+        if s.subentry_type == SUBENTRY_TYPE_DATABASE
+    ]
+    assert databases == [other]
+    # The entry that appeared was not the one tested: no claim about it.
+    assert flow._basic_db_state is None
+
+
+@pytest.mark.asyncio
+async def test_basic_setup_keeps_a_reachable_existing_database(
+    hass: HomeAssistant, default_database_reachable: list[str]
+) -> None:
+    """A working Database subentry is tested, kept, and reported as configured."""
+    entry = _basic_entry()
+    data = {
+        "username": "me",
+        "password": "pw",
+        "host": "nas",
+        "port": 5432,
+        "db_name": "hga",
+    }
+    db = DummySubentry("db1", SUBENTRY_TYPE_DATABASE, "Database", dict(data))
+    entry.subentries[db.subentry_id] = db
+    flow = _make_feature_flow_for_basic(hass, entry)
+
+    result = await flow.async_step_setup_mode({"setup_mode": "basic"})
+
+    assert default_database_reachable == ["postgresql://me:pw@nas:5432/hga"]
+    assert _database(entry) is db
+    placeholders = result.get("description_placeholders") or {}
+    assert placeholders.get("database_status") == "Configured"
+
+
+@pytest.mark.asyncio
+async def test_the_database_form_still_rejects_a_bad_uri(
+    hass: HomeAssistant,
+) -> None:
+    """The real URI checks run under the test stub: no host is refused."""
+    entry = _basic_entry()
+    flow = _make_feature_flow_for_basic(hass, entry)
+
+    result = await flow.async_step_database(
+        {"username": "u", "password": "p", "host": "", "port": 5432, "db_name": "hga"}
+    )
+
+    assert result.get("step_id") == "database"
+    assert (result.get("errors") or {}).get("base") == "cannot_connect"
+    assert _database(entry) is None
+
+
 @pytest.mark.asyncio
 async def test_feature_basic_setup_assigns_first_compatible_provider(
     hass: HomeAssistant,
@@ -5648,3 +5891,281 @@ async def test_feature_flow_blank_model_name_keeps_the_default(
 
     assert result.get("type") == "abort"
     assert feature.data[CONF_FEATURE_MODEL].get(CONF_FEATURE_MODEL_NAME) != ""
+
+
+@pytest.mark.asyncio
+async def test_the_database_test_has_one_deadline(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A server that stalls at any point cannot hold a setup flow (#765)."""
+    from custom_components.home_generative_agent.core import utils  # noqa: PLC0415
+
+    finished: list[bool] = []
+
+    async def _stall(_db_uri: str) -> None:
+        # psycopg catches the cancel mid-query and waits on the server again.
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.5)
+        finished.append(True)
+
+    monkeypatch.setattr(utils, "_db_probe", _stall)
+    monkeypatch.setattr(utils, "_DB_PROBE_DEADLINE_S", 0.05)
+    with pytest.raises(CannotConnectError):
+        await utils.validate_db_uri(hass, "postgresql://u:p@db:5432/hga")
+    # The flow stopped waiting before the probe gave up its own wait; the
+    # abandoned probe then finishes on its own and closes its connection.
+    assert finished == []
+    pending = [
+        task
+        for task in asyncio.all_tasks()
+        if task is not asyncio.current_task() and not task.done()
+    ]
+    await asyncio.gather(*pending, return_exceptions=True)
+    assert finished == [True]
+
+
+@pytest.mark.asyncio
+async def test_the_database_test_keeps_the_users_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The URI is connected to as given, and the query timeout is set on it.
+
+    Passing ``options`` as a keyword replaced the user's own ``options``, so
+    the test checked other settings than startup uses.
+    """
+    from custom_components.home_generative_agent.core import utils  # noqa: PLC0415
+
+    seen: dict[str, Any] = {"sql": []}
+
+    class _Cursor:
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+        async def execute(self, sql: str) -> None:
+            seen["sql"].append(sql)
+
+        async def fetchone(self) -> tuple[int]:
+            return (1,)
+
+    class _Conn:
+        def cursor(self) -> _Cursor:
+            return _Cursor()
+
+        async def close(self) -> None:
+            seen["closed"] = True
+
+    async def _connect(uri: str, **kwargs: Any) -> _Conn:
+        seen["uri"] = uri
+        seen["kwargs"] = kwargs
+        return _Conn()
+
+    monkeypatch.setattr(utils.psycopg.AsyncConnection, "connect", _connect)
+    uri = "postgresql://u:p@db:5432/hga?options=-c%20search_path%3Dhga"
+
+    await utils._db_probe_connect(uri)
+
+    assert seen["uri"] == uri
+    assert seen["kwargs"] == {"connect_timeout": 10}
+    assert seen["sql"] == ["SET statement_timeout = 5000", "SELECT 1"]
+    assert seen["closed"] is True
+
+
+@pytest.mark.asyncio
+async def test_basic_setup_reports_incomplete_existing_settings(
+    hass: HomeAssistant, default_database_reachable: list[str]
+) -> None:
+    """Settings that cannot form a URI are reported and left as they are."""
+    entry = _basic_entry()
+    db = DummySubentry("db1", SUBENTRY_TYPE_DATABASE, "Database", {"host": "nas"})
+    entry.subentries[db.subentry_id] = db
+    flow = _make_feature_flow_for_basic(hass, entry)
+
+    result = await flow.async_step_setup_mode({"setup_mode": "basic"})
+
+    assert result.get("step_id") == "setup_status"
+    assert flow._basic_db_state == "existing_invalid"
+    assert dict(db.data) == {"host": "nas"}
+    assert default_database_reachable == []
+    status = (result.get("description_placeholders") or {}).get("database_status")
+    assert status is not None
+    assert "saved Database settings are incomplete" in status
+
+
+@pytest.mark.asyncio
+async def test_basic_setup_survives_malformed_legacy_settings(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Old settings that cannot be read still reach the status screen."""
+
+    async def _refuse(_hass: Any, _db_uri: str) -> None:
+        raise CannotConnectError
+
+    monkeypatch.setattr(feature_flow_module, "validate_db_uri", _refuse)
+    entry = _basic_entry()
+    entry.options = {
+        "db_name": "hga",
+        "username": "u",
+        "password": "p",
+        "host": "nas",
+        "port": "not-a-port",
+    }
+    flow = _make_feature_flow_for_basic(hass, entry)
+
+    result = await flow.async_step_setup_mode({"setup_mode": "basic"})
+
+    assert result.get("step_id") == "setup_status"
+    assert flow._basic_db_state == "legacy"
+
+
+@pytest.mark.parametrize(
+    "state",
+    ["unreachable", "existing_unreachable", "existing_invalid", "legacy"],
+)
+@pytest.mark.asyncio
+async def test_basic_database_status_is_localized(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    """Each status line comes from the "common" translations; the fallback is en.json."""
+    key, fallback = feature_flow_module._BASIC_DATABASE_STATUS[state]
+    assert fallback == _load_en_translations()["common"][key]
+    _patch_common_translations(
+        monkeypatch,
+        {f"component.home_generative_agent.common.{key}": "Lokalizov\u00e1no"},
+    )
+    flow = _make_feature_flow_for_basic(hass, _basic_entry())
+    flow._basic_db_state = state
+
+    result = await flow.async_step_setup_status(None)
+
+    placeholders = result.get("description_placeholders") or {}
+    assert placeholders.get("database_status") == "Lokalizov\u00e1no"
+
+
+@pytest.mark.asyncio
+async def test_the_database_test_keeps_a_connect_timeout_the_user_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connect_timeout in the URI is the user's; the test does not override it."""
+    from custom_components.home_generative_agent.core import utils  # noqa: PLC0415
+
+    seen: dict[str, Any] = {}
+
+    async def _connect(_uri: str, **kwargs: Any) -> Any:
+        seen.update(kwargs)
+        raise utils.psycopg.OperationalError
+
+    monkeypatch.setattr(utils.psycopg.AsyncConnection, "connect", _connect)
+    with pytest.raises(utils.psycopg.OperationalError):
+        await utils._db_probe_connect("postgresql://u:p@db:5432/hga?connect_timeout=30")
+    assert seen == {}
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(OSError("refused"), id="refused"),
+        pytest.param(UnicodeError("label empty or too long"), id="bad-host-label"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_the_database_test_maps_probe_failures_to_cannot_connect(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    """Every way the probe fails is cannot_connect, so no form step crashes."""
+    from custom_components.home_generative_agent.core import utils  # noqa: PLC0415
+
+    async def _fail(_db_uri: str) -> None:
+        raise error
+
+    monkeypatch.setattr(utils, "_db_probe", _fail)
+    with pytest.raises(CannotConnectError):
+        await utils.validate_db_uri(hass, "postgresql://u:p@db..local:5432/hga")
+
+
+@pytest.mark.asyncio
+async def test_the_database_test_maps_a_psycopg_error_to_cannot_connect(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused connection or rejected password arrives as a psycopg error."""
+    from custom_components.home_generative_agent.core import utils  # noqa: PLC0415
+
+    async def _refuse(_db_uri: str) -> None:
+        msg = "password authentication failed"
+        raise utils.psycopg.OperationalError(msg)
+
+    monkeypatch.setattr(utils, "_db_probe", _refuse)
+    with pytest.raises(CannotConnectError):
+        await utils.validate_db_uri(hass, "postgresql://u:p@db:5432/hga")
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "postgresql://u:p@[db:5432/hga",
+        "mysql://u:p@db:3306/hga",
+        "postgresql://u:p@:5432/hga",
+        "postgresql://u:p@db:5432/",
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_malformed_database_uri_is_refused_without_connecting(
+    hass: HomeAssistant, default_database_reachable: list[str], uri: str
+) -> None:
+    """A host such as "[db" made urlparse raise in the Advanced step (#765)."""
+    from custom_components.home_generative_agent.core import utils  # noqa: PLC0415
+
+    with pytest.raises(CannotConnectError):
+        await utils.validate_db_uri(hass, uri)
+    assert default_database_reachable == []
+
+
+@pytest.mark.asyncio
+async def test_basic_setup_reports_an_existing_entry_with_no_host_as_incomplete(
+    hass: HomeAssistant, default_database_reachable: list[str]
+) -> None:
+    """An empty host forms a URI but names no server: incomplete, not unreachable."""
+    entry = _basic_entry()
+    data = {
+        "username": "u",
+        "password": "p",
+        "host": "",
+        "port": 5432,
+        "db_name": "hga",
+    }
+    db = DummySubentry("db1", SUBENTRY_TYPE_DATABASE, "Database", dict(data))
+    entry.subentries[db.subentry_id] = db
+    flow = _make_feature_flow_for_basic(hass, entry)
+
+    await flow.async_step_setup_mode({"setup_mode": "basic"})
+
+    assert flow._basic_db_state == "existing_invalid"
+    assert default_database_reachable == []
+
+
+@pytest.mark.asyncio
+async def test_basic_setup_writes_nothing_if_the_dialog_closed_during_the_test(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Closing the dialog does not stop a step in progress; the step checks."""
+    from homeassistant.data_entry_flow import UnknownFlow  # noqa: PLC0415
+
+    entry = _basic_entry()
+    flow = _make_feature_flow_for_basic(hass, entry)
+    flow.flow_id = "closed-flow"
+
+    def _gone(_flow_id: str) -> Any:
+        raise UnknownFlow
+
+    monkeypatch.setattr(hass.config_entries.subentries, "async_get", _gone)
+
+    result = await flow.async_step_setup_mode({"setup_mode": "basic"})
+
+    assert result.get("type") == "abort"
+    assert _features(entry) == []
+    assert _database(entry) is None

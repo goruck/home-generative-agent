@@ -96,7 +96,7 @@ Click the button below to add the repository, then install and configure the app
 **5. Add a Model Provider:** on the integration page click **+ Model Provider**. The first step asks **Edge** or **Cloud** — that choice decides which provider types the next step offers (**Edge** → Ollama, OpenAI Compatible; **Cloud** → OpenAI, Gemini, Anthropic). A provider must exist before you can run Setup. Click **+ Model Provider** again for each additional provider you want — reconfiguring an existing one replaces it in place rather than adding another.
 
 **6. Open the integration page and click + Setup.** Choose a setup mode:
-   - **Basic** — enables all features with recommended defaults and creates the database subentry automatically. No database prompt appears.
+   - **Basic** — enables all features with recommended defaults and creates the database subentry with the default settings if it can connect to them; otherwise its final screen says so and how to add the database. No database prompt appears.
    - **Advanced** — configure each feature individually; includes a database configuration step.
 
 **7. Set as your voice assistant:** Settings → Voice Assistants → select **Home Generative Agent** as the conversation agent.
