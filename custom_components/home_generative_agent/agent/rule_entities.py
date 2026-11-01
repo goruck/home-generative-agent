@@ -674,13 +674,24 @@ def audit_reach(
         )
 
     # A group listing a member Home Assistant knows nothing about (a YAML id
-    # with no state and no registry entry) may hold more than it shows.
+    # with no state and no registry entry) may hold more than it shows, and
+    # so may one holding a member of its own domain that is not loaded or
+    # could not be read, since that member could be a group itself (#899).
+    unseen = index.unknown | index.unreadable
     partial = index.unreadable_groups | {
         group_id
         for group_id in index.ha_groups
         if any(
-            member not in index.classes for member in index.members.get(group_id, ())
+            member not in index.classes
+            or (member in unseen and _domain(member) == _domain(group_id))
+            for member in index.members.get(group_id, ())
         )
+    }
+    # Every group holding a partly read group may hold what it could not show.
+    partial |= {
+        holder
+        for group_id in list(partial)
+        for holder in _audit_holders(index, group_id)
     }
     return AuditReach(
         sensitive=sensitive,
