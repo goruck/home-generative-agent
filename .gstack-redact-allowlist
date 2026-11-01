@@ -1,0 +1,8 @@
+mysql://u:p@db:3306
+postgresql://ha_user:ha_password@localhost:5432
+postgresql://me:pw@nas:5432
+postgresql://u:p@:5432
+postgresql://u:p@[db:5432
+postgresql://u:p@db..local:5432
+postgresql://u:p@db:5432
+postgresql://u:p@nas:5432

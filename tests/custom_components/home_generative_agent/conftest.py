@@ -27,3 +27,28 @@ def _no_chat_grace_between_tests() -> None:
     utils_mod._chat_last_end = 0.0
     utils_mod._uncontended = False
     utils_mod._sentinel_last_call_end = 0.0
+
+
+@pytest.fixture(autouse=True)
+def default_database_reachable(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """
+    Skip the network half of every database test the flows run (#765).
+
+    Without it every test that runs Basic setup would open a real PostgreSQL
+    connection to ``localhost``, which may reach a developer's own database.
+    Only ``core.utils._db_probe`` (connect, query, close) is replaced, so the
+    URI checks ``validate_db_uri`` makes before connecting still run; a URI
+    that passes them looks reachable. A test that needs it unreachable patches
+    ``validate_db_uri`` or ``_db_probe`` itself. Returns the URIs probed.
+    """
+    from custom_components.home_generative_agent.core import (  # noqa: PLC0415
+        utils,
+    )
+
+    probed: list[str] = []
+
+    async def _reachable(db_uri: str) -> None:
+        probed.append(db_uri)
+
+    monkeypatch.setattr(utils, "_db_probe", _reachable)
+    return probed

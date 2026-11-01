@@ -12,7 +12,7 @@ import secrets
 import time
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal, cast
-from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
+from urllib.parse import parse_qs, urljoin, urlparse, urlsplit, urlunsplit
 
 import httpx
 import psycopg
@@ -1461,29 +1461,95 @@ async def validate_face_api_url(
             raise CannotConnectError
 
 
-async def validate_db_uri(hass: HomeAssistant, db_uri: str) -> None:
-    """Validate PostgreSQL connection URI by executing a trivial query."""
+# The flows stop waiting for the database test after this long, whatever
+# the server or the driver does, so nothing can hold a setup flow (#765). The
+# connection gets startup's connect timeout (`database_guard`), unless the
+# URI sets its own, and the query a statement timeout (5 s), so a slow but
+# healthy server fails cleanly before the deadline.
+_DB_PROBE_DEADLINE_S = 20.0
+_DB_PROBE_CONNECT_TIMEOUT_S = 10
+
+
+async def _db_probe_connect(db_uri: str) -> None:
+    """
+    Connect with ``db_uri`` exactly as given, run ``SELECT 1`` and close.
+
+    The statement timeout is set on the connection, not passed as the
+    ``options`` startup parameter, which would replace any ``options`` the
+    user set and test other settings than startup uses.
+    """
+    params = parse_qs(urlparse(db_uri).query)
+    kwargs: dict[str, Any] = (
+        {}
+        if "connect_timeout" in params
+        else {"connect_timeout": _DB_PROBE_CONNECT_TIMEOUT_S}
+    )
+    conn = await psycopg.AsyncConnection.connect(db_uri, **kwargs)
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute("SET statement_timeout = 5000")
+            await cur.execute("SELECT 1")
+            await cur.fetchone()
+    finally:
+        await conn.close()
+
+
+# Tests replace this to skip the network; the URI checks still run.
+_db_probe = _db_probe_connect
+
+
+def db_uri_is_well_formed(db_uri: str) -> bool:
+    """
+    Return whether ``db_uri`` is a PostgreSQL URI naming a host and database.
+
+    A host such as ``[db`` makes ``urlparse`` raise; that is not well formed
+    either.
+    """
+    try:
+        parsed = urlparse(db_uri)
+        host = parsed.hostname
+    except ValueError:
+        return False
+    return (
+        parsed.scheme.startswith("postgres")
+        and bool(host)
+        and bool(parsed.path)
+        and parsed.path != "/"
+    )
+
+
+def _consume_result(task: asyncio.Task[None]) -> None:
+    """Retrieve an abandoned probe's outcome so it is never logged as lost."""
+    if not task.cancelled():
+        task.exception()
+
+
+async def validate_db_uri(hass: HomeAssistant, db_uri: str) -> None:  # noqa: ARG001 - kept for callers
+    """
+    Validate a PostgreSQL connection URI by connecting and running a query.
+
+    A malformed URI, a refused connection, a rejected sign-in, a host name
+    that cannot be resolved or encoded, a failed query and a test that does
+    not finish within ``_DB_PROBE_DEADLINE_S`` all raise
+    ``CannotConnectError``. The deadline holds even where psycopg catches
+    the cancellation and waits on the server again: the probe runs as its
+    own task, which is left to finish and close its connection.
+    """
     if not db_uri:
         return
-
-    parsed = urlparse(db_uri)
-    if not parsed.scheme.startswith("postgres"):
-        raise CannotConnectError
-    if not parsed.hostname or not parsed.path or parsed.path == "/":
+    if not db_uri_is_well_formed(db_uri):
         raise CannotConnectError
 
-    def _psycopg_ping() -> None:
-        try:
-            with (
-                psycopg.connect(db_uri, connect_timeout=5) as conn,
-                conn.cursor() as cur,
-            ):
-                cur.execute("SELECT 1")
-                cur.fetchone()
-        except psycopg.Error as err:
-            raise CannotConnectError from err
-
-    await hass.async_add_executor_job(_psycopg_ping)
+    task = asyncio.ensure_future(_db_probe(db_uri))
+    done, _pending = await asyncio.wait({task}, timeout=_DB_PROBE_DEADLINE_S)
+    if not done:
+        task.cancel()
+        task.add_done_callback(_consume_result)
+        raise CannotConnectError
+    try:
+        task.result()
+    except (psycopg.Error, OSError, ValueError) as err:
+        raise CannotConnectError from err
 
 
 # ---------------------------

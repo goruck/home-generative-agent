@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
@@ -20,6 +21,7 @@ from homeassistant.const import (
     CONF_PORT,
     CONF_USERNAME,
 )
+from homeassistant.data_entry_flow import UnknownFlow
 from homeassistant.helpers.selector import (
     BooleanSelector,
     NumberSelector,
@@ -77,12 +79,14 @@ from ..core.db_utils import build_postgres_uri  # noqa: TID252
 from ..core.embedding_model_guard import async_store_vector_dims  # noqa: TID252
 from ..core.subentry_resolver import (  # noqa: TID252
     OPT_IN_CATEGORIES,
+    build_database_uri_from_entry,
     shares_runtime_slot,
     with_implied_capabilities,
 )
 from ..core.utils import (  # noqa: TID252
     CannotConnectError,
     InvalidAuthError,
+    db_uri_is_well_formed,
     fetch_ollama_models,
     format_embedding_dims,
     list_ollama_models,
@@ -123,6 +127,18 @@ def _current_subentry(flow: ConfigSubentryFlow) -> ConfigSubentry | None:
         if len(matches) == 1:
             return matches[0]
     return None
+
+
+def _database_subentry(entry: ConfigEntry) -> ConfigSubentry | None:
+    """Return the entry's Database subentry, if it has one."""
+    return next(
+        (
+            s
+            for s in entry.subentries.values()
+            if s.subentry_type == SUBENTRY_TYPE_DATABASE
+        ),
+        None,
+    )
 
 
 def _feature_subentry(entry: ConfigEntry, feature_type: str) -> ConfigSubentry | None:
@@ -538,6 +554,67 @@ def _remembered_reasoning_entry(
     return dict(entry) if isinstance(entry, Mapping) else {}
 
 
+LOGGER = logging.getLogger(__name__)
+
+# What Basic setup found when it tested the database (#765), and the status
+# line shown for each; the "common" translation of the same key wins. A
+# state with no entry here shows the plain "Configured" / "Not configured".
+_DB_OK = "ok"
+_DB_UNREACHABLE = "unreachable"
+_DB_EXISTING_UNREACHABLE = "existing_unreachable"
+_DB_EXISTING_INVALID = "existing_invalid"
+_DB_LEGACY = "legacy"
+_BASIC_DATABASE_STATUS: dict[str, tuple[str, str]] = {
+    _DB_UNREACHABLE: (
+        "basic_database_unreachable",
+        (
+            "Not configured. Basic setup could not connect to or sign in to the "
+            "default PostgreSQL database (`localhost`, port `5432`, database "
+            "`ha_db`, user `ha_user`) just now, so it saved no database "
+            "settings. Until a database is added, conversation history is kept "
+            "in memory only, and long-term memory, face recognition and the "
+            "Sentinel baseline detector are off. Start the **PostgreSQL with "
+            "pgvector** app, or have your own database's settings ready, then "
+            "run **+ Setup** again and choose **Advanced setup**: after the "
+            "feature steps, its last step tests the database and saves it."
+        ),
+    ),
+    _DB_EXISTING_UNREACHABLE: (
+        "basic_database_existing_unreachable",
+        (
+            "Configured, but it cannot connect just now, so the integration "
+            "cannot finish setting up until the database answers. Basic setup "
+            "left your Database settings unchanged. Start the **PostgreSQL "
+            "with pgvector** app if you use it, or correct the settings with "
+            "**+ Setup** and **Advanced setup**: after the feature steps, its "
+            "last step tests them and saves them over these. To run on "
+            "in-memory storage instead, delete the Database entry."
+        ),
+    ),
+    _DB_EXISTING_INVALID: (
+        "basic_database_existing_invalid",
+        (
+            "Configured, but the saved Database settings are incomplete, so the "
+            "integration cannot finish setting up. Basic setup left them "
+            "unchanged. Correct them with **+ Setup** and **Advanced setup**: "
+            "after the feature steps, its last step tests them and saves them "
+            "over these. Or delete the Database entry to run on in-memory "
+            "storage."
+        ),
+    ),
+    _DB_LEGACY: (
+        "basic_database_legacy",
+        (
+            "Not configured as a Database entry. The integration uses database "
+            "settings saved before Database entries existed, so Basic setup "
+            "saved none over them and did not test them. To replace them, run "
+            "**+ Setup** again and choose **Advanced setup**: after the "
+            "feature steps, its last step tests the database and saves it."
+        ),
+    ),
+}
+
+
 class FeatureSubentryFlow(ConfigSubentryFlow):
     """Config flow handler for feature/tool subentries."""
 
@@ -546,6 +623,9 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
         self._setup_mode = False
         self._basic_mode = False
         self._basic_skipped_features: list[str] = []
+        # What Basic setup found when it tested the database (#765), one of
+        # the _DB_* states; None outside Basic setup.
+        self._basic_db_state: str | None = None
         self._feature_queue: list[str] = []
         self._active_feature: str | None = None
         self._pending_provider_id: str | None = None
@@ -716,6 +796,14 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
         if not any_providers:
             return self.async_abort(reason="no_provider_for_basic_setup")
 
+        # Test the database before anything is written, and write nothing if
+        # the dialog was closed while it ran: closing does not stop a step
+        # in progress (#765).
+        tested_db = _database_subentry(entry)
+        db_data = await self._async_basic_database_check(entry)
+        if not self._flow_still_open():
+            return self.async_abort(reason="setup_complete")
+
         self._basic_skipped_features = []
         disabled_cache = self._disabled_feature_cache()
 
@@ -749,33 +837,99 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                 )
 
         self._persist_disabled_cache(disabled_cache)
-        current_db = next(
-            (
-                s
-                for s in entry.subentries.values()
-                if s.subentry_type == SUBENTRY_TYPE_DATABASE
-            ),
-            None,
-        )
-        if current_db is None:
+        # Checked again after the probe: a flow finishing meanwhile may have
+        # added or removed one, which was not the one tested.
+        if _database_subentry(entry) is not tested_db:
+            self._basic_db_state = None
+        elif db_data is not None:
             db_subentry = ConfigSubentry(
                 subentry_type=SUBENTRY_TYPE_DATABASE,
                 title="Database",
                 unique_id=f"{entry.entry_id}_database",
-                data=MappingProxyType(
-                    {
-                        CONF_USERNAME: RECOMMENDED_DB_USERNAME,
-                        CONF_PASSWORD: RECOMMENDED_DB_PASSWORD,
-                        CONF_HOST: RECOMMENDED_DB_HOST,
-                        CONF_PORT: RECOMMENDED_DB_PORT,
-                        CONF_DB_NAME: RECOMMENDED_DB_NAME,
-                        CONF_DB_PARAMS: RECOMMENDED_DB_PARAMS,
-                    }
-                ),
+                data=MappingProxyType(db_data),
             )
             self.hass.config_entries.async_add_subentry(entry, db_subentry)
         self._schedule_reload()
         return await self.async_step_setup_status()
+
+    async def _async_basic_database_check(
+        self, entry: ConfigEntry
+    ) -> dict[str, Any] | None:
+        """
+        Test the database Basic setup would use; return the defaults to save.
+
+        An existing Database subentry is the user's: it is tested, so the
+        status screen can say when it cannot connect, but never changed.
+        Without one the defaults are tested as the Database form tests
+        settings, and returned for saving only if they connect: settings that
+        cannot connect would leave the entry retrying setup forever (#765).
+        Without them it loads on in-memory storage with the "database not
+        configured" repair issue. An install from before subentries that keeps
+        database settings in its options goes on using them: Basic setup
+        saves no Database subentry over them, whatever the defaults do, since
+        that would move the install to another database.
+        """
+        current = _database_subentry(entry)
+        if current is not None:
+            try:
+                uri = build_postgres_uri(dict(current.data))
+            except (KeyError, TypeError, ValueError):
+                uri = ""
+            if not db_uri_is_well_formed(uri):
+                self._basic_db_state = _DB_EXISTING_INVALID
+                return None
+            reachable = await self._async_uri_reachable(uri)
+            self._basic_db_state = _DB_OK if reachable else _DB_EXISTING_UNREACHABLE
+            return None
+        try:
+            legacy = build_database_uri_from_entry(entry) is not None
+        except Exception:  # noqa: BLE001 - malformed old settings are still settings
+            LOGGER.debug("Basic setup: could not read the legacy database settings")
+            legacy = True
+        if legacy:
+            self._basic_db_state = _DB_LEGACY
+            return None
+        defaults: dict[str, Any] = {
+            CONF_USERNAME: RECOMMENDED_DB_USERNAME,
+            CONF_PASSWORD: RECOMMENDED_DB_PASSWORD,
+            CONF_HOST: RECOMMENDED_DB_HOST,
+            CONF_PORT: RECOMMENDED_DB_PORT,
+            CONF_DB_NAME: RECOMMENDED_DB_NAME,
+            CONF_DB_PARAMS: RECOMMENDED_DB_PARAMS,
+        }
+        if await self._async_uri_reachable(build_postgres_uri(defaults)):
+            self._basic_db_state = _DB_OK
+            return defaults
+        self._basic_db_state = _DB_UNREACHABLE
+        return None
+
+    def _flow_still_open(self) -> bool:
+        """Return False if this flow was closed while a step was awaiting."""
+        if self.flow_id is None:
+            return True
+        try:
+            self.hass.config_entries.subentries.async_get(self.flow_id)
+        except UnknownFlow:
+            return False
+        return True
+
+    async def _async_uri_reachable(self, db_uri: str) -> bool:
+        """
+        Return whether the database ``db_uri`` names answers.
+
+        The connection test reports a refused connection and a rejected
+        sign-in the same way, so both are "unreachable"; anything else that
+        goes wrong is too, logged, so Basic setup always reaches its status
+        screen.
+        """
+        try:
+            await validate_db_uri(self.hass, db_uri)
+        except (CannotConnectError, InvalidAuthError):
+            return False
+        except Exception:
+            LOGGER.debug("Basic setup: the database test failed", exc_info=True)
+            return False
+        return True
 
     async def async_step_setup_status(
         self, user_input: dict[str, Any] | None = None
@@ -801,6 +955,11 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
             if skipped_names
             else ""
         )
+        found = _BASIC_DATABASE_STATUS.get(self._basic_db_state or "")
+        if found is not None:
+            database_status = await async_common_translation(self.hass, *found)
+        else:
+            database_status = "Configured" if db_ok else "Not configured"
         return self.async_show_form(
             step_id="setup_status",
             data_schema=vol.Schema({}),
@@ -808,7 +967,7 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                 "features_enabled": (
                     ", ".join(enabled_names) if enabled_names else "None"
                 ),
-                "database_status": "Configured" if db_ok else "Not configured",
+                "database_status": database_status,
                 "skipped_section": skipped_section,
             },
         )
