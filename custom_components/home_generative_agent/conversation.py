@@ -2132,10 +2132,6 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 "tool_index_ready": runtime_data.tool_index_ready,
                 "tool_indexing_in_progress": runtime_data.tool_indexing_in_progress,
                 "tool_index_failed": runtime_data.tool_index_failed,
-                # The Assist pipeline's language; retrieval binds the history
-                # tool on every non-English turn, since its intent patterns
-                # are English-only (#902).
-                "language": user_input.language,
             },
             "recursion_limit": 20,
         }

@@ -59,7 +59,6 @@ from custom_components.home_generative_agent.const import (
     CONF_TOOL_RELEVANCE_THRESHOLD,
     CONF_TOOL_RETRIEVAL_LIMIT,
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
-    HISTORY_INTENT_REGEX,
     MAX_AFFIRMATIVE_FOLLOW_UP_WORDS,
     MAX_REFERENTIAL_FOLLOW_UP_WORDS,
     NON_OPEN_ACTUATION_KEYWORDS_REGEX,
@@ -1518,100 +1517,47 @@ async def _append_security_audit_tool(  # noqa: PLR0913
     return candidates if fetched is None else [*candidates, fetched]
 
 
-def _query_wants_history(query: str) -> bool:
-    """Return True when the query asks about past entity states or activity."""
-    return bool(re.search(HISTORY_INTENT_REGEX, query[:_MAX_INTENT_SCAN_CHARS]))
+_HISTORY_TOOL = "get_entity_history"
 
 
-def _conversation_is_non_english(config: RunnableConfig) -> bool:
-    """
-    Return True when the turn's Assist language is set and is not English.
-
-    ``HISTORY_INTENT_REGEX`` matches English phrasings only, and history
-    questions in other languages ("Welche Lampen waren heute an?") rank no
-    better than English ones did before #715. The history tool is read-only
-    and appended outside the retrieval limit, so on a non-English turn it is
-    bound every time instead of guessing at another language's grammar
-    (#902). A missing language, or HA's "*" (any), keeps the English path.
-    """
-    language = config.get("configurable", {}).get("language")
-    if not isinstance(language, str):
-        return False
-    language = language.strip().lower()
-    return bool(language) and language != "*" and not language.startswith("en")
+def _is_local_history_tool(tool: RawTool) -> bool:
+    """Return True for HGA's own history tool, which step 3g always binds."""
+    return tool["api_id"] == "hga_local" and tool["name"] == _HISTORY_TOOL
 
 
-# Trailing HUMAN turns that keep get_entity_history bound: the current message
-# plus the previous exchange. A follow-up ("and yesterday?", "the mudroom
-# lights") carries no history signal of its own and ranks on two words.
-_HISTORY_CONTEXT_HUMAN_TURNS = 2
-
-
-def _conversation_has_history_context(messages: Sequence[BaseMessage]) -> bool:
-    """
-    Return True when the previous turn was about past states.
-
-    Covers the second question of a history conversation, which issue #715
-    would otherwise reach again: the previous turn asked a history question or
-    called ``get_entity_history``, and the follow-up does not say so itself.
-    The tool call keeps a chain going ("and yesterday?", then "and the day
-    before?"). The current message is the caller's ``_query_wants_history``
-    check, so it is not scanned again here.
-    """
-    human_turns = 0
-    for msg in reversed(messages):
-        if isinstance(msg, HumanMessage):
-            human_turns += 1
-            if human_turns >= _HISTORY_CONTEXT_HUMAN_TURNS and _query_wants_history(
-                _message_text(msg)
-            ):
-                return True
-            if human_turns >= _HISTORY_CONTEXT_HUMAN_TURNS:
-                return False
-        elif (isinstance(msg, ToolMessage) and msg.name == "get_entity_history") or (
-            isinstance(msg, AIMessage)
-            and any(
-                tc.get("name") == "get_entity_history"
-                for tc in [*msg.tool_calls, *msg.invalid_tool_calls]
-            )
-        ):
-            return True
-    return False
-
-
-async def _append_history_tool(  # noqa: PLR0913
+async def _append_history_tool(
     candidates: list[RawTool],
     store: BaseStore,
     config: RunnableConfig,
-    query: str,
-    messages: Sequence[BaseMessage],
     live_tool_ids: set[tuple[str, str]] | None,
 ) -> list[RawTool]:
     """
-    Force-bind ``get_entity_history`` when the conversation asks about the past.
+    Bind ``get_entity_history`` on every turn.
 
     A history question phrased around the device ("when did the mudroom
     lights turn off today?") ranks entity-control and date/time tools above
     the history tool, and a model that is not handed the tool tells the user
-    it has no access to history (issue #715). On a non-English turn it is
-    always bound, since the intent patterns are English-only (#902).
-    Appended outside the limit like
-    ``audit_home_security``, so it never evicts a RAG/safety selection. The
-    lookup is pinned to ``hga_local``: dispatch routes this name to the local
-    implementation, so the force-bind must not pull in another API's
-    same-named tool. A same-named tool that ranking already bound is left as
-    is, as before this step existed.
+    it has no access to history (issue #715). English intent patterns caught
+    some of those, never other languages (#902), and missed English
+    phrasings such as "did anyone open the garage while I was away?". An eval
+    on four Ollama models found that binding it every turn never drew a
+    history call on a command or status question and did not change their
+    tool choice or latency (#907), so it is always bound. Appended outside the
+    limit like ``audit_home_security``, so it never evicts a RAG/safety
+    selection. The lookup is pinned to ``hga_local``: dispatch routes this
+    name to the local implementation, so the bind must not pull in another
+    API's same-named tool. A same-named tool that ranking already bound is
+    left as is.
     """
+    opts = config.get("configurable", {}).get("options", {})
+    # An exclusion wins even when the live filter is fail-open and the lookup
+    # reads the raw index, as in ``_append_included_tools``.
     if _has_local_tool(
-        candidates, _remote_ids(config), lambda name: name == "get_entity_history"
-    ) or not (
-        _conversation_is_non_english(config)
-        or _query_wants_history(query)
-        or _conversation_has_history_context(messages)
-    ):
+        candidates, _remote_ids(config), lambda name: name == _HISTORY_TOOL
+    ) or is_tool_excluded(_HISTORY_TOOL, tool_exclusions(opts).get("hga_local", ())):
         return candidates
     fetched = await _get_tool_by_name(
-        store, config, "get_entity_history", {"hga_local"}, live_tool_ids
+        store, config, _HISTORY_TOOL, {"hga_local"}, live_tool_ids
     )
     return candidates if fetched is None else [*candidates, fetched]
 
@@ -3105,6 +3051,10 @@ async def _retrieve_tools(  # noqa: PLR0915
         _filter_live_candidates(config, rag_tools, safety_tools, live_tool_ids)
     )
     live_filter_dropped += rag_dropped_not_live
+    # 1c. Step 3g binds HGA's own history tool on every turn, outside the
+    # limit, so a ranked copy would only take a slot from another tool (#907).
+    # A remote server's namesake is another tool and still ranks.
+    rag_tools = [t for t in rag_tools if not _is_local_history_tool(t)]
 
     # 2. Merge: safety tools take priority; RAG fills remaining slots.
     #
@@ -3144,7 +3094,11 @@ async def _retrieve_tools(  # noqa: PLR0915
     # this order: actuation tools first for actuation queries, otherwise
     # GetLiveContext, then other read-only tools, then actuation tools.
     if not all_candidates:
-        fallback = _get_fallback_tools(config, allowed_api_ids)
+        fallback = [
+            t
+            for t in _get_fallback_tools(config, allowed_api_ids)
+            if not _is_local_history_tool(t)
+        ]
         (
             fallback_reason,
             tool_index_ready,
@@ -3262,10 +3216,10 @@ async def _retrieve_tools(  # noqa: PLR0915
         all_candidates, store, config, query, allowed_api_ids, live_tool_ids
     )
 
-    # 3g. Force-bind get_entity_history for questions about past states,
-    # including follow-ups to one. Before 3e so inclusions dedupe against it.
+    # 3g. Bind get_entity_history on every turn (#907). Before 3e so
+    # inclusions dedupe against it.
     all_candidates = await _append_history_tool(
-        all_candidates, store, config, query, state["messages"], live_tool_ids
+        all_candidates, store, config, live_tool_ids
     )
 
     # 3e. Force-bind the user's always-included tools (issue #579). A

@@ -579,8 +579,6 @@ async def test_hgas_own_history_tool_is_bound_beside_a_remote_namesake() -> None
         [cast("Any", dict(remote.value))],
         cast("Any", _Store([], [local, remote])),
         config,
-        "what happened to the porch light yesterday",
-        [HumanMessage(content="what happened to the porch light yesterday")],
         None,
     )
     assert ("get_entity_history", "hga_local") in {
