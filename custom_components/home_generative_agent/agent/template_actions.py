@@ -137,7 +137,7 @@ _MQTT_DOMAIN = "mqtt"
 # Beyond the first step, what a template cover or lock drives is followed
 # only into these domains: a relay, a lock, a cover, a button, another
 # script. A script that also lights the house does not hold the lights.
-_RELAY_DOMAINS = frozenset(
+RELAY_DOMAINS = frozenset(
     {"switch", "cover", "valve", "lock", "button", "input_button", SCRIPT_DOMAIN}
 )
 
@@ -1430,14 +1430,18 @@ def _group_helper_members(
     return members
 
 
-def driven_entities(hass: HomeAssistant, sequences: Iterable[Any]) -> set[str]:
+def driven_entities(
+    hass: HomeAssistant, sequences: Iterable[Any], problems: list[str] | None = None
+) -> set[str]:
     """
     Return the entities the steps act on.
 
     Every target the steps name directly counts. A script or template entity
     among them is followed into its own steps, there keeping only relay-like
-    entities (see ``_RELAY_DOMAINS``). Targets that cannot be named (a
-    template) are left out: the caller holds what it can.
+    entities (see ``RELAY_DOMAINS``). Targets that cannot be named (a
+    template) are left out: the caller holds what it can. With ``problems``
+    (the security audit), what could not be followed is added to it instead
+    of logged, so the audit can say what it did not check.
     """
     found: set[str] = set()
     followed: set[str] = set()
@@ -1448,15 +1452,20 @@ def driven_entities(hass: HomeAssistant, sequences: Iterable[Any]) -> set[str]:
         try:
             calls = list(iter_service_calls(sequence, strict=True))
         except TooDeepError:
+            if problems is not None:
+                problems.append("actions that nest too deeply")
+                continue
             LOGGER.warning(
                 "Critical Action PIN: a template entity's actions nest too deeply "
                 "to follow; the devices inside are not held"
             )
             continue
         for domain, service, step in calls:
-            entities, _unresolved = call_targets(hass, domain, service, step)
+            entities, unresolved = call_targets(hass, domain, service, step)
+            if unresolved and problems is not None:
+                problems.append(f"a target of {domain}.{service} it could not resolve")
             if depth:
-                entities = {e for e in entities if e.split(".", 1)[0] in _RELAY_DOMAINS}
+                entities = {e for e in entities if e.split(".", 1)[0] in RELAY_DOMAINS}
             found |= entities
             if depth >= MAX_FOLLOW_DEPTH:
                 continue
@@ -1466,7 +1475,7 @@ def driven_entities(hass: HomeAssistant, sequences: Iterable[Any]) -> set[str]:
                     found |= {
                         e
                         for e in _scene_entities(hass, entity_id)
-                        if e.split(".", 1)[0] in _RELAY_DOMAINS
+                        if e.split(".", 1)[0] in RELAY_DOMAINS
                     }
                     continue
                 if entity_id.split(".", 1)[0] in PRESS_DOMAINS:
@@ -1476,7 +1485,8 @@ def driven_entities(hass: HomeAssistant, sequences: Iterable[Any]) -> set[str]:
                         for reactor in reader.started_by(entity_id) or []
                     )
                 pending.extend(
-                    (nested, depth + 1) for nested in _own_sequences(hass, entity_id)
+                    (nested, depth + 1)
+                    for nested in _own_sequences(hass, entity_id, problems)
                 )
     return found
 
@@ -1491,13 +1501,26 @@ def _scene_entities(hass: HomeAssistant, entity_id: str) -> set[str]:
     return with_members(hass, {str(key).lower() for key in states})
 
 
-def _own_sequences(hass: HomeAssistant, entity_id: str) -> list[Any]:
+def _own_sequences(
+    hass: HomeAssistant, entity_id: str, problems: list[str] | None = None
+) -> list[Any]:
     """Return the steps a script or template entity runs, when readable."""
     entity = _loaded_entity(hass, entity_id)
     if entity_id.startswith(f"{SCRIPT_DOMAIN}."):
         sequence = getattr(getattr(entity, "script", None), "sequence", None)
+        if (
+            not isinstance(sequence, list)
+            and entity is not None
+            and problems is not None
+        ):
+            problems.append(f"the steps of {entity_id}")
         return [sequence] if isinstance(sequence, list) else []
     if entity is None or not is_template_entity(hass, entity_id):
+        return []
+    if problems is not None and not isinstance(
+        getattr(entity, "_action_scripts", None), dict
+    ):
+        problems.append(f"the actions of {entity_id}")
         return []
     scripts = action_scripts(entity, entity_id)
     return (_sequences(scripts, list(scripts)) or []) if scripts else []
