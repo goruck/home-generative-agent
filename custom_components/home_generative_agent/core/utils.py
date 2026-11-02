@@ -41,6 +41,7 @@ from ..const import (  # noqa: TID252
     OPENAI_CHAT_COMPLETIONS_PATH,
     RECOMMENDED_OLLAMA_URL,
 )
+from .face_api import face_api_request, face_api_url
 from .fallback import (
     ainvoke_dropping_unsupported_params,
     invoke_dropping_unsupported_params,
@@ -1452,7 +1453,8 @@ async def validate_face_api_url(
     client = get_async_client(hass)
     try:
         async with asyncio.timeout(timeout_s):
-            resp = await client.get(urljoin(base_url.rstrip("/") + "/", "status"))
+            status_url = face_api_url(base_url, "status")
+            resp = await face_api_request(lambda: client.get(status_url))
     except (TimeoutError, httpx.RequestError) as err:
         LOGGER.debug("Face API connectivity exception: %s", err)
         raise CannotConnectError from err
