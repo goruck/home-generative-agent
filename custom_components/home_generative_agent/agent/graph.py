@@ -1523,6 +1523,24 @@ def _query_wants_history(query: str) -> bool:
     return bool(re.search(HISTORY_INTENT_REGEX, query[:_MAX_INTENT_SCAN_CHARS]))
 
 
+def _conversation_is_non_english(config: RunnableConfig) -> bool:
+    """
+    Return True when the turn's Assist language is set and is not English.
+
+    ``HISTORY_INTENT_REGEX`` matches English phrasings only, and history
+    questions in other languages ("Welche Lampen waren heute an?") rank no
+    better than English ones did before #715. The history tool is read-only
+    and appended outside the retrieval limit, so on a non-English turn it is
+    bound every time instead of guessing at another language's grammar
+    (#902). A missing language, or HA's "*" (any), keeps the English path.
+    """
+    language = config.get("configurable", {}).get("language")
+    if not isinstance(language, str):
+        return False
+    language = language.strip().lower()
+    return bool(language) and language != "*" and not language.startswith("en")
+
+
 # Trailing HUMAN turns that keep get_entity_history bound: the current message
 # plus the previous exchange. A follow-up ("and yesterday?", "the mudroom
 # lights") carries no history signal of its own and ranks on two words.
@@ -1575,7 +1593,9 @@ async def _append_history_tool(  # noqa: PLR0913
     A history question phrased around the device ("when did the mudroom
     lights turn off today?") ranks entity-control and date/time tools above
     the history tool, and a model that is not handed the tool tells the user
-    it has no access to history (issue #715). Appended outside the limit like
+    it has no access to history (issue #715). On a non-English turn it is
+    always bound, since the intent patterns are English-only (#902).
+    Appended outside the limit like
     ``audit_home_security``, so it never evicts a RAG/safety selection. The
     lookup is pinned to ``hga_local``: dispatch routes this name to the local
     implementation, so the force-bind must not pull in another API's
@@ -1585,7 +1605,9 @@ async def _append_history_tool(  # noqa: PLR0913
     if _has_local_tool(
         candidates, _remote_ids(config), lambda name: name == "get_entity_history"
     ) or not (
-        _query_wants_history(query) or _conversation_has_history_context(messages)
+        _conversation_is_non_english(config)
+        or _query_wants_history(query)
+        or _conversation_has_history_context(messages)
     ):
         return candidates
     fetched = await _get_tool_by_name(
