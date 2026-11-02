@@ -16,20 +16,6 @@
 
 ---
 
-### A padded lock domain can make the PIN confirmation pick a different lock than the prompt named
-
-**What:** `normalize_intent_for_lock` and `maybe_fill_lock_entity` compare the `domain` slot without trimming it, and `_prepare_tool_args` only trims domains after both have run. So `HassTurnOff({"domain": [" lock "], "name": "Entrance"})` skips the lock fill at hold time, is trimmed, and is held with no entity id. At confirmation `_execute_pending_action` (`agent/tools.py`) runs `normalize_intent_for_lock` and `maybe_fill_lock_entity` again on the now-trimmed args, and the fuzzy fill can choose a different lock ("Entrance Lock") than the one HA would have matched by alias ("Entrance" on `lock.side_door`) and that the prompt described. Both are locks the PIN confirms, but not the same one.
-
-**Why:** Codex adversarial pass in the review of the #770 fix (2026-10-16); pre-existing, not introduced by that branch. Left out of the hotfix by the maintainer's choice.
-
-**How to apply:** Trim and lowercase the domain list before the lock and alarm normalizers in `_prepare_tool_args`, and store the payload as it will run (after `maybe_fill_lock_entity` and `minimal_payload_for_domain`) on the pending action, so `_execute_pending_action` sends it without running the heuristic fill again. Pin it with a test that holds the padded shape and asserts the confirmed call targets the entity the prompt named.
-
-**Effort:** S
-**Priority:** P2
-**Depends on:** None
-
----
-
 ### The PIN line describes the match at hold time; HA matches again when the confirmed call runs
 
 **What:** `describe_pending_action` resolves an intent's targets with `async_match_targets` when the call is held, and the fixed line names that match ("open every cover in Garage"). The confirmed call (`_execute_pending_action`, `agent/tools.py`) sends the held arguments, and HA matches them again at that moment. A device renamed, re-aliased or moved into the area between the prompt and the PIN reply changes what runs without changing the line the user confirmed.
