@@ -3399,3 +3399,16 @@ async def test_a_renamed_remote_server_is_indexed_again() -> None:
     value = rd.store.aput.call_args.kwargs["value"]
     assert value["content"] == "intent__HassTurnOn (at Cabin): Turns on a device"
     assert rd.tool_index_houses == {"mcp-cabin": "Cabin"}
+
+
+def test_the_turn_hands_the_pipeline_language_to_retrieval() -> None:
+    """
+    Retrieval reads the turn's language from the graph config (#902).
+
+    A non-English turn always binds get_entity_history, because the history
+    intent patterns are English-only; without the language in the config
+    every turn would look English. The full turn cannot be driven in this
+    venv (the HA conversation stack is stubbed), so pin the source.
+    """
+    src = inspect.getsource(HGAConversationEntity._async_handle_message_active)
+    assert '"language": user_input.language,' in src

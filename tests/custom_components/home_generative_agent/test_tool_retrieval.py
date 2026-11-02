@@ -2637,17 +2637,18 @@ def _history_state(query: str) -> State:
     }
 
 
-def _history_config(*, registered: bool = True) -> RunnableConfig:
-    return {
-        "configurable": {
-            "options": {"llm_hass_api": ["assist"], "tool_relevance_threshold": 0.15},
-            "tool_index_ready": True,
-            "langchain_tools": (
-                {"get_entity_history": MagicMock()} if registered else {}
-            ),
-            "ha_llm_api": _live_llm_api("GetDateTime", "HassTurnOff"),
-        }
+def _history_config(
+    *, registered: bool = True, language: str | None = None
+) -> RunnableConfig:
+    configurable: dict[str, Any] = {
+        "options": {"llm_hass_api": ["assist"], "tool_relevance_threshold": 0.15},
+        "tool_index_ready": True,
+        "langchain_tools": ({"get_entity_history": MagicMock()} if registered else {}),
+        "ha_llm_api": _live_llm_api("GetDateTime", "HassTurnOff"),
     }
+    if language is not None:
+        configurable["language"] = language
+    return {"configurable": configurable}
 
 
 def _history_followup(*, called: bool, asked: str = "") -> list[BaseMessage]:
@@ -2756,6 +2757,55 @@ async def test_retrieve_tools_force_binds_history_when_ranking_misses_it() -> No
     assert result["tool_routing_map"]["get_entity_history"] == "hga_local"
     # Appended outside the limit: the ranked selection is still bound.
     assert "GetDateTime" in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("language", "query"),
+    [
+        # Issue #902: the reporter's question, and phrasings no English-style
+        # pattern list would cover.
+        ("de", "Welche Lampen waren heute an?"),
+        ("de-DE", "Wann ging das Licht im Flur aus?"),
+        ("cs", "Kdy se naposledy otevřely garážové dveře?"),
+        ("zh-Hans", "车库门今天什么时候打开的？"),
+    ],
+)
+async def test_retrieve_tools_binds_history_on_a_non_english_turn(
+    language: str, query: str
+) -> None:
+    result = await _retrieve_tools(
+        _history_state(query),
+        _history_config(language=language),
+        store=_history_store(ranked=False),
+    )
+    assert result["tool_routing_map"]["get_entity_history"] == "hga_local"
+    assert "GetDateTime" in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("language", [None, "", "en", "en-US", "EN-gb", "*"])
+async def test_retrieve_tools_keeps_the_english_intent_check(
+    language: str | None,
+) -> None:
+    """English, unset or "any" language: only a history question binds it."""
+    result = await _retrieve_tools(
+        _history_state("turn off the mudroom lights"),
+        _history_config(language=language),
+        store=_history_store(ranked=False),
+    )
+    assert "get_entity_history" not in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_tools_binds_history_once_on_a_non_english_turn() -> None:
+    result = await _retrieve_tools(
+        _history_state("Welche Lampen waren heute an?"),
+        _history_config(language="de"),
+        store=_history_store(ranked=True),
+    )
+    names = [t["function"]["name"] for t in result["selected_tools"]]
+    assert names.count("get_entity_history") == 1
 
 
 @pytest.mark.asyncio
