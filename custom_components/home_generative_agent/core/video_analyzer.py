@@ -18,7 +18,6 @@ from functools import partial
 from pathlib import Path
 from time import monotonic, time
 from typing import TYPE_CHECKING, Any, Final, Literal, cast
-from urllib.parse import urljoin
 
 import aiofiles
 import homeassistant.util.dt as dt_util
@@ -104,6 +103,7 @@ from .event_recording import (
     recording_url_from_state,
     thin_frames,
 )
+from .face_api import post_face_analyze
 from .fallback import (
     ProviderRefusedError,
     ainvoke_dropping_unsupported_params,
@@ -2549,10 +2549,8 @@ class VideoAnalyzer:
 
         # Call face API with timeout & specific exception handling
         try:
-            resp = await client.post(
-                urljoin(base_url.rstrip("/") + "/", "analyze"),
-                files={"file": ("snapshot.jpg", data, "image/jpeg")},
-                timeout=_FACE_TIMEOUT_SEC,
+            resp = await post_face_analyze(
+                client, base_url, data, request_timeout=_FACE_TIMEOUT_SEC
             )
             resp.raise_for_status()
             face_res = resp.json()

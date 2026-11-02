@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
-from urllib.parse import urljoin
 
 import numpy as np
 from homeassistant.helpers.httpx_client import get_async_client
@@ -21,6 +20,8 @@ from custom_components.home_generative_agent.const import (
     RESERVED_IDENTITY_LABELS,
     UNKNOWN_PERSON_LABEL,
 )
+
+from .face_api import post_face_analyze
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -69,10 +70,7 @@ class PersonGalleryDAO:
         if name.strip().lower() in RESERVED_IDENTITY_LABELS:
             LOGGER.warning("Refusing to enroll reserved identity label %r", name)
             return False
-        resp = await self._client.post(
-            urljoin(face_api_url.rstrip("/") + "/", "analyze"),
-            files={"file": ("snapshot.jpg", image_bytes, "image/jpeg")},
-        )
+        resp = await post_face_analyze(self._client, face_api_url, image_bytes)
         resp.raise_for_status()
         data = resp.json()
 
