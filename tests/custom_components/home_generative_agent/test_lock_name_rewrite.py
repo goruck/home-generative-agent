@@ -596,6 +596,18 @@ async def _confirm(home: HomeAssistant, ctx: Any) -> dict[str, Any]:
             'unlock "Front Door Lock" (lock.front_door)',
             {"domain": ["lock"], "name": "lock.front_door"},
         ),
+        # A padded or capitalized domain is read as "lock" before the fill, so
+        # it is completed when held, like the clean one: confirmation never
+        # runs the fill again on the trimmed args, where it could pick
+        # another lock than the line named.
+        *(
+            (
+                {"name": "Front Door", "domain": domain},
+                'unlock "Front Door Lock" (lock.front_door)',
+                {"domain": ["lock"], "name": "lock.front_door"},
+            )
+            for domain in ([" lock "], ["LOCK"], " lock ")
+        ),
         # Held as given, and confirmed as given: never turned into a lock call.
         ({"name": "Shed"}, None, {"name": "Shed"}),
     ],
