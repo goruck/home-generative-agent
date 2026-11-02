@@ -16,6 +16,7 @@ from urllib.parse import unquote
 import aiofiles
 import httpx
 import psycopg
+import psycopg_pool
 import voluptuous as vol
 from homeassistant.components import media_source
 from homeassistant.components.camera.const import DOMAIN as CAMERA_DOMAIN
@@ -4455,7 +4456,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             msg = f"Could not read media: {err}"
             raise HomeAssistantError(msg) from err
 
-        ok = await dao.enroll_from_image(runtime_data.face_api_url, name, img_bytes)
+        try:
+            ok = await dao.enroll_from_image(runtime_data.face_api_url, name, img_bytes)
+        except psycopg_pool.PoolClosed as err:
+            # A reload closed the pool under this call, as the upload view
+            # reports too: not a database failure.
+            msg = (
+                "Enrollment failed; Home Generative Agent may be reloading. Try again."
+            )
+            raise HomeAssistantError(msg) from err
+        except psycopg.Error as err:
+            # By type only: a connection error's text can name the server
+            # and user.
+            msg = (
+                f"Could not save the face of {name} to the database "
+                f"({type(err).__name__})"
+            )
+            raise HomeAssistantError(msg) from err
         if not ok:
             msg = f"No face found in image for {name}"
             raise HomeAssistantError(msg)

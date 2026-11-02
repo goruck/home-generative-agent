@@ -6,15 +6,25 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
+import psycopg
+import psycopg_pool
 from aiohttp import multipart, web
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.helpers.http import HomeAssistantView
 
-from .const import DOMAIN, NO_DATABASE_ENROLL_MESSAGE, NO_DATABASE_ERROR_CODE
+from .const import (
+    DOMAIN,
+    HTTP_STATUS_BAD_GATEWAY,
+    HTTP_STATUS_SERVICE_UNAVAILABLE,
+    NO_DATABASE_ENROLL_MESSAGE,
+    NO_DATABASE_ERROR_CODE,
+)
+from .core.face_api import FaceServiceError
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
+    from .core.person_gallery import PersonGalleryDAO
     from .core.runtime import HGAConfigEntry
 
 LOGGER = logging.getLogger(__name__)
@@ -34,6 +44,86 @@ def _is_allowed_image(part: multipart.BodyPartReader) -> bool:
     if part.filename:
         return Path(part.filename).suffix.lower() in ALLOWED_EXTENSIONS
     return False
+
+
+def _reloading_response() -> web.Response:
+    """Answer an upload a reload interrupted."""
+    return web.json_response(
+        {
+            "status": "error",
+            "message": (
+                "Enrollment failed; Home Generative Agent may be reloading. Try again."
+            ),
+        },
+        status=HTTP_STATUS_SERVICE_UNAVAILABLE,
+    )
+
+
+def _stopped_response(
+    reason: str, name: str, enrolled: int, skipped: int, status: int
+) -> web.Response:
+    """
+    Answer an upload stopped part way, with what was already saved (#906).
+
+    ``count`` lets a scripted caller retry only the images after it, instead
+    of enrolling the saved ones again.
+    """
+    done = f" {enrolled} image(s) were enrolled first." if enrolled else ""
+    return web.json_response(
+        {
+            "status": "error",
+            "message": f"{reason.rstrip('.')}.{done}",
+            "name": name,
+            "count": enrolled,
+            "skipped": skipped,
+        },
+        status=status,
+    )
+
+
+async def _enroll_images(
+    dao: PersonGalleryDAO, face_api_url: str, name: str, images: list[bytes]
+) -> tuple[int, int] | web.Response:
+    """Enroll each image; return (enrolled, skipped), or the error response."""
+    enrolled = 0
+    skipped = 0
+    try:
+        for img_bytes in images:
+            ok = await dao.enroll_from_image(face_api_url, name, img_bytes)
+            if not ok:
+                skipped += 1
+                continue
+            enrolled += 1
+    except FaceServiceError as err:
+        # The face service, not HGA, failed: say so, so nobody reloads HGA or
+        # retries for a service that is down (#906).
+        LOGGER.warning("Enrollment of %s stopped: %s", name, err)
+        return _stopped_response(
+            str(err), name, enrolled, skipped, HTTP_STATUS_BAD_GATEWAY
+        )
+    except psycopg_pool.PoolClosed:
+        # A reload closed the pool under this upload.
+        LOGGER.debug("Enrollment of %s stopped by a reload", name)
+        return _reloading_response()
+    except psycopg.Error as err:
+        # By type only: a connection error's text can name the server and user.
+        LOGGER.warning(
+            "Enrollment of %s could not be saved: %s", name, type(err).__name__
+        )
+        return _stopped_response(
+            f"Could not save the face of {name} to the database ({type(err).__name__})",
+            name,
+            enrolled,
+            skipped,
+            HTTP_STATUS_SERVICE_UNAVAILABLE,
+        )
+    except Exception:
+        # A mid-upload teardown closes the DAO's pool under this request.
+        # Surface it as the same 503 as "not loaded" instead of letting
+        # aiohttp convert the raise into a 500 with a traceback.
+        LOGGER.exception("Enrollment failed mid-request")
+        return _reloading_response()
+    return enrolled, skipped
 
 
 class EnrollPersonView(HomeAssistantView):
@@ -170,30 +260,10 @@ class EnrollPersonView(HomeAssistantView):
                 status=400,
             )
 
-        enrolled = 0
-        skipped = 0
-        try:
-            for img_bytes in images:
-                ok = await dao.enroll_from_image(face_api_url, name, img_bytes)
-                if not ok:
-                    skipped += 1
-                    continue
-                enrolled += 1
-        except Exception:
-            # A mid-upload teardown closes the DAO's pool under this request.
-            # Surface it as the same 503 as "not loaded" instead of letting
-            # aiohttp convert the raise into a 500 with a traceback.
-            LOGGER.exception("Enrollment failed mid-request")
-            return web.json_response(
-                {
-                    "status": "error",
-                    "message": (
-                        "Enrollment failed; Home Generative Agent may be"
-                        " reloading. Try again."
-                    ),
-                },
-                status=503,
-            )
+        result = await _enroll_images(dao, face_api_url, name, images)
+        if isinstance(result, web.Response):
+            return result
+        enrolled, skipped = result
 
         if enrolled == 0:
             return web.json_response(

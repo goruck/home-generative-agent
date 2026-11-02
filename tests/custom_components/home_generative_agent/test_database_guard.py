@@ -37,7 +37,7 @@ from homeassistant.helpers import translation
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from psycopg import OperationalError
 from psycopg import errors as pg_errors
-from psycopg_pool import PoolTimeout
+from psycopg_pool import PoolClosed, PoolTimeout
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 import custom_components.home_generative_agent as hga_component
@@ -68,6 +68,7 @@ from custom_components.home_generative_agent.core.database_guard import (
     is_connection_failure,
 )
 from custom_components.home_generative_agent.core.db_utils import build_postgres_uri
+from custom_components.home_generative_agent.core.face_api import FaceServiceError
 
 from .test_deferred_start_listener import _UnreachablePool
 from .test_fallback_setup import _fallback_setup_data, _patch_setup_dependencies
@@ -898,6 +899,77 @@ async def test_enroll_person_service_refuses_before_reading_any_media(
             "enroll_person",
             {"name": "Alice", "file_path": "/media/faces/alice.jpg"},
             blocking=True,
+        )
+
+
+class _FailingGallery:
+    """A gallery whose enrollment raises ``error``."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    async def enroll_from_image(self, *_args: Any) -> bool:
+        raise self.error
+
+
+async def _enroll_with(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, gallery: _FailingGallery
+) -> None:
+    entry = await _setup_without_database(hass, monkeypatch)
+    entry.runtime_data.person_gallery = cast("Any", gallery)
+
+    async def _bytes(*_args: Any, **_kwargs: Any) -> bytes:
+        return b"img"
+
+    monkeypatch.setattr(hga_component, "_read_enroll_image_bytes", _bytes)
+    await hass.services.async_call(
+        DOMAIN,
+        "enroll_person",
+        {"name": "Alice", "file_path": "/media/faces/alice.jpg"},
+        blocking=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_enroll_person_service_names_a_face_service_failure(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A down face service is a clear service error, not a traceback (#906)."""
+    message = (
+        "Could not reach the face service at http://face-api:8000: "
+        "ConnectError: Connection refused"
+    )
+    with pytest.raises(HomeAssistantError) as info:
+        await _enroll_with(
+            hass, monkeypatch, _FailingGallery(FaceServiceError(message))
+        )
+    assert str(info.value) == message
+
+
+@pytest.mark.asyncio
+async def test_enroll_person_service_names_a_database_failure(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A database error saving the face is named, by type only (#906)."""
+    with pytest.raises(HomeAssistantError) as info:
+        await _enroll_with(
+            hass,
+            monkeypatch,
+            _FailingGallery(OperationalError("connection to user=hga failed")),
+        )
+    assert str(info.value) == (
+        "Could not save the face of Alice to the database (OperationalError)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_enroll_person_service_reports_a_closed_pool_as_a_reload(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reload closing the pool is not a database failure."""
+    with pytest.raises(HomeAssistantError, match="may be reloading"):
+        await _enroll_with(
+            hass, monkeypatch, _FailingGallery(PoolClosed("the pool is closed"))
         )
 
 

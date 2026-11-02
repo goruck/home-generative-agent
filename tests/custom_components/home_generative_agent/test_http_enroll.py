@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import psycopg
+import psycopg_pool
 import pytest
 from aiohttp import FormData
 from homeassistant.config_entries import ConfigEntryState
@@ -14,11 +16,13 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.home_generative_agent.const import (
     DOMAIN,
+    HTTP_STATUS_BAD_GATEWAY,
     HTTP_STATUS_BAD_REQUEST,
     HTTP_STATUS_OK,
     HTTP_STATUS_REQUEST_TOO_LARGE,
     HTTP_STATUS_SERVICE_UNAVAILABLE,
 )
+from custom_components.home_generative_agent.core.face_api import FaceServiceError
 from custom_components.home_generative_agent.core.runtime import HGAData
 from custom_components.home_generative_agent.http import (
     MAX_UPLOAD_BYTES,
@@ -446,3 +450,121 @@ async def test_enroll_too_many_files(
     assert response.status == HTTP_STATUS_REQUEST_TOO_LARGE
     assert "Too many files" in data["message"]
     assert dao.last_args is None, "enrollment ran despite the refused request"
+
+
+@pytest.mark.asyncio
+async def test_a_face_service_failure_is_named_not_a_reload(
+    hass: HomeAssistant, hass_client: Callable[[], Awaitable[TestClient]]
+) -> None:
+    """
+    A down face service answers 502 naming it, not "may be reloading" (#906).
+
+    The first image enrolled before the service failed, so the reply says so.
+    """
+    await async_setup_component(hass, "http", {})
+
+    class _FaceServiceDownDAO(DummyDAO):
+        async def enroll_from_image(
+            self, face_api_url: str, name: str, image_bytes: bytes
+        ) -> bool:
+            if self.last_args is not None:
+                msg = (
+                    "Could not reach the face service at http://face-api:8000: "
+                    "ConnectError: Connection refused"
+                )
+                raise FaceServiceError(msg)
+            self.last_args = (face_api_url, name, image_bytes)
+            return True
+
+    _add_loaded_entry(hass, _FaceServiceDownDAO())
+    hass.http.register_view(EnrollPersonView(hass))
+    client = await hass_client()
+
+    form = FormData()
+    form.add_field("name", "Alice")
+    form.add_field("file", b"img1", filename="face1.jpg", content_type="image/jpeg")
+    form.add_field("file", b"img2", filename="face2.jpg", content_type="image/jpeg")
+
+    response = await client.post("/api/home_generative_agent/enroll", data=form)
+    data = await response.json()
+
+    assert response.status == HTTP_STATUS_BAD_GATEWAY
+    assert data["message"] == (
+        "Could not reach the face service at http://face-api:8000: "
+        "ConnectError: Connection refused. 1 image(s) were enrolled first."
+    )
+    assert "reloading" not in data["message"]
+    # Machine-readable, so a script retries only what was not saved.
+    assert (data["name"], data["count"], data["skipped"]) == ("Alice", 1, 0)
+
+
+class _RaisingDAO(DummyDAO):
+    """Enrolls the first image, then raises ``error``."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
+
+    async def enroll_from_image(
+        self, face_api_url: str, name: str, image_bytes: bytes
+    ) -> bool:
+        if self.last_args is not None:
+            raise self.error
+        self.last_args = (face_api_url, name, image_bytes)
+        return True
+
+
+async def _post_two_images(
+    hass: HomeAssistant,
+    hass_client: Callable[[], Awaitable[TestClient]],
+    error: Exception,
+) -> tuple[int, dict[str, object]]:
+    await async_setup_component(hass, "http", {})
+    _add_loaded_entry(hass, _RaisingDAO(error))
+    hass.http.register_view(EnrollPersonView(hass))
+    client = await hass_client()
+    form = FormData()
+    form.add_field("name", "Alice")
+    form.add_field("file", b"img1", filename="face1.jpg", content_type="image/jpeg")
+    form.add_field("file", b"img2", filename="face2.jpg", content_type="image/jpeg")
+    response = await client.post("/api/home_generative_agent/enroll", data=form)
+    return response.status, await response.json()
+
+
+@pytest.mark.asyncio
+async def test_a_database_failure_is_named_not_a_reload(
+    hass: HomeAssistant, hass_client: Callable[[], Awaitable[TestClient]]
+) -> None:
+    status, data = await _post_two_images(
+        hass, hass_client, psycopg.OperationalError("connection to user=hga failed")
+    )
+    assert status == HTTP_STATUS_SERVICE_UNAVAILABLE
+    assert data["message"] == (
+        "Could not save the face of Alice to the database (OperationalError)."
+        " 1 image(s) were enrolled first."
+    )
+    assert data["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_closed_pool_is_still_a_reload(
+    hass: HomeAssistant, hass_client: Callable[[], Awaitable[TestClient]]
+) -> None:
+    status, data = await _post_two_images(
+        hass, hass_client, psycopg_pool.PoolClosed("the pool is closed")
+    )
+    assert status == HTTP_STATUS_SERVICE_UNAVAILABLE
+    assert "reloading" in str(data["message"])
+
+
+@pytest.mark.asyncio
+async def test_a_message_ending_in_a_period_is_not_doubled(
+    hass: HomeAssistant, hass_client: Callable[[], Awaitable[TestClient]]
+) -> None:
+    status, data = await _post_two_images(
+        hass, hass_client, FaceServiceError("Could not reach it: refused.")
+    )
+    assert status == HTTP_STATUS_BAD_GATEWAY
+    assert data["message"] == (
+        "Could not reach it: refused. 1 image(s) were enrolled first."
+    )
