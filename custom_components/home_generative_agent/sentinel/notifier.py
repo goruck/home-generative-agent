@@ -56,6 +56,7 @@ from custom_components.home_generative_agent.sentinel.models import (
     SEMANTIC_KEY_SLUG_PREFIX,
     SEVERITY_RANK,
     enrolled_people,
+    motion_subject,
     subject_entity,
     trust_device_ids,
 )
@@ -1153,12 +1154,72 @@ def _build_subtitle(
             else "subtitle_reading_deviation"
         )
         return notif_msg(hass, subtitle_key, appliance=appliance, direction=direction)
-    device_subtitle = (
-        _state_duration_subtitle(finding, hass, snapshot)
-        if finding.evidence.get("template_id") == "entity_state_duration"
-        else _open_entry_subtitle(finding, hass, snapshot)
-    )
+    template_id = finding.evidence.get("template_id")
+    if template_id == "entity_state_duration":
+        device_subtitle = _state_duration_subtitle(finding, hass, snapshot)
+    elif isinstance(template_id, str) and template_id in _MOTION_SUBTITLE_KEYS:
+        device_subtitle = _motion_subtitle(
+            finding, _MOTION_SUBTITLE_KEYS[template_id], hass, snapshot
+        )
+    else:
+        device_subtitle = _open_entry_subtitle(finding, hass, snapshot)
     return device_subtitle or _display_type(finding, hass)
+
+
+# Motion findings whose subtitle names the sensor (#897): a collapsed push
+# shows title and subtitle only, so two pushes about two sensors looked the
+# same until expanded.
+_MOTION_SUBTITLE_KEYS = {
+    "motion_detected_at_night_while_alarm_disarmed": (
+        "subtitle_motion_night_alarm_disarmed"
+    ),
+    "motion_while_alarm_disarmed_and_home_present": (
+        "subtitle_motion_alarm_disarmed_home"
+    ),
+    "motion_detected_at_night_while_away": "subtitle_motion_night_away",
+    "motion_detected_while_away": "subtitle_motion_away",
+    "motion_without_camera_activity": "subtitle_motion_no_camera",
+}
+# Sensors named in one subtitle before "+N" (the push cuts long subtitles).
+_MOTION_SENSORS_SHOWN = 2
+
+
+def _motion_subtitle(
+    finding: AnomalyFinding,
+    key: str,
+    hass: HomeAssistant | None = None,
+    snapshot: FullStateSnapshot | None = None,
+) -> str | None:
+    """
+    Return "<sensors>: motion ..." for a motion template finding, else None.
+
+    Every sensor that is on, in the rule's order, by its snapshot friendly
+    name: naming only the first left a second push, for another sensor that
+    turned on meanwhile, reading the same. With none on, the one
+    ``motion_subject`` names (as the body does, #731);
+    ``motion_without_camera_activity`` carries its one sensor as
+    ``motion_entity_id``. None when no sensor can be named, so the caller
+    falls back to the template label.
+    """
+    evidence = finding.evidence
+    raw = evidence.get("motion_entity_ids")
+    ids = [i for i in raw if isinstance(i, str) and i] if isinstance(raw, list) else []
+    states = evidence.get("motion_states")
+    sensors = (
+        [i for i in ids if states.get(i) == "on"] if isinstance(states, dict) else []
+    )
+    if not sensors:
+        single = evidence.get("motion_entity_id")
+        subject = (
+            single if isinstance(single, str) and single else motion_subject(finding)
+        )
+        sensors = [subject] if subject else []
+    if not sensors:
+        return None
+    names = [_snapshot_name(i, snapshot) for i in sensors[:_MOTION_SENSORS_SHOWN]]
+    extra = len(sensors) - len(names)
+    sensor = ", ".join(names) + (f" +{extra}" if extra else "")
+    return notif_msg(hass, key, sensor=sensor)
 
 
 # Open-entry findings whose subtitle names the door or window (issue #729):

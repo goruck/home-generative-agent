@@ -127,6 +127,15 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "subtitle_power_deviation": "{appliance}: power {direction} than expected",
         "subtitle_reading_deviation": "{appliance}: reading {direction} than expected",
         "subtitle_entry_open": "{entity} open",
+        "subtitle_motion_night_alarm_disarmed": (
+            "{sensor}: motion at night, alarm disarmed"
+        ),
+        "subtitle_motion_alarm_disarmed_home": (
+            "{sensor}: motion, alarm disarmed, someone home"
+        ),
+        "subtitle_motion_no_camera": "{sensor}: motion, no camera activity",
+        "subtitle_motion_night_away": "{sensor}: motion at night while away",
+        "subtitle_motion_away": "{sensor}: motion while away",
         "subtitle_state_open_for": "{entity} open for {duration}",
         "subtitle_state_unlocked_for": "{entity} unlocked for {duration}",
         "subtitle_state_unchanged_for": "{entity} unchanged for {duration}",
@@ -360,6 +369,15 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "{appliance}: hodnota {direction}, než se čekalo"
         ),
         "subtitle_entry_open": "{entity}: otevřeno",
+        "subtitle_motion_night_alarm_disarmed": (
+            "{sensor}: pohyb v noci při vypnutém alarmu"
+        ),
+        "subtitle_motion_alarm_disarmed_home": (
+            "{sensor}: pohyb při vypnutém alarmu, někdo je doma"
+        ),
+        "subtitle_motion_no_camera": "{sensor}: pohyb bez aktivity kamery",
+        "subtitle_motion_night_away": "{sensor}: pohyb v noci v nepřítomnosti",
+        "subtitle_motion_away": "{sensor}: pohyb v nepřítomnosti",
         "subtitle_state_open_for": "{entity}: otevřeno {duration}",
         "subtitle_state_unlocked_for": "{entity}: odemčeno {duration}",
         "subtitle_state_unchanged_for": "{entity}: beze změny {duration}",
@@ -573,6 +591,13 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "subtitle_power_deviation": "{appliance}：功率比预期{direction}",
         "subtitle_reading_deviation": "{appliance}：读数比预期{direction}",
         "subtitle_entry_open": "{entity}开着",
+        "subtitle_motion_night_alarm_disarmed": "{sensor}：夜间检测到运动，警报已解除",
+        "subtitle_motion_alarm_disarmed_home": (
+            "{sensor}：检测到运动，警报已解除，有人在家"
+        ),
+        "subtitle_motion_no_camera": "{sensor}：检测到运动，摄像头无活动",
+        "subtitle_motion_night_away": "{sensor}：离家时夜间检测到运动",
+        "subtitle_motion_away": "{sensor}：离家时检测到运动",
         "subtitle_state_open_for": "{entity}已开着 {duration}",
         "subtitle_state_unlocked_for": "{entity}已未锁 {duration}",
         "subtitle_state_unchanged_for": "{entity}已 {duration} 未变化",
