@@ -1209,14 +1209,20 @@ async def async_collect_ha_native_inputs(  # noqa: PLR0913
     unconfigured, ignored = _collect_discovery(hass)
     sensitive_ids = [e["entity_id"] for e in entities if is_sensitive_entity(e)]
     reach = _collect_sensitive_reach(hass, sensitive_ids)
-    reach_ids = [*reach.sensitive, *reach.groups] if reach is not None else []
+    # Every id the index found sensitive, holding one or driving one (#898)
+    # is asked about: one not asked about is never reported exposed.
+    reach_ids = (
+        [*reach.sensitive, *reach.groups, *reach.relays] if reach is not None else []
+    )
     automations = _collect_automations(hass)
     critical_actions = _collect_critical_actions(hass, context, automations)
     return HaNativeInputs(
         now=now,
         auth=auth,
         failed_login_notification_present=_collect_failed_login(hass),
-        exposed=_collect_exposed(hass, [*sensitive_ids, *reach_ids]),
+        # Deduplicated: an entity both holding one door and driving another
+        # is asked about, and listed, once (#898 review).
+        exposed=_collect_exposed(hass, sorted({*sensitive_ids, *reach_ids})),
         sensitive_reach=reach,
         cloud_remote_ui_enabled=_collect_cloud(hass),
         http=_collect_http(hass),
@@ -1446,8 +1452,9 @@ def _exposed_fields(
     Write the exposed sensitive entities and, for exposed groups, what they hold.
 
     An entity counts when the snapshot shows it is sensitive, or when the
-    entity index said so (sensitive by registry class or name alone, or a
-    group helper holding a sensitive entity, #793); an exposed one with no
+    entity index said so (sensitive by registry class or name alone, a group
+    helper holding a sensitive entity, #793, or the relay a sensitive cover
+    or lock is driven through, #898); an exposed one with no
     state in the snapshot is kept, since a setting stored by hand exposed it.
     A membership read that failed, a group it could not read in full and an
     entity it could not read are said in the section's notes, so the audit
@@ -1458,7 +1465,11 @@ def _exposed_fields(
     ha = result.ha_security
     by_id = {e["entity_id"]: e for e in entities}
     reach = inputs.sensitive_reach
-    extra = set(reach.sensitive) | set(reach.groups) if reach is not None else set()
+    extra = (
+        set(reach.sensitive) | set(reach.groups) | set(reach.relays)
+        if reach is not None
+        else set()
+    )
     ha["exposed_sensitive_entities"] = {
         assistant: sorted(
             entity_id
@@ -1471,8 +1482,9 @@ def _exposed_fields(
     if reach is None:
         result.notes.append(
             "Group membership and registry device classes could not be read; "
-            "an exposed group holding a lock or entry cover, or a cover that is "
-            "an entry only by its registry class or name, is not audited."
+            "an exposed group holding a lock or entry cover, a relay one is "
+            "driven through, or a cover that is an entry only by its registry "
+            "class or name, is not audited."
         )
         return
     exposed_all = {entity_id for ids in inputs.exposed.values() for entity_id in ids}
@@ -1483,6 +1495,14 @@ def _exposed_fields(
     }
     if exposed_groups:
         ha["exposed_sensitive_groups"] = exposed_groups
+    # A relay under a sensitive cover or lock moves it as surely (#898).
+    exposed_relays = {
+        relay: list(moved)
+        for relay, moved in reach.relays.items()
+        if relay in exposed_all
+    }
+    if exposed_relays:
+        ha["exposed_sensitive_relays"] = exposed_relays
     # A partly read group may hold an entity the audit could not see, so an
     # exclusion of the members it did read must not hide it (#899).
     partial = sorted(set(reach.unreadable_groups) & exposed_groups.keys())
@@ -1492,6 +1512,11 @@ def _exposed_fields(
         result.notes.append(
             f"Membership of {_some(reach.unreadable_groups)} could not be read "
             "in full; an exposed one may hold more than the audit reports."
+        )
+    if reach.unread_relays:
+        result.notes.append(
+            f"{_some(reach.unread_relays)} could not be read; the relays under "
+            "it are not audited."
         )
     if reach.unreadable:
         result.notes.append(

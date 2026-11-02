@@ -89,7 +89,11 @@ member list Home Assistant wrote itself (a group helper, or a ZHA or MQTT
 group publishing ``group_entities``) in the member's domain: a voice
 assistant drives an old-style ``group.*`` through ``homeassistant.turn_on``,
 which skips covers and locks, and an ``entity_id`` attribute on anything else
-is a reference. It skips the switch wrappers and template drives (#898).
+is a reference. It also follows the relay a sensitive cover or lock is driven
+through (#898), with a walk of its own (``_audit_relay_reach``): the PIN's
+``relay_reach`` holds every reference and every unknown entity, which here
+would report a status light whose attributes name the relay as opening the
+garage. A template's side effects (a light it also turns on) are not relays.
 """
 
 from __future__ import annotations
@@ -110,7 +114,12 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
 from .helpers import CRITICAL_RULE_EXACT_ENTITY, CRITICAL_RULE_REGISTRY_ID
-from .template_actions import action_scripts, driven_entities, template_entities
+from .template_actions import (
+    RELAY_DOMAINS,
+    action_scripts,
+    driven_entities,
+    template_entities,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -158,12 +167,15 @@ _MOVING_SERVICES: dict[str, frozenset[str]] = {
 }
 
 
-def read_switch_wrappers(hass: HomeAssistant) -> dict[str, tuple[str, bool]]:
+def read_switch_wrappers(
+    hass: HomeAssistant, problems: list[str] | None = None
+) -> dict[str, tuple[str, bool]]:
     """
     Return every switch_as_x wrapper -> (the switch it wraps, inverted).
 
     Disabled wrappers count: the relay still works. An entry that cannot be
-    read is logged and skipped.
+    read is skipped: logged for the PIN, or added to ``problems`` when the
+    caller (the security audit) reports it itself.
     """
     config_entries = getattr(hass, "config_entries", None)
     entries = config_entries.async_entries(_SWITCH_AS_X) if config_entries else []
@@ -183,10 +195,15 @@ def read_switch_wrappers(hass: HomeAssistant) -> dict[str, tuple[str, bool]]:
                     registry, config_entry.entry_id
                 )
             ]
-        except Exception:
+        except Exception as err:
             # One bad entry must not fail every guarded call in the house.
             # Nothing here raises for a well-formed entry (an unknown id
             # resolves to None), so this is not a way past the gate.
+            if problems is not None:
+                problems.append(
+                    f"switch_as_x entry {config_entry.entry_id} ({type(err).__name__})"
+                )
+                continue
             LOGGER.exception(
                 "Critical Action PIN: could not read switch_as_x entry %s",
                 config_entry.entry_id,
@@ -207,12 +224,16 @@ _TEMPLATE_DRIVING_ACTIONS: dict[str, frozenset[str] | None] = {
 }
 
 
-def read_template_drives(hass: HomeAssistant) -> dict[str, set[str]]:
+def read_template_drives(
+    hass: HomeAssistant, problems: list[str] | None = None
+) -> dict[str, set[str]]:
     """
     Return every template cover or lock -> the entities its actions drive.
 
     See the module docstring. An entity whose actions cannot be read is
-    logged and skipped: the template entity itself is still held by the rules.
+    skipped, the template entity itself still held by the rules: logged for
+    the PIN, or added to ``problems`` when the caller (the security audit)
+    reports it itself.
     """
     drives: dict[str, set[str]] = {}
     for domain, keys in _TEMPLATE_DRIVING_ACTIONS.items():
@@ -220,9 +241,15 @@ def read_template_drives(hass: HomeAssistant) -> dict[str, set[str]]:
             entity_id = str(getattr(entity, "entity_id", "") or "").lower()
             if not entity_id:
                 continue
+            if problems is not None and not isinstance(
+                getattr(entity, "_action_scripts", None), dict
+            ):
+                problems.append(f"the actions of {entity_id}")
+                continue
             scripts = action_scripts(entity, entity_id)
             if scripts is None:
                 continue
+            inner: list[str] | None = [] if problems is not None else None
             try:
                 driven = driven_entities(
                     hass,
@@ -231,12 +258,22 @@ def read_template_drives(hass: HomeAssistant) -> dict[str, set[str]]:
                         for key, script in scripts.items()
                         if keys is None or key in keys
                     ],
+                    inner,
                 )
-            except Exception:
+            except Exception as err:
+                if problems is not None:
+                    problems.append(
+                        f"the actions of {entity_id} ({type(err).__name__})"
+                    )
+                    continue
                 LOGGER.exception(
                     "Critical Action PIN: could not read the actions of %s", entity_id
                 )
                 continue
+            if inner and problems is not None:
+                problems.append(
+                    f"the actions of {entity_id} ({'; '.join(sorted(set(inner)))})"
+                )
             driven.discard(entity_id)
             if driven:
                 drives[entity_id] = driven
@@ -602,6 +639,15 @@ class AuditReach:
     unreadable_groups: list[str] = field(default_factory=list)
     # Entities whose read raised, in a sensitive domain: not followed.
     unreadable: list[str] = field(default_factory=list)
+    # Relay -> the sensitive entities it moves (#898): the switch under a
+    # switch_as_x cover or lock, the members of a switch group it is, the
+    # groups holding them, another wrapper of the same switch, and what a
+    # template cover's or lock's actions drive. Not a sensitive entity or a
+    # group already listed, nor a disabled one.
+    relays: dict[str, list[str]] = field(default_factory=dict)
+    # What could not be read to find relays (a switch_as_x entry, a template
+    # entity's actions): the relays under them are not reported.
+    unread_relays: list[str] = field(default_factory=list)
 
 
 def audit_reach(
@@ -632,9 +678,26 @@ def audit_reach(
     members cannot all be read, or that lists a member Home Assistant does not
     know, is reported with the members that could be read and named in
     ``unreadable_groups``, not held. A seed is never listed as holding
-    another. Switch wrappers and template drives are not followed (#898).
+    another. The relays a sensitive cover or lock is driven through are
+    followed as the PIN follows them (``relay_reach``), so an exposed
+    ``switch.garage_relay`` under a garage cover is reported (#898); unlike
+    the PIN, an entity not set up or unreadable is not taken for one.
     """
-    index = _EntityIndex(hass, wrapped={}, drives={}, purpose=_AUDIT_PURPOSE)
+    # Read for the audit: a problem is reported in the audit's notes and
+    # logged once, not as a PIN hold with a traceback every cycle.
+    unread: list[str] = []
+    wrapped = read_switch_wrappers(hass, unread)
+    drives = read_template_drives(hass, unread)
+    for text in unread:
+        key = (_AUDIT_PURPOSE, "relays", text)
+        if key not in _LOGGED_UNREADABLE:
+            _LOGGED_UNREADABLE.add(key)
+            LOGGER.warning(
+                "%s: could not read %s; the relays under it are not reported",
+                _AUDIT_PURPOSE,
+                text,
+            )
+    index = _EntityIndex(hass, wrapped, drives, purpose=_AUDIT_PURPOSE)
     wanted = {entity_id.lower() for entity_id in entity_ids}
     classes = {c.lower() for c in cover_classes}
     words = [_word_pattern(word) for word in cover_classes]
@@ -646,9 +709,11 @@ def audit_reach(
             return True
         if domain != "cover":
             return False
-        if not index.classes[entity_id].isdisjoint(classes):
+        # .get: a template wrapper can be listed before its first state is
+        # written, and so be in neither (#898 review).
+        if not index.classes.get(entity_id, set()).isdisjoint(classes):
             return True
-        texts = [_plain(entity_id), *index.names[entity_id]]
+        texts = [_plain(entity_id), *index.names.get(entity_id, [])]
         return any(word.search(text) for text in texts for word in words)
 
     sensitive = sorted(
@@ -693,6 +758,23 @@ def audit_reach(
         for group_id in list(partial)
         for holder in _audit_holders(index, group_id)
     }
+    # What moves a sensitive wrapper through its relay (#898). A disabled
+    # wrapper counts: disabling it does not disconnect the relay, which still
+    # opens the door. Only what can move it by voice is reported.
+    relays: dict[str, set[str]] = {}
+    for wrapper, relay in _relay_pairs(index):
+        # A disabled relay is not reported, but a switch group it is still has
+        # live members that open the door: the walk goes through it.
+        if not (wrapper in wanted or is_sensitive(wrapper)):
+            continue
+        if wrapper in index.drives and _domain(relay) not in RELAY_DOMAINS:
+            # A template's side effect (the light it also turns on) does not
+            # move the door; the PIN holds it anyway, the audit does not
+            # report it.
+            continue
+        for entity_id in _audit_relay_reach(index, relay, wrapper):
+            if entity_id not in seeds and entity_id not in index.disabled:
+                relays.setdefault(entity_id, set()).add(wrapper)
     return AuditReach(
         sensitive=sensitive,
         groups={
@@ -700,7 +782,122 @@ def audit_reach(
         },
         unreadable_groups=named(partial & index.ha_groups),
         unreadable=named(index.unreadable),
+        unread_relays=sorted(set(unread)),
+        relays={
+            entity_id: sorted(moved) for entity_id, moved in sorted(relays.items())
+        },
     )
+
+
+# The domains Assist and the voice assistants drive an old-style ``group.*``
+# without reaching: they turn it on and off with ``homeassistant.turn_on``
+# and ``turn_off``, which skip covers, locks and valves.
+# Buttons have no turn_on either: a group cannot press one.
+_TURN_ON_SKIPS = frozenset({"cover", "lock", "valve", "button", "input_button"})
+
+
+def _audit_voice_holders(index: _EntityIndex, entity_id: str) -> set[str]:
+    """
+    Return the groups that drive ``entity_id`` when one is turned on, any depth.
+
+    A group Home Assistant wrote the member list of, in the member's domain,
+    and an old-style ``group.*`` unless the member is in ``_TURN_ON_SKIPS``.
+    Not anything else with an ``entity_id`` attribute: that is a reference.
+    """
+    found: set[str] = set()
+    pending = [entity_id]
+    while pending:
+        member = pending.pop()
+        for group_id in index.holders.get(member, ()):
+            if (
+                group_id in found
+                or group_id not in index.ha_groups
+                or group_id in index.disabled
+            ):
+                continue
+            group_domain = _domain(group_id)
+            if group_domain == "group":
+                if _domain(member) in _TURN_ON_SKIPS:
+                    continue
+            elif group_domain != _domain(member):
+                continue
+            found.add(group_id)
+            pending.append(group_id)
+    return found
+
+
+def _audit_relay_reach(index: _EntityIndex, relay: str, wrapper: str) -> set[str]:
+    """
+    Return what moves ``wrapper`` by voice through ``relay``, for the audit.
+
+    The relay; the members of a group it is (a disabled group's too: its
+    members still switch); what a switch_as_x wrapper or a template entity
+    among those drives in turn (a template garage cover opening another
+    switch_as_x cover reaches the switch under it); the groups driving any
+    of them; and every other wrapper of any of them with the groups driving
+    it. Not ``wrapper`` itself, nor a group reached only through it. Narrower
+    than the PIN's ``relay_reach``: only real groups, no references, nothing
+    unknown. Disabled entities are walked through and filtered by the caller.
+    """
+    switches = {relay}
+    pending = [relay]
+    while pending:
+        entity_id = pending.pop()
+        below: set[str] = set()
+        if entity_id in index.ha_groups:
+            below |= {
+                member
+                for member in index.members.get(entity_id, ())
+                if _domain(member) == _domain(entity_id)
+                or (
+                    _domain(entity_id) == "group"
+                    and _domain(member) not in _TURN_ON_SKIPS
+                )
+            }
+        if entity_id != wrapper and entity_id in index.wrapped:
+            below.add(index.wrapped[entity_id][0])
+        if entity_id != wrapper:
+            below |= {
+                driven
+                for driven in index.drives.get(entity_id, ())
+                if _domain(driven) in RELAY_DOMAINS
+            }
+        for member in below - switches:
+            switches.add(member)
+            pending.append(member)
+    for entity_id in list(switches):
+        if entity_id not in index.disabled:
+            switches |= _audit_voice_holders(index, entity_id)
+    # Up from every live one: the wrappers and template entities driving it,
+    # then whatever drives those in turn, to any depth. Not through a
+    # disabled entity, which no wrapper can switch.
+    found = set(switches)
+    pending = [e for e in switches if e not in index.disabled]
+    while pending:
+        entity_id = pending.pop()
+        for other in index.wrappers_of.get(entity_id, ()):
+            if other == wrapper or other in index.disabled or other in found:
+                continue
+            found.add(other)
+            found |= _audit_voice_holders(index, other)
+            pending.append(other)
+    return found
+
+
+def _relay_pairs(index: _EntityIndex) -> list[tuple[str, str]]:
+    """
+    Return (wrapper, relay) for every wrapper a relay moves.
+
+    A switch_as_x wrapper and the switch it wraps; a template cover or lock
+    and each entity its actions drive.
+    """
+    return [
+        (wrapper, switch_id) for wrapper, (switch_id, _invert) in index.wrapped.items()
+    ] + [
+        (wrapper, entity_id)
+        for wrapper, driven in index.drives.items()
+        for entity_id in driven
+    ]
 
 
 def _word_pattern(word: str) -> re.Pattern[str]:
@@ -747,15 +944,8 @@ def relay_wrappers_reached(hass: HomeAssistant, targets: Iterable[str]) -> list[
     if not wrapped and not drives:
         return []
     index = _EntityIndex(hass, wrapped, drives)
-    relays = [
-        (wrapper, switch_id) for wrapper, (switch_id, _invert) in index.wrapped.items()
-    ] + [
-        (wrapper, entity_id)
-        for wrapper, driven in index.drives.items()
-        for entity_id in driven
-    ]
     moved: set[str] = set()
-    for wrapper, switch_id in relays:
+    for wrapper, switch_id in _relay_pairs(index):
         if wrapper.split(".", 1)[0] not in _OPENING_SERVICES:
             continue
         # Not the fail-closed unknowns: the gate holds those, but a switch not

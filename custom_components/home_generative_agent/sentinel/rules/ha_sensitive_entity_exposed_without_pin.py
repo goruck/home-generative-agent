@@ -35,7 +35,7 @@ _ASSISTANT_LABELS = {
 # Assist exposure is shared by every conversation agent, so the PIN silences
 # it only when every Assist pipeline runs on this integration's agent.
 _PIN_GATED_ASSISTANTS = frozenset({"conversation"})
-# Held members named per group. What a group holds comes after every
+# Targets named per group or relay. What a group holds comes after every
 # exposure and its assistant and PIN wording, so the push's 220-character cut
 # takes the detail, never the warning (#793).
 _MAX_HELD_SHOWN = 3
@@ -74,16 +74,17 @@ class HaSensitiveEntityExposedWithoutPinRule:
             entity_id, self.rule_id
         )
 
-    def _held_in_scope(
+    def _targets_in_scope(
         self, held_raw: dict[str, list[str]], partial: set[str]
     ) -> tuple[dict[str, list[str]], set[str]]:
         """
-        Return each group's members left after exclusions, and the dropped groups.
+        Return each holder's targets left after exclusions, and those emptied.
 
-        A group whose every sensitive member is excluded is dropped; one with
-        some excluded members keeps and names the rest (#899). A group read
-        only in part is never dropped this way, since it may hold a member
-        the audit could not see.
+        A holder is a group (its sensitive members) or a relay (the sensitive
+        entities it moves, #898). One whose every target is excluded is
+        emptied; one with some excluded keeps and names the rest (#899). A
+        group read only in part is never emptied this way, since it may hold
+        a member the audit could not see.
         """
         held: dict[str, list[str]] = {}
         dropped: set[str] = set()
@@ -139,7 +140,17 @@ class HaSensitiveEntityExposedWithoutPinRule:
         # Exclusions apply per exposure, so one excluded entity never drops
         # the whole report, and a member's exclusion reaches its groups (#899).
         partial = {str(g) for g in ha.get("exposed_sensitive_groups_partial") or []}
-        held, dropped = self._held_in_scope(held_raw, partial)
+        held, emptied_groups = self._targets_in_scope(held_raw, partial)
+        # A relay is followed by what it moves (#898). An entity both holding
+        # one door and driving another is dropped only when exclusions empty
+        # both.
+        relays_raw: dict[str, list[str]] = ha.get("exposed_sensitive_relays") or {}
+        moved, emptied_relays = self._targets_in_scope(relays_raw, set())
+        dropped = (
+            (emptied_groups - relays_raw.keys())
+            | (emptied_relays - held_raw.keys())
+            | (emptied_groups & emptied_relays)
+        )
         exposures = self._exposures_in_scope(
             exposed, dropped, assist_gated=assist_gated
         )
@@ -149,9 +160,15 @@ class HaSensitiveEntityExposedWithoutPinRule:
         groups = {
             entity_id: held[entity_id] for entity_id in all_ids if held.get(entity_id)
         }
+        relays = {
+            entity_id: moved[entity_id] for entity_id in all_ids if moved.get(entity_id)
+        }
         holds = "".join(
             f" {group_id} holds {listed(members, _MAX_HELD_SHOWN)}."
             for group_id, members in groups.items()
+        ) + "".join(
+            f" {relay} moves {listed(targets, _MAX_HELD_SHOWN)}."
+            for relay, targets in relays.items()
         )
         parts = []
         actions = []
@@ -192,13 +209,15 @@ class HaSensitiveEntityExposedWithoutPinRule:
                 severity="high",
                 triggering_entities=all_ids,
                 evidence={"exposures": exposures},
-                # What a group holds is display: the exposure is the group's,
+                # What a group holds or a relay moves is display: the exposure
+                # is the group's or the relay's,
                 # and a member briefly losing its class must not mint a new
-                # id and a new push. Present only when there are groups.
+                # id and a new push. Present only when there are any.
                 display={
                     "critical_action_pin_enabled": bool(pin),
                     "assist_agents_outside_pin": outside,
                     **({"groups": groups} if groups else {}),
+                    **({"relays": relays} if relays else {}),
                 },
                 summary=(
                     f"{plural(len(all_ids), 'sensitive entity', 'sensitive entities')} "
