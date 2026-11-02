@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import struct
+import traceback
 from types import MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -495,6 +496,20 @@ async def test_openai_error_raises_home_assistant_error() -> None:
     with pytest.raises(HomeAssistantError, match="request failed") as excinfo:
         await _speak(entity, responses=[_openai_error()])
     assert isinstance(excinfo.value.__cause__, OpenAIError)
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_a_rejected_header_is_not_chained_into_the_tts_error() -> None:
+    """h11 repeats a rejected header, the API key: the error drops that cause."""
+    entity, _ = _make_entity()
+    err = _openai_error()
+    err.__cause__ = httpx.LocalProtocolError(
+        "Illegal header value b'Bearer sk-FAKE-TTS-KEY\\n'"
+    )
+    with pytest.raises(HomeAssistantError, match="request failed") as excinfo:
+        await _speak(entity, responses=[err])
+    assert excinfo.value.__cause__ is None
+    assert "sk-FAKE-TTS-KEY" not in "".join(traceback.format_exception(excinfo.value))
 
 
 async def test_unknown_provider_type_fails(patched_client: Any) -> None:

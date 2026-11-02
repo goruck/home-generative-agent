@@ -72,12 +72,14 @@ from .fallback import (
     EmbeddingsCircuitOpenError,
     EmbeddingsUnavailableError,
     FallbackEmbeddings,
+    echoes_request_headers,
 )
 from .utils import (
     builds_differ,
     fetch_ollama_model_digest,
     generate_embeddings,
     ollama_model_key,
+    safe_error_text,
 )
 
 if TYPE_CHECKING:
@@ -646,8 +648,15 @@ async def async_sync_embedding_record(hass: HomeAssistant, entry: ConfigEntry) -
     """
     try:
         retry = await _async_sync_record_and_fallbacks(hass, entry)
-    except Exception:  # The watch still runs after it.
-        LOGGER.exception("The memory store's embedding model check failed")
+    except Exception as err:  # The watch still runs after it.
+        if echoes_request_headers(err):
+            # Its traceback would repeat a rejected header, the API key.
+            LOGGER.error(  # noqa: TRY400
+                "The memory store's embedding model check failed: %s",
+                safe_error_text(err),
+            )
+        else:
+            LOGGER.exception("The memory store's embedding model check failed")
         retry = False
     retrying = asyncio.Event()
 
@@ -1934,12 +1943,22 @@ async def _async_run_locked(  # noqa: PLR0912, PLR0915 - a handler per stop
             err,
         )
         raise _StoppedError(recorded) from None
-    except Exception:
-        LOGGER.exception(
-            "Re-embedding the memory store with %s stopped. Start the "
-            "repair again; it resumes where it stopped.",
-            target.label,
-        )
+    except Exception as err:
+        # The primary's own client is not wrapped in the chain, so a rejected
+        # header, the API key, would reach this traceback.
+        if echoes_request_headers(err):
+            LOGGER.error(  # noqa: TRY400
+                "Re-embedding the memory store with %s stopped (%s). Start the "
+                "repair again; it resumes where it stopped.",
+                target.label,
+                safe_error_text(err),
+            )
+        else:
+            LOGGER.exception(
+                "Re-embedding the memory store with %s stopped. Start the "
+                "repair again; it resumes where it stopped.",
+                target.label,
+            )
         raise _StoppedError(recorded) from None
 
 

@@ -283,6 +283,56 @@ def is_timeout_error(err: BaseException) -> bool:
 # APIConnectionError ("Connection error."), which subclasses neither
 # ConnectionError nor the httpx errors; the transport error is its cause.
 _CONNECTION_ERROR_NAMES = frozenset({"APIConnectionError"})
+# h11 rejects a malformed header value with the value in its message
+# ("Illegal header value b'Bearer <key>\\n'"), and httpcore, httpx and httpx2
+# raise their own LocalProtocolError with the same text. An API key with a
+# stray space or newline therefore sits in that error's message.
+_HEADER_ECHO_ERROR_NAMES = frozenset({"LocalProtocolError"})
+
+
+def _next_in_chain(err: BaseException) -> BaseException | None:
+    """Return the error a traceback prints after this one, if any."""
+    if err.__cause__ is not None:
+        return err.__cause__
+    return None if err.__suppress_context__ else err.__context__
+
+
+# Links walked before a chain is assumed to hide a header echo. Real chains
+# are 1-4 deep (SDK -> httpx -> httpcore -> h11); past this, fail closed.
+_MAX_HEADER_ECHO_DEPTH = 32
+
+
+def echoes_request_headers(err: BaseException | None) -> bool:
+    """
+    Return True if this error or one a traceback prints after it may hold a header.
+
+    Follows ``__context__`` too, unlike the classifiers above, because a
+    traceback prints it. A chain too long to walk counts as an echo, so a
+    deep wrapper cannot hide one.
+    """
+    seen: set[int] = set()
+    current = err
+    while current is not None and id(current) not in seen:
+        if len(seen) >= _MAX_HEADER_ECHO_DEPTH:
+            return True
+        if type(current).__name__ in _HEADER_ECHO_ERROR_NAMES:
+            return True
+        seen.add(id(current))
+        current = _next_in_chain(current)
+    return False
+
+
+def _raise_if_header_echo(err: Exception, kind: str) -> None:
+    """
+    Raise a type-only stand-in for an error that may hold a header value.
+
+    For a failure the chain does not retry, which is re-raised to the caller:
+    its message or causes would otherwise reach a traceback, and graph.py
+    copies its text into the chat reply and the conversation checkpoint.
+    """
+    if echoes_request_headers(err):
+        msg = f"{kind} failed: {_safe_err_summary(err)}"
+        raise HomeAssistantError(msg) from None
 
 
 def is_connection_error(err: BaseException) -> bool:
@@ -341,7 +391,13 @@ def _safe_err_summary(err: Exception | None) -> str:
     if err is None:
         return "No provider was available"
     summary = f"{type(err).__name__}: {str(err)[:200]}"
-    if type(err).__name__ not in _CONNECTION_ERROR_NAMES:
+    if echoes_request_headers(err) and type(err).__name__ not in (
+        _CONNECTION_ERROR_NAMES
+    ):
+        # Its message, or one it was built from, may hold the API key; the
+        # SDKs' "Connection error." is the only text known to be safe.
+        summary = type(err).__name__
+    elif type(err).__name__ not in _CONNECTION_ERROR_NAMES:
         return summary
     # The SDKs say only "Connection error." for anything raised while sending
     # (a refused connection, a TLS failure, a bad header), so name the cause.
@@ -697,9 +753,15 @@ def _chain_error(
     Return the error to raise when no member answered.
 
     A lone provider's own error, as before every model was wrapped (#828):
-    callers keep its type and message. A real chain wraps the last error.
+    callers keep its type and message. A real chain wraps the last error, and
+    so does a lone provider whose error may hold the API key (h11 echoes a
+    rejected header), since a caller's LOGGER.exception prints its causes.
     """
-    if len(chain) == 1 and last_err is not None:
+    if (
+        len(chain) == 1
+        and last_err is not None
+        and not echoes_request_headers(last_err)
+    ):
         return last_err
     error = _chain_failed_error(kind, last_err)
     error.__cause__ = _chain_cause(last_err)
@@ -713,12 +775,12 @@ def _chain_cause(last_err: Exception | None) -> Exception | None:
     A connection error's causes can hold a rejected header's value, the API
     key (h11 echoes it), and a caller's LOGGER.exception prints the whole
     chain; the chain error's message already names the cause's type (#880).
-    A timeout keeps its cause: it carries no request text.
+    A timeout keeps its cause: it carries no request text, unless one in its
+    chain echoes a header.
     """
-    if (
-        last_err is not None
-        and is_connection_error(last_err)
-        and not is_timeout_error(last_err)
+    if last_err is not None and (
+        echoes_request_headers(last_err)
+        or (is_connection_error(last_err) and not is_timeout_error(last_err))
     ):
         return None
     return last_err
@@ -908,7 +970,12 @@ def _handle_member_failure(  # noqa: PLR0913
     if lone:
         # A lone provider's caller reports the error, as it did before every
         # model was wrapped (#828); there is no next provider to announce.
-        LOGGER.debug("%s failed for provider %s: %s", kind, provider_id, err)
+        LOGGER.debug(
+            "%s failed for provider %s: %s",
+            kind,
+            provider_id,
+            _safe_err_summary(err),
+        )
     elif half_open and not is_model_not_found(err):
         LOGGER.debug(
             "%s half-open try of provider %s failed: %s",
@@ -1167,6 +1234,7 @@ class FallbackChatModel:
                     return rebind_result
                 last_err = failure
                 if not _is_retryable(failure):
+                    _raise_if_header_echo(failure, "Model call")
                     if failure is err:
                         raise
                     raise failure from err
@@ -1290,6 +1358,7 @@ class FallbackVLM:
             except Exception as err:
                 last_err = err
                 if not _is_retryable(err):
+                    _raise_if_header_echo(err, "VLM call")
                     raise
                 if _handle_member_failure(
                     self,
@@ -1804,6 +1873,7 @@ class FallbackEmbeddings:
             except Exception as err:
                 last_err = err
                 if not _is_retryable(err):
+                    _raise_if_header_echo(err, "Embedding call")
                     raise
                 failed_providers.append(provider_id)
                 self._record_failure(

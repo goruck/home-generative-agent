@@ -44,6 +44,7 @@ from ..const import (  # noqa: TID252
 from .face_api import face_api_request, face_api_url
 from .fallback import (
     ainvoke_dropping_unsupported_params,
+    echoes_request_headers,
     invoke_dropping_unsupported_params,
 )
 from .provider_stall import (
@@ -876,6 +877,22 @@ _SAFE_CAUSE_TYPES: tuple[type[BaseException], ...] = (
 )
 
 
+def safe_error_text(err: BaseException) -> str:
+    """
+    Name an error, with its text only when that cannot quote a request header.
+
+    For logging transport errors raised while a request carried an API key:
+    h11 rejects a key with a stray newline and repeats it in its message.
+    """
+    name = type(err).__name__
+    detail = (
+        str(err)
+        if isinstance(err, _SAFE_CAUSE_TYPES) and not echoes_request_headers(err)
+        else ""
+    )
+    return f"{name}: {detail}" if detail else name
+
+
 def health_failure_reason(err: Exception) -> str:
     """
     Describe why a health check failed, readably and without secrets.
@@ -888,9 +905,7 @@ def health_failure_reason(err: Exception) -> str:
     """
     cause = err.__cause__
     if cause is not None:
-        name = type(cause).__name__
-        detail = str(cause) if isinstance(cause, _SAFE_CAUSE_TYPES) else ""
-        return f"{name}: {detail}" if detail else name
+        return safe_error_text(cause)
     return str(err) or type(err).__name__
 
 
@@ -960,7 +975,7 @@ async def validate_ollama_url(
         async with asyncio.timeout(timeout_s):
             resp = await client.get(urljoin(base_url.rstrip("/") + "/", "api/tags"))
     except (TimeoutError, httpx.RequestError) as err:
-        LOGGER.debug("Ollama connectivity exception: %s", err)
+        LOGGER.debug("Ollama connectivity exception: %s", safe_error_text(err))
         raise CannotConnectError from err
     except (httpx.InvalidURL, ValueError) as err:
         # A malformed saved URL must fail its check, not abort setup.
@@ -1194,7 +1209,7 @@ async def validate_openai_key(
                 headers={"Authorization": f"Bearer {api_key}"},
             )
     except (TimeoutError, httpx.RequestError) as err:
-        LOGGER.debug("OpenAI connectivity exception: %s", err)
+        LOGGER.debug("OpenAI connectivity exception: %s", safe_error_text(err))
         raise CannotConnectError from err
     else:
         if resp.status_code == HTTP_STATUS_UNAUTHORIZED:
@@ -1262,7 +1277,9 @@ async def _probe_openai_compatible_route(
         async with asyncio.timeout(timeout_s):
             resp = await client.post(url, headers=headers, json={})
     except (TimeoutError, httpx.RequestError) as err:
-        LOGGER.debug("OpenAI-compatible capability probe exception: %s", err)
+        LOGGER.debug(
+            "OpenAI-compatible capability probe exception: %s", safe_error_text(err)
+        )
         raise CannotConnectError from err
     if resp.status_code == HTTP_STATUS_UNAUTHORIZED:
         LOGGER.debug("OpenAI-compatible capability probe unauthorized: %s", url)
@@ -1312,7 +1329,9 @@ async def validate_openai_compatible_url(
         async with asyncio.timeout(timeout_s):
             resp = await client.get(url, headers=headers)
     except (TimeoutError, httpx.RequestError) as err:
-        LOGGER.debug("OpenAI-compatible connectivity exception: %s", err)
+        LOGGER.debug(
+            "OpenAI-compatible connectivity exception: %s", safe_error_text(err)
+        )
         # The host itself is unreachable, so the capability route cannot be
         # reachable either — no second probe.
         raise CannotConnectError from err
@@ -1385,7 +1404,7 @@ async def validate_gemini_key(
                 headers={"x-goog-api-key": api_key},
             )
     except (TimeoutError, httpx.RequestError) as err:
-        LOGGER.debug("Gemini connectivity exception: %s", err)
+        LOGGER.debug("Gemini connectivity exception: %s", safe_error_text(err))
         raise CannotConnectError from err
     else:
         # Google reports a bad, blocked or unauthorized key as 400/401/403 --
@@ -1418,7 +1437,7 @@ async def validate_anthropic_key(
                 },
             )
     except (TimeoutError, httpx.RequestError) as err:
-        LOGGER.debug("Anthropic connectivity exception: %s", err)
+        LOGGER.debug("Anthropic connectivity exception: %s", safe_error_text(err))
         raise CannotConnectError from err
     else:
         if resp.status_code == HTTP_STATUS_UNAUTHORIZED:
@@ -1456,7 +1475,7 @@ async def validate_face_api_url(
             status_url = face_api_url(base_url, "status")
             resp = await face_api_request(lambda: client.get(status_url))
     except (TimeoutError, httpx.RequestError) as err:
-        LOGGER.debug("Face API connectivity exception: %s", err)
+        LOGGER.debug("Face API connectivity exception: %s", safe_error_text(err))
         raise CannotConnectError from err
     else:
         if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
