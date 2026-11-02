@@ -516,7 +516,9 @@ class SentinelEngine:
                 # Network / HA-security rules. Each declares ``requires`` and is
                 # skipped (and reported on the health sensor) when the snapshot's
                 # network section lacks a capability it needs.
-                HaSensitiveEntityExposedWithoutPinRule(),
+                HaSensitiveEntityExposedWithoutPinRule(
+                    is_entity_excluded=self._entity_excluded_for_type
+                ),
                 HaNewAdminOrTokenRule(),
                 HaLongLivedTokenStaleRule(
                     stale_days=_coerce_int(
@@ -2219,7 +2221,9 @@ class SentinelEngine:
         excluded entity that a rule carries in ``evidence`` alone.  Such rules
         must apply ``_entity_excluded_for_type`` themselves — see
         ``CameraEntryUnsecuredRule``, which is injected with it for exactly
-        that reason.
+        that reason. Aggregate rules that list many entities in one finding
+        apply it too, so one exclusion removes one entity rather than the
+        whole report (``HaSensitiveEntityExposedWithoutPinRule``, #899).
         """
         kept: list[AnomalyFinding] = []
         for finding in findings:

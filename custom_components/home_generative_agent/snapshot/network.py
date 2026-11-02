@@ -1483,6 +1483,11 @@ def _exposed_fields(
     }
     if exposed_groups:
         ha["exposed_sensitive_groups"] = exposed_groups
+    # A partly read group may hold an entity the audit could not see, so an
+    # exclusion of the members it did read must not hide it (#899).
+    partial = sorted(set(reach.unreadable_groups) & exposed_groups.keys())
+    if partial:
+        ha["exposed_sensitive_groups_partial"] = partial
     if reach.unreadable_groups:
         result.notes.append(
             f"Membership of {_some(reach.unreadable_groups)} could not be read "

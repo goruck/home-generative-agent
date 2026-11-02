@@ -442,6 +442,48 @@ async def test_a_partly_readable_group_helper_is_reported_with_what_it_holds(
     assert reach.unreadable_groups == ["cover.partial"]
 
 
+async def test_a_group_holding_a_partly_read_group_is_partly_read_too(
+    hass: HomeAssistant,
+) -> None:
+    """The outer group may hold what the inner one could not show (#899)."""
+    _helper(
+        hass,
+        "inner",
+        ["cover.garage_door", "0123456789abcdef0123456789abcdef"],
+        config=True,
+    )
+    _helper(hass, "outer", ["cover.inner", "cover.study_blinds"])
+    hass.states.async_set("cover.garage_door", "closed")
+    hass.states.async_set("cover.study_blinds", "closed")
+    reach = _reach(hass, ["cover.garage_door"])
+    assert reach.groups == {
+        "cover.inner": ["cover.garage_door"],
+        "cover.outer": ["cover.garage_door"],
+    }
+    assert reach.unreadable_groups == ["cover.inner", "cover.outer"]
+
+
+async def test_a_group_holding_an_unreadable_member_is_partly_read(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable member could be a group holding anything (#899)."""
+    hass.states.async_set("cover.odd", "closed")
+    hass.states.async_set("cover.garage_door", "closed")
+    _helper(hass, "mixed", ["cover.garage_door", "cover.odd"])
+
+    class _Broken:
+        def get_entity(self, entity_id: str) -> None:
+            if entity_id == "cover.odd":
+                raise RuntimeError
+
+    monkeypatch.setitem(hass.data, "cover", _Broken())
+    rule_entities._LOGGED_UNREADABLE.clear()
+    reach = _reach(hass, ["cover.garage_door"])
+    assert reach.groups == {"cover.mixed": ["cover.garage_door"]}
+    assert reach.unreadable_groups == ["cover.mixed"]
+
+
 async def test_an_unreadable_entity_is_named_and_logged_once_as_the_audit(
     hass: HomeAssistant,
     monkeypatch: pytest.MonkeyPatch,

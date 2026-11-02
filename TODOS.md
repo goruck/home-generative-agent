@@ -1181,6 +1181,20 @@ Also: `_anomaly_type_for_state` attributes every image-entity wake-up to `unknow
 
 ---
 
+### An owed replay of the exposure audit is still dropped whole by a later exclusion
+
+**What:** #899 made `ha_sensitive_entity_exposed_without_pin` apply exclusions per exposure, so a live run removes only the excluded entity. The owed-alert replay (`sentinel/engine.py`, the replay block that calls `owed_alerts.excluded_items` and then `_filter_excluded_findings(pending)`) still sees the stored aggregate: this kind has no `ITEM_KEYS` entry in `sentinel/owed.py`, so `owed_alerts.without()` returns it unchanged, and the generic filter drops the whole owed alert when an exclusion added since it was owed matches any of its triggering entities (excluding `cover.all_covers` during quiet hours also discards the owed `lock.front_door to Alexa`). The next live cycle reports the remaining exposures again under a new id, so nothing stays hidden past one cycle.
+
+**Why:** Red Team pass in the #899 review (2026-11-01); pre-existing and outside that diff.
+
+**How to apply:** For this kind, re-derive the owed aggregate before the generic filter: strip excluded ids from `evidence["exposures"]`, `triggering_entities` and the `groups` display, re-mint the id the way the rule does, and drop it only when nothing is left; or let the live evaluation replace owed posture findings of this type. Pin with a replay test that owes a two-exposure alert, adds an exclusion for one, and asserts the other is told.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ## Sentinel Network Audit
 
 ### Network security plan steps 7–11 (router adapters, redaction, audit tool)

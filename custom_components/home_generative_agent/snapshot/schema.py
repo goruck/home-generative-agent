@@ -167,6 +167,9 @@ class HaSecurityPosture(TypedDict, total=False):
     exposed_sensitive_entities: dict[str, list[str]]  # assistant -> entity_ids
     # group -> the sensitive entity_ids it holds; only exposed groups (#793)
     exposed_sensitive_groups: dict[str, list[str]]
+    # exposed groups whose membership was read only in part: they may hold
+    # more than exposed_sensitive_groups lists (#899)
+    exposed_sensitive_groups_partial: list[str]
     critical_action_pin_enabled: bool
     assist_agents_outside_pin: list[str]  # pipeline agents the PIN does not cover
     cloud_remote_ui_enabled: bool
