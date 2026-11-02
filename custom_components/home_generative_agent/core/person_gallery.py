@@ -6,6 +6,7 @@ import logging
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+import httpx
 import numpy as np
 from homeassistant.helpers.httpx_client import get_async_client
 from psycopg.rows import DictRow, dict_row
@@ -21,7 +22,8 @@ from custom_components.home_generative_agent.const import (
     UNKNOWN_PERSON_LABEL,
 )
 
-from .face_api import post_face_analyze
+from .face_api import FaceServiceError, post_face_analyze
+from .utils import redact_url, safe_error_text
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -29,6 +31,11 @@ if TYPE_CHECKING:
     from psycopg_pool import AsyncConnectionPool
 
 LOGGER = logging.getLogger(__name__)
+
+# Face-service answers that reject the uploaded image itself (undecodable,
+# too large, wrong type, unprocessable): that image is skipped, the rest of
+# an upload still tried. Any other error status is the service's (#906).
+_IMAGE_REJECTED_STATUSES = frozenset({400, 413, 415, 422})
 Embedding = Sequence[float]
 FACE_EMBEDDING_DIMS = 512
 # Max cosine distance for a gallery row to count as a positive identification.
@@ -70,9 +77,35 @@ class PersonGalleryDAO:
         if name.strip().lower() in RESERVED_IDENTITY_LABELS:
             LOGGER.warning("Refusing to enroll reserved identity label %r", name)
             return False
-        resp = await post_face_analyze(self._client, face_api_url, image_bytes)
-        resp.raise_for_status()
-        data = resp.json()
+        # Named as the face service's failure, not the database's or a
+        # reload's, so the caller can say where to look (#906).
+        url = redact_url(face_api_url)
+        try:
+            resp = await post_face_analyze(self._client, face_api_url, image_bytes)
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as err:
+            status = err.response.status_code
+            if status in _IMAGE_REJECTED_STATUSES:
+                # The image, not the service: skip it like one with no face.
+                LOGGER.warning(
+                    "The face service rejected an image for %s (HTTP %s)",
+                    name,
+                    status,
+                )
+                return False
+            msg = f"The face service at {url} answered HTTP {status}"
+            raise FaceServiceError(msg) from err
+        except (httpx.HTTPError, httpx.InvalidURL) as err:
+            msg = f"Could not reach the face service at {url}: {safe_error_text(err)}"
+            raise FaceServiceError(msg) from err
+        try:
+            data = resp.json()
+        except ValueError as err:
+            msg = f"The face service at {url} sent a response that is not JSON"
+            raise FaceServiceError(msg) from err
+        if not isinstance(data, dict):
+            msg = f"The face service at {url} sent an unexpected response"
+            raise FaceServiceError(msg)
 
         faces = data.get("faces", [])
         if not isinstance(faces, list) or not faces:

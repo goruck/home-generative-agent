@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urljoin
 
 import httpx
+from homeassistant.exceptions import HomeAssistantError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -22,6 +23,12 @@ LOGGER = logging.getLogger(__name__)
 # goes out on a new one unless another pooled connection went stale at the
 # same moment. Every face API call only reads, so sending one twice is safe.
 FACE_API_STALE_CONN_RETRIES = 1
+
+
+class FaceServiceError(HomeAssistantError):
+    """The face service could not be reached, failed, or sent no readable answer."""
+
+
 _STALE_CONN_ERRORS = (httpx.RemoteProtocolError, httpx.ReadError)
 
 
