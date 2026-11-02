@@ -6,3 +6,4 @@ postgresql://u:p@[db:5432
 postgresql://u:p@db..local:5432
 postgresql://u:p@db:5432
 postgresql://u:p@nas:5432
+http://user:s3cret@face-api:8000
