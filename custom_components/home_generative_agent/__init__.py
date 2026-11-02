@@ -3101,11 +3101,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             )
         elif _emb_chain:
             await _async_announce_setup_embedding_fallback(_emb_chain[0])
-            embedding_model = _emb_chain[0][0]
+            # A lone provider is wrapped too: the wrapper reports its failures
+            # without a request header, which can hold the API key (h11
+            # echoes a rejected one). No circuit breaker: nothing to skip to.
+            embedding_model = FallbackEmbeddings(_emb_chain, circuit_breaker=None)
             if embedding_fallback_unchecked:
-                # Only an unchecked fallback answered at setup: wrapped, so
-                # it is held like one in a longer chain (#857).
-                embedding_model = FallbackEmbeddings(_emb_chain, circuit_breaker=None)
+                # Only an unchecked fallback answered at setup: it is held
+                # like one in a longer chain (#857).
                 _hold_unchecked_embedding_fallbacks(
                     hass,
                     entry,

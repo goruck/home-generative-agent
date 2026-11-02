@@ -453,7 +453,9 @@ async def test_setup_configures_fallback_models_and_embedding_chain(
     # own default instead of a hard-coded -2 sentinel (issue #614).
     assert summary_fallback.config["configurable"]["num_predict"] is None
 
-    assert "chain" not in data.captured_embedding_chain
+    # No fallback in the chain: the primary alone is wrapped too, so its
+    # errors are reported without a request header (h11 echoes a rejected key).
+    assert len(data.captured_embedding_chain.get("chain", [])) <= 1
     assert "Embedding fallback provider(s) Ollama left out" in caplog.text
     # Picked automatically, not by the user: no repair issue.
     assert not _other_model_issue(hass, entry.entry_id)
@@ -575,7 +577,9 @@ async def test_setup_leaves_out_a_chosen_fallback_of_a_non_ollama_type(
     assert await cast("Any", hga_component).async_setup_entry(hass, entry)
     await hass.async_block_till_done()
 
-    assert "chain" not in data.captured_embedding_chain
+    # No fallback in the chain: the primary alone is wrapped too, so its
+    # errors are reported without a request header (h11 echoes a rejected key).
+    assert len(data.captured_embedding_chain.get("chain", [])) <= 1
     issue = _other_model_issue(hass, entry.entry_id)
     assert issue is not None
     assert issue.translation_placeholders == {
@@ -615,7 +619,9 @@ async def test_setup_leaves_out_an_automatic_fallback_of_a_non_ollama_type(
 
     assert await cast("Any", hga_component).async_setup_entry(hass, entry)
 
-    assert "chain" not in data.captured_embedding_chain
+    # No fallback in the chain: the primary alone is wrapped too, so its
+    # errors are reported without a request header (h11 echoes a rejected key).
+    assert len(data.captured_embedding_chain.get("chain", [])) <= 1
     assert not _other_model_issue(hass, entry.entry_id)
     assert any(
         r.levelname == "INFO" and "OpenAI Work left out" in r.getMessage()
@@ -799,7 +805,9 @@ async def test_a_fallback_that_is_the_primarys_client_is_no_fallback(
     assert await cast("Any", hga_component).async_setup_entry(hass, entry)
 
     # One client: no FallbackEmbeddings wrapper, so no false "fell back".
-    assert "chain" not in data.captured_embedding_chain
+    # No fallback in the chain: the primary alone is wrapped too, so its
+    # errors are reported without a request header (h11 echoes a rejected key).
+    assert len(data.captured_embedding_chain.get("chain", [])) <= 1
 
 
 @pytest.mark.asyncio
@@ -838,7 +846,9 @@ async def test_setup_embedding_chain_skips_unavailable_primary(
     result = await cast("Any", hga_component).async_setup_entry(hass, entry)
 
     assert result is True
-    assert "chain" not in data.captured_embedding_chain
+    # No fallback in the chain: the primary alone is wrapped too, so its
+    # errors are reported without a request header (h11 echoes a rejected key).
+    assert len(data.captured_embedding_chain.get("chain", [])) <= 1
     # The store keeps its index with a stand-in that fails at once.
     assert "Embedding provider OpenAI is not available" in caplog.text
 
@@ -1432,7 +1442,9 @@ async def test_setup_builds_a_fallback_only_ollama_provider_at_its_own_url(
         fallback = cast("FakeConfiguredModel", model.chain[1][0])
         assert fallback.base.name == f"ollama@{fallback_url}"
     # Behind the OpenAI primary it would embed with another model (#751).
-    assert "chain" not in data.captured_embedding_chain
+    # No fallback in the chain: the primary alone is wrapped too, so its
+    # errors are reported without a request header (h11 echoes a rejected key).
+    assert len(data.captured_embedding_chain.get("chain", [])) <= 1
 
 
 @pytest.mark.asyncio
@@ -1466,7 +1478,9 @@ async def test_setup_rechecks_a_fallback_only_ollama_url_that_failed(
         entry.runtime_data.summarization_model,
     ):
         _only_member(model)
-    assert "chain" not in data.captured_embedding_chain
+    # No fallback in the chain: the primary alone is wrapped too, so its
+    # errors are reported without a request header (h11 echoes a rejected key).
+    assert len(data.captured_embedding_chain.get("chain", [])) <= 1
 
 
 @pytest.mark.asyncio
@@ -1506,7 +1520,9 @@ async def test_setup_continues_when_fallback_ollama_embeddings_fail_to_build(
     assert await cast("Any", hga_component).async_setup_entry(hass, entry)
 
     # Embeddings stay on the primary alone; chat still gets its Ollama fallback.
-    assert "chain" not in data.captured_embedding_chain
+    # No fallback in the chain: the primary alone is wrapped too, so its
+    # errors are reported without a request header (h11 echoes a rejected key).
+    assert len(data.captured_embedding_chain.get("chain", [])) <= 1
     assert isinstance(entry.runtime_data.chat_model, FallbackChatModel)
     assert (
         "Ollama embeddings init failed for http://ollama-fallback:11434 (ValueError)"
@@ -1785,5 +1801,9 @@ async def test_a_healthy_fallback_is_chosen_over_a_down_primary(
 
     assert await cast("Any", hga_component).async_setup_entry(hass, entry)
 
-    assert "chain" not in data.captured_embedding_chain
-    assert cast("FakeEmbeddings", seen["model"]).name == f"ollama@{fallback_url}"
+    # No fallback in the chain: the primary alone is wrapped too, so its
+    # errors are reported without a request header (h11 echoes a rejected key).
+    assert len(data.captured_embedding_chain.get("chain", [])) <= 1
+    assert cast("FakeEmbeddings", seen["model"].chain[0][0]).name == (
+        f"ollama@{fallback_url}"
+    )

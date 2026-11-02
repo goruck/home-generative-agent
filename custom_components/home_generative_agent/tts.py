@@ -40,6 +40,7 @@ from .const import (
     TTS_SPEED_DEFAULT,
     TTS_STREAM_RESPONSE_FORMAT,
 )
+from .core.fallback import echoes_request_headers
 from .core.openai_endpoint import (
     OpenAIClientCache,
     OpenAIConnectionError,
@@ -816,6 +817,10 @@ class HGATtsEntity(TextToSpeechEntity):
         except OpenAIError as err:
             LOGGER.warning("TTS request failed for %s: %s", self.entity_id, err)
             msg = f"TTS request failed for {self.entity_id}: {err}"
+            if echoes_request_headers(err):
+                # Its causes repeat a rejected header, the API key, and a
+                # caller logging this with its traceback would print them.
+                raise HomeAssistantError(msg) from None
             raise HomeAssistantError(msg) from err
 
         if not audio:

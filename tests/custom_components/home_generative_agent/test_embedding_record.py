@@ -3197,8 +3197,12 @@ async def test_a_fallback_holding_another_build_is_left_out(
     assert asked[0] == (["http://ollama", FALLBACK_URL], "configured-embed")
     # The primary's build is known: the record is not read for it.
     assert ("recorded", "configured-embed") not in asked
-    assert "chain" not in data.captured_embedding_chain
-    assert entry.runtime_data.embeddings.name == "configured-embed@http://ollama"
+    # No fallback in the chain: the primary alone is wrapped too, so its
+    # errors are reported without a request header (h11 echoes a rejected key).
+    assert len(data.captured_embedding_chain.get("chain", [])) <= 1
+    assert entry.runtime_data.embeddings.chain[0][0].name == (
+        "configured-embed@http://ollama"
+    )
     issue = _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD, entry.entry_id)
     assert issue is not None
     assert issue.translation_placeholders == {
@@ -3351,8 +3355,11 @@ async def test_setup_hands_the_fallbacks_it_could_not_fully_check_to_the_record_
     )
     chain = entry.runtime_data.embeddings
     if left_out:
-        # The fallback is out: the primary alone, unwrapped.
-        assert not isinstance(chain, FallbackEmbeddings)
+        # The fallback is out: the primary alone, wrapped so its errors
+        # never repeat a rejected header, with nothing held.
+        assert isinstance(chain, FallbackEmbeddings)
+        assert len(chain.chain) == 1
+        assert not chain.unverified
         return
     assert isinstance(chain, FallbackEmbeddings)
     assert chain.unverified == {fb.provider_id for fb in unchecked}

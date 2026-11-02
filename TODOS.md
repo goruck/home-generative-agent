@@ -2552,20 +2552,6 @@ label pair ("Server URL" vs "Base URL").
 
 ---
 
-### Header text echoed by h11 can still reach a log outside the chain error
-
-**What:** h11 rejects a malformed header value with `LocalProtocolError("Illegal header value b'Bearer <key>'")`, so an API key with a stray space or newline sits in that error's message. #880 keeps it out of `_safe_err_summary` for the SDKs' `APIConnectionError` and drops the cause chain from a chain error that ends on a connection error. Two paths remain: (1) a lone provider's error is re-raised as-is (`_chain_error` keeps a one-member chain's own error, #828), so a caller's `LOGGER.exception` prints the SDK error's cause chain with the key, as it did before #880; (2) a transport error raised unwrapped (langchain-ollama does not wrap httpx errors, and the Ollama client sends `Authorization: Bearer $OLLAMA_API_KEY` when that variable is set) prints its full message in `_safe_err_summary`, the WARNING lines and the chain error text.
-
-**Why:** Found in the final pre-landing review pass of #880 (2026-10-29); both predate it. The config flow's httpx validation normally rejects a padded key, but legacy-options migration (`core/subentry_resolver.py`) and older entries skip it.
-
-**How to apply:** Treat any `LocalProtocolError`/`ProtocolError` anywhere in the chain as type-only in `_safe_err_summary`, and for a lone provider either strip header-bearing causes before re-raising or log model failures without `exc_info` when `is_connection_error(err)`. Test with a real local socket and a key ending in `\n`, as the #880 probes did.
-
-**Effort:** S
-**Priority:** P2
-**Depends on:** None
-
----
-
 ### A chain whose primary timed out and whose fallback refused is not reported as a timeout
 
 **What:** `_chain_failed_error` picks `ModelChainTimeoutError` from the last member's error only. Since #880 a refused connection moves the chain on, so a chain whose primary timed out and whose fallback refused ends as a plain `HomeAssistantError`. Callers that count timeouts by type (the video analyzer's timeout metric, the `except (TimeoutError, ProviderStalledError)` in `agent/tools.py` `analyze_image`) undercount it, and `analyze_image` logs it with a traceback as a caption error instead.
