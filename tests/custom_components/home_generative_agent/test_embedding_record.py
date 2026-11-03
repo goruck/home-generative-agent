@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import asdict, replace
+from datetime import timedelta
 from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self, cast
@@ -25,7 +26,11 @@ import pytest
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from homeassistant.util import dt as dt_util
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_fire_time_changed,
+)
 
 import custom_components.home_generative_agent as hga_component
 from custom_components.home_generative_agent import repairs
@@ -34,8 +39,8 @@ from custom_components.home_generative_agent.const import (
     CONF_OLLAMA_EMBEDDING_MODEL,
     DOMAIN,
 )
+from custom_components.home_generative_agent.core import caption_store, utils
 from custom_components.home_generative_agent.core import embedding_record as er
-from custom_components.home_generative_agent.core import utils
 from custom_components.home_generative_agent.core.embedding_record import (
     ISSUE_EMBEDDING_FALLBACK_HELD,
     ISSUE_EMBEDDING_FALLBACK_HELD_NO_REFERENCE,
@@ -3917,6 +3922,49 @@ async def test_setup_starts_the_caption_backfill_and_unload_cancels_it(
 
 
 @pytest.mark.asyncio
+async def test_setup_starts_the_caption_prune_and_unload_cancels_it(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    First run an hour after setup, then hourly; unload stops it (#709).
+
+    Not at setup itself, with the rest of a boot or a reload. One run at a
+    time: a tick while a run is in flight starts none. The run is cancelled
+    before the pool it deletes on closes.
+    """
+    runs: list[Any] = []
+    never = asyncio.Event()
+
+    async def _run(self: Any) -> None:
+        runs.append(self)
+        await never.wait()
+
+    monkeypatch.setattr(caption_store.CaptionPruner, "async_run", _run)
+    entry, _data, _asked = await _setup_two_ollama_servers(
+        hass, monkeypatch, {"http://ollama": "w:a1", FALLBACK_URL: "w:a1"}
+    )
+    entry.mock_state(hass, ConfigEntryState.LOADED)
+    await asyncio.sleep(0)
+    assert runs == []
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(hours=1, seconds=1))
+    await asyncio.sleep(0)
+    run = entry.runtime_data.caption_prune_task
+    assert run is not None
+    assert len(runs) == 1
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(hours=2, seconds=2))
+    await asyncio.sleep(0)
+    assert len(runs) == 1
+    monkeypatch.setattr(
+        hass.config_entries, "async_unload_platforms", AsyncMock(return_value=True)
+    )
+
+    assert await hga_component.async_unload_entry(hass, entry)
+
+    assert run.cancelled()
+    assert entry.runtime_data.caption_prune_task is None
+
+
+@pytest.mark.asyncio
 async def test_no_database_starts_no_caption_backfill(
     hass: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3926,6 +3974,7 @@ async def test_no_database_starts_no_caption_backfill(
     )
 
     assert entry.runtime_data.caption_backfill_task is None
+    assert entry.runtime_data.caption_prune_task is None
 
 
 @pytest.mark.asyncio

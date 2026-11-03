@@ -121,6 +121,9 @@ class HGAData:
     reembed_task: asyncio.Task[None] | None = None
     # The caption camera backfill, cancelled at unload before the pool (#706).
     caption_backfill_task: asyncio.Task[None] | None = None
+    # The hourly prune of old camera captions (#709), cancelled at unload
+    # before the pool it deletes on is closed.
+    caption_prune_task: asyncio.Task[None] | None = None
 
 
 type HGAConfigEntry = ConfigEntry[HGAData]

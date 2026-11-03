@@ -7,6 +7,7 @@ import inspect
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
+from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
 from types import MappingProxyType
@@ -25,6 +26,7 @@ from homeassistant.config_entries import (
     SIGNAL_CONFIG_ENTRY_CHANGED,
     ConfigEntry,
     ConfigEntryChange,
+    ConfigEntryState,
     ConfigSubentry,
 )
 from homeassistant.const import (
@@ -44,6 +46,7 @@ from homeassistant.helpers.dispatcher import (
     async_dispatcher_connect,
     async_dispatcher_send,
 )
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.helpers.network import get_url
 from homeassistant.helpers.target import (
@@ -68,6 +71,7 @@ from pydantic import SecretStr
 from .agent.tools import VLMPromptOverrides, analyze_image
 from .audit.store import AuditStore
 from .const import (
+    CAPTION_PRUNE_INTERVAL_SEC,
     CHAT_MODEL_MAX_TOKENS,
     CHAT_MODEL_REPEAT_PENALTY,
     CHAT_MODEL_TOP_P,
@@ -265,7 +269,7 @@ from .const import (
     VLM_TOP_P,
 )
 from .core.anthropic_client import SharedClientChatAnthropic, async_prime_async_client
-from .core.caption_store import async_backfill_caption_cameras
+from .core.caption_store import CaptionPruner, async_backfill_caption_cameras
 from .core.database_guard import (
     async_check_database_reachable,
     async_clear_database_issue,
@@ -5114,6 +5118,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             async_backfill_caption_cameras(pool),
             name="hga_caption_camera_backfill",
         )
+        # Captions not written for 30 days are deleted every hour, the first
+        # time an hour after setup (not with the rest of startup, on every
+        # boot and reload), so each camera's caption store stays bounded
+        # (#709). A run at a time, and never while the entry is unloading:
+        # the run is cancelled before the pool closes, and the timer is
+        # removed with the entry and at shutdown.
+        pruner = CaptionPruner(pool)
+
+        @callback
+        def _start_caption_prune(_now: datetime) -> None:
+            if entry.state is not ConfigEntryState.LOADED:
+                return
+            rd_now = entry.runtime_data
+            if rd_now.caption_prune_task is not None and not (
+                rd_now.caption_prune_task.done()
+            ):
+                return
+            rd_now.caption_prune_task = entry.async_create_background_task(
+                hass, pruner.async_run(), name="hga_caption_prune"
+            )
+
+        entry.async_on_unload(
+            async_track_time_interval(
+                hass,
+                _start_caption_prune,
+                timedelta(seconds=CAPTION_PRUNE_INTERVAL_SEC),
+                cancel_on_shutdown=True,
+            )
+        )
 
     # Same placement, same reason: four Sentinel rule ids (five evaluators) key
     # on a positive "Unknown Person" label that only the face pipeline writes,
@@ -5267,6 +5300,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
         # Same for the caption camera backfill (#706).
         await _cancel_and_wait(rd.caption_backfill_task, "caption camera backfill")
         rd.caption_backfill_task = None
+        # And the caption prune (#709).
+        await _cancel_and_wait(rd.caption_prune_task, "caption prune")
+        rd.caption_prune_task = None
 
     await _teardown("reembed.cancel", _cancel_reembed)
     if rd.pool is not None:
