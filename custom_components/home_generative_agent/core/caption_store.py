@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any, Final
 
 import psycopg
 
+from ..const import CAPTION_RETENTION_DAYS  # noqa: TID252
+
 if TYPE_CHECKING:
     from psycopg import AsyncConnection
     from psycopg.rows import DictRow
@@ -54,6 +56,7 @@ _CAMERA_START: Final = len(CAPTION_NAMESPACE) + 2
 _PENDING_SQL: Final = """
     SELECT 1 AS pending FROM store
     WHERE prefix LIKE %(pattern)s AND NOT (value ? %(field)s)
+      AND updated_at >= NOW() - make_interval(days => %(days)s)
     LIMIT 1
 """
 _BATCH_SQL: Final = """
@@ -71,6 +74,7 @@ _BATCH_SQL: Final = """
         FROM batch
         WHERE s.prefix = batch.prefix AND s.key = batch.key
           AND NOT (s.value ? %(field)s)
+          AND s.updated_at >= NOW() - make_interval(days => %(days)s)
         RETURNING 1
     ), last AS (
         SELECT prefix, key FROM batch ORDER BY prefix DESC, key DESC LIMIT 1
@@ -110,9 +114,12 @@ async def async_backfill_caption_cameras(
     database runs it, this one looks again every minute until nothing is
     left; a failure leaves the rest to the next start.
     """
+    # Captions past the retention are left alone: the prune deletes them
+    # (#709), so updating them first would be wasted work.
     params: dict[str, Any] = {
         "pattern": _CAPTION_PREFIX_PATTERN,
         "field": CAPTION_CAMERA_FIELD,
+        "days": CAPTION_RETENTION_DAYS,
     }
     try:
         while True:
@@ -221,3 +228,175 @@ async def _async_run_batches(
         after = (row["last_prefix"], row["last_key"])
         # As long as the batch took, so the database keeps half its time.
         await asyncio.sleep(time.monotonic() - started)
+
+
+# Captions not written for CAPTION_RETENTION_DAYS are deleted (#709), with
+# their vectors (store_vectors cascades). Not LangGraph's TTL sweeper: it
+# deletes every expired row in one statement, which on an install that kept
+# years of captions is one long delete holding the table. This walks the
+# captions by primary key a batch at a time instead, one run per database.
+_PRUNE_BATCH: Final = 2000
+_PRUNE_MIN_BATCH: Final = 100
+_PRUNE_RETRIES: Final = 3
+_PRUNE_LOCK_KEY: Final = 709_709
+# Above this many deleted in one run (the first run after an upgrade), the
+# run is logged at INFO; the hourly runs after it at DEBUG.
+_PRUNE_LOG_INFO_ABOVE: Final = 2000
+_PRUNE_TIMEOUT_SQL: Final = "SET LOCAL statement_timeout = '60s'"
+_PRUNE_LOCK_TIMEOUT_SQL: Final = "SET LOCAL lock_timeout = '10s'"
+# One batch: the next keys in the caption namespace after the cursor, and of
+# those, the ones not written for the retention. The age is checked on the
+# row deleted, not only where the keys are picked, so a caption rewritten
+# meanwhile (a later batch with the same key) is kept: Postgres checks the
+# condition again on the row version it waited for.
+_PRUNE_SQL: Final = """
+    WITH batch AS (
+        SELECT prefix, key FROM store
+        WHERE prefix LIKE %(pattern)s
+          AND (prefix, key) > (%(after_prefix)s, %(after_key)s)
+        ORDER BY prefix, key
+        LIMIT %(batch)s
+    ), deleted AS (
+        DELETE FROM store AS s USING batch
+        WHERE s.prefix = batch.prefix AND s.key = batch.key
+          AND s.updated_at < NOW() - make_interval(days => %(days)s)
+        RETURNING 1
+    ), last AS (
+        SELECT prefix, key FROM batch ORDER BY prefix DESC, key DESC LIMIT 1
+    )
+    SELECT
+        (SELECT count(*) FROM batch) AS seen,
+        (SELECT count(*) FROM deleted) AS deleted,
+        (SELECT prefix FROM last) AS last_prefix,
+        (SELECT key FROM last) AS last_key
+"""
+
+
+async def async_prune_captions(
+    pool: AsyncConnectionPool[AsyncConnection[DictRow]],
+    days: int = CAPTION_RETENTION_DAYS,
+) -> int | None:
+    """
+    Delete captions not written for ``days`` days; return how many (#709).
+
+    None when another entry on the same database is pruning (an advisory
+    lock): one run per database, so two entries never double the load. The
+    run walks every caption by primary key, a batch at a time, each batch
+    in its own transaction with its timeouts set locally, pausing as long as
+    each batch took. The connection goes back to the pool only after a clean
+    finish; any interruption closes it, so no later user inherits the lock.
+    """
+    async with pool.connection() as conn:
+        clean = False
+        try:
+            row = await (
+                await conn.execute(_LOCK_SQL, {"key": _PRUNE_LOCK_KEY})
+            ).fetchone()
+            if not row or not row["locked"]:
+                clean = True
+                return None
+            try:
+                total = await _async_prune_batches(conn, days)
+            finally:
+                await conn.execute(_UNLOCK_SQL, {"key": _PRUNE_LOCK_KEY})
+            clean = True
+            return total
+        finally:
+            if not clean:
+                await conn.close()
+
+
+async def _async_prune_batches(conn: AsyncConnection[DictRow], days: int) -> int:
+    """
+    Walk every caption in key order, deleting the old ones; return how many.
+
+    A batch held up by a lock or a slow statement is retried from the same
+    place after a pause, at half the size after a timeout (down to
+    ``_PRUNE_MIN_BATCH``), so a slow store still makes progress.
+    """
+    after = ("", "")
+    batch = _PRUNE_BATCH
+    total = 0
+    retries = 0
+    while True:
+        started = time.monotonic()
+        try:
+            async with conn.transaction():
+                await conn.execute(_PRUNE_TIMEOUT_SQL)
+                await conn.execute(_PRUNE_LOCK_TIMEOUT_SQL)
+                row = await (
+                    await conn.execute(
+                        _PRUNE_SQL,
+                        {
+                            "pattern": _CAPTION_PREFIX_PATTERN,
+                            "days": days,
+                            "batch": batch,
+                            "after_prefix": after[0],
+                            "after_key": after[1],
+                        },
+                    )
+                ).fetchone()
+        except (
+            psycopg.errors.LockNotAvailable,
+            psycopg.errors.QueryCanceled,
+            psycopg.errors.DeadlockDetected,
+            psycopg.errors.SerializationFailure,
+        ) as err:
+            retries += 1
+            if retries > _PRUNE_RETRIES:
+                raise
+            if isinstance(err, psycopg.errors.QueryCanceled):
+                batch = max(batch // 2, _PRUNE_MIN_BATCH)
+            await asyncio.sleep(
+                max(time.monotonic() - started, _BACKFILL_RETRY_BACKOFF_SEC * retries)
+            )
+            continue
+        retries = 0
+        if not row:
+            return total
+        total += row["deleted"]
+        if row["seen"] < batch or row["last_prefix"] is None:
+            return total
+        after = (row["last_prefix"], row["last_key"])
+        await asyncio.sleep(time.monotonic() - started)
+
+
+class CaptionPruner:
+    """
+    One prune run at a time, logging a streak of failures once (#709).
+
+    A failed run (a database that is down) is warned about once, not every
+    hour, and its recovery is logged.
+    """
+
+    def __init__(self, pool: AsyncConnectionPool[AsyncConnection[DictRow]]) -> None:
+        """Prune on ``pool``."""
+        self._pool = pool
+        self._failing = False
+
+    async def async_run(self) -> None:
+        """Delete the captions older than the retention, logging the outcome."""
+        try:
+            deleted = await async_prune_captions(self._pool)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if not self._failing:
+                LOGGER.warning(
+                    "Could not delete old camera captions; retrying every hour.",
+                    exc_info=True,
+                )
+            self._failing = True
+            return
+        if self._failing:
+            LOGGER.info("Deleting old camera captions works again.")
+        self._failing = False
+        if deleted is None:
+            LOGGER.debug("Another entry is deleting old camera captions.")
+        elif deleted:
+            LOGGER.log(
+                logging.INFO if deleted > _PRUNE_LOG_INFO_ABOVE else logging.DEBUG,
+                "Deleted %s camera captions older than %s days.",
+                deleted,
+                CAPTION_RETENTION_DAYS,
+            )

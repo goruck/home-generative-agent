@@ -1073,6 +1073,14 @@ Write ≤150 characters (≤2 sentences). Obey all rules and narrate in order.
 """
 VIDEO_ANALYZER_TIME_OFFSET = 15  # minutes
 VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC = 1800  # 30 minutes
+# Camera captions not written for this many days are deleted, with their
+# vectors (#709). Every analyzed batch stores its caption, notified or not, so
+# a scene that keeps recurring keeps a fresh caption and stays matched; a
+# scene absent this long notifies once more when it returns.
+CAPTION_RETENTION_DAYS = 30
+# How often old captions are deleted; the first run is an interval after
+# setup, not with the rest of startup.
+CAPTION_PRUNE_INTERVAL_SEC = 3600
 VIDEO_ANALYZER_SIMILARITY_THRESHOLD = 0.85
 VIDEO_ANALYZER_DELETE_SNAPSHOTS = False
 VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP = 200

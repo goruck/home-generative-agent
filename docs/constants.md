@@ -263,6 +263,8 @@ The model Sentinel's triage, discovery and explanation calls run on when a **Sen
 | `VIDEO_ANALYZER_TIME_OFFSET` | `const.py` | `15` (min) | Lookback window for fetching recent camera activity when building a video batch |
 | `VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC` | `const.py` | `1800` (s, 30 min) | Caption deduplication window. A caption of a real subject in action is suppressed when a match at or above the similarity threshold was sent as a notification within this window, and notifies again otherwise. Artifact captions within this window are suppressed even when the vector score is below threshold. |
 | `VIDEO_ANALYZER_SIMILARITY_THRESHOLD` | `const.py` | `0.85` | Cosine similarity threshold for caption deduplication. Captions above this score are considered duplicates and suppressed. |
+| `CAPTION_RETENTION_DAYS` | `const.py` | `30` (days) | Camera captions not written for this long are deleted with their vectors ([#709](https://github.com/goruck/home-generative-agent/issues/709)). Every analyzed batch stores its caption, notified or not, so a recurring scene keeps a fresh caption and stays matched; a scene absent this long notifies once more when it returns. |
+| `CAPTION_PRUNE_INTERVAL_SEC` | `const.py` | `3600` (s) | How often old captions are deleted; the first run is one interval after setup, not with the rest of startup. |
 | `RECOMMENDED_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S` | `const.py` | `0` (s, off) | Default for the per-camera notification cooldown option (`video_analyzer_notification_cooldown_s`). |
 | `VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_MAX_S` | `const.py` | `600` (s) | Largest value the notification cooldown option accepts. Kept short because push delivery cannot be confirmed: it bounds how long quiet updates can follow a lost alert. |
 | `RECOMMENDED_VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_S` | `const.py` | `0` (s, off) | Default for the house notification cooldown option (`video_analyzer_house_notification_cooldown_s`). |
@@ -625,6 +627,7 @@ These constants live outside `const.py` in individual modules. They affect runti
 |---|---|---|
 | `_BACKFILL_BATCH` | `2000` | Captions per batch when the camera field is added to captions stored before it existed ([#706](https://github.com/goruck/home-generative-agent/issues/706)). The run walks the store's primary key, one database per run (an advisory lock), and pauses as long as each batch took. |
 | `_BACKFILL_RETRIES` | `3` | Retries of a batch that hit a caption locked by a live write or ran past its 60 s statement timeout, each after a longer pause (`_BACKFILL_RETRY_BACKOFF_SEC`, 10 s, times the attempt). Then the rest is left to the next start. |
+| `_PRUNE_BATCH` | `2000` | Captions read per batch when old captions are pruned ([#709](https://github.com/goruck/home-generative-agent/issues/709)): the run walks the caption namespace by primary key (an index-only scan), deleting the rows not written for `CAPTION_RETENTION_DAYS`, each batch in its own transaction with a 60 s statement and 10 s lock timeout, pausing as long as each batch took. One run per database (an advisory lock). A batch that times out is retried from the same key at half the size, down to `_PRUNE_MIN_BATCH` (100); after `_PRUNE_RETRIES` (3) failed attempts the rest waits for the next hourly run. |
 
 ### `core/video_analyzer.py`
 
