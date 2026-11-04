@@ -1882,6 +1882,7 @@ async def test_finalize_stores_whether_the_caption_notified(
     va: VideoAnalyzer, notified: object, batch_names: list[str], unknown_person: object
 ) -> None:
     va._handle_notification = AsyncMock(return_value=notified)  # type: ignore[method-assign]
+    va._schedule_publish = MagicMock()  # type: ignore[method-assign]
     store = va.entry.runtime_data.store
     store.aput = AsyncMock()
     batch = _make_batch()
@@ -2238,6 +2239,7 @@ async def test_finalize_is_one_step_per_camera(va: VideoAnalyzer) -> None:
 
     va._handle_notification = _handle  # type: ignore[method-assign]
     va._store_results = _store  # type: ignore[method-assign]
+    va._schedule_publish = MagicMock()  # type: ignore[method-assign]
     batch = _make_batch()
     first = asyncio.create_task(
         va._finalize("camera.side", batch, "first", context=_NO_NAMES)  # type: ignore[attr-defined]
@@ -2254,3 +2256,165 @@ async def test_finalize_is_one_step_per_camera(va: VideoAnalyzer) -> None:
     release.set()
     await asyncio.gather(first, second)
     assert events[3:] == ["store first", "check second", "store second"]
+
+
+@pytest.mark.asyncio
+async def test_a_second_batch_publishes_while_the_first_is_checked(
+    va: VideoAnalyzer,
+) -> None:
+    """
+    The frame is not held behind another batch's dedup (#708).
+
+    Only the novelty check, the push and the caption store are one step per
+    camera; the latest frame goes to the camera's writer at once.
+    """
+    events: list[str] = []
+    first_checking = asyncio.Event()
+    release = asyncio.Event()
+
+    def _publish(_camera: str, msg: str, *_a: object) -> None:
+        events.append(f"publish {msg}")
+
+    async def _handle(_camera: str, msg: str, *_a: object, **_k: object) -> bool:
+        events.append(f"check {msg}")
+        if msg == "first":
+            first_checking.set()
+            await release.wait()
+        return True
+
+    async def _store(_camera: str, _batch: object, msg: str, **_k: object) -> None:
+        events.append(f"store {msg}")
+
+    va._schedule_publish = _publish  # type: ignore[method-assign]
+    va._handle_notification = _handle  # type: ignore[method-assign]
+    va._store_results = _store  # type: ignore[method-assign]
+    batch = _make_batch()
+    first = asyncio.create_task(
+        va._finalize("camera.side", batch, "first", context=_NO_NAMES)  # type: ignore[attr-defined]
+    )
+    await first_checking.wait()
+    second = asyncio.create_task(
+        va._finalize("camera.side", batch, "second", context=_NO_NAMES)  # type: ignore[attr-defined]
+    )
+    for _ in range(5):
+        await asyncio.sleep(0)
+    # Handed to the writer while the first batch still holds the camera's lock.
+    assert events == ["publish first", "check first", "publish second"]
+    release.set()
+    await asyncio.gather(first, second)
+    assert events[3:] == ["store first", "check second", "store second"]
+
+
+def _writer_analyzer(
+    va: VideoAnalyzer, monkeypatch: pytest.MonkeyPatch
+) -> tuple[list[str], dict[str, asyncio.Event], list[tuple[str, str]]]:
+    """
+    Run the latest-frame writer on real tasks with a copy each test can hold.
+
+    Returns the copies started, a gate per frame name (set it to let that copy
+    land) and the signals sent, as (signal, summary).
+    """
+    from custom_components.home_generative_agent.core import (  # noqa: PLC0415
+        video_analyzer,
+    )
+
+    copies: list[str] = []
+    gates: dict[str, asyncio.Event] = {}
+    sent: list[tuple[str, str]] = []
+
+    async def _copy(_hass: object, src: Path, _dst: Path) -> None:
+        copies.append(src.name)
+        gate = gates.setdefault(src.name, asyncio.Event())
+        await gate.wait()
+        if src.name.startswith("broken"):
+            msg = "No space left on device"
+            raise OSError(msg)
+
+    def _dispatch(_hass: object, signal: str, _camera: str, *args: object) -> None:
+        # Both signals carry the summary second.
+        sent.append((signal, str(args[1])))
+
+    monkeypatch.setattr(video_analyzer, "publish_latest_atomic", _copy)
+    monkeypatch.setattr(video_analyzer, "dispatch_on_loop", _dispatch)
+    va.hass.async_create_background_task = (  # type: ignore[method-assign]
+        lambda coro, _name: asyncio.create_task(coro)
+    )
+    return copies, gates, sent
+
+
+async def _settle() -> None:
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_the_newest_frame_wins_and_signals_follow_the_copy(
+    va: VideoAnalyzer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A frame waiting behind a slow copy is replaced by a newer one (#708).
+
+    So a stalled mount holds one copy per camera, and the image never goes
+    back to an older frame; each frame's signals fire after its file lands.
+    """
+    from custom_components.home_generative_agent.core import (  # noqa: PLC0415
+        video_analyzer,
+    )
+
+    copies, gates, sent = _writer_analyzer(va, monkeypatch)
+    va._schedule_publish("camera.side", "A", Path("a.jpg"), [])  # type: ignore[attr-defined]
+    await _settle()
+    va._schedule_publish("camera.side", "B", Path("b.jpg"), [])  # type: ignore[attr-defined]
+    va._schedule_publish("camera.side", "C", Path("c.jpg"), [])  # type: ignore[attr-defined]
+    await _settle()
+    # One copy in flight, and nothing announced before it lands.
+    assert copies == ["a.jpg"]
+    assert sent == []
+    gates["a.jpg"].set()
+    await _settle()
+    gates.setdefault("c.jpg", asyncio.Event()).set()
+    await _settle()
+    # B was replaced while A copied; C followed, each announced after landing.
+    assert copies == ["a.jpg", "c.jpg"]
+    assert [
+        m for signal, m in sent if signal == video_analyzer.SIGNAL_HGA_NEW_LATEST
+    ] == [
+        "A",
+        "C",
+    ]
+    assert va._latest_pending == {}  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_copy_is_logged_and_the_next_frame_still_goes(
+    va: VideoAnalyzer,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A full or failing media volume costs that frame, never a notification."""
+    copies, gates, sent = _writer_analyzer(va, monkeypatch)
+    gates["broken.jpg"] = asyncio.Event()
+    gates["broken.jpg"].set()
+    gates["ok.jpg"] = asyncio.Event()
+    gates["ok.jpg"].set()
+    va._schedule_publish("camera.side", "bad", Path("broken.jpg"), [])  # type: ignore[attr-defined]
+    await _settle()
+    va._schedule_publish("camera.side", "good", Path("ok.jpg"), [])  # type: ignore[attr-defined]
+    await _settle()
+    assert copies == ["broken.jpg", "ok.jpg"]
+    assert all(m == "good" for _, m in sent)
+    assert "Could not publish the latest frame broken.jpg" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_a_writer_stuck_on_a_copy(
+    va: VideoAnalyzer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _writer_analyzer(va, monkeypatch)
+    va._schedule_publish("camera.side", "A", Path("a.jpg"), [])  # type: ignore[attr-defined]
+    await _settle()
+    writer = va._latest_writers["camera.side"]  # type: ignore[attr-defined]
+    writers = va._cancel_latest_writers()  # type: ignore[attr-defined]
+    await asyncio.gather(*writers, return_exceptions=True)
+    assert writer.cancelled()
+    assert va._latest_writers == {}  # type: ignore[attr-defined]

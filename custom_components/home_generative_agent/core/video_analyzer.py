@@ -983,6 +983,10 @@ class VideoAnalyzer:
         self._house_lock = asyncio.Lock()
         # Per-camera lock making caption dedup's check, send and store one step.
         self._finalize_locks: dict[str, asyncio.Lock] = {}
+        # One latest-frame writer per camera, newest frame wins (#708): the
+        # frame waiting to be written, and the writer task.
+        self._latest_pending: dict[str, tuple[str, Path, list[str]]] = {}
+        self._latest_writers: dict[str, asyncio.Task[None]] = {}
         self._notify_cooldown_unsupported_logged = False
         self._event_recording_sem = asyncio.Semaphore(RECORDING_MAX_CONCURRENT)
         self._event_recording_warned_at: dict[str, float] = {}
@@ -1635,10 +1639,20 @@ class VideoAnalyzer:
         # Caption dedup reads the stored captions and this batch's caption is
         # stored last, so check, send and store are one step per camera: two
         # batches with the same scene cannot both find nothing to match.
+        # The frame goes to the camera's latest-frame writer, outside the lock
+        # and without waiting for the copy (#708): only the novelty check,
+        # the push and the caption store need to be one step.
+        chosen = self._notify_frame(batch, notify_frame)
+        self._schedule_publish(camera_id, msg, chosen, context.recognized)
         lock = self._finalize_locks.setdefault(camera_id, asyncio.Lock())
         async with lock:
             notified = await self._handle_notification(
-                camera_id, msg, batch, notify_frame, context=context
+                camera_id,
+                msg,
+                batch,
+                notify_frame,
+                context=context,
+                published=chosen,
             )
             await self._store_results(
                 camera_id,
@@ -2824,30 +2838,30 @@ class VideoAnalyzer:
             self._m_inc(camera_id, "analyzed")
             return {frame_description: [h.name for h in face_hits]}, face_hits
 
-    async def _handle_notification(
-        self,
-        camera_id: str,
-        msg: str,
-        batch: list[Path],
-        notify_frame: Path | None = None,
-        *,
-        context: _BatchNotifyContext,
-    ) -> bool:
+    @staticmethod
+    def _notify_frame(batch: list[Path], notify_frame: Path | None) -> Path:
         """
-        Decide whether to notify and send if needed.
+        Return the frame a batch is shown and notified with.
 
-        Returns True only when a sounding push was handed to a notify service.
+        notify_frame is the frame _process_batch judged representative of the
+        summary text. Middle-of-batch is only a legacy fallback: after the
+        sentinel drop (issue #493) the raw batch is dominated by
+        unchanged-scene frames the summary does not describe.
         """
-        camera_name = camera_id.rsplit(".", maxsplit=1)[-1]
-        recognized = context.recognized
-        # notify_frame is the frame _process_batch judged representative of
-        # the summary text. Middle-of-batch is only a legacy fallback: after
-        # the sentinel drop (issue #493) the raw batch is dominated by
-        # unchanged-scene frames the summary does not describe.
-        if notify_frame is None:
-            LOGGER.debug("[%s] No notify frame provided; using batch middle", camera_id)
-        chosen = notify_frame if notify_frame is not None else batch[len(batch) // 2]
+        if notify_frame is not None:
+            return notify_frame
+        return batch[len(batch) // 2]
 
+    async def _publish_now(
+        self, camera_id: str, msg: str, chosen: Path, recognized: Sequence[str]
+    ) -> None:
+        """
+        Copy ``chosen`` to the camera's latest frame, then tell its listeners.
+
+        The listeners (the `hga_last_event_frame` event, the image entity and
+        the recognized-people sensor) are told after the copy lands, so the
+        file always matches what they announce. The copy is atomic.
+        """
         dst = latest_target(Path(VIDEO_ANALYZER_SNAPSHOT_ROOT), camera_id)
         await publish_latest_atomic(self.hass, chosen, dst)
 
@@ -2884,11 +2898,71 @@ class VideoAnalyzer:
             str(dst),
         )
 
-        # If backlog is hot, let filesystem settle before notifying
-        queue = self._snapshot_queues.get(camera_id)
-        backlog_limit = 10
-        if queue and queue.qsize() > backlog_limit:
-            await asyncio.sleep(0.5)
+    def _schedule_publish(
+        self, camera_id: str, msg: str, chosen: Path, recognized: Sequence[str]
+    ) -> None:
+        """
+        Make ``chosen`` the camera's next latest frame (#708).
+
+        One writer per camera, newest frame wins: a batch that arrives while
+        a copy is in flight replaces any frame still waiting, so a stalled
+        media mount holds one thread per camera, never one per batch, and
+        frames are written in the order batches finish. Not part of caption
+        deduplication: ``_finalize`` goes on to the check and the push
+        without waiting, and the push sends the frame from its own path.
+        """
+        self._latest_pending[camera_id] = (msg, chosen, list(recognized))
+        writer = self._latest_writers.get(camera_id)
+        if writer is None or writer.done():
+            self._latest_writers[camera_id] = self.hass.async_create_background_task(
+                self._latest_writer(camera_id), f"hga latest frame {camera_id}"
+            )
+
+    async def _latest_writer(self, camera_id: str) -> None:
+        """Write the camera's newest pending frame until none is left."""
+        while (pending := self._latest_pending.pop(camera_id, None)) is not None:
+            msg, chosen, recognized = pending
+            try:
+                await self._publish_now(camera_id, msg, chosen, recognized)
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # noqa: BLE001 - never the notification's concern
+                LOGGER.warning(
+                    "[%s] Could not publish the latest frame %s: %s",
+                    camera_id,
+                    chosen.name,
+                    err,
+                )
+
+    async def _handle_notification(  # noqa: PLR0913
+        self,
+        camera_id: str,
+        msg: str,
+        batch: list[Path],
+        notify_frame: Path | None = None,
+        *,
+        context: _BatchNotifyContext,
+        published: Path | None = None,
+    ) -> bool:
+        """
+        Decide whether to notify and send if needed.
+
+        ``published`` is the frame ``_finalize`` already handed to the
+        camera's latest-frame writer (#708); without it the frame is
+        published here first. Returns True only when a sounding push was
+        handed to a notify service.
+        """
+        camera_name = camera_id.rsplit(".", maxsplit=1)[-1]
+        recognized = context.recognized
+        if published is not None:
+            chosen = published
+        else:
+            if notify_frame is None:
+                LOGGER.debug(
+                    "[%s] No notify frame provided; using batch middle", camera_id
+                )
+            chosen = self._notify_frame(batch, notify_frame)
+            await self._publish_now(camera_id, msg, chosen, recognized)
 
         # If the Home Assistant media_dirs option is set in configuration.yaml,
         # ensure that /media is added as an option for '/media/local' to work.
@@ -4207,6 +4281,15 @@ class VideoAnalyzer:
         except HomeAssistantError:
             LOGGER.warning("Error unsubscribing %s", what, exc_info=True)
 
+    def _cancel_latest_writers(self) -> list[asyncio.Task[None]]:
+        """Cancel every camera's latest-frame writer; return them to await."""
+        writers = list(self._latest_writers.values())
+        for task in writers:
+            task.cancel()
+        self._latest_writers.clear()
+        self._latest_pending.clear()
+        return writers
+
     async def stop(self) -> None:
         """Stop the video analyzer."""
         # Latch before the not-started early return, not after: the entry
@@ -4239,6 +4322,7 @@ class VideoAnalyzer:
             task.cancel()
             tasks_to_await.append(task)
         self._flush_tasks.clear()
+        tasks_to_await.extend(self._cancel_latest_writers())
 
         self._event_snapshot_buffers.clear()
 
