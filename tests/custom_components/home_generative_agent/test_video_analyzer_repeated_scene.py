@@ -509,6 +509,10 @@ async def test_notification_image_matches_summary_not_batch_middle(
     va._store_results = AsyncMock()  # type: ignore[method-assign]
     va._prune_old_snapshots = AsyncMock()  # type: ignore[method-assign]
     va._send_notification = AsyncMock()  # type: ignore[method-assign]
+    # The latest-frame writer is not run here; close it rather than leak it.
+    va.hass.async_create_background_task = (  # type: ignore[method-assign]
+        lambda coro, _name: coro.close()
+    )
 
     with (
         patch(
@@ -531,9 +535,12 @@ async def test_notification_image_matches_summary_not_batch_middle(
     assert va._send_notification.await_args is not None
     notify_img = va._send_notification.await_args.args[2]
     assert Path(notify_img).name in {"snap_1.jpg", "snap_2.jpg"}
-    # The "latest" image entity must show the same representative frame.
-    assert mock_publish.await_args is not None
-    assert mock_publish.await_args.args[1].name in {"snap_1.jpg", "snap_2.jpg"}
+    # The "latest" image entity must show the same representative frame: it
+    # is queued for the camera's latest-frame writer (#708), which this mocked
+    # hass does not run.
+    mock_publish.assert_not_awaited()
+    _msg, latest_frame, _names = va._latest_pending[_CAMERA]  # type: ignore[attr-defined]
+    assert latest_frame.name in {"snap_1.jpg", "snap_2.jpg"}
 
 
 @pytest.mark.asyncio

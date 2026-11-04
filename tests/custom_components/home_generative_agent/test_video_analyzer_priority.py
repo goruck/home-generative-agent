@@ -2187,6 +2187,7 @@ async def test_finalize_does_not_reregister_batch_for_retention(
     """
     va._handle_notification = AsyncMock()  # type: ignore[method-assign]
     va._store_results = AsyncMock()  # type: ignore[method-assign]
+    va._schedule_publish = MagicMock()  # type: ignore[method-assign]
 
     with patch.object(va, "_prune_old_snapshots", new=AsyncMock()) as mock_prune:
         await va._finalize(  # type: ignore[attr-defined]
