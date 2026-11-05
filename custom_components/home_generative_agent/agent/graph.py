@@ -269,6 +269,32 @@ def _make_tool_error(err: str, name: str, tid: str) -> ToolMessage:
     )
 
 
+def _make_routing_rejection(
+    name: str, tool_routing_map: Mapping[str, str], tid: str
+) -> ToolMessage:
+    """
+    Reject a call to a tool not bound this turn, naming the ones that are (#920).
+
+    Not ``_make_tool_error``: its "Call the tool again with your mistake
+    corrected." told the model to repeat the very call that was refused, and
+    a small local model did, twice, then said it had no tool, while
+    ``intent__HassTurnOn`` sat bound and unused. Naming the bound tools gives
+    it somewhere to go. Keeps ``_ROUTING_REJECTION_MARKER`` and the error
+    status, which the PIN recovery reads.
+    """
+    available = ", ".join(sorted(tool_routing_map))
+    return ToolMessage(
+        content=(
+            f"\nError: Tool '{name}' {_ROUTING_REJECTION_MARKER}. Do not call "
+            f"it again this turn. Use one of the tools you have instead: "
+            f"{available}.\n"
+        ),
+        name=name,
+        tool_call_id=tid,
+        status="error",
+    )
+
+
 def _make_transient_tool_error(err: str, name: str, tid: str) -> ToolMessage:
     """Build a ToolMessage for transient/resource errors that must not be retried."""
     return ToolMessage(
@@ -1680,6 +1706,95 @@ async def _append_turn_on_tool(  # noqa: PLR0913
     if fetched is None:
         return candidates
     return [*candidates, fetched]
+
+
+# At most this many of the previous turn's tools are kept bound (#920).
+_PRIOR_TURN_TOOLS_MAX = 3
+
+
+def _prior_turn_tool_names(messages: Sequence[BaseMessage]) -> list[str]:
+    """
+    Return the tools the previous turn ran without error, in call order.
+
+    Only the turn just before the current message: its tool results sit
+    between the previous user message and this one. A rejected or failed
+    call has an error status and is skipped, so a refusal is never carried.
+    """
+    if not messages or not isinstance(messages[-1], HumanMessage):
+        return []
+    names: list[str] = []
+    for msg in reversed(messages[:-1]):
+        if isinstance(msg, HumanMessage):
+            break
+        if (
+            isinstance(msg, ToolMessage)
+            and msg.status != "error"
+            and msg.name
+            and msg.name not in names
+        ):
+            names.append(msg.name)
+    names.reverse()
+    return names
+
+
+async def _append_prior_turn_tools(
+    candidates: list[RawTool],
+    store: BaseStore,
+    config: RunnableConfig,
+    messages: Sequence[BaseMessage],
+    live_tool_ids: set[tuple[str, str]] | None,
+) -> list[RawTool]:
+    """
+    Keep the previous turn's tools bound on a short follow-up (#920).
+
+    "Turn them back on" after "Outside lights" ranks on words that name
+    neither the device nor the action, so the tool the previous turn just ran
+    can fall out of the list, and the model, reaching for it, is refused.
+    Field report: ``light__HassLightSet`` turned both porch lights off, "Turn
+    the back on" did not retrieve it, and the agent gave up. Binding widens
+    the tool list only and gates nothing; the PIN gate still holds every
+    call. Short queries only (the referential word cap), so a turn that names
+    its own target ranks as before. This house's own tools only: a remote
+    Home Assistant's reach the agent renamed, and the name in the history
+    is not the one in its index. Appended outside the limit, like
+    GetLiveContext, so it never evicts a ranked tool.
+    """
+    query = _message_text(messages[-1]) if messages else ""
+    if not query.strip() or len(query.split()) > MAX_REFERENTIAL_FOLLOW_UP_WORDS:
+        return candidates
+    names = _prior_turn_tool_names(messages)
+    if not names:
+        return candidates
+    opts = config.get("configurable", {}).get("options", {})
+    excluded_names = tool_exclusions(opts)
+    remote_ids = _remote_ids(config)
+    local_api_ids = _get_allowed_api_ids(config) - remote_ids
+    bound = {t["name"] for t in candidates}
+    added = 0
+    for name in names:
+        if added >= _PRIOR_TURN_TOOLS_MAX:
+            break
+        if name in bound:
+            continue
+        fetched = await _get_tool_by_name(
+            store, config, name, local_api_ids, live_tool_ids
+        )
+        # Exact name only: the lookup's base-name fallback would let a
+        # renamed remote tool's history name pick a different local tool.
+        if (
+            fetched is None
+            or fetched["name"] != name
+            or is_tool_excluded(name, excluded_names.get(fetched["api_id"], ()))
+        ):
+            continue
+        candidates = [*candidates, fetched]
+        bound.add(name)
+        added += 1
+    if added:
+        LOGGER.debug(
+            "Short follow-up: kept %d tool(s) the previous turn ran bound", added
+        )
+    return candidates
 
 
 # How many trailing HUMAN turns establish automation-creation context for
@@ -3252,6 +3367,11 @@ async def _retrieve_tools(  # noqa: PLR0915
         all_candidates, store, config, live_tool_ids
     )
 
+    # 3j. Keep the previous turn's tools bound on a short follow-up (#920).
+    all_candidates = await _append_prior_turn_tools(
+        all_candidates, store, config, state["messages"], live_tool_ids
+    )
+
     # 4. Format and deduplicate. The provider drives the subtractive schema
     # normalisation passes: the OpenAI/Anthropic top-level-union flatten
     # (_flatten_top_level_union) and the Gemini anyOf-required sanitizer
@@ -4321,11 +4441,8 @@ async def _call_tools(
                 tool_name,
                 list(tool_routing_map),
             )
-            return _make_tool_error(
-                f"Tool '{tool_name}' is not available for this request. "
-                "Only use the tools listed in your schema.",
-                tool_name,
-                tool_call.get("id") or "",
+            return _make_routing_rejection(
+                tool_name, tool_routing_map, tool_call.get("id") or ""
             )
 
         ctx = ToolExecutionContext(
