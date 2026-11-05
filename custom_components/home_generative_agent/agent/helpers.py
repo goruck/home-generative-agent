@@ -193,6 +193,21 @@ def normalize_llm_api_value(raw: Any) -> list[str]:
     return [api_id for api_id in raw if isinstance(api_id, str) and api_id]
 
 
+def llm_api_is_supported(api: llm.API) -> bool:
+    """
+    Return whether this integration offers, indexes and loads ``api``.
+
+    Home Assistant 2026.11 added an admin-only LLM API, "Home Assistant"
+    (``homeassistant``), that manages Home Assistant itself (registries, logs,
+    automations, config entries) and is not bounded by entity exposure. Its
+    tools have not been checked against the Critical Action PIN gate, so an
+    API that requires an admin is left out everywhere until they are: not
+    offered in the options form, not indexed, and not loaded for a turn.
+    ``requires_admin`` does not exist before 2026.11, hence the default.
+    """
+    return not getattr(api, "requires_admin", False)
+
+
 def normalize_tool_exclusions(raw: Any) -> dict[str, list[str]]:
     """
     Normalize a stored ``CONF_TOOL_EXCLUSIONS`` value to ``{api_id: [name]}``.

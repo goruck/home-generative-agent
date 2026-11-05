@@ -388,6 +388,92 @@ async def test_init_llm_apis_excluding_every_tool_keeps_the_api_loaded() -> None
     assert multi.apis["mcp-abc"].tools == []
 
 
+def _admin_api(api_id: str) -> Any:
+    """Build a registered API that needs an admin, like HA 2026.11's "homeassistant"."""
+    return types.SimpleNamespace(id=api_id, name=api_id, requires_admin=True)
+
+
+def _plain_api(api_id: str) -> Any:
+    """Build a registered API from before HA 2026.11, with no requires_admin."""
+    return types.SimpleNamespace(id=api_id, name=api_id)
+
+
+@pytest.mark.asyncio
+async def test_init_llm_apis_never_loads_an_admin_only_api(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    An admin-only API stored before the options form hid it is not loaded.
+
+    Its tools manage Home Assistant itself and have not been checked against
+    the Critical Action PIN gate, so it is skipped for every user, admin or
+    not, with a warning that says how to clear it.
+    """
+    entity = _excl_entity({CONF_LLM_HASS_API: ["assist", "homeassistant"]})
+    instance = _excl_api_instance(["HassTurnOn"])
+    get_api = AsyncMock(return_value=instance)
+
+    with (
+        patch(
+            f"{_CONV}.llm.async_get_apis",
+            return_value=[_plain_api("assist"), _admin_api("homeassistant")],
+        ),
+        patch(f"{_CONV}.llm.async_get_api", new=get_api),
+        caplog.at_level(logging.WARNING),
+    ):
+        multi = await entity._async_init_llm_apis(MagicMock())
+
+    assert list(multi.apis) == ["assist"]
+    assert [call.args[1] for call in get_api.await_args_list] == ["assist"]
+    assert "Not loading LLM API homeassistant" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_init_llm_apis_only_an_admin_only_api_fails_loudly() -> None:
+    """With nothing else configured the turn fails, naming the skipped API."""
+    entity = _excl_entity({CONF_LLM_HASS_API: ["homeassistant"]})
+
+    with (
+        patch(
+            f"{_CONV}.llm.async_get_apis", return_value=[_admin_api("homeassistant")]
+        ),
+        patch(f"{_CONV}.llm.async_get_api", new=AsyncMock()) as get_api,
+        pytest.raises(HomeAssistantError, match="Failed: homeassistant"),
+    ):
+        await entity._async_init_llm_apis(MagicMock())
+
+    get_api.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_index_tools_skips_an_admin_only_api() -> None:
+    """
+    Background indexing never asks for an admin-only API.
+
+    It runs with no user, so Home Assistant 2026.11 refuses it with
+    Unauthorized, which logged "Failed to index tool provider homeassistant"
+    on every startup; and a turn never loads it, so it has nothing to index.
+    """
+    entity = _index_entity()
+    rd = _index_runtime_data(tool_index_ready=False, tool_content_hashes={})
+    discover = AsyncMock()
+
+    with (
+        patch.object(entity, "_async_discover_provider_tools", new=discover),
+        patch.object(entity, "_async_discover_local_tools", new=AsyncMock()),
+        patch.object(entity, "_async_evict_stale_tool_index_rows", new=AsyncMock()),
+        patch(
+            f"{_CONV}.llm.async_get_apis",
+            return_value=[_plain_api("assist"), _admin_api("homeassistant")],
+        ),
+        patch(f"{_CONV}.async_dispatcher_send"),
+    ):
+        await entity._async_index_tools(MagicMock(), rd)
+
+    assert discover.await_args is not None
+    assert discover.await_args.args[2] == ["assist"]
+
+
 # ---------------------------------------------------------------------------
 # _run_tool_index_background failure path
 # ---------------------------------------------------------------------------

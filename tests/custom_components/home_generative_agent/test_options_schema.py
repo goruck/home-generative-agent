@@ -168,6 +168,51 @@ async def test_options_schema_keeps_valid_llm_api_ids(hass: Any) -> None:
     ]
 
 
+def _admin_api_registry() -> Any:
+    """Register Assist plus HA 2026.11's admin-only "homeassistant" API."""
+    return patch(
+        "custom_components.home_generative_agent.config_flow.llm.async_get_apis",
+        return_value=[
+            SimpleNamespace(id="assist", name="Assist"),
+            SimpleNamespace(
+                id="homeassistant", name="Home Assistant", requires_admin=True
+            ),
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_options_schema_hides_an_admin_only_llm_api(hass: Any) -> None:
+    """An admin-only API is not offered: this integration does not load it."""
+    with _admin_api_registry():
+        schema = await _schema_for_options(hass, {CONF_LLM_HASS_API: ["assist"]})
+
+    assert list(_llm_api_options(schema)) == ["assist"]
+
+
+@pytest.mark.asyncio
+async def test_options_schema_keeps_a_stored_admin_only_llm_api_labeled(
+    hass: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """
+    An admin-only API selected before it was hidden stays selected, labeled.
+
+    Dropping it from the selector would make the pre-filled form fail
+    validation on submit (#568's failure class), and deselecting it is the
+    user's call. Its tools are not listed: loading it with no user is refused.
+    """
+    with _admin_api_registry():
+        schema = await _schema_for_options(
+            hass, {CONF_LLM_HASS_API: ["assist", "homeassistant"]}
+        )
+
+    assert _suggested_llm_apis(schema) == ["assist", "homeassistant"]
+    options = _llm_api_options(schema)
+    assert options["homeassistant"] == "homeassistant (not supported yet)"
+    assert "no longer available" not in options["homeassistant"]
+    assert "Could not list tools of LLM API homeassistant" not in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_options_schema_defaults_to_empty_llm_api_selection(hass: Any) -> None:
     """A config entry with no stored LLM API pre-fills an empty selection."""
