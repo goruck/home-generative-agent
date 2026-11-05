@@ -39,6 +39,7 @@ from homeassistant.helpers.selector import (
 from .agent.helpers import (
     TOOL_KEY_SEP,
     api_id_is_form_representable,
+    llm_api_is_supported,
     normalize_api_tool_map,
     normalize_llm_api_value,
     normalize_pin,
@@ -501,12 +502,28 @@ async def _schema_for_options(
     # `api.name` is `entry.title` for an MCP API, which HA sets from the
     # server's own `serverInfo.name` -- remote text, in a label, in the same
     # form whose tool picker sanitizes the identical value.
+    registered_apis = llm.async_get_apis(hass)
     hass_apis = [
         SelectOptionDict(label=sanitize_tool_text(api.name), value=api.id)
-        for api in llm.async_get_apis(hass)
+        for api in registered_apis
+        if llm_api_is_supported(api)
     ]
     valid_api_ids = {api["value"] for api in hass_apis}
+    unsupported_api_ids = {
+        api.id for api in registered_apis if not llm_api_is_supported(api)
+    }
     selected_apis = normalize_llm_api_value(opts.get(CONF_LLM_HASS_API, []))
+    # An admin-only API selected before this release stays selected, labeled,
+    # for the same reason a stale one does below: the form must stay saveable
+    # and deselecting it is the user's call. It is not loaded for a turn.
+    if unsupported := [
+        api_id for api_id in selected_apis if api_id in unsupported_api_ids
+    ]:
+        hass_apis.extend(
+            SelectOptionDict(label=f"{api_id} (not supported yet)", value=api_id)
+            for api_id in unsupported
+        )
+        valid_api_ids.update(unsupported)
     # Stored ids that are no longer registered (e.g. a removed MCP server)
     # stay selected but are re-added as labeled selector options: without
     # them the pre-filled value fails SelectSelector validation on submit,
@@ -526,7 +543,9 @@ async def _schema_for_options(
         )
 
     live_choices, live_seen, api_names = await _live_tool_choices(
-        hass, selected_apis, indexed_keys
+        hass,
+        [api_id for api_id in selected_apis if api_id not in unsupported_api_ids],
+        indexed_keys,
     )
     selected_api_set = set(selected_apis)
     selected_exclusions = _tool_map_as_list(opts.get(CONF_TOOL_EXCLUSIONS))

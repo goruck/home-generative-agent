@@ -333,6 +333,7 @@ from .core.lifecycle import (
     defer_start_until_hass_started,
 )
 from .core.migrations import migrate_person_gallery
+from .core.openai_preload import preload_openai_resources
 from .core.person_gallery import PersonGalleryDAO
 from .core.pipeline_guard import async_clear_pin_pipeline_issue
 from .core.prompt_cache import CACHE_CONTROL_EPHEMERAL
@@ -2597,6 +2598,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     openai_http_client = await hass.async_add_executor_job(
         partial(httpx.Client, timeout=120)
     )
+    # Before any OpenAI client is built here or by the STT and TTS platforms:
+    # openai 3.26+ imports its resources lazily on first use, which Home
+    # Assistant flags as a blocking call on the event loop.
+    await hass.async_add_executor_job(preload_openai_resources)
 
     # Close registered here, at construction, rather than in
     # async_unload_entry. Home Assistant runs an entry's on-unload callbacks on

@@ -58,6 +58,7 @@ from .agent.helpers import (
     is_actuation_tool,
     keep_pin_prompts,
     langchain_tool_parameters_json,
+    llm_api_is_supported,
     prompts_awaiting_reply,
     remote_house_words,
     resolve_critical_action_policy,
@@ -1356,7 +1357,19 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         active_apis: dict[str, llm.APIInstance] = {}
         remote_home_assistants: set[str] = set()
         failed_apis: list[str] = []
+        unsupported_api_ids = {
+            api.id for api in llm.async_get_apis(hass) if not llm_api_is_supported(api)
+        }
         for api_id in active_api_ids:
+            if api_id in unsupported_api_ids:
+                # Stored before the options form hid it; see llm_api_is_supported.
+                _LOGGER.warning(
+                    "Not loading LLM API %s: this integration does not support "
+                    "admin-only LLM APIs yet; deselect it in the options",
+                    api_id,
+                )
+                failed_apis.append(api_id)
+                continue
             try:
                 api = await llm.async_get_api(hass, api_id, llm_context)
             except HomeAssistantError:
@@ -2506,8 +2519,12 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                             "Failed to queue tools of loaded API %s: %s", api_id, err
                         )
             else:
+                # An admin-only API is never loaded for a turn, so it has no
+                # tools to index (and loading it here, with no user, is refused).
                 all_available_api_ids = [
-                    api.id for api in llm.async_get_apis(self.hass)
+                    api.id
+                    for api in llm.async_get_apis(self.hass)
+                    if llm_api_is_supported(api)
                 ]
                 # 1. Index Providers
                 await self._async_discover_provider_tools(
