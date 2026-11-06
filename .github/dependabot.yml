@@ -17,7 +17,7 @@ updates:
       # The "HA compatibility" workflow (scripts/check_ha_versions.py) fails a
       # PR that lets them drift and names the versions to bump to.
       - dependency-name: "homeassistant"
-      - dependency-name: "pytest-homeassistant-custom-component"
+      - dependency-name: "pytest-homeassistant"
       - dependency-name: "openai"
       - dependency-name: "mutagen"
       - dependency-name: "ha-ffmpeg"

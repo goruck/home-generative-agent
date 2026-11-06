@@ -63,7 +63,7 @@ integration's update rides a restart they were taking anyway.
 
 In the week between HA's stable and the bundle cut, move to the new HA version on both sides:
 bump `requirements/test.txt` to it (the "HA compatibility" workflow's notice names the
-`homeassistant` and `pytest-homeassistant-custom-component` versions), and update the field-test
+`homeassistant` and `pytest-homeassistant` versions), and update the field-test
 box, so the bundle is tested against the HA users are moving to. `scripts/deploy` warns when the
 box and the tests run different HA versions. Install HA patch releases on the box within a few
 days; keep betas off it. The workflow's daily run covers betas.
