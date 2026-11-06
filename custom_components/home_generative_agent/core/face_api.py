@@ -12,6 +12,8 @@ from homeassistant.exceptions import HomeAssistantError
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from .http_types import HAAsyncClient, HAResponse
+
 LOGGER = logging.getLogger(__name__)
 
 # One retry when a pooled keep-alive connection is dead at send time (#900).
@@ -38,8 +40,8 @@ def face_api_url(base_url: str, path: str) -> str:
 
 
 async def face_api_request(
-    send: Callable[[], Awaitable[httpx.Response]],
-) -> httpx.Response:
+    send: Callable[[], Awaitable[HAResponse]],
+) -> HAResponse:
     """Run one face API request, retrying once on a dead pooled connection."""
     for _ in range(FACE_API_STALE_CONN_RETRIES):
         try:
@@ -53,12 +55,12 @@ async def face_api_request(
 
 
 async def post_face_analyze(
-    client: httpx.AsyncClient,
+    client: HAAsyncClient,
     base_url: str,
     image_bytes: bytes,
     *,
     request_timeout: float | None = None,
-) -> httpx.Response:
+) -> HAResponse:
     """
     POST an image to the face service's /analyze endpoint.
 

@@ -46,6 +46,8 @@ if TYPE_CHECKING:
 
     from homeassistant.core import HomeAssistant, State
 
+    from .http_types import HAAsyncClient, HAResponse
+
 LOGGER = logging.getLogger(__name__)
 
 # --- Tuning ---
@@ -207,7 +209,7 @@ def ffmpeg_available(binary: str) -> bool:
 
 
 async def download_recording(
-    client: httpx.AsyncClient,
+    client: HAAsyncClient,
     url: str,
     dest: Path,
     *,
@@ -268,7 +270,7 @@ async def download_recording(
     return written
 
 
-async def _write_body(resp: httpx.Response, dest: Path, max_bytes: int) -> int:
+async def _write_body(resp: HAResponse, dest: Path, max_bytes: int) -> int:
     """Stream a 2xx body to ``dest`` under the size cap; return bytes written."""
     declared = resp.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > max_bytes:

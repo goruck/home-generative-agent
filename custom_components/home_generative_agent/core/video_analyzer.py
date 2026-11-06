@@ -159,6 +159,7 @@ if TYPE_CHECKING:
 
     from homeassistant.core import Event, HomeAssistant
 
+    from .http_types import HAAsyncClient
     from .runtime import HGAConfigEntry
 
 LOGGER = logging.getLogger(__name__)
@@ -1003,7 +1004,7 @@ class VideoAnalyzer:
         self._stale_reported_at: dict[str, float] = {}
         # Protect images referenced in notifications from immediate pruning
         self._notify_protected: dict[Path, float] = {}  # path -> expiry time
-        self._httpx_client: httpx.AsyncClient | None = None
+        self._httpx_client: HAAsyncClient | None = None
         self._last_hashes: dict[
             str, deque[int]
         ] = {}  # camera_id -> deque of recent dHashes
