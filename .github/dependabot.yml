@@ -27,4 +27,5 @@ updates:
       - dependency-name: "PyTurboJPEG"
       - dependency-name: "pymicro-vad"
       - dependency-name: "pyspeex-noise"
+      - dependency-name: "aiohasupervisor"
 
