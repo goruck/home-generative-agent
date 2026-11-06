@@ -29,4 +29,4 @@ pymicro-vad==1.0.1
 pyspeex-noise==1.0.2
 
 # Supervisor snapshot tests import the hassio component.
-aiohasupervisor==0.8.1
+aiohasupervisor==0.9.0
