@@ -15,7 +15,7 @@ from custom_components.home_generative_agent.core.video_helpers import (
 )
 
 # ---------------------------------------------------------------------------
-# Override autouse fixtures from pytest-homeassistant-custom-component:
+# Override autouse fixtures from pytest-homeassistant:
 # these are pure synchronous helpers; the HA event-loop/cleanup fixtures
 # only add per-case overhead across the parametrized matrix.
 # ---------------------------------------------------------------------------

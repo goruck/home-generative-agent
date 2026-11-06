@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 # ---------------------------------------------------------------------------
-# Override autouse fixtures from pytest-homeassistant-custom-component
+# Override autouse fixtures from pytest-homeassistant
 # ---------------------------------------------------------------------------
 
 

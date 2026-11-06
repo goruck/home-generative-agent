@@ -4,7 +4,7 @@ name: "HA compatibility"
 # See scripts/check_ha_versions.py for what each check covers.
 #
 # - "Pinned HA" runs on every PR: requirements/test.txt's homeassistant and
-#   pytest-homeassistant-custom-component pins agree, test pins HA also pins
+#   pytest-homeassistant pins agree, test pins HA also pins
 #   match HA, and manifest.json resolves against HA's package constraints.
 # - "Newest HA" runs daily against the newest HA release on PyPI, betas
 #   included: the manifest must resolve against its constraints (a conflict

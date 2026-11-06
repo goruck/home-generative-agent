@@ -31,7 +31,7 @@ from custom_components.home_generative_agent.core.provider_stall import (
 )
 
 # ---------------------------------------------------------------------------
-# Override pytest-homeassistant-custom-component autouse fixtures.
+# Override pytest-homeassistant autouse fixtures.
 # These tests use pytest-asyncio's function-scoped asyncio.Runner (no `hass`).
 # Shadowing the plugin fixtures avoids "Event loop is closed" errors in teardown.
 # ---------------------------------------------------------------------------

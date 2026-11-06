@@ -62,7 +62,7 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
 # ---------------------------------------------------------------------------
-# Override autouse fixtures from pytest-homeassistant-custom-component
+# Override autouse fixtures from pytest-homeassistant
 # ---------------------------------------------------------------------------
 
 

@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from homeassistant.config_entries import ConfigEntryState
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.home_generative_agent.sentinel.network_inventory import (
     NetworkInventory,

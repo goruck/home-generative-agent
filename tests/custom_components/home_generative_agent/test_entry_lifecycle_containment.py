@@ -29,7 +29,7 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import CoreState
 from langgraph.store.base.batch import AsyncBatchedBaseStore
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 import custom_components.home_generative_agent as hga_component
 from custom_components.home_generative_agent import image as image_platform

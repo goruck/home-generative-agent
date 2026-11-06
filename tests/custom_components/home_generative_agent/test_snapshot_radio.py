@@ -12,7 +12,7 @@ import pytest
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 from zwave_js_server.model.controller import Controller
 
 from custom_components.home_generative_agent.sentinel.network_inventory import (

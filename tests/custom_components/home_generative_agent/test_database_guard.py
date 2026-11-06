@@ -38,7 +38,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from psycopg import OperationalError
 from psycopg import errors as pg_errors
 from psycopg_pool import PoolClosed, PoolTimeout
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 import custom_components.home_generative_agent as hga_component
 from custom_components.home_generative_agent.const import (

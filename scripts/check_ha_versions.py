@@ -12,7 +12,7 @@ without anyone noticing until a user's install fails:
   constraints (#735: ``langchain-openai`` needed ``openai<3``, HA 2026.10
   pinned ``openai==3.10.0``), so setup fails for everyone on release day.
 * ``requirements/test.txt`` pins ``homeassistant`` and
-  ``pytest-homeassistant-custom-component`` separately, but the plugin
+  ``pytest-homeassistant`` separately, but the plugin
   requires one exact HA version, so the two can only move together.
 * Test pins for packages HA also pins (``openai``, ``pymicro-vad``, ...) move
   past HA's version, usually through Dependabot, so the suite runs against
@@ -56,7 +56,7 @@ TEST_REQUIREMENTS = REPO_ROOT / "requirements" / "test.txt"
 MANIFEST = REPO_ROOT / "custom_components" / "home_generative_agent" / "manifest.json"
 
 HA = "homeassistant"
-PLUGIN = "pytest-homeassistant-custom-component"
+PLUGIN = "pytest-homeassistant"
 PYPI = "https://pypi.org/pypi"
 
 # How many of the newest plugin releases to search for one matching an HA
@@ -95,8 +95,8 @@ def _version_key(version: str) -> tuple[tuple[int, ...], int, int]:
     """
     Sort key for HA-style versions: 2026.10.1 > 2026.10.1b2 > 2026.10.0.
 
-    Enough for the versions this script compares (HA calver, the plugin's
-    0.13.N); not a general PEP 440 implementation.
+    Enough for the HA and test harness calendar versions this script compares;
+    not a general PEP 440 implementation.
     """
     pre = _PRE_RE.search(version)
     base = version[: pre.start()] if pre else version

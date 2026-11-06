@@ -105,7 +105,7 @@ def _entry_model_deployment_get(entry: MagicMock) -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
-# Override autouse fixtures from pytest-homeassistant-custom-component
+# Override autouse fixtures from pytest-homeassistant
 # ---------------------------------------------------------------------------
 
 

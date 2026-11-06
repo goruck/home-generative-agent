@@ -38,7 +38,7 @@ from custom_components.home_generative_agent.core.video_analyzer import (
 )
 
 # ---------------------------------------------------------------------------
-# Override autouse fixtures from pytest-homeassistant-custom-component
+# Override autouse fixtures from pytest-homeassistant
 # ---------------------------------------------------------------------------
 
 

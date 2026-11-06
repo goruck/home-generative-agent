@@ -12,7 +12,7 @@ import pytest
 from aiohttp import FormData
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.setup import async_setup_component
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.home_generative_agent.const import (
     DOMAIN,

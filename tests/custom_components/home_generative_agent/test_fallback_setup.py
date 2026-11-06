@@ -11,7 +11,7 @@ import pytest
 from homeassistant.const import CONF_API_KEY
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 import custom_components.home_generative_agent as hga_component
 from custom_components.home_generative_agent.const import (
