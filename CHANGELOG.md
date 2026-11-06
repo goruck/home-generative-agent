@@ -7,6 +7,8 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+## [3.45.0] - 2026-11-06
+
 ### Added
 
 - **A model of its own for Sentinel** ([#866](https://github.com/goruck/home-generative-agent/issues/866)). A new optional **Sentinel Model** feature under **+ Setup** gives Sentinel's triage, discovery and explanation calls their own provider, model and fallback chain, so they can run on a small model (`qwen3:4b` by default on Ollama) or on a second Ollama server instead of sharing the Conversation model, and its GPU, with voice and chat. Any provider that serves Conversation can serve it. It is off by default and Basic setup leaves it off: Sentinel then runs on the Conversation model exactly as before. The health sensor, fallback notices and the stalled-provider checks treat it as a category of its own (`sentinel`). If its provider is unreachable at startup, Sentinel runs on the Conversation model with a warning until it answers. A second account or server of the same type as another feature's provider (two OpenAI keys, two OpenAI-compatible servers) is refused in setup, or leaves Sentinel on the Conversation model with a warning, since only one of a type can be used at a time and Conversation never moves onto it; a second Ollama server is fine, though for now chat on any Ollama server still holds back an edge Sentinel model ([#877](https://github.com/goruck/home-generative-agent/issues/877)).
