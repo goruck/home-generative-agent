@@ -13,7 +13,7 @@ from homeassistant.components.ssdp.const import SSDP_SCANNER
 from homeassistant.config_entries import SOURCE_IGNORE, ConfigEntryState
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.service_info.ssdp import SsdpServiceInfo
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.home_generative_agent.sentinel.pseudonymizer import (
     Pseudonymizer,

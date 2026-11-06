@@ -14,7 +14,7 @@ import voluptuous as vol
 from homeassistant.const import CONF_LLM_HASS_API
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import llm
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.home_generative_agent.agent.helpers import (
     TOOL_TEXT_MAX_LEN,

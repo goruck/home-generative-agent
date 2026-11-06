@@ -22,7 +22,7 @@ import pytest
 import custom_components.home_generative_agent.core.utils as utils_mod
 
 # ---------------------------------------------------------------------------
-# Override autouse fixtures from pytest-homeassistant-custom-component
+# Override autouse fixtures from pytest-homeassistant
 # ---------------------------------------------------------------------------
 
 

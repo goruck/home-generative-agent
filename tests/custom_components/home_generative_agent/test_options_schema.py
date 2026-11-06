@@ -16,7 +16,7 @@ from homeassistant.helpers.selector import (
     NumberSelector,
     TextSelector,
 )
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.home_generative_agent.config_flow import (
     HomeGenerativeAgentOptionsFlow,
