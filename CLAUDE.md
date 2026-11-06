@@ -33,7 +33,7 @@ PYTHONPATH=$(pwd) hga/bin/pytest -k "test_name_pattern"
 
 `make lint` fails if `requirements_runtime_manifest.txt` is out of date with `manifest.json`.
 
-`requirements/test.txt` pins Home Assistant, the matching `pytest-homeassistant-custom-component`, and every package HA itself pins at that version. `python3 scripts/check_ha_versions.py pins` checks them (CI runs it on every PR) and names the versions to bump to; `... latest` checks the newest HA release, betas included. Bump `homeassistant` and the plugin together, never one alone.
+`requirements/test.txt` pins Home Assistant, the matching `pytest-homeassistant`, and every package HA itself pins at that version. `python3 scripts/check_ha_versions.py pins` checks them (CI runs it on every PR) and names the versions to bump to; `... latest` checks the newest HA release, betas included. Bump `homeassistant` and the plugin together, never one alone.
 
 ## Dependency Workflow
 
