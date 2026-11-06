@@ -66,6 +66,8 @@ if TYPE_CHECKING:
 
     from homeassistant.core import HomeAssistant
 
+    from .http_types import HAResponse
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -845,7 +847,7 @@ def valid_exclusion_entry(entry: str) -> bool:
 # ---------------------------
 
 
-def _http_status(resp: httpx.Response) -> str:
+def _http_status(resp: HAResponse) -> str:
     """Name an HTTP error status for a validator's exception message."""
     return f"HTTP {resp.status_code}"
 
@@ -1231,7 +1233,7 @@ _ROUTE_ABSENT_STATUSES = frozenset(
 )
 
 
-def _is_model_catalog(resp: httpx.Response) -> bool:
+def _is_model_catalog(resp: HAResponse) -> bool:
     """
     Whether a 200 response is actually an OpenAI model catalog.
 

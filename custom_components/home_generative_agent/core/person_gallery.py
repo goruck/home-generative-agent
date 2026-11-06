@@ -30,6 +30,8 @@ if TYPE_CHECKING:
     from psycopg import AsyncConnection
     from psycopg_pool import AsyncConnectionPool
 
+    from .http_types import HAAsyncClient
+
 LOGGER = logging.getLogger(__name__)
 
 # Face-service answers that reject the uploaded image itself (undecodable,
@@ -52,7 +54,7 @@ class PersonGalleryDAO:
     ) -> None:
         """Initialize with a psycopg_pool AsyncConnectionPool."""
         self.pool = pool
-        self._client = get_async_client(hass)
+        self._client: HAAsyncClient = get_async_client(hass)
 
     def _normalize(self, embedding: Embedding) -> list[float]:
         """Return L2-normalized list of floats."""

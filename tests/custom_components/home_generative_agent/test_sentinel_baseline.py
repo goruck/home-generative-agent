@@ -1304,7 +1304,7 @@ async def test_reload_keeps_an_unread_notice(hass: HomeAssistant) -> None:
     await new._update_baselines(_snapshot([_entity("sensor.after", "2.0")]))
 
     assert calls[-1][1]["message"].startswith("Baselines established for 4 entities:")
-    notifications = persistent_notification._async_get_or_create_notifications(hass)
+    notifications = persistent_notification._async_get_or_create_notifications(hass)  # pyright: ignore[reportPrivateImportUsage]
     assert [nid for nid in notifications if nid.startswith("hga_baseline")] == [
         "hga_baseline_established"
     ]
@@ -1367,7 +1367,7 @@ async def test_reset_drops_the_baseline_from_its_notice(
     assert await updater.async_reset_baseline(reset) != -1
 
     assert list(_baseline_notices(hass).established) == left
-    notifications = persistent_notification._async_get_or_create_notifications(hass)
+    notifications = persistent_notification._async_get_or_create_notifications(hass)  # pyright: ignore[reportPrivateImportUsage]
     assert ("hga_baseline_established" not in notifications) is dismissed
     if not dismissed:
         # The notice is posted again without the reset entity.
