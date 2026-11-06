@@ -21,3 +21,6 @@ visualize_graph.py
 config/*
 #!config/configuration.yaml
 .gstack/
+
+# Created by pytest-homeassistant's hass fixture (blueprints copied in on each run).
+tests/testing_config/
