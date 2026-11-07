@@ -242,6 +242,7 @@
             "sentinel_runtime_override_ttl_minutes": "Autonomy override duration (minutes)",
             "sentinel_daily_digest_enabled": "Enable daily digest notification",
             "sentinel_daily_digest_time": "Daily digest time (HH:MM:SS)",
+            "sentinel_persistent_record": "Also keep each pushed alert's full text in Home Assistant notifications",
             "sentinel_quiet_hours_start": "Quiet hours start (suppresses selected severities)",
             "sentinel_quiet_hours_end": "Quiet hours end",
             "sentinel_quiet_hours_severities": "Quiet hours suppressed severities",
@@ -264,6 +265,7 @@
             "sentinel_enabled": "Enable anomaly alerting",
             "sentinel_daily_digest_enabled": "Enable daily digest notification",
             "sentinel_daily_digest_time": "Daily digest time (HH:MM:SS)",
+            "sentinel_persistent_record": "Also keep each pushed alert's full text in Home Assistant notifications",
             "notify_service": "Notify service (optional)",
             "critical_action_pin": "Level-increase PIN (optional, 4-10 digits)"
           }

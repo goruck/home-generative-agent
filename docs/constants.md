@@ -419,6 +419,7 @@ The model Sentinel's triage, discovery and explanation calls run on when a **Sen
 | `RECOMMENDED_SENTINEL_PRESENCE_GRACE_MINUTES` | `sentinel_presence_grace_minutes` | `10` | After everyone leaves home, suppress `open_entry_while_away` and `unknown_person_camera_no_home` for this many minutes to allow time for departure actions to settle |
 | `RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED` | `sentinel_daily_digest_enabled` | `False` | Send a daily push summary of the past 24 hours |
 | `RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME` | `sentinel_daily_digest_time` | `08:00:00` | Local delivery time for the daily digest |
+| `RECOMMENDED_SENTINEL_PERSISTENT_RECORD` | `sentinel_persistent_record` | `False` | Also keep each alert sent to a notify service as a full-text persistent notification, one per anomaly, except network and HA-security findings (#922; see `docs/sentinel.md`) |
 
 **Code-only:**
 

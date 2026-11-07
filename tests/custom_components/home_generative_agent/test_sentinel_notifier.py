@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import pytest
 from homeassistant.core import Context
+from homeassistant.exceptions import HomeAssistantError, ServiceNotFound
 
 import custom_components.home_generative_agent.sentinel.notifier as _notifier_mod
 from custom_components.home_generative_agent.const import (
@@ -20,6 +21,7 @@ from custom_components.home_generative_agent.const import (
     ACTION_PREFIX,
     CONF_NOTIFY_SERVICE,
     CONF_SENTINEL_AREA_NOTIFY_MAP,
+    CONF_SENTINEL_PERSISTENT_RECORD,
     CONF_SENTINEL_RESPONSE_LANGUAGE,
     SNOOZE_PERMANENT,
 )
@@ -563,6 +565,421 @@ async def test_no_notify_service_uses_persistent_notification() -> None:
     call = hass.services.calls[0]
     assert call["domain"] == "persistent_notification"
     assert call["service"] == "create"
+
+
+_LONG_EXPLANATION = (
+    "The front door has been open for 25 minutes while everyone is away. "
+    "It opened at 09:35 just after the last person left, nothing has moved "
+    "inside since, and the porch camera saw no one at the door. Check that "
+    "it latched, or close it remotely if a cover controls it."
+)
+
+
+@pytest.mark.asyncio
+async def test_persistent_record_keeps_full_text_next_to_push() -> None:
+    """With the record on, a pushed alert also keeps its full text in HA (#922)."""
+    assert len(_LONG_EXPLANATION) > MAX_MOBILE_MESSAGE_CHARS
+    options = {
+        CONF_NOTIFY_SERVICE: "notify.mobile_app_phone",
+        CONF_SENTINEL_PERSISTENT_RECORD: True,
+    }
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    finding = _finding(anomaly_id="record1")
+
+    sent = await notifier.async_notify(finding, _minimal_snapshot(), _LONG_EXPLANATION)  # type: ignore[arg-type]
+
+    assert sent is True
+    assert [(c["domain"], c["service"]) for c in hass.services.calls] == [
+        ("persistent_notification", "create"),
+        ("notify", "mobile_app_phone"),
+    ]
+    record, push = (c["data"] for c in hass.services.calls)
+    assert len(push["message"]) <= MAX_MOBILE_MESSAGE_CHARS
+    assert record["message"] == _LONG_EXPLANATION
+    assert record["title"] == push["title"]
+    assert record["notification_id"] == "hga_sentinel_record1"
+
+
+@pytest.mark.asyncio
+async def test_persistent_record_written_when_push_service_is_missing() -> None:
+    """A removed notify service raises; the record still keeps the alert (#922)."""
+    options = {
+        CONF_NOTIFY_SERVICE: "notify.mobile_app_gone",
+        CONF_SENTINEL_PERSISTENT_RECORD: True,
+    }
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    record_call = hass.services.async_call
+
+    async def _call(
+        domain: str, service: str, data: dict[str, Any] | None = None, **kwargs: Any
+    ) -> None:
+        if domain == "notify":
+            raise ServiceNotFound(domain, service)
+        await record_call(domain, service, data, **kwargs)
+
+    hass.services.async_call = _call  # type: ignore[method-assign]
+
+    with pytest.raises(ServiceNotFound):
+        await notifier.async_notify(
+            _finding(anomaly_id="gone1"),
+            _minimal_snapshot(),  # type: ignore[arg-type]
+            _LONG_EXPLANATION,
+        )
+
+    assert [c["domain"] for c in hass.services.calls] == ["persistent_notification"]
+    assert hass.services.calls[0]["data"]["message"] == _LONG_EXPLANATION
+
+
+@pytest.mark.asyncio
+async def test_persistent_record_off_by_default() -> None:
+    """Without the option, a pushed alert creates no persistent notification."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+
+    await notifier.async_notify(_finding(), _minimal_snapshot(), _LONG_EXPLANATION)  # type: ignore[arg-type]
+
+    assert [c["domain"] for c in hass.services.calls] == ["notify"]
+
+
+@pytest.mark.asyncio
+async def test_persistent_record_without_push_is_not_duplicated() -> None:
+    """With no notify service the alert already is the record: one, not two."""
+    notifier, hass, _suppression, _action_handler = _make_notifier(
+        {CONF_SENTINEL_PERSISTENT_RECORD: True}
+    )
+
+    await notifier.async_notify(_finding(), _minimal_snapshot(), _LONG_EXPLANATION)  # type: ignore[arg-type]
+
+    assert [c["domain"] for c in hass.services.calls] == ["persistent_notification"]
+    assert hass.services.calls[0]["data"]["message"] == _LONG_EXPLANATION
+
+
+@pytest.mark.asyncio
+async def test_persistent_record_redacts_sensitive_text() -> None:
+    """The record carries the redacted text, like the push it sits beside."""
+    options = {
+        CONF_NOTIFY_SERVICE: "notify.mobile_app_phone",
+        CONF_SENTINEL_PERSISTENT_RECORD: True,
+    }
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    finding = _finding(is_sensitive=True, recognized_people=["Alice"])
+
+    await notifier.async_notify(finding, _minimal_snapshot(), "Alice is at the door.")  # type: ignore[arg-type]
+
+    record = hass.services.calls[0]["data"]
+    assert record["notification_id"] == f"hga_sentinel_{finding.anomaly_id}"
+    assert "Alice" not in record["message"]
+
+
+@pytest.mark.asyncio
+async def test_flush_batch_keeps_each_held_finding_record() -> None:
+    """A batched push keeps every held finding's full text when the record is on."""
+    options = {
+        CONF_NOTIFY_SERVICE: "notify.mobile_app_phone",
+        CONF_SENTINEL_PERSISTENT_RECORD: True,
+    }
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    first = _finding_with_severity("low", anomaly_id="heldA")
+    second = _finding_with_severity("medium", anomaly_id="heldB")
+    notifier._held_batch.append((first, _LONG_EXPLANATION, None))
+    notifier._held_batch.append((second, "Kettle ran longer.", None))
+
+    notifier._async_flush_batch()
+    await hass.drain_tasks()
+
+    assert hass.services.calls[0]["domain"] == "notify"
+    records = {
+        c["data"]["notification_id"]: c["data"]
+        for c in hass.services.calls[1:]
+        if c["domain"] == "persistent_notification"
+    }
+    assert set(records) == {"hga_sentinel_heldA", "hga_sentinel_heldB"}
+    assert records["hga_sentinel_heldA"]["message"] == _LONG_EXPLANATION
+    assert records["hga_sentinel_heldB"]["message"] == "Kettle ran longer."
+
+
+_RECORD_OPTIONS = {
+    CONF_NOTIFY_SERVICE: "notify.mobile_app_phone",
+    CONF_SENTINEL_PERSISTENT_RECORD: True,
+}
+
+
+def _records(hass: DummyHass) -> list[dict[str, Any]]:
+    return [
+        c["data"]
+        for c in hass.services.calls
+        if c["domain"] == "persistent_notification"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_persistent_record_keeps_the_also_line() -> None:
+    """A grouped push's record carries its "Also:" line, escaped (#922)."""
+    notifier, hass, _suppression, _action_handler = _make_notifier(
+        dict(_RECORD_OPTIONS)
+    )
+
+    await notifier.async_notify(
+        _finding(anomaly_id="grp1"),
+        _minimal_snapshot(),  # type: ignore[arg-type]
+        _LONG_EXPLANATION,
+        also_line="Also: Kitchen Window",
+    )
+
+    (record,) = _records(hass)
+    assert record["message"].endswith("\n\nAlso: Kitchen Window")
+
+
+@pytest.mark.asyncio
+async def test_persistent_record_escapes_markdown_from_device_names() -> None:
+    """A device named like a link is shown as text, not as a link (#922)."""
+    notifier, hass, _suppression, _action_handler = _make_notifier(
+        dict(_RECORD_OPTIONS)
+    )
+    finding = AnomalyFinding(
+        anomaly_id="app1",
+        type="appliance_power_duration",
+        severity="low",
+        confidence=0.7,
+        triggering_entities=["sensor.kettle_power"],
+        evidence={
+            "friendly_name": "[Review alert](https://example.invalid)",
+            "power_w": 1500,
+            "duration_min": 40,
+        },
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+
+    await notifier.async_notify(finding, _minimal_snapshot(), None)  # type: ignore[arg-type]
+
+    (record,) = _records(hass)
+    # Escaped brackets render as text; the raw "[name](" is what makes a link.
+    assert "[Review alert](" not in record["message"]
+    assert "\\[Review alert\\]" in record["message"]
+
+
+@pytest.mark.asyncio
+async def test_persistent_record_escapes_markdown_from_the_explanation() -> None:
+    """Model prose that carries an image or link is escaped too (#922)."""
+    notifier, hass, _suppression, _action_handler = _make_notifier(
+        dict(_RECORD_OPTIONS)
+    )
+
+    await notifier.async_notify(
+        _finding(),
+        _minimal_snapshot(),  # type: ignore[arg-type]
+        "Door open. ![x](https://example.invalid/p)",
+    )
+
+    (record,) = _records(hass)
+    assert record["message"].startswith("Door open. ")
+    assert "!\\[x\\](https://example.invalid/p)" in record["message"]
+
+
+@pytest.mark.asyncio
+async def test_persistent_record_leaves_out_network_findings() -> None:
+    """Network and HA-security findings reach the phone, never the shared panel."""
+    notifier, hass, _suppression, _action_handler = _make_notifier(
+        dict(_RECORD_OPTIONS)
+    )
+    finding = _finding(anomaly_id="net1", ftype="ha_new_admin_or_token")
+    finding.evidence["summary"] = "A new admin account was created."
+
+    await notifier.async_notify(finding, _minimal_snapshot(), None)  # type: ignore[arg-type]
+
+    assert [c["domain"] for c in hass.services.calls] == ["notify"]
+
+
+@pytest.mark.asyncio
+async def test_persistent_record_skipped_when_the_push_is_a_notification() -> None:
+    """notify.persistent_notification already posts the alert; no second copy."""
+    notifier, hass, _suppression, _action_handler = _make_notifier(
+        {
+            CONF_NOTIFY_SERVICE: "notify.persistent_notification",
+            CONF_SENTINEL_PERSISTENT_RECORD: True,
+        }
+    )
+
+    await notifier.async_notify(_finding(), _minimal_snapshot(), _LONG_EXPLANATION)  # type: ignore[arg-type]
+
+    assert [(c["domain"], c["service"]) for c in hass.services.calls] == [
+        ("notify", "persistent_notification")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_flush_batch_silenced_writes_no_records() -> None:
+    """At autonomy level 0 a held batch is dropped, records included (#922)."""
+    notifier, hass, _suppression, _action_handler = _make_notifier(
+        dict(_RECORD_OPTIONS)
+    )
+    notifier.set_silence_check(lambda: True)
+    notifier._held_batch.append(
+        (_finding_with_severity("low", anomaly_id="quiet1"), _LONG_EXPLANATION, None)
+    )
+
+    notifier._async_flush_batch()
+    await hass.drain_tasks()
+
+    assert hass.services.calls == []
+
+
+@pytest.mark.asyncio
+async def test_flush_batch_leaves_out_a_held_network_finding() -> None:
+    """A held network finding is in the summary push but gets no record."""
+    notifier, hass, _suppression, _action_handler = _make_notifier(
+        dict(_RECORD_OPTIONS)
+    )
+    network = _finding_with_severity(
+        "low", anomaly_id="heldnet", ftype="network_unconfigured_discovered_device"
+    )
+    network.evidence["summary"] = "Home Assistant discovered 1 unconfigured device."
+    plain = _finding_with_severity("low", anomaly_id="heldplain")
+    notifier._held_batch.append((network, "model prose", None))
+    notifier._held_batch.append((plain, "Kettle ran longer.", None))
+
+    notifier._async_flush_batch()
+    await hass.drain_tasks()
+
+    assert [r["notification_id"] for r in _records(hass)] == ["hga_sentinel_heldplain"]
+
+
+def test_persistent_fallback_escapes_markdown() -> None:
+    """The generic fallback, with no explanation, is escaped as well (#922)."""
+    finding = _finding(ftype="custom_[Check](https://example.invalid)_rule")
+
+    message = _persistent_message(None, finding, None)
+
+    assert "[check](" not in message.lower()
+    assert "\\[check\\]" in message.lower()
+
+
+@pytest.mark.asyncio
+async def test_persistent_record_failure_does_not_stop_the_push(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The record is a side copy: if it cannot be written, the push still goes."""
+    notifier, hass, _suppression, _action_handler = _make_notifier(
+        dict(_RECORD_OPTIONS)
+    )
+    push_call = hass.services.async_call
+
+    async def _call(
+        domain: str, service: str, data: dict[str, Any] | None = None, **kwargs: Any
+    ) -> None:
+        if domain == "persistent_notification":
+            raise HomeAssistantError
+        await push_call(domain, service, data, **kwargs)
+
+    hass.services.async_call = _call  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.WARNING):
+        sent = await notifier.async_notify(
+            _finding(anomaly_id="nopanel"),
+            _minimal_snapshot(),  # type: ignore[arg-type]
+            _LONG_EXPLANATION,
+        )
+
+    assert sent is True
+    assert [c["domain"] for c in hass.services.calls] == ["notify"]
+    assert "full-text record of nopanel" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_persistent_record_skipped_for_a_persistent_notification_service() -> (
+    None
+):
+    """A persistent_notification.* target already posts the alert; no copy."""
+    notifier, hass, _suppression, _action_handler = _make_notifier(
+        {
+            CONF_NOTIFY_SERVICE: "persistent_notification.create",
+            CONF_SENTINEL_PERSISTENT_RECORD: True,
+        }
+    )
+
+    await notifier.async_notify(_finding(), _minimal_snapshot(), _LONG_EXPLANATION)  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_flush_batch_record_failure_only_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A batch record that cannot be written logs the same warning (#922)."""
+    notifier, hass, _suppression, _action_handler = _make_notifier(
+        dict(_RECORD_OPTIONS)
+    )
+    push_call = hass.services.async_call
+
+    async def _call(
+        domain: str, service: str, data: dict[str, Any] | None = None, **kwargs: Any
+    ) -> None:
+        if domain == "persistent_notification":
+            raise HomeAssistantError
+        await push_call(domain, service, data, **kwargs)
+
+    hass.services.async_call = _call  # type: ignore[method-assign]
+    notifier._held_batch.append(
+        (_finding_with_severity("low", anomaly_id="heldfail"), "Kettle ran.", None)
+    )
+
+    with caplog.at_level(logging.WARNING):
+        notifier._async_flush_batch()
+        await hass.drain_tasks()
+
+    assert [c["domain"] for c in hass.services.calls] == ["notify"]
+    assert "full-text record of heldfail" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_persistent_record_target_check_ignores_case() -> None:
+    """notify.Persistent_Notification is the same service; no second copy."""
+    notifier, hass, _suppression, _action_handler = _make_notifier(
+        {
+            CONF_NOTIFY_SERVICE: "notify.Persistent_Notification",
+            CONF_SENTINEL_PERSISTENT_RECORD: True,
+        }
+    )
+
+    await notifier.async_notify(_finding(), _minimal_snapshot(), _LONG_EXPLANATION)  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_flush_batch_judges_each_record_by_its_own_target() -> None:
+    """Held alerts routed to different services each get their own decision."""
+    notifier, hass, _suppression, _action_handler = _make_notifier(
+        dict(_RECORD_OPTIONS)
+    )
+    panel = _finding_with_severity("low", anomaly_id="toPanel")
+    phone = _finding_with_severity("low", anomaly_id="toPhone")
+    notifier._held_batch.append(
+        (panel, "Hall light on.", "notify.persistent_notification")
+    )
+    notifier._held_batch.append((phone, _LONG_EXPLANATION, "notify.mobile_app_phone"))
+
+    notifier._async_flush_batch()
+    await hass.drain_tasks()
+
+    assert [r["notification_id"] for r in _records(hass)] == ["hga_sentinel_toPhone"]
+
+
+@pytest.mark.asyncio
+async def test_flush_batch_summary_without_push_is_escaped() -> None:
+    """With no notify service the batch summary is a notification: escaped."""
+    notifier, hass, _suppression, _action_handler = _make_notifier({})
+    finding = _finding_with_severity("low", anomaly_id="sum1")
+    notifier._held_batch.append((finding, "See [this](https://example.invalid).", None))
+
+    notifier._async_flush_batch()
+    await hass.drain_tasks()
+
+    (summary,) = _records(hass)
+    assert summary["notification_id"] == "hga_sentinel_batch_summary"
+    assert "[this](" not in summary["message"]
 
 
 @pytest.mark.asyncio
