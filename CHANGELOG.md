@@ -7,6 +7,10 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Home Assistant 2026.11: the Anthropic provider works next to Home Assistant's own Anthropic integration** ([#929](https://github.com/goruck/home-generative-agent/issues/929)). Home Assistant 2026.11's Anthropic integration installs the `anthropic` 2.x SDK, which the `langchain-anthropic` release HGA allowed (1.4.3) cannot run with, and which talks to a newer Anthropic API version (`2026-10-21`). After upgrading `langchain-anthropic` by hand, every chat, camera, summarization and Sentinel request to an Anthropic model failed with `temperature: Extra inputs are not permitted`, and with a smaller model such as Claude Haiku 4.5 then with `max_tokens: 128000 > 64000`. HGA now requires `langchain-anthropic` 1.7.10 or later, which works with the 2.x SDK. Under that SDK it no longer sends `temperature`, `top_p` or `top_k` to Anthropic, which that API version does not accept, so the Temperature setting has no effect on Anthropic models there; with an older SDK it is sent as before. A request that does not size `max_tokens` itself now asks for 16,384 tokens, or the model's own limit if that is lower, instead of the output limit of Claude Sonnet 4.6 for every model; extended thinking still sizes it from the thinking budget.
+
 ## [3.45.0] - 2026-11-06
 
 ### Added
