@@ -2306,6 +2306,46 @@ names, so check it stays collision-safe).
 
 ## Notifier / Observability
 
+### A held alert routed to the notification panel goes out in another target's batch summary
+
+**What:** `_async_flush_batch` (sentinel/notifier.py) sends one summary to the first held finding's resolved service. With an area map that routes one area to `notify.persistent_notification` and another to a phone, a held alert meant for the panel is summarized on the phone instead, and (correctly) gets no #922 record, so its full text reaches neither destination.
+
+**Why:** Found by the #922 review (pass 3). The first-service routing predates #922; deciding records per held finding made the gap visible. Rare: it needs the area map, a burst, and two different targets in one batch.
+
+**How to apply:** Group held findings by resolved target and send one summary per target, or send panel-bound held findings as their own notification. Test with two held findings routed to different services.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
+### `escape_markdown` escapes a line-start marker on the first line only
+
+**What:** `_MARKDOWN_LINE_START_RE` in sentinel/notifier.py has no `re.MULTILINE`, so only the first line's leading `#`, `-`, `+` or `1.` is escaped. Every current input is safe (explanations are collapsed to one line, also/canary lines are escaped on their own, batch lines start with a bullet), but a future multi-line fixed body or translation that starts a later line with a device name would render it as a heading or list item.
+
+**Why:** Latent; found by the #922 review (pass 3).
+
+**How to apply:** Compile the regex with `re.MULTILINE` and add a test with a two-line text whose second line starts with `# `.
+
+**Effort:** XS
+**Priority:** P3
+
+---
+
+### Bare web addresses in Sentinel's persistent notifications still autolink
+
+**What:** `escape_markdown` (sentinel/notifier.py) escapes link, image and emphasis syntax, but Home Assistant's frontend renders persistent notifications as GFM Markdown, which turns a bare `https://…` or `www.…` into a clickable link. A device name or model explanation carrying one still shows as a link in the panel, in the no-notify-service alerts and in the #922 full-text records.
+
+**Why:** Found by the #922 review (pass 2, security + adversarial). Lower risk than the fixed case: the link shows its own destination, so it cannot hide behind other text, and nothing loads on view. Fixing it means breaking autolinks in every Sentinel text bound for the panel (escape the `:` of `://`, or a zero-width joiner after `www`), which first needs a check of how the frontend renders the escaped form.
+
+**How to apply:** Confirm in the HA frontend which escape survives rendering as plain text, add it to `escape_markdown` or a panel-only wrapper, and test with a device name and an explanation that contain `https://example.invalid`.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
+
 ### Sanitize friendly_name-derived text in notification copy like the unit string
 
 **What:** The v3.31.1 baseline-copy fix strips control/bidi characters and length-caps the untrusted `unit_of_measurement` before it reaches push text (`_baseline_deviation_mobile_message`), but the appliance/sensor display name (`friendly_name` → `_strip_power_suffix(...).title()`) is still embedded uncapped and unfiltered in the same messages, and camera names elsewhere use only a `[:30]` cap with no control-char strip. A crafted device name can carry the same bidi-reorder / instruction-text spoofing the unit fix closed (raised by both the Claude adversarial and Codex passes on v3.31.1; same class, pre-existing convention).

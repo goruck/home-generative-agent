@@ -7,6 +7,14 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+### Added
+
+- **Keep each Sentinel alert's full text in Home Assistant** ([#922](https://github.com/goruck/home-generative-agent/issues/922)). A mobile push is cut to 220 characters, and until now an install with a notify service had no other copy of the finding once the push scrolled away. A new Sentinel option, **Also keep each pushed alert's full text in Home Assistant notifications** (Basic and Advanced setup, off by default), also creates a persistent notification with the full text for every alert sent to a notify service, including each alert in a burst batch. The record is written before the push, so it is kept even when the push fails. A repeat of the same anomaly replaces its record instead of adding another. Sensitive findings are redacted as in the push. Like every persistent notification, records last until Home Assistant restarts. Network and Home Assistant security findings are left out, since every signed-in user can read the notification panel, and no record is written when the notify service is `notify.persistent_notification` itself.
+
+### Fixed
+
+- **Sentinel's Home Assistant notifications no longer turn device names or model text into links or images.** A device named like a Markdown link (`[Check](https://…)`), or an explanation carrying an image, rendered as a live link or picture in the persistent notifications Sentinel posts when no notify service is set, burst-batch summaries included (and in the new full-text records). That text is now escaped and shown as written ([#922](https://github.com/goruck/home-generative-agent/issues/922)).
+
 ## [3.45.0] - 2026-11-06
 
 ### Added

@@ -251,6 +251,7 @@
             "sentinel_enabled": "启用异常提醒",
             "sentinel_daily_digest_enabled": "启用每日摘要通知",
             "sentinel_daily_digest_time": "每日摘要时间（HH:MM:SS）",
+            "sentinel_persistent_record": "同时在 Home Assistant 通知中保留每条推送提醒的完整文本",
             "critical_action_pin": "提高等级用的 PIN（可选，4 到 10 位数字）",
             "notify_service": "通知服务（可选）"
           }
@@ -293,6 +294,7 @@
             "sentinel_runtime_override_ttl_minutes": "权限等级临时覆盖时长（分钟）",
             "sentinel_daily_digest_enabled": "启用每日摘要通知",
             "sentinel_daily_digest_time": "每日摘要时间（HH:MM:SS）",
+            "sentinel_persistent_record": "同时在 Home Assistant 通知中保留每条推送提醒的完整文本",
             "sentinel_quiet_hours_start": "免打扰开始时间（屏蔽所选的严重级别）",
             "sentinel_quiet_hours_end": "免打扰结束时间",
             "sentinel_quiet_hours_severities": "免打扰时段屏蔽的严重级别",
