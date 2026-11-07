@@ -362,9 +362,11 @@ from .core.utils import (
     configured_ollama_urls,
     dispatch_on_loop,
     ensure_http_url,
+    gate_server_for_url,
     gemini_healthy,
     gemini_sampling_configurable,
     generate_embeddings,
+    is_edge_deployment,
     make_gated_probe_runner,
     normalize_openai_compatible_base_url,
     normalized_ollama_url,
@@ -376,7 +378,9 @@ from .core.utils import (
     openai_healthy,
     reasoning_field,
     redact_url,
+    servers_isolated,
     set_model_provider_uncontended,
+    set_sentinel_isolated,
     thinking_configurable,
     validate_anthropic_key,
     validate_gemini_key,
@@ -2153,6 +2157,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     _utils_mod._sentinel_last_defer = 0.0  # noqa: SLF001
     _utils_mod._video_active_count = 0  # noqa: SLF001
     _utils_mod._video_idle.set()  # noqa: SLF001
+    _utils_mod.set_sentinel_isolated(False)
     _utils_mod._sentinel_last_run = 0.0  # noqa: SLF001
     _utils_mod._sentinel_first_defer = 0.0  # noqa: SLF001
     _utils_mod._sentinel_defer_count = 0  # noqa: SLF001
@@ -2210,6 +2215,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         embedding_left_out_chosen = []
     notified_model_fallbacks: set[tuple[str, str]] = set()
     setup_model_fallbacks: list[tuple[str, str, str, str]] = []
+    # Every local server each category's chain can reach, for the GPU gates
+    # (#877).
+    chain_servers: dict[str, frozenset[str | None]] = {}
 
     def _provider_name(provider_id: str | None) -> str:
         """Return a readable provider name for fallback notices."""
@@ -2363,6 +2371,53 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         provider = providers.get(provider_id)
         return provider.deployment if provider else None
 
+    def _provider_server(provider_id: str, category: str = "chat") -> str | None:
+        """Return the local server a provider runs on, for the GPU gates (#877)."""
+        provider = providers.get(provider_id)
+        if provider is None:
+            return None
+        settings = provider.data.get("settings", {})
+        if provider.provider_type == "ollama":
+            return gate_server_for_url(ollama_provider_settings_url(settings))
+        if provider.provider_type == "openai_compatible":
+            # Every OpenAI-compatible member shares one client per kind, at
+            # these URLs, whatever its own settings say.
+            return gate_server_for_url(
+                openai_compatible_embedding_url
+                if category == "embedding"
+                else openai_compatible_base_url
+            )
+        return gate_server_for_url(settings.get("base_url"))
+
+    def _foreground_servers() -> frozenset[str | None]:
+        """
+        Return every local server a chat turn or video call can reach.
+
+        The chat, camera and summarization chains, and the embedding chain
+        every chat turn searches with, fallbacks included.
+        """
+        servers: set[str | None] = set()
+        for category in ("chat", "vlm", "summarization", "embedding"):
+            if category == "embedding" and (members := fallback_chains.get(category)):
+                found: frozenset[str | None] | None = frozenset(
+                    _provider_server(p.entry_id, "embedding")
+                    for p in members
+                    if is_edge_deployment(p.deployment)
+                )
+            else:
+                found = chain_servers.get(category)
+            if found is None:
+                # A model whose chain was not built may still be local (its
+                # consumers default to edge), on a server not known.
+                local = is_edge_deployment(model_deployments.get(category, "edge"))
+                found = frozenset({None}) if local else frozenset()
+            servers |= found
+        return frozenset(servers)
+
+    def _provider_isolated(provider_id: str) -> bool:
+        """Return True when no foreground model can run on the provider's server."""
+        return servers_isolated({_provider_server(provider_id)}, _foreground_servers())
+
     # One stall state per provider, shared by the chat, VLM and summarization
     # chains: a provider that stopped answering for one is skipped by all
     # (#828). Changes refresh sensor.sentinel_health. On an edge deployment
@@ -2373,7 +2428,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         provider_name=_provider_name,
         on_change=lambda: async_dispatcher_send(hass, SIGNAL_SENTINEL_RUN_COMPLETE),
         on_recovered=_reset_breakers,
-        run_probe=make_gated_probe_runner(_provider_deployment),
+        run_probe=make_gated_probe_runner(_provider_deployment, _provider_isolated),
     )
 
     _chat_cb = CircuitBreaker(
@@ -3932,6 +3987,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
         _active_model, active_deployment, active_provider_id = chain[0]
         model_deployments[category] = active_deployment
+        chain_servers[category] = frozenset(
+            _provider_server(provider_id)
+            for _model, deployment, provider_id in chain
+            if is_edge_deployment(deployment)
+        )
         if active_provider_id != primary_provider.entry_id:
             LOGGER.warning(
                 "Fallback selected at setup for %s: primary provider %s was "
@@ -4156,6 +4216,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         if sentinel_model is not None
         else chat_deployment
     )
+    # A Sentinel model whose chain reaches no server a chat, camera,
+    # summarization or embedding chain can reach, fallbacks included, is not
+    # held back by them (#877); any overlap, or a server not known, keeps
+    # every gate.
+    sentinel_isolated = sentinel_model is not None and servers_isolated(
+        chain_servers.get("sentinel", frozenset()), _foreground_servers()
+    )
+    set_sentinel_isolated(sentinel_isolated)
+    if sentinel_isolated:
+        LOGGER.info(
+            "Sentinel Model runs on a server of its own; chat and camera "
+            "turns do not hold its calls back."
+        )
+    elif sentinel_model is not None and is_edge_deployment(sentinel_deployment):
+        LOGGER.info(
+            "Sentinel Model shares a server with the Conversation, camera, "
+            "summarization or embedding model, or one of their fallbacks, or "
+            "a server address is not known; chat and camera turns still hold "
+            "its calls back."
+        )
     explainer = None
     if options.get(CONF_EXPLAIN_ENABLED, RECOMMENDED_EXPLAIN_ENABLED):
         explainer = LLMExplainer(

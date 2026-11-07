@@ -25,6 +25,7 @@ def _no_chat_grace_between_tests() -> None:
     import custom_components.home_generative_agent.core.utils as utils_mod  # noqa: PLC0415
 
     utils_mod._chat_last_end = 0.0
+    utils_mod._sentinel_isolated = False
     utils_mod._uncontended = False
     utils_mod._sentinel_last_call_end = 0.0
 

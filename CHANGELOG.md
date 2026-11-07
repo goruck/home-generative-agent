@@ -7,6 +7,10 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A Sentinel Model on a second Ollama server is no longer held back by chat on the first** ([#877](https://github.com/goruck/home-generative-agent/issues/877)). The local GPU gates decided by deployment alone, so with the Sentinel Model on its own Ollama server, Sentinel still waited for every chat and camera turn on the Conversation server (and its 30 s grace), had its calls cancelled by chat there, and kept the per-run triage limit and the gap between calls: during a conversation, findings went out untriaged and without explanations. Now, when no server in the Sentinel Model's chain (its fallbacks included) is one a Conversation, camera, summarization or embedding model or any of their fallbacks can reach, none of those gates hold Sentinel back, and the log says so at startup. A stalled-provider probe to such a server is also sent during chat. Any shared server, or one whose address is not known, keeps every gate exactly as before. A server is its host name: two Ollama instances on one machine count as one, and every loopback address (`localhost`, `127.0.0.1`, `::1`) is the same. Also fixed: a reload during a Sentinel model call could leave the old Sentinel engine subscribed to state changes.
+
 ## [3.45.0] - 2026-11-06
 
 ### Added
