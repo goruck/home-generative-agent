@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 import pytest
 from pytest_homeassistant.common import MockConfigEntry
 
+import custom_components.home_generative_agent.core.utils as utils_mod
 from custom_components.home_generative_agent.const import (
     CONF_EXPLAIN_ENABLED,
     CONF_FEATURE_MODEL,
@@ -23,6 +24,7 @@ from custom_components.home_generative_agent.const import (
     CONF_OLLAMA_SENTINEL_MODEL,
     CONF_OLLAMA_SENTINEL_URL,
     CONF_OPENAI_COMPATIBLE_BASE_URL,
+    CONF_OPENAI_COMPATIBLE_EMBEDDING_URL,
     CONF_OPENAI_SENTINEL_MODEL,
     CONF_SENTINEL_MODEL_PROVIDER,
     CONF_SENTINEL_MODEL_TEMPERATURE,
@@ -38,6 +40,9 @@ from custom_components.home_generative_agent.const import (
     SUBENTRY_TYPE_MODEL_PROVIDER,
 )
 from custom_components.home_generative_agent.core.fallback import FallbackChatModel
+from custom_components.home_generative_agent.core.provider_stall import (
+    StallProbeDeferredError,
+)
 from custom_components.home_generative_agent.core.subentry_resolver import (
     OPT_IN_CATEGORIES,
     build_model_deployments,
@@ -45,6 +50,9 @@ from custom_components.home_generative_agent.core.subentry_resolver import (
     resolve_model_provider_configs,
     resolve_runtime_options,
     with_implied_capabilities,
+)
+from custom_components.home_generative_agent.core.subentry_types import (
+    ModelProviderConfig,
 )
 from custom_components.home_generative_agent.flows.feature_subentry_flow import (
     _fallback_provider_options,
@@ -490,3 +498,210 @@ def test_a_dangling_pin_is_logged(caplog: pytest.LogCaptureFixture) -> None:
     options = resolve_runtime_options(entry)  # type: ignore[arg-type]
     assert CONF_SENTINEL_MODEL_PROVIDER not in options
     assert "Feature 'sentinel_model' has no model provider" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# GPU gates per server (#877)
+# ---------------------------------------------------------------------------
+
+
+def _second_ollama_server(data: Any) -> ModelProviderConfig:
+    """Add an Ollama server of its own for the Sentinel Model and return it."""
+    gpu2 = ModelProviderConfig(
+        entry_id="ollama2",
+        name="Ollama GPU 2",
+        provider_type="ollama",
+        capabilities={"chat", "sentinel"},
+        data={"settings": {"base_url": "http://GPU2.lan:11434"}},
+        deployment="edge",
+    )
+    data.providers[gpu2.entry_id] = gpu2
+    data.options[CONF_SENTINEL_MODEL_PROVIDER] = "ollama"
+    data.options[CONF_OLLAMA_SENTINEL_MODEL] = "qwen3:1.7b"
+    data.deployments["sentinel"] = "edge"
+    return gpu2
+
+
+@pytest.mark.asyncio
+async def test_a_sentinel_model_on_its_own_server_is_isolated(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Chat, camera and summarization reach only http://ollama; Sentinel gpu2."""
+    data = _fallback_setup_data()
+    gpu2 = _second_ollama_server(data)
+    data.fallback_chains["sentinel"] = [gpu2]
+
+    await _set_up(hass, monkeypatch, data)
+
+    assert utils_mod._sentinel_isolated is True
+    assert not utils_mod.sentinel_calls_gated("edge")
+    assert "Sentinel Model runs on a server of its own" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_sentinel_fallback_on_the_chat_server_keeps_the_gates(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its fallback can run on the chat server, so the gates stay on."""
+    data = _fallback_setup_data()
+    gpu2 = _second_ollama_server(data)
+    data.providers["ollama1"].data["settings"]["sentinel_model"] = "qwen-fallback"
+    data.fallback_chains["sentinel"] = [gpu2, data.providers["ollama1"]]
+
+    utils_mod.set_sentinel_isolated(True)  # left over from an earlier setup
+    await _set_up(hass, monkeypatch, data)
+
+    assert utils_mod._sentinel_isolated is False
+    assert utils_mod.sentinel_calls_gated("edge")
+
+
+@pytest.mark.asyncio
+async def test_a_camera_model_on_sentinels_server_keeps_the_gates(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A chat turn's camera tool calls the VLM, so its server counts too."""
+    data = _fallback_setup_data()
+    gpu2 = _second_ollama_server(data)
+    gpu2.capabilities.add("vlm")
+    gpu2.data["settings"]["vlm_model"] = "llava-gpu2"
+    data.fallback_chains["sentinel"] = [gpu2]
+    data.fallback_chains["vlm"] = [data.providers["openai1"], gpu2]
+
+    utils_mod.set_sentinel_isolated(True)  # left over from an earlier setup
+    await _set_up(hass, monkeypatch, data)
+
+    assert utils_mod._sentinel_isolated is False
+    assert utils_mod.sentinel_calls_gated("edge")
+
+
+@pytest.mark.asyncio
+async def test_an_edge_model_without_a_chain_keeps_the_gates(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A local camera model whose server is not known may be Sentinel's."""
+    data = _fallback_setup_data()
+    gpu2 = _second_ollama_server(data)
+    data.fallback_chains["sentinel"] = [gpu2]
+    data.fallback_chains["vlm"] = []
+    data.deployments["vlm"] = "edge"
+
+    utils_mod.set_sentinel_isolated(True)  # left over from an earlier setup
+    await _set_up(hass, monkeypatch, data)
+
+    assert utils_mod._sentinel_isolated is False
+
+
+@pytest.mark.asyncio
+async def test_sentinel_on_the_chat_model_is_never_isolated(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    utils_mod.set_sentinel_isolated(True)  # left over from an earlier setup
+    await _set_up(hass, monkeypatch, _fallback_setup_data())
+
+    assert utils_mod._sentinel_isolated is False
+    assert utils_mod.sentinel_calls_gated("edge")
+
+
+@pytest.mark.asyncio
+async def test_a_camera_model_with_no_deployment_keeps_the_gates(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its consumers default to edge, so it may run on Sentinel's server."""
+    data = _fallback_setup_data()
+    gpu2 = _second_ollama_server(data)
+    data.fallback_chains["sentinel"] = [gpu2]
+    data.fallback_chains["vlm"] = []
+    data.deployments.pop("vlm")
+
+    await _set_up(hass, monkeypatch, data)
+
+    assert utils_mod._sentinel_isolated is False
+
+
+@pytest.mark.asyncio
+async def test_an_embedding_model_on_sentinels_server_keeps_the_gates(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every chat turn searches with the embedding model."""
+    data = _fallback_setup_data()
+    gpu2 = _second_ollama_server(data)
+    gpu2.capabilities.add("embedding")
+    data.fallback_chains["sentinel"] = [gpu2]
+    data.fallback_chains["embedding"] = [gpu2]
+    data.deployments["embedding"] = "edge"
+
+    await _set_up(hass, monkeypatch, data)
+
+    assert utils_mod._sentinel_isolated is False
+
+
+@pytest.mark.asyncio
+async def test_setup_probes_only_isolated_servers_during_chat(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The stall probe is sent during chat only to a server of Sentinel's own.
+
+    An OpenAI-compatible provider is judged by the one URL every such member
+    calls, not by its own settings.
+    """
+    captured: dict[str, Any] = {}
+    real_tracker = hga_component.ProviderStallTracker
+
+    def _spy(*args: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return real_tracker(*args, **kwargs)
+
+    monkeypatch.setattr(hga_component, "ProviderStallTracker", _spy)
+    data = _fallback_setup_data()
+    gpu2 = _second_ollama_server(data)
+    data.fallback_chains["sentinel"] = [gpu2]
+    data.options[CONF_OPENAI_COMPATIBLE_BASE_URL] = "http://ollama:8000/v1"
+    data.providers["compat"] = ModelProviderConfig(
+        entry_id="compat",
+        name="Compatible",
+        provider_type="openai_compatible",
+        capabilities={"chat"},
+        data={"settings": {"base_url": "http://gpu3.lan:8000/v1"}},
+        deployment="edge",
+    )
+
+    await _set_up(hass, monkeypatch, data)
+
+    run_probe = captured["run_probe"]
+
+    async def _probe() -> str:
+        return "ok"
+
+    async with utils_mod.local_chat_session("edge"):
+        assert await run_probe("ollama2", _probe) == "ok"
+        for provider_id in ("ollama1", "compat"):
+            with pytest.raises(StallProbeDeferredError):
+                await run_probe(provider_id, _probe)
+
+
+@pytest.mark.asyncio
+async def test_a_compatible_embedding_server_is_its_own_client_url(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OpenAI-compatible embeddings use their own URL, not the chat client's."""
+    data = _fallback_setup_data()
+    gpu2 = _second_ollama_server(data)
+    data.fallback_chains["sentinel"] = [gpu2]
+    data.options[CONF_OPENAI_COMPATIBLE_BASE_URL] = "http://ollama:8000/v1"
+    data.options[CONF_OPENAI_COMPATIBLE_EMBEDDING_URL] = "http://gpu2.lan:8080/v1"
+    compat = ModelProviderConfig(
+        entry_id="compat_emb",
+        name="Compatible embeddings",
+        provider_type="openai_compatible",
+        capabilities={"embedding"},
+        data={"settings": {"base_url": "http://elsewhere:8080/v1"}},
+        deployment="edge",
+    )
+    data.providers[compat.entry_id] = compat
+    data.fallback_chains["embedding"] = [compat]
+    data.deployments["embedding"] = "edge"
+
+    await _set_up(hass, monkeypatch, data)
+
+    assert utils_mod._sentinel_isolated is False
