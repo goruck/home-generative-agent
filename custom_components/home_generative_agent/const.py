@@ -508,6 +508,13 @@ CONF_CHAT_REASONING_BY_MODEL = "chat_reasoning_by_model"
 ANTHROPIC_THINKING_MIN_BUDGET = 1024
 ANTHROPIC_THINKING_MAX_BUDGET = 32768
 ANTHROPIC_THINKING_RESPONSE_TOKENS = 4096
+# max_tokens for an Anthropic request that does not size it itself (extended
+# thinking does, above). langchain-anthropic would otherwise send the output
+# limit of the model the provider was built with (128000 for
+# claude-sonnet-4-6) to every model the provider serves, which the API rejects
+# for a model with a lower limit such as claude-haiku-4-5 (64000, issue #929).
+# It is capped at the requested model's own output limit where that is known.
+ANTHROPIC_DEFAULT_MAX_TOKENS = 16384
 
 # ---- Fallback configuration ----
 CONF_FEATURE_FALLBACK_PROVIDER_IDS = "fallback_provider_ids"

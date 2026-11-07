@@ -42,22 +42,39 @@ SSL context load at startup for a path that is never taken. A primed model
 cannot be deep-copied (the httpx client holds a lock); nothing in the
 integration deep-copies models, and the base class has the same property
 after its first request.
+
+The subclass also adapts requests to the API version the installed SDK sends
+(issue #929). ``anthropic>=2`` sends ``anthropic-version: 2026-10-21``, which
+rejects ``temperature``, ``top_p`` and ``top_k`` ("Extra inputs are not
+permitted"). Under that SDK they are dropped from every instance, so neither
+the payload nor langchain-anthropic's per-model checks see them; older SDKs
+send ``2023-06-01`` and keep them. ``max_tokens`` is not left to
+langchain-anthropic's default, the output limit of the model the provider was
+*built* with, which every per-request copy inherits whatever model it serves:
+a request that does not set it gets ``ANTHROPIC_DEFAULT_MAX_TOKENS``, capped at
+the requested model's own limit. Extended thinking sets ``max_tokens``
+explicitly and is left alone.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import threading
-from functools import cached_property
+from collections.abc import Mapping
+from functools import cache, cached_property
 from typing import TYPE_CHECKING, Any
 
 from langchain_anthropic import ChatAnthropic
-from pydantic import Field
+from pydantic import Field, model_validator
+
+from ..const import ANTHROPIC_DEFAULT_MAX_TOKENS  # noqa: TID252
 
 if TYPE_CHECKING:
     import anthropic
     from homeassistant.core import HomeAssistant
+    from langchain_core.language_models import LanguageModelInput
 
 LOGGER = logging.getLogger(__name__)
 
@@ -71,6 +88,47 @@ def _on_event_loop() -> bool:
     return True
 
 
+# Sampling parameters API version 2026-10-21 (sent by anthropic>=2) rejects.
+SAMPLING_PARAMS_REJECTED_BY_SDK_2 = ("temperature", "top_p", "top_k")
+_FIRST_SDK_MAJOR_REJECTING_SAMPLING = 2
+
+
+@cache
+def sdk_rejects_sampling_params() -> bool:
+    """
+    Return True when the installed SDK talks to an API that rejects sampling.
+
+    ``anthropic`` 0.x and 1.x send ``anthropic-version: 2023-06-01``, which
+    accepts ``temperature``/``top_p``/``top_k``; 2.x sends ``2026-10-21``,
+    which does not. The SDK's version string is read rather than its private
+    ``_constants`` module; an unreadable version keeps the parameters, as the
+    older SDKs need them.
+    """
+    try:
+        import anthropic  # noqa: PLC0415
+    except ImportError:
+        return False
+    match = re.match(r"\D*(\d+)", str(getattr(anthropic, "__version__", "")))
+    return (
+        match is not None and int(match.group(1)) >= _FIRST_SDK_MAJOR_REJECTING_SAMPLING
+    )
+
+
+def default_max_tokens(model: str) -> int:
+    """Return ``max_tokens`` for a request to ``model`` that does not set it."""
+    try:
+        from langchain_anthropic.chat_models import (  # noqa: PLC0415
+            _get_default_model_profile,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        limit = _get_default_model_profile(model).get("max_output_tokens")
+    except (ImportError, AttributeError, TypeError):
+        limit = None
+    if isinstance(limit, int) and limit > 0:
+        return min(limit, ANTHROPIC_DEFAULT_MAX_TOKENS)
+    return ANTHROPIC_DEFAULT_MAX_TOKENS
+
+
 class SharedClientChatAnthropic(ChatAnthropic):
     """``ChatAnthropic`` that shares its async SDK client across per-request copies."""
 
@@ -79,6 +137,60 @@ class SharedClientChatAnthropic(ChatAnthropic):
 
     shared_client_params: Any = Field(default=None, exclude=True, repr=False)
     """The client parameters ``shared_async_client`` was built from."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def set_default_max_tokens(cls, values: Any) -> Any:
+        """
+        Leave an unset ``max_tokens`` unset (overrides the base validator).
+
+        The base class fills it from the profile of the model this instance
+        is built with, and ``configurable_fields`` copies that value into
+        every per-request instance, whichever model it serves.
+        ``_get_request_payload`` sizes it for the requested model instead.
+        """
+        return values
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_sampling_params_rejected_by_api(cls, values: Any) -> Any:
+        """Drop sampling parameters the SDK's API version rejects (#929)."""
+        if not isinstance(values, dict) or not sdk_rejects_sampling_params():
+            return values
+        return {
+            k: v
+            for k, v in values.items()
+            if k not in SAMPLING_PARAMS_REJECTED_BY_SDK_2
+        }
+
+    def _get_request_payload(
+        self,
+        input_: LanguageModelInput,
+        *,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> dict:
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        if payload.get("max_tokens") is None:
+            payload["max_tokens"] = default_max_tokens(str(payload.get("model", "")))
+        if sdk_rejects_sampling_params():
+            # Call-time kwargs or model_kwargs bypass the field validator, and
+            # langchain-anthropic moves the parameters into extra_body for
+            # SDKs whose create() no longer names them.
+            for name in SAMPLING_PARAMS_REJECTED_BY_SDK_2:
+                payload.pop(name, None)
+            extra_body = payload.get("extra_body")
+            if isinstance(extra_body, Mapping):
+                kept = {
+                    k: v
+                    for k, v in extra_body.items()
+                    if k not in SAMPLING_PARAMS_REJECTED_BY_SDK_2
+                }
+                if kept:
+                    payload["extra_body"] = kept
+                else:
+                    payload.pop("extra_body")
+        return payload
 
     def _shared_client_params(self) -> dict[str, Any]:
         """Return everything the base class feeds into the SDK client constructor."""
