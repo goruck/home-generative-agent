@@ -6117,3 +6117,407 @@ async def test_a_check_from_a_replaced_chain_names_nothing(
         )
 
     assert _issue(hass, HELD_ISSUE) is None
+
+
+# --- #857 items 4, 6, 7, 8 ---------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_rebuilt_empty_vector_table_records_the_current_model() -> None:
+    """Item 4: the new table is recorded before the tool index fills it."""
+    cur = _Cursor(record=_row(OPENAI), has_vectors=False)
+
+    await er.async_record_rebuilt_vector_table(cast("Any", _Pool(cur)), OLLAMA_A)
+
+    assert _written(cur) == [OLLAMA_A]
+    # Read under the row lock, inside a transaction.
+    names = [q for q, _ in cur.executed]
+    assert names.index("BEGIN") < names.index(er._READ_RECORD_FOR_UPDATE_SQL)
+
+
+@pytest.mark.asyncio
+async def test_a_rebuilt_table_another_entry_already_wrote_into_is_left() -> None:
+    cur = _Cursor(record=_row(OPENAI), has_vectors=True)
+
+    await er.async_record_rebuilt_vector_table(cast("Any", _Pool(cur)), OLLAMA_A)
+
+    assert _written(cur) == []
+    assert cur.ran(er._DELETE_RECORD_SQL) == []
+
+
+@pytest.mark.asyncio
+async def test_a_rebuilt_table_with_an_unread_build_drops_the_record() -> None:
+    """The end-of-setup check then waits for the build, as with no record."""
+    cur = _Cursor(record=_row(OPENAI), has_vectors=False)
+
+    await er.async_record_rebuilt_vector_table(cast("Any", _Pool(cur)), OLLAMA_UNREAD)
+
+    assert _written(cur) == []
+    assert cur.ran(er._DELETE_RECORD_SQL) == [None]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_rebuilt_table_record_only_logs() -> None:
+    class _Broken(_Cursor):
+        async def execute(self, query: str, params: Any = None) -> None:
+            msg = "gone"
+            raise psycopg.OperationalError(msg)
+
+    await er.async_record_rebuilt_vector_table(
+        cast("Any", _Pool(_Broken(record=None))), OLLAMA_A
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_model_records_nothing_for_a_rebuilt_table() -> None:
+    cur = _Cursor(record=None, has_vectors=False)
+    await er.async_record_rebuilt_vector_table(cast("Any", _Pool(cur)), None)
+    assert cur.executed == []
+
+
+class _ScriptedConn(_RunConn):
+    """A run connection whose lock, index and statements can be scripted."""
+
+    def __init__(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        locks: list[bool] | None = None,
+        failing: tuple[str, ...] = (),
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(rows, **kwargs)
+        self.locks = list(locks) if locks is not None else []
+        self.failing = failing
+
+    def _apply(self, query: str, params: Any) -> tuple[list[Any], int]:
+        if query in self.failing:
+            msg = f"refused: {query}"
+            raise psycopg.errors.InsufficientPrivilege(msg)
+        if query == er._REEMBED_LOCK_SQL and self.locks:
+            return [{"locked": self.locks.pop(0)}], 1
+        return super()._apply(query, params)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("pauses")
+async def test_the_run_sets_and_resets_keepalives() -> None:
+    """Item 6: a dead host's connection, and its lock, ends in about a minute."""
+    conn = _ScriptedConn(_rows(2))
+
+    assert await _run(conn) == []
+
+    names = [q for q, _ in conn.queries]
+    lock = names.index(er._REEMBED_LOCK_SQL)
+    # Set before the lock, so the wait for it is bounded too.
+    for statement in (*er._RUN_TIMEOUTS_SQL, *er._RUN_KEEPALIVE_SQL):
+        assert names.index(statement) < lock
+    for statement in er._RESET_KEEPALIVE_SQL:
+        assert names.index(statement) > names.index(er._REEMBED_UNLOCK_SQL)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("pauses")
+async def test_a_keepalive_the_server_refuses_does_not_stop_the_run() -> None:
+    """tcp_user_timeout needs PostgreSQL 12: older servers still re-embed."""
+    conn = _ScriptedConn(
+        _rows(2), failing=("SET tcp_user_timeout = 60000", "RESET tcp_user_timeout")
+    )
+
+    assert await _run(conn) == []
+
+    assert conn.record["model"] == OLLAMA_A.as_json().obj
+    assert not conn.closed
+
+
+@pytest.mark.asyncio
+async def test_a_run_to_the_same_model_is_waited_for(
+    pauses: list[float], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Item 7: a second entry waits for the first run instead of the repair."""
+    conn = _ScriptedConn(
+        _rows(2), locks=[False, False, True], record=_row(OPENAI, OLLAMA_A)
+    )
+
+    assert await _run(conn, start=False) == []
+
+    assert pauses[:2] == [er._LOCK_WAIT_POLL_S, er._LOCK_WAIT_POLL_S]
+    assert "waiting for it to end" in caplog.text
+    assert "this one does not start" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_run_to_another_model_is_not_waited_for(pauses: list[float]) -> None:
+    conn = _ScriptedConn(_rows(2), locks=[False], record=_row(OPENAI, OLLAMA_B))
+
+    assert await _run(conn) == [OPENAI.label]
+
+    assert er._LOCK_WAIT_POLL_S not in pauses
+
+
+async def _reembed(conn: _RunConn, *, start: bool = True) -> bool:
+    async def _build() -> str | None:
+        return OLLAMA_A.digest
+
+    return await er._async_reembed(
+        cast("Any", _RunPool(conn)),
+        FakeEmbeddings("new"),
+        OLLAMA_A,
+        start=start,
+        stopped=lambda _label: None,
+        current_build=_build,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("pauses")
+async def test_a_finished_run_says_so_and_does_not_vacuum_itself() -> None:
+    """Item 8: the vacuum is the caller's, after the run let go of everything."""
+    conn = _ScriptedConn(_rows(2))
+
+    assert await _reembed(conn) is True
+
+    assert conn.ran(er._VACUUM_VECTORS_SQL) == []
+    assert conn.ran(er._REEMBED_UNLOCK_SQL)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("pauses")
+async def test_nothing_to_reembed_or_a_stopped_run_is_not_finished() -> None:
+    assert await _reembed(_ScriptedConn(_rows(2), record=_row(OLLAMA_A))) is False
+    assert await _reembed(_ScriptedConn(_rows(2), locks=[False])) is False
+
+
+class _VacuumConn:
+    def __init__(self, *, can_vacuum: bool | None, fail: str | None = None) -> None:
+        self.can_vacuum = can_vacuum
+        self.fail = fail
+        self.queries: list[str] = []
+
+    async def execute(self, query: str, _params: Any = None) -> Any:
+        self.queries.append(query)
+        if query == self.fail:
+            msg = "lock timeout"
+            raise psycopg.errors.LockNotAvailable(msg)
+        row = (
+            {"can_vacuum": self.can_vacuum}
+            if query == er._CAN_VACUUM_VECTORS_SQL and self.can_vacuum is not None
+            else None
+        )
+        return SimpleNamespace(fetchone=AsyncMock(return_value=row))
+
+
+def _vacuum_pool(conn: _VacuumConn) -> Any:
+    @contextlib.asynccontextmanager
+    async def _connection() -> AsyncGenerator[_VacuumConn]:
+        yield conn
+
+    return SimpleNamespace(connection=_connection)
+
+
+@pytest.mark.asyncio
+async def test_the_vacuum_is_bounded_and_resets_its_timeouts(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    conn = _VacuumConn(can_vacuum=True)
+
+    await er.async_vacuum_vectors(_vacuum_pool(conn))
+
+    vacuum = conn.queries.index(er._VACUUM_VECTORS_SQL)
+    for statement in er._VACUUM_TIMEOUTS_SQL:
+        assert conn.queries.index(statement) < vacuum
+    for statement in er._RESET_TIMEOUTS_SQL:
+        assert conn.queries.index(statement) > vacuum
+    assert "Vacuumed the memory store" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_user_who_may_not_vacuum_gets_a_warning_not_a_success(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """PostgreSQL only notices and skips: ask first, and say so."""
+    conn = _VacuumConn(can_vacuum=False)
+
+    await er.async_vacuum_vectors(_vacuum_pool(conn))
+
+    assert er._VACUUM_VECTORS_SQL not in conn.queries
+    assert "does not own the store_vectors table" in caplog.text
+    assert "Vacuumed the memory store" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_failed_vacuum_only_logs(caplog: pytest.LogCaptureFixture) -> None:
+    conn = _VacuumConn(can_vacuum=True, fail=er._VACUUM_VECTORS_SQL)
+
+    await er.async_vacuum_vectors(_vacuum_pool(conn))
+
+    assert "Could not vacuum the memory store" in caplog.text
+    assert er._RESET_TIMEOUTS_SQL[0] in conn.queries
+
+
+@pytest.mark.asyncio
+async def test_no_vector_table_vacuums_nothing() -> None:
+    conn = _VacuumConn(can_vacuum=None)
+
+    await er.async_vacuum_vectors(_vacuum_pool(conn))
+
+    assert er._VACUUM_VECTORS_SQL not in conn.queries
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_just_finished_is_waited_for(
+    pauses: list[float], caplog: pytest.LogCaptureFixture
+) -> None:
+    """The holder recorded the target but still holds the lock: no repair."""
+    conn = _ScriptedConn(_rows(2), locks=[False, True], record=_row(OLLAMA_A))
+
+    assert await _run(conn, start=False) == []
+
+    assert pauses[:1] == [er._LOCK_WAIT_POLL_S]
+    assert "this one does not start" not in caplog.text
+    # It finds the work done, and says so: no stop is reported.
+    assert "nothing to re-embed" in caplog.text
+    assert "changed its target" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_mixed_store_is_not_waited_for(pauses: list[float]) -> None:
+    """Recorded as `target`, but another model wrote in: not a finished run."""
+    conn = _ScriptedConn(
+        _rows(2), locks=[False], record=_row(OLLAMA_A, mixed=(OPENAI,))
+    )
+
+    assert await _run(conn) != []
+
+    assert er._LOCK_WAIT_POLL_S not in pauses
+
+
+@pytest.mark.asyncio
+async def test_the_wait_gives_up_after_six_hours(
+    monkeypatch: pytest.MonkeyPatch,
+    pauses: list[float],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A holder that never ends still brings the repair back, with a warning."""
+    clock = [0.0]
+
+    def _monotonic() -> float:
+        clock[0] += er._LOCK_WAIT_POLL_S
+        return clock[0]
+
+    monkeypatch.setattr(er.time, "monotonic", _monotonic)
+    polls = int(er._LOCK_WAIT_MAX_S // er._LOCK_WAIT_POLL_S) + 5
+    conn = _ScriptedConn(_rows(2), locks=[False] * polls, record=_row(OPENAI, OLLAMA_A))
+
+    assert await _run(conn, start=False) == [OPENAI.label]
+
+    assert "Waited 6 hours" in caplog.text
+    assert len(pauses) < polls
+
+
+@pytest.mark.asyncio
+async def test_a_rebuilt_table_is_locked_before_it_is_checked() -> None:
+    """Item 4: no vector lands between the emptiness check and the record."""
+    cur = _Cursor(record=_row(OPENAI), has_vectors=False)
+
+    await er.async_record_rebuilt_vector_table(cast("Any", _Pool(cur)), OLLAMA_A)
+
+    names = [q for q, _ in cur.executed]
+    assert names.index(er._LOCK_VECTOR_TABLE_SQL) < names.index(er._HAS_VECTORS_SQL)
+    assert names.index(er._LOCK_VECTOR_TABLE_SQL) > names.index("BEGIN")
+
+
+@pytest.mark.parametrize(("reembedded", "vacuums"), [(True, 1), (False, 0)])
+@pytest.mark.asyncio
+async def test_the_vacuum_is_its_own_task_after_a_finished_run(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, *, reembedded: bool, vacuums: int
+) -> None:
+    """The re-embed task ends before the vacuum, so a new repair can start."""
+    entry = _entry(hass, record=None, monkeypatch=monkeypatch)
+    vacuumed: list[Any] = []
+
+    async def _reembed(*_args: Any, **_kwargs: Any) -> bool:
+        return reembedded
+
+    async def _vacuum(pool: Any) -> None:
+        vacuumed.append(pool)
+
+    monkeypatch.setattr(er, "_async_reembed", _reembed)
+    monkeypatch.setattr(er, "async_vacuum_vectors", _vacuum)
+    monkeypatch.setattr(er, "_can_reembed", lambda _entry: True)
+
+    assert er._start_reembed_task(hass, entry, start=True)
+    await entry.runtime_data.reembed_task
+    await hass.async_block_till_done()
+
+    assert entry.runtime_data.reembed_task.done()
+    assert vacuumed == [entry.runtime_data.pool] * vacuums
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_before_the_lock_is_known_closes_the_connection() -> None:
+    """The server may have granted the lock: never hand it back to the pool."""
+    conn = _ScriptedConn(_rows(2))
+
+    async def _cancelled(*_args: Any, **_kwargs: Any) -> Any:
+        raise asyncio.CancelledError
+
+    original = er._async_take_lock
+    er._async_take_lock = _cancelled  # type: ignore[assignment]
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await _reembed(conn)
+    finally:
+        er._async_take_lock = original  # type: ignore[assignment]
+
+    assert conn.closed
+    assert conn.ran(er._REEMBED_UNLOCK_SQL) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("pauses")
+async def test_a_failed_session_setup_still_cleans_up() -> None:
+    """A SET that fails part way never leaves the run's timeouts on the pool."""
+    conn = _ScriptedConn(_rows(2), failing=(er._RUN_TIMEOUTS_SQL[1],))
+
+    assert await _reembed(conn) is False
+
+    assert conn.closed
+
+
+@pytest.mark.asyncio
+async def test_a_store_already_holding_the_target_after_the_wait_raises_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    pauses: list[float],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A holder that recorded the target and hung: the store is already done."""
+    clock = [0.0]
+
+    def _monotonic() -> float:
+        clock[0] += er._LOCK_WAIT_POLL_S
+        return clock[0]
+
+    monkeypatch.setattr(er.time, "monotonic", _monotonic)
+    polls = int(er._LOCK_WAIT_MAX_S // er._LOCK_WAIT_POLL_S) + 5
+    conn = _ScriptedConn(_rows(2), locks=[False] * polls, record=_row(OLLAMA_A))
+
+    assert await _run(conn, start=False) == []
+
+    assert "nothing to re-embed" in caplog.text
+    assert pauses
+
+
+@pytest.mark.asyncio
+async def test_a_failed_vacuum_reset_closes_the_connection() -> None:
+    class _ResetFails(_VacuumConn):
+        closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    conn = _ResetFails(can_vacuum=True, fail=er._RESET_TIMEOUTS_SQL[0])
+
+    await er.async_vacuum_vectors(_vacuum_pool(conn))
+
+    assert conn.closed

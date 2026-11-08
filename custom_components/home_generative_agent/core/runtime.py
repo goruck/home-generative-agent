@@ -119,6 +119,8 @@ class HGAData:
     # kept ones it could not fully check, read again in the background (#860).
     embedding_fallback_gate: EmbeddingFallbackGate | None = None
     reembed_task: asyncio.Task[None] | None = None
+    # The vacuum after a finished re-embed (#857).
+    vacuum_task: asyncio.Task[None] | None = None
     # The caption camera backfill, cancelled at unload before the pool (#706).
     caption_backfill_task: asyncio.Task[None] | None = None
     # The hourly prune of old camera captions (#709), cancelled at unload

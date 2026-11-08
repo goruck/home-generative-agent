@@ -125,6 +125,9 @@ _WRITE_RECORD_SQL = """
     SET model = EXCLUDED.model, recorded_at = now(),
         reembed_target = NULL, reembed_cursor = NULL, mixed_with = NULL
 """
+# The record of a store whose vector table was just created again, when the
+# build is unread: nothing it said applies to the new, empty table (#857).
+_DELETE_RECORD_SQL = "DELETE FROM hga_embedding_model WHERE id = 1"
 _MARK_MIXED_SQL = """
     UPDATE hga_embedding_model
     SET mixed_with = %(mixed)s, reembed_cursor = %(cursor)s
@@ -240,6 +243,54 @@ _RUN_TIMEOUTS_SQL = (
     "SET lock_timeout = '30s'",
 )
 _RESET_TIMEOUTS_SQL = ("RESET statement_timeout", "RESET lock_timeout")
+# The lock lives on the run's connection. A host that dies mid-run leaves it
+# held until PostgreSQL notices the connection is gone: about two hours with
+# the OS defaults, during which a resume could not start (#857). Probing the
+# connection from the server ends it in about a minute. Each is best effort:
+# a Unix socket ignores them and tcp_user_timeout needs PostgreSQL 12.
+_RUN_KEEPALIVE_SQL = (
+    "SET tcp_keepalives_idle = 30",
+    "SET tcp_keepalives_interval = 10",
+    "SET tcp_keepalives_count = 3",
+    "SET tcp_user_timeout = 60000",
+    # PostgreSQL 14: a running statement notices the dead client too.
+    "SET client_connection_check_interval = '10s'",
+)
+_RESET_KEEPALIVE_SQL = (
+    "RESET tcp_keepalives_idle",
+    "RESET tcp_keepalives_interval",
+    "RESET tcp_keepalives_count",
+    "RESET tcp_user_timeout",
+    "RESET client_connection_check_interval",
+)
+# While another run re-embeds to the same model, this one waits for its lock
+# rather than raise the repair (#857): it then finishes that run's work, or
+# finds it done.
+_LOCK_WAIT_POLL_S = 60.0
+# A waiter gives up after this long and raises the repair: a holder that
+# never ends (a host that hangs but still answers, a lock leaked behind a
+# connection proxy) must not leave the store with nothing to tell the user.
+_LOCK_WAIT_MAX_S = 6 * 3600.0
+# After a full re-embed every vector was rewritten in place: the search
+# index still holds the old entries until a vacuum, and recall can suffer.
+# Vacuumed once the run is recorded and the lock is released (#857): no
+# extra disk, nothing left behind if it is interrupted.
+_VACUUM_VECTORS_SQL = "VACUUM (ANALYZE) store_vectors"
+# PostgreSQL skips a table the user may not vacuum with only a notice: ask
+# first, so the log says so rather than claim it was done.
+_CAN_VACUUM_VECTORS_SQL = """
+    SELECT pg_has_role(current_user, c.relowner, 'USAGE')
+        OR pg_has_role(current_user, d.datdba, 'USAGE')
+        OR CASE WHEN current_setting('server_version_num')::int >= 170000
+            THEN has_table_privilege(c.oid, 'MAINTAIN') ELSE false END
+        AS can_vacuum
+    FROM pg_class c, pg_database d
+    WHERE c.oid = to_regclass('store_vectors') AND d.datname = current_database()
+"""
+_VACUUM_TIMEOUTS_SQL = ("SET statement_timeout = '1h'", "SET lock_timeout = '60s'")
+# The recreated table is locked while its record is written, so no insert
+# lands between the emptiness check and the record (#857).
+_LOCK_VECTOR_TABLE_SQL = "LOCK TABLE store_vectors IN SHARE ROW EXCLUSIVE MODE"
 
 _RECORD_TIMEOUT_S = 10.0
 # Quoted in the repair text (strings.json and translations) and the docs.
@@ -631,6 +682,66 @@ async def _async_check_record(
             elif decision is _Decision.MISMATCH:
                 record = await _async_mark_mixed(cur, record, current)
             return decision, record
+
+
+async def async_record_rebuilt_vector_table(
+    pool: AsyncConnectionPool[AsyncConnection[DictRow]],
+    current: EmbeddingFingerprint | None,
+) -> None:
+    """
+    Record `current` for a vector table setup has just created again (#857).
+
+    The table is locked for the check and the write, so no vector lands in
+    between.
+
+    Dropping the table to change its size (#760) leaves the record naming
+    the old model. The tool index writes new vectors before the end-of-setup
+    check runs, which then sees vectors under that record and raises a repair
+    for nothing. Recording now, while the table is still empty, avoids it; a
+    table that already holds vectors (another entry on the database is
+    writing) is left to the check. With the build unread nothing is
+    recorded: the record is dropped, so the check waits for the build. A
+    failure only logs: the check runs anyway.
+    """
+    if current is None:
+        return
+    try:
+        async with (
+            asyncio.timeout(_RECORD_TIMEOUT_S),
+            pool.connection() as conn,
+            conn.cursor() as cur,
+        ):
+            await _create_record_table(cur)
+            async with conn.transaction():
+                await _read_record(cur, for_update=True)
+                await cur.execute(_HAS_VECTOR_TABLE_SQL, {"table": STORE_VECTORS_TABLE})
+                row = await cur.fetchone()
+                if not row or not row["has_table"]:
+                    return
+                await cur.execute(_LOCK_VECTOR_TABLE_SQL)
+                if await _has_vectors(cur) is not False:
+                    return
+                if current.undetermined:
+                    await cur.execute(_DELETE_RECORD_SQL)
+                    LOGGER.info(
+                        "Dropped the memory store's embedding model record for "
+                        "the new vector table; it is recorded once the "
+                        "embedding primary's build is read."
+                    )
+                    return
+                await cur.execute(_WRITE_RECORD_SQL, {"model": current.as_json()})
+    except (psycopg.Error, OSError, TimeoutError) as err:
+        LOGGER.warning(
+            "Could not record the embedding model for the new vector table (%s); "
+            "a repair to re-embed the memory store may follow, which is safe to "
+            "run.",
+            err,
+        )
+        return
+    LOGGER.info(
+        "Recorded %s as the embedding model of the new, empty vector table.",
+        current.label,
+    )
 
 
 async def async_sync_embedding_record(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -1454,17 +1565,26 @@ def _start_reembed_task(
         # run would otherwise be certified as the one read at the start.
         return await _async_primary_build(hass, entry)
 
+    async def _run() -> None:
+        if (
+            await _async_reembed(
+                rd.pool,
+                rd.primary_embeddings,
+                target,
+                start=start,
+                stopped=_stopped,
+                current_build=_current_build,
+            )
+            and entry.state in ACTIVE_ENTRY_STATES
+        ):
+            # Its own task: a repair confirmed while it runs starts at once.
+            # Kept so the unload cancels it before the pool closes.
+            rd.vacuum_task = entry.async_create_background_task(
+                hass, async_vacuum_vectors(rd.pool), name="hga_embedding_vacuum"
+            )
+
     rd.reembed_task = entry.async_create_background_task(
-        hass,
-        _async_reembed(
-            rd.pool,
-            rd.primary_embeddings,
-            target,
-            start=start,
-            stopped=_stopped,
-            current_build=_current_build,
-        ),
-        name="hga_embedding_reembed",
+        hass, _run(), name="hga_embedding_reembed"
     )
     return True
 
@@ -1696,17 +1816,18 @@ async def _async_prepare_run(
             if record is None or record.model is None:
                 raise _RecordGoneError
             recorded = record.held_label
+            if (
+                record.target is None
+                and len(record.holders()) == 1
+                and record.model.same_model(target)
+            ):
+                # Also a resume that waited for another entry's run (#857).
+                LOGGER.info(
+                    "The memory store already holds %s; nothing to re-embed.",
+                    target.label,
+                )
+                return None, recorded
             if start:
-                if (
-                    record.target is None
-                    and len(record.holders()) == 1
-                    and record.model.same_model(target)
-                ):
-                    LOGGER.info(
-                        "The memory store already holds %s; nothing to re-embed.",
-                        target.label,
-                    )
-                    return None, recorded
                 await cur.execute(_START_REEMBED_SQL, {"target": target.as_json()})
                 record = await _read_record(cur)
             elif record.target is None or not record.target.same_model(target):
@@ -1724,54 +1845,53 @@ async def _async_reembed(  # noqa: PLR0913
     start: bool,
     stopped: Callable[[str], None],
     current_build: Callable[[], Awaitable[str | None]],
-) -> None:
+) -> bool:
     """
     Re-embed every stored vector with `target`'s model, then record it.
 
     Holds the advisory lock throughout and records `target` (``start``), or
     checks the record still names it, only once it holds it. `stopped`
     brings the repair back when the run ends without finishing, except on a
-    cancel (the unload) and when another run took over.
+    cancel (the unload) and when another run took over. Return True when it
+    re-embedded the store: the caller then vacuums it.
     """
     recorded = target.label
     try:
         async with pool.connection() as conn:
-            row = await (
-                await conn.execute(_REEMBED_LOCK_SQL, {"key": _REEMBED_LOCK_KEY})
-            ).fetchone()
-            if not row or not row["locked"]:
-                async with conn.cursor() as cur:
-                    with contextlib.suppress(psycopg.Error):
-                        held = await _read_record(cur)
-                        if held is not None and held.model is not None:
-                            recorded = held.held_label
-                LOGGER.warning(
-                    "Another Home Generative Agent run is re-embedding the memory "
-                    "store; this one does not start. Start the repair again once "
-                    "that run ends."
-                )
-                stopped(recorded)
-                return
+            locked = finished = aborted = False
             try:
-                for statement in _RUN_TIMEOUTS_SQL:
-                    await conn.execute(statement)
-                await _async_run_locked(
+                # The timeouts come first: the wait for the lock reads the
+                # record too, and must not hang on a lock held elsewhere.
+                await _async_set_run_session(conn)
+                locked, held = await _async_take_lock(conn, target)
+                if not locked:
+                    if held is not None and _holds_only(held, target):
+                        LOGGER.info(
+                            "The memory store already holds %s; nothing to re-embed.",
+                            target.label,
+                        )
+                        return False
+                    if held is not None and held.model is not None:
+                        recorded = held.held_label
+                    LOGGER.warning(
+                        "Another Home Generative Agent run holds the memory "
+                        "store; this one does not start. Start the repair again "
+                        "once that run ends."
+                    )
+                    stopped(recorded)
+                    return False
+                finished = await _async_run_locked(
                     conn, embeddings, target, start=start, current_build=current_build
                 )
-            except asyncio.CancelledError:
-                raise
             except _StoppedError as err:
                 if err.recorded is not None:
                     stopped(err.recorded)
+            except BaseException:
+                aborted = True
+                raise
             finally:
-                try:
-                    await conn.execute(_REEMBED_UNLOCK_SQL, {"key": _REEMBED_LOCK_KEY})
-                    for statement in _RESET_TIMEOUTS_SQL:
-                        await conn.execute(statement)
-                except psycopg.Error:
-                    # A pooled connection still holding the lock would refuse
-                    # every later run: close it so the pool drops it.
-                    await conn.close()
+                await _async_release_run(conn, locked=locked, unsure=aborted)
+            return finished
     except asyncio.CancelledError:
         raise
     except Exception as err:  # noqa: BLE001 - the connection or lock failed
@@ -1782,6 +1902,164 @@ async def _async_reembed(  # noqa: PLR0913
             err,
         )
         stopped(recorded)
+    return False
+
+
+async def _async_release_run(
+    conn: AsyncConnection[DictRow], *, locked: bool, unsure: bool
+) -> None:
+    """
+    Unlock and reset the run's connection, or close it when that is not safe.
+
+    `unsure`: the run ended on an error or a cancel, which can land after the
+    server granted the lock but before the run knew it holds it. Such a
+    connection, and one whose reset failed, is closed rather than handed
+    back to the pool with the lock or the run's settings on it.
+    """
+    if unsure and not locked:
+        await conn.close()
+        return
+    try:
+        if locked:
+            await conn.execute(_REEMBED_UNLOCK_SQL, {"key": _REEMBED_LOCK_KEY})
+        await _async_reset_run_session(conn)
+    except psycopg.Error:
+        await conn.close()
+
+
+def _holds_only(held: _Record, target: EmbeddingFingerprint) -> bool:
+    """Return True when the record names `target` alone and no run to another."""
+    return (
+        held.target is None
+        and held.model is not None
+        and held.model.same_model(target)
+        and len(held.holders()) == 1
+    )
+
+
+async def _async_set_run_session(conn: AsyncConnection[DictRow]) -> None:
+    """Set the run's timeouts, and its keepalives where the server takes them."""
+    for statement in _RUN_TIMEOUTS_SQL:
+        await conn.execute(statement)
+    for statement in _RUN_KEEPALIVE_SQL:
+        with contextlib.suppress(psycopg.Error):
+            await conn.execute(statement)
+
+
+async def _async_reset_run_session(conn: AsyncConnection[DictRow]) -> None:
+    """Reset what `_async_set_run_session` set, before the pool reuses it."""
+    for statement in _RESET_TIMEOUTS_SQL:
+        await conn.execute(statement)
+    for statement in _RESET_KEEPALIVE_SQL:
+        with contextlib.suppress(psycopg.Error):
+            await conn.execute(statement)
+
+
+async def _async_take_lock(
+    conn: AsyncConnection[DictRow], target: EmbeddingFingerprint
+) -> tuple[bool, _Record | None]:
+    """
+    Take the re-embed lock; wait for it while another run re-embeds to `target`.
+
+    Return whether it is held, and the record read when it is not. A second
+    entry on the database and model, or a resume after its host stopped,
+    finds a run to `target` holding the lock: it waits rather than raise the
+    repair, then finishes that run's work or finds it done (#857), for up to
+    `_LOCK_WAIT_MAX_S`. A run to another model, or none on record, is not
+    waited for.
+    """
+    waited_since: float | None = None
+    while True:
+        row = await (
+            await conn.execute(_REEMBED_LOCK_SQL, {"key": _REEMBED_LOCK_KEY})
+        ).fetchone()
+        if row and row["locked"]:
+            if waited_since is not None:
+                LOGGER.info("The other memory store re-embed ended; this one goes on.")
+            return True, None
+        held: _Record | None = None
+        async with conn.cursor() as cur:
+            with contextlib.suppress(psycopg.Error):
+                held = await _read_record(cur)
+        if held is None or not _waits_for(held, target):
+            return False, held
+        now = time.monotonic()
+        if waited_since is None:
+            LOGGER.info(
+                "Another Home Generative Agent run is re-embedding the memory store "
+                "with %s; waiting for it to end.",
+                target.label,
+            )
+            waited_since = now
+        elif now - waited_since >= _LOCK_WAIT_MAX_S:
+            LOGGER.warning(
+                "Waited %d hours for another Home Generative Agent run to finish "
+                "re-embedding the memory store with %s; it has not.",
+                int(_LOCK_WAIT_MAX_S // 3600),
+                target.label,
+            )
+            return False, held
+        await asyncio.sleep(_LOCK_WAIT_POLL_S)
+
+
+def _waits_for(held: _Record, target: EmbeddingFingerprint) -> bool:
+    """
+    Return True when the lock holder works toward `target`.
+
+    A run to `target`, or one that has just recorded it and not yet let go
+    of the lock (the store then holds `target` alone).
+    """
+    if held.target is not None:
+        return held.target.same_model(target)
+    return _holds_only(held, target)
+
+
+async def async_vacuum_vectors(
+    pool: AsyncConnectionPool[AsyncConnection[DictRow]],
+) -> None:
+    """
+    Vacuum the store's vectors after a full re-embed (#857).
+
+    Clears the old entries out of the search index so memory search finds
+    the right items again. Runs as its own task, after the re-embed ended,
+    on its own connection: a repair confirmed meanwhile starts at once.
+    Bounded, and best effort: the store is already recorded, so a database
+    user that may not vacuum the table (PostgreSQL then skips it with only a
+    notice), a lock held elsewhere or a timeout only logs.
+    """
+    try:
+        async with pool.connection() as conn:
+            row = await (await conn.execute(_CAN_VACUUM_VECTORS_SQL)).fetchone()
+            if not row:
+                return
+            if not row["can_vacuum"]:
+                LOGGER.warning(
+                    "Could not vacuum the memory store after re-embedding it: the "
+                    "database user does not own the store_vectors table. Memory "
+                    "search works; it may find less until PostgreSQL vacuums it."
+                )
+                return
+            try:
+                for statement in _VACUUM_TIMEOUTS_SQL:
+                    await conn.execute(statement)
+                await conn.execute(_VACUUM_VECTORS_SQL)
+            finally:
+                try:
+                    for statement in _RESET_TIMEOUTS_SQL:
+                        await conn.execute(statement)
+                except psycopg.Error:
+                    # Not back to the pool with the vacuum's timeouts on it.
+                    await conn.close()
+    except asyncio.CancelledError:
+        raise
+    except (psycopg.Error, OSError) as err:
+        LOGGER.warning(
+            "Could not vacuum the memory store after re-embedding it: %s. Memory "
+            "search works; it may find less until PostgreSQL vacuums the table.",
+            err,
+        )
+    else:
+        LOGGER.info("Vacuumed the memory store's vectors after re-embedding.")
 
 
 class _StoppedError(Exception):
@@ -1836,17 +2114,23 @@ async def _async_run_locked(  # noqa: PLR0912, PLR0915 - a handler per stop
     *,
     start: bool,
     current_build: Callable[[], Awaitable[str | None]],
-) -> None:
-    """Run under the lock; every way it ends unfinished becomes _StoppedError."""
+) -> bool:
+    """
+    Run under the lock; every way it ends unfinished becomes _StoppedError.
+
+    Return True when it re-embedded the store, False when there was nothing
+    to re-embed.
+    """
     recorded = target.label
     stored: EmbeddingFingerprint | None = None
     record_mixed: tuple[EmbeddingFingerprint, ...] = ()
     try:
         record, recorded = await _async_prepare_run(conn, target, start=start)
         if record is None or record.target is None:
-            return
+            return False
         stored, record_mixed = record.target, record.mixed
         await _async_reembed_rows(conn, embeddings, record, current_build)
+        return True  # noqa: TRY300 - every handler below raises
     except asyncio.CancelledError:
         raise
     except _SupersededError:
