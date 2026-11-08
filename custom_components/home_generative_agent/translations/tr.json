@@ -236,6 +236,7 @@
             "sentinel_runtime_override_ttl_minutes": "Özerklik geçersiz kılma süresi (dakika)",
             "sentinel_daily_digest_enabled": "Günlük özet bildirimini etkinleştir",
             "sentinel_daily_digest_time": "Günlük özet saati (SS:DD:SN)",
+            "sentinel_persistent_record": "Gönderilen her uyarının tam metnini Home Assistant bildirimlerinde de sakla",
             "sentinel_quiet_hours_start": "Sessiz saatler başlangıcı (seçili önem düzeylerini bastırır)",
             "sentinel_quiet_hours_end": "Sessiz saatler bitişi",
             "sentinel_quiet_hours_severities": "Sessiz saatlerde bastırılan önem düzeyleri",
@@ -264,6 +265,7 @@
             "sentinel_enabled": "Anomali uyarılarını etkinleştir",
             "sentinel_daily_digest_enabled": "Günlük özet bildirimini etkinleştir",
             "sentinel_daily_digest_time": "Günlük özet saati (SS:DD:SN)",
+            "sentinel_persistent_record": "Gönderilen her uyarının tam metnini Home Assistant bildirimlerinde de sakla",
             "notify_service": "Bildirim servisi (isteğe bağlı)",
             "critical_action_pin": "Düzey artırma PIN'i (isteğe bağlı, 4-10 rakam)"
           }

@@ -34,12 +34,14 @@ import custom_components.home_generative_agent as hga_component
 from custom_components.home_generative_agent.const import (
     CONF_CRITICAL_ACTION_PIN,
     CONF_NOTIFY_SERVICE,
+    CONF_SENTINEL_AUTONOMY_LEVEL,
     CONF_SENTINEL_CAMERA_ENTRY_LINKS,
     CONF_SENTINEL_DAILY_DIGEST_ENABLED,
     CONF_SENTINEL_DAILY_DIGEST_TIME,
     CONF_SENTINEL_ENABLED,
     CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
     CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT,
+    CONF_SENTINEL_PERSISTENT_RECORD,
     CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
     CONF_SENTINEL_TRIAGE_ENABLED,
@@ -225,6 +227,58 @@ async def test_basic_setup_on_a_fresh_install_writes_the_defaults(
     assert data is not None
     assert data[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] == {}
     assert data[CONF_SENTINEL_CAMERA_ENTRY_LINKS] == {}
+
+
+@pytest.mark.asyncio
+async def test_basic_setup_stores_the_persistent_record(hass: HomeAssistant) -> None:
+    """Turning the full-text record on in Basic setup is saved (#922)."""
+    flow = _make_sentinel_flow_for_mode(hass, DummyEntry())
+
+    await flow.async_step_setup_mode({"setup_mode": "basic"})
+    result = await flow.async_step_basic_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_DAILY_DIGEST_ENABLED: False,
+            CONF_SENTINEL_DAILY_DIGEST_TIME: "08:00:00",
+            CONF_SENTINEL_PERSISTENT_RECORD: True,
+        }
+    )
+
+    data = result.get("data")
+    assert data is not None
+    assert data[CONF_SENTINEL_PERSISTENT_RECORD] is True
+
+
+@pytest.mark.asyncio
+async def test_advanced_setup_stores_the_persistent_record(
+    hass: HomeAssistant,
+) -> None:
+    """Turning the full-text record on in Advanced setup is saved (#922)."""
+    flow = _make_sentinel_flow_for_mode(hass, DummyEntry())
+    payload = _default_payload()
+    payload[CONF_SENTINEL_AUTONOMY_LEVEL] = str(payload[CONF_SENTINEL_AUTONOMY_LEVEL])
+    payload[CONF_SENTINEL_PERSISTENT_RECORD] = True
+
+    result = await flow.async_step_settings(payload)
+
+    assert result.get("type") == "create_entry"
+    data = result.get("data") or {}
+    assert data[CONF_SENTINEL_PERSISTENT_RECORD] is True
+
+
+def test_a_sentinel_without_the_record_key_resolves_to_off() -> None:
+    """Subentries saved before #922 have no key; the record stays off."""
+    entry = DummyEntry(options={})
+    sentinel = DummySubentry(
+        "sentinel1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {CONF_SENTINEL_ENABLED: True},
+    )
+    entry.subentries[sentinel.subentry_id] = sentinel
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_SENTINEL_PERSISTENT_RECORD] is False
 
 
 @pytest.mark.asyncio

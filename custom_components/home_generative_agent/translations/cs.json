@@ -251,6 +251,7 @@
             "sentinel_enabled": "Povolit upozornění na anomálie",
             "sentinel_daily_digest_enabled": "Povolit denní souhrn oznámení",
             "sentinel_daily_digest_time": "Čas denního souhrnu (HH:MM:SS)",
+            "sentinel_persistent_record": "Uchovat plný text každého odeslaného upozornění v oznámeních Home Assistant",
             "critical_action_pin": "PIN pro zvýšení úrovně (volitelné, 4-10 číslic)",
             "notify_service": "Oznamovací služba (volitelné)"
           }
@@ -293,6 +294,7 @@
             "sentinel_runtime_override_ttl_minutes": "Doba platnosti změny autonomie (minuty)",
             "sentinel_daily_digest_enabled": "Povolit denní souhrn oznámení",
             "sentinel_daily_digest_time": "Čas denního souhrnu (HH:MM:SS)",
+            "sentinel_persistent_record": "Uchovat plný text každého odeslaného upozornění v oznámeních Home Assistant",
             "sentinel_quiet_hours_start": "Začátek nočního klidu (potlačí vybrané závažnosti)",
             "sentinel_quiet_hours_end": "Konec nočního klidu",
             "sentinel_quiet_hours_severities": "Závažnosti potlačené během nočního klidu",

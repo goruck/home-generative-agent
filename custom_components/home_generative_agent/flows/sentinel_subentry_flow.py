@@ -64,6 +64,7 @@ from ..const import (  # noqa: TID252
     CONF_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
     CONF_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN,
     CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
+    CONF_SENTINEL_PERSISTENT_RECORD,
     CONF_SENTINEL_QUIET_HOURS_END,
     CONF_SENTINEL_QUIET_HOURS_SEVERITIES,
     CONF_SENTINEL_QUIET_HOURS_START,
@@ -105,6 +106,7 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
     RECOMMENDED_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN,
     RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
+    RECOMMENDED_SENTINEL_PERSISTENT_RECORD,
     RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
     RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     RECOMMENDED_SENTINEL_RESPONSE_LANGUAGE,
@@ -598,6 +600,7 @@ def _default_payload() -> dict[str, Any]:
         ),
         CONF_SENTINEL_DAILY_DIGEST_ENABLED: RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED,
         CONF_SENTINEL_DAILY_DIGEST_TIME: RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME,
+        CONF_SENTINEL_PERSISTENT_RECORD: RECOMMENDED_SENTINEL_PERSISTENT_RECORD,
         # Quiet-hours start/end default to absent (feature disabled).
         CONF_SENTINEL_QUIET_HOURS_SEVERITIES: list(
             RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES
@@ -908,6 +911,15 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     )
                 ),
             ): TimeSelector(),
+            vol.Required(
+                CONF_SENTINEL_PERSISTENT_RECORD,
+                default=bool(
+                    payload.get(
+                        CONF_SENTINEL_PERSISTENT_RECORD,
+                        RECOMMENDED_SENTINEL_PERSISTENT_RECORD,
+                    )
+                ),
+            ): BooleanSelector(),
             vol.Optional(
                 CONF_SENTINEL_QUIET_HOURS_START,
                 default=_quiet_hour_str(payload, CONF_SENTINEL_QUIET_HOURS_START),
@@ -1092,6 +1104,15 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     )
                 ),
             ): TimeSelector(),
+            vol.Required(
+                CONF_SENTINEL_PERSISTENT_RECORD,
+                default=bool(
+                    payload.get(
+                        CONF_SENTINEL_PERSISTENT_RECORD,
+                        RECOMMENDED_SENTINEL_PERSISTENT_RECORD,
+                    )
+                ),
+            ): BooleanSelector(),
             vol.Optional(
                 CONF_CRITICAL_ACTION_PIN,
                 description={"suggested_value": ""},
@@ -1187,6 +1208,12 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             user_input.get(
                 CONF_SENTINEL_DAILY_DIGEST_TIME,
                 RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME,
+            )
+        )
+        data[CONF_SENTINEL_PERSISTENT_RECORD] = bool(
+            user_input.get(
+                CONF_SENTINEL_PERSISTENT_RECORD,
+                RECOMMENDED_SENTINEL_PERSISTENT_RECORD,
             )
         )
 

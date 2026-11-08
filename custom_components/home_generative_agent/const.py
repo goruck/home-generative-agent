@@ -387,6 +387,16 @@ CONF_SENTINEL_DAILY_DIGEST_TIME = "sentinel_daily_digest_time"
 RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED: bool = False
 RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME: str = "08:00:00"
 
+# ---- Sentinel full-text record (#922) ----
+# A mobile push is capped at MAX_MOBILE_MESSAGE_CHARS and scrolls away. On =
+# an alert sent to a notify service also gets its full text as a Home
+# Assistant persistent notification, except network / HA-security findings
+# and a notify service that already is a persistent notification. Off by
+# default so an upgrade does not start filling the notification panel of
+# installs that already get pushes.
+CONF_SENTINEL_PERSISTENT_RECORD = "sentinel_persistent_record"
+RECOMMENDED_SENTINEL_PERSISTENT_RECORD: bool = False
+
 # ---- Sentinel network security audit (docs/network-security-plan.md) ----
 # Master switch for the network section of the snapshot and every network /
 # HA-security rule. Off = the section carries no capabilities, so the rules
