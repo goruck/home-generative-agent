@@ -295,6 +295,7 @@
             "sentinel_daily_digest_enabled": "启用每日摘要通知",
             "sentinel_daily_digest_time": "每日摘要时间（HH:MM:SS）",
             "sentinel_persistent_record": "同时在 Home Assistant 通知中保留每条推送提醒的完整文本",
+            "sentinel_outdoor_temperature_entity": "室外温度实体（供暖或制冷解释功率警报时显示）",
             "sentinel_quiet_hours_start": "免打扰开始时间（屏蔽所选的严重级别）",
             "sentinel_quiet_hours_end": "免打扰结束时间",
             "sentinel_quiet_hours_severities": "免打扰时段屏蔽的严重级别",
@@ -305,6 +306,7 @@
             "notify_service": "Sentinel 通知服务（可选）"
           },
           "data_description": {
+            "sentinel_outdoor_temperature_entity": "可选。用于在供暖或制冷解释功率警报时显示温度的天气实体或室外温度传感器。留空时使用第一个天气实体。",
             "explain_enabled": "让模型撰写每条提醒的措辞，而不是使用规则自带的固定摘要。这只改变提醒的写法——不影响你是否会收到提醒，那是上面的 LLM 过滤决定的。每条实际发出的提醒会多一次模型调用；它在过滤之后运行，所以被屏蔽的异常不会走到这一步。Home Assistant 与网络安全提醒、以及警报解除相关的提醒始终保持原有的确切措辞，不受影响。在下面设置异常说明的语言，即可让这些措辞用其他语言撰写。默认关闭。",
             "sentinel_response_language": "通知中由 LLM 撰写的异常说明所用的语言，例如 'Chinese'。留空则为英文。新自动提议候选的标题/摘要，以及过滤的 decision/reason_code/summary 不受影响——这些由代码解析，始终保持英文。",
             "sentinel_rule_entity_exclusions_all": "选择 Sentinel 在任何地方都应忽略的实体——例如触控面板上只是镜像另一个实体状态的模板锁。被排除的实体会从所有规则的异常中去掉，也不再唤醒 Sentinel，因此涉及它们的真实异常只会在下一次轮询时（默认 5 分钟）被发现。不要排除你仍希望即时收到提醒的摄像头、锁或报警面板。",

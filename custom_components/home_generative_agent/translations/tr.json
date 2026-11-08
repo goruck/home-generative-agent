@@ -237,6 +237,7 @@
             "sentinel_daily_digest_enabled": "Günlük özet bildirimini etkinleştir",
             "sentinel_daily_digest_time": "Günlük özet saati (SS:DD:SN)",
             "sentinel_persistent_record": "Gönderilen her uyarının tam metnini Home Assistant bildirimlerinde de sakla",
+            "sentinel_outdoor_temperature_entity": "Outdoor temperature entity (shown when heating or cooling explains a power alert)",
             "sentinel_quiet_hours_start": "Sessiz saatler başlangıcı (seçili önem düzeylerini bastırır)",
             "sentinel_quiet_hours_end": "Sessiz saatler bitişi",
             "sentinel_quiet_hours_severities": "Sessiz saatlerde bastırılan önem düzeyleri",

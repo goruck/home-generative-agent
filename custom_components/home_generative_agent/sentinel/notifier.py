@@ -54,6 +54,10 @@ from custom_components.home_generative_agent.const import (
     SNOOZE_PERMANENT,
 )
 from custom_components.home_generative_agent.core.utils import extract_final
+from custom_components.home_generative_agent.sentinel.hvac_context import (
+    hvac_explained_by,
+    outdoor_reading,
+)
 from custom_components.home_generative_agent.sentinel.models import (
     RULE_NAMED_TEMPLATES,
     SEMANTIC_KEY_SLUG_PREFIX,
@@ -1142,7 +1146,9 @@ def _is_power_class_evidence(ev: dict[str, Any]) -> bool:
 
 
 def _appliance_power_duration_mobile_message(
-    finding: AnomalyFinding, hass: HomeAssistant | None = None
+    finding: AnomalyFinding,
+    hass: HomeAssistant | None = None,
+    cap: int | None = MAX_MOBILE_MESSAGE_CHARS,
 ) -> str:
     """Deterministic mobile copy for appliance_power_duration."""
     ev = finding.evidence
@@ -1176,15 +1182,57 @@ def _appliance_power_duration_mobile_message(
         else notif_msg(hass, "body_threshold_unknown")
     )
 
+    note = _hvac_note(ev, hass)
     msg = notif_msg(
         hass,
-        "body_appliance_power",
+        "body_appliance_power_explained" if note else "body_appliance_power",
         appliance=appliance,
         power=power_str,
         duration=dur_str,
         threshold=thr_str,
+        note=note or "",
     )
-    return msg[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
+    return _cap_keeping_note(msg, note, cap)
+
+
+def _cap_keeping_note(msg: str, note: str | None, cap: int | None) -> str:
+    """
+    Cut *msg* to *cap* characters, keeping the heating note it ends with (#922).
+
+    The note is why the alert is likely expected; a long device name must not
+    cut it off mid-sentence. No cap (the full-text record) keeps everything.
+    """
+    if cap is None or len(msg) <= cap:
+        return msg.rstrip()
+    if note and msg.endswith(note) and len(note) < cap - 1:
+        head = msg[: len(msg) - len(note)].rstrip()
+        return f"{head[: cap - len(note) - 1].rstrip()} {note}"
+    return msg[:cap].rstrip()
+
+
+def _hvac_note(ev: dict[str, Any], hass: HomeAssistant | None = None) -> str | None:
+    """
+    Return "Likely from heating, 2 °C outside." for an explained finding (#922).
+
+    None when heating or cooling does not explain the finding. The unit is
+    one of two fixed strings (see hvac_context.outdoor_reading), never text
+    taken from an entity.
+    """
+    explained = hvac_explained_by(ev)
+    if explained is None:
+        return None
+    reading = outdoor_reading(ev)
+    outdoor = (
+        notif_msg(hass, "hvac_outdoor", temp=f"{reading[0]} {reading[1]}")
+        if reading is not None
+        else ""
+    )
+    return notif_msg(
+        hass,
+        "body_hvac_expected",
+        demand=notif_msg(hass, f"hvac_demand_{explained}"),
+        outdoor=outdoor,
+    )
 
 
 def _build_subtitle(
@@ -1605,7 +1653,9 @@ def _alarm_disarmed_open_entry_mobile_message(
 
 
 def _baseline_deviation_mobile_message(
-    finding: AnomalyFinding, hass: HomeAssistant | None = None
+    finding: AnomalyFinding,
+    hass: HomeAssistant | None = None,
+    cap: int | None = MAX_MOBILE_MESSAGE_CHARS,
 ) -> str:
     """Deterministic mobile copy for baseline_deviation and time_of_day_anomaly."""
     ev = finding.evidence
@@ -1639,7 +1689,10 @@ def _baseline_deviation_mobile_message(
         # ABSENCE is the legacy signal — a present-but-empty unit means a
         # genuinely unitless sensor, where fabricating a unit would be wrong.
         unit = "kWh" if "energy" in str(ev.get("entity_id") or "") else "W"
-    cta = notif_msg(hass, "body_cta_appliance" if is_power else "body_cta_worth")
+    note = _hvac_note(ev, hass)
+    cta = note or notif_msg(
+        hass, "body_cta_appliance" if is_power else "body_cta_worth"
+    )
 
     is_below = direction == "below"
     direction_word = notif_msg(hass, "body_dir_below" if is_below else "body_dir_above")
@@ -1692,7 +1745,7 @@ def _baseline_deviation_mobile_message(
             direction=direction_word,
             cta=cta,
         )
-    return msg[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
+    return _cap_keeping_note(msg, note, cap)
 
 
 def _age_phrase(hass: HomeAssistant | None, noun: str, count: int) -> str:
@@ -2466,6 +2519,8 @@ def _mobile_message(
     ):
         return deterministic
     if explanation:
+        # The explanation is in the response language and is told about
+        # heating already: no fixed note in another language here (#922).
         text = _normalize_text(explanation)
         if text and len(text) <= MAX_MOBILE_MESSAGE_CHARS:
             return text
@@ -2499,10 +2554,23 @@ def _persistent_message(
     if explanation:
         text = _normalize_text(explanation)
         if text:
+            if (note := _hvac_note(finding.evidence, hass)) and note not in text:
+                # The model's prose (or its compact fallback) may not say why
+                # the draw is likely expected; the fixed note does (#922).
+                text = f"{text}\n\n{note}"
             return escape_markdown(text)
 
+    # The record is the full text: no push length cap.
     if finding.type == "appliance_power_duration":
-        return escape_markdown(_appliance_power_duration_mobile_message(finding, hass))
+        return escape_markdown(
+            _appliance_power_duration_mobile_message(finding, hass, cap=None)
+        )
+    if hvac_explained_by(finding.evidence) is not None:
+        # A power deviation heating or cooling explains: the same body as the
+        # push, so the record says why too (#922).
+        return escape_markdown(
+            _baseline_deviation_mobile_message(finding, hass, cap=None)
+        )
 
     # The device the finding is about first; the context it also carries
     # (an alarm panel, the presence entities) after it (#731).

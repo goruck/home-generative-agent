@@ -240,6 +240,14 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "body_noun_reading": "reading",
         "body_cta_appliance": "Check appliance.",
         "body_cta_worth": "Worth checking.",
+        "body_appliance_power_explained": (
+            "{appliance} drew {power} {duration}, {threshold}. {note}"
+        ),
+        "body_hvac_expected": "Likely from {demand}{outdoor}.",
+        "hvac_demand_heating": "heating",
+        "hvac_demand_cooling": "cooling",
+        "hvac_demand_heating_and_cooling": "heating and cooling",
+        "hvac_outdoor": ", {temp} outside",
         "body_stale_person": (
             "{name}'s location tracking has been outdated for {age}. "
             "Check if their phone is on and reachable."
@@ -481,6 +489,14 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "body_noun_reading": "hodnota",
         "body_cta_appliance": "Zkontrolujte spotřebič.",
         "body_cta_worth": "Stojí za kontrolu.",
+        "body_appliance_power_explained": (
+            "{appliance}: {power}, {duration} ({threshold}). {note}"
+        ),
+        "body_hvac_expected": "Nejspíš kvůli {demand}{outdoor}.",
+        "hvac_demand_heating": "vytápění",
+        "hvac_demand_cooling": "chlazení",
+        "hvac_demand_heating_and_cooling": "vytápění a chlazení",
+        "hvac_outdoor": ", venku {temp}",
         "body_stale_person": (
             "Poloha osoby {name} se neaktualizuje už {age}. "
             "Zkontrolujte, zda je telefon zapnutý a dostupný."
@@ -691,6 +707,14 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "body_noun_reading": "读数",
         "body_cta_appliance": "请检查电器。",
         "body_cta_worth": "值得检查一下。",
+        "body_appliance_power_explained": (
+            "{appliance}{duration}功率{power}，{threshold}。{note}"
+        ),
+        "body_hvac_expected": "可能是{demand}所致{outdoor}。",
+        "hvac_demand_heating": "供暖",
+        "hvac_demand_cooling": "制冷",
+        "hvac_demand_heating_and_cooling": "供暖和制冷",
+        "hvac_outdoor": "，室外 {temp}",
         "body_stale_person": (
             "{name}的位置追踪已经{age}没有更新。请检查其手机是否开机并能连上网络。"
         ),

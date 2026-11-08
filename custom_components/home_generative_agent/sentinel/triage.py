@@ -13,6 +13,10 @@ Design constraints (from sentinel_plan.md §6, §7)
     ``is_night``, ``anyone_home``, ``recognized_people_count`` (enrolled
     identities only), ``unknown_person_present``,
     ``last_changed_age_seconds``.
+  - Only when heating or cooling explains a power finding (#922): the
+    fixed word ``hvac_explained_by``, ``outdoor_temperature_C``/``_F``, and
+    the bounded numbers ``deviation_pct``, ``power_w``, ``duration_min`` and
+    ``threshold_min``.
   - **Never** included: raw entity state values, attribute strings, area
     names, or free-form evidence text.
 * Output schema: ``decision`` (``notify``|``suppress``), ``reason_code``,
@@ -49,6 +53,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -68,12 +73,19 @@ from custom_components.home_generative_agent.core.utils import (
     sentinel_calls_gated,
     wait_sentinel_call_gap,
 )
+from custom_components.home_generative_agent.sentinel.hvac_context import (
+    hvac_explained_by,
+    outdoor_reading,
+)
 from custom_components.home_generative_agent.sentinel.logging_utils import (
     RepeatingLogLimiter,
 )
 from custom_components.home_generative_agent.sentinel.models import (
     enrolled_people,
     has_unknown_person,
+)
+from custom_components.home_generative_agent.sentinel.power_units import (
+    watts_per_unit,
 )
 from custom_components.home_generative_agent.sentinel.redaction import (
     redact_network_identifiers,
@@ -123,6 +135,14 @@ _ALLOWED_EVIDENCE_KEYS: frozenset[str] = frozenset(
         "recognized_people_count",
         "unknown_person_present",
         "last_changed_age_seconds",
+        # Explained power findings only (#922).
+        "hvac_explained_by",
+        "outdoor_temperature_C",
+        "outdoor_temperature_F",
+        "deviation_pct",
+        "power_w",
+        "duration_min",
+        "threshold_min",
     }
 )
 
@@ -145,6 +165,11 @@ Rules:
 - "triage_confidence" reflects your confidence in this specific decision
   (0=uncertain, 1=certain).
 - HARD LIMIT: "summary" must be under 120 characters. Stop writing when you reach it.
+- hvac_explained_by means a thermostat is calling for heating or cooling, so
+  some extra power draw on this load is expected. Weigh its size: a draw far
+  above normal (deviation_pct), unusually high (power_w), or running many
+  times longer than the threshold (duration_min vs threshold_min) can still
+  be a fault, and should be notified.
 - If you are uncertain, default to "notify".
 - Return only the JSON object. Do not explain your reasoning."""
 
@@ -366,6 +391,39 @@ class SentinelTriageService:
 # ---------------------------------------------------------------------------
 
 
+# Bounded figures of a power finding's size, for an explained finding (#922).
+_MAGNITUDE_KEYS = ("deviation_pct", "power_w", "duration_min", "threshold_min")
+_MAGNITUDE_MAX = 100_000
+
+
+def _power_magnitude(evidence: dict[str, Any]) -> list[str]:
+    """Return how big a power finding is, as allowlisted ``key: number`` lines."""
+    figures = dict(evidence)
+    if "power_w" not in figures:
+        # A deviation finding carries its reading in its own unit: in watts,
+        # so 200 W and 20 kW never read alike (a zero baseline gives both
+        # deviation_pct 100).
+        factor = watts_per_unit(str(evidence.get("unit_of_measurement") or ""))
+        current = evidence.get("current_value")
+        if (
+            factor is not None
+            and isinstance(current, (int, float))
+            and not isinstance(current, bool)
+        ):
+            figures["power_w"] = current * factor
+    lines: list[str] = []
+    for key in _MAGNITUDE_KEYS:
+        value = figures.get(key)
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+        ):
+            bounded = max(-_MAGNITUDE_MAX, min(_MAGNITUDE_MAX, value))
+            lines.append(f"{key}: {bounded:.0f}")
+    return lines
+
+
 def _build_prompt(
     finding: AnomalyFinding,
     snapshot: FullStateSnapshot,
@@ -407,6 +465,16 @@ def _build_prompt(
         val = raw_evidence["last_changed_age_seconds"]
         if isinstance(val, (int, float)):
             evidence_items.append(f"last_changed_age_seconds: {val:.0f}")
+
+    # Heating or cooling demand that explains a power finding (#922): a fixed
+    # word and numbers, never entity names or free text. The size of the draw
+    # goes with it, so the model can tell routine heating load from a fault.
+    if (explained := hvac_explained_by(raw_evidence)) is not None:
+        evidence_items.append(f"hvac_explained_by: {explained}")
+        if (reading := outdoor_reading(raw_evidence)) is not None:
+            unit = "F" if reading[1] == "°F" else "C"
+            evidence_items.append(f"outdoor_temperature_{unit}: {reading[0]}")
+        evidence_items.extend(_power_magnitude(raw_evidence))
 
     evidence_block = ""
     if evidence_items:

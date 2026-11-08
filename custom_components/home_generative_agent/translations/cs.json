@@ -295,6 +295,7 @@
             "sentinel_daily_digest_enabled": "Povolit denní souhrn oznámení",
             "sentinel_daily_digest_time": "Čas denního souhrnu (HH:MM:SS)",
             "sentinel_persistent_record": "Uchovat plný text každého odeslaného upozornění v oznámeních Home Assistant",
+            "sentinel_outdoor_temperature_entity": "Entita venkovní teploty (zobrazí se, když výkonové upozornění vysvětluje vytápění nebo chlazení)",
             "sentinel_quiet_hours_start": "Začátek nočního klidu (potlačí vybrané závažnosti)",
             "sentinel_quiet_hours_end": "Konec nočního klidu",
             "sentinel_quiet_hours_severities": "Závažnosti potlačené během nočního klidu",
@@ -305,6 +306,7 @@
             "notify_service": "Sentinel oznamovací služba (volitelné)"
           },
           "data_description": {
+            "sentinel_outdoor_temperature_entity": "Volitelné. Entita počasí nebo senzor venkovní teploty pro teplotu, která se zobrazí, když výkonové upozornění vysvětluje vytápění nebo chlazení. Když zůstane prázdné, použije se první entita počasí.",
             "explain_enabled": "Nechá model formulovat znění každého upozornění místo pevného shrnutí daného pravidla. Mění to pouze to, jak se upozornění čte -- nikdy to, zda ho dostanete; o tom rozhoduje LLM triáž výše. Stojí to jedno volání modelu na každé skutečně odeslané upozornění a probíhá až po triáži, takže potlačený nález se sem nikdy nedostane. Upozornění na zabezpečení Home Assistant a sítě a upozornění na vypnutí alarmu si vždy ponechají své přesné znění a nejsou tím ovlivněna. Chcete-li toto znění v jiném jazyce, nastavte níže jazyk vysvětlení nálezu. Ve výchozím stavu vypnuto.",
             "sentinel_response_language": "Jazyk, ve kterém LLM generuje vysvětlení nálezu zobrazované v oznámeních, např. „Czech“. Ponechte prázdné pro angličtinu. Název/shrnutí discovery kandidátů a rozhodnutí/reason_code/shrnutí triáže tím nejsou ovlivněny -- ta jsou strojově zpracovávána a vždy zůstávají v angličtině.",
             "sentinel_rule_entity_exclusions_all": "Vyberte entity, které má Sentinel všude ignorovat -- např. šablonový zámek na dotykovém panelu, který jen zrcadlí stav jiné entity. Vyloučené entity se vyřadí z nálezů všech pravidel a už Sentinel neprobouzejí, takže skutečná anomálie, která se jich týká, se zachytí až při dalším cyklu (výchozí 5 minut). Nevylučujte kameru, zámek ani alarm, u kterých chcete okamžitá upozornění.",
