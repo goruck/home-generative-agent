@@ -7,6 +7,10 @@ from annotated_types import Ge, Le
 DOMAIN = "home_generative_agent"
 HGA_CARD_STATIC_PATH = "/hga-card"
 HGA_CARD_STATIC_PATH_LEGACY = "/hga-enroll-card"
+HGA_FRONTEND_CARDS = (
+    "hga-enroll-card.js",
+    "hga-proposals-card.js",
+)
 
 CONFIG_ENTRY_VERSION = 6
 # Minor bumps keep an entry loadable by an older release (issue #949).

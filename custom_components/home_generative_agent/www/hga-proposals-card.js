@@ -1622,13 +1622,13 @@ class HgaProposalsCard extends HTMLElement {
 
 }
 
+// HGA loads this file itself; a hand-added Resources entry would load it again.
 if (!customElements.get("hga-proposals-card")) {
   customElements.define("hga-proposals-card", HgaProposalsCard);
+  window.customCards = window.customCards || [];
+  window.customCards.push({
+    type: "hga-proposals-card",
+    name: "HGA Proposals",
+    description: "Review discovery candidates, promote drafts, and approve/reject rules.",
+  });
 }
-
-window.customCards = window.customCards || [];
-window.customCards.push({
-  type: "hga-proposals-card",
-  name: "HGA Proposals",
-  description: "Review discovery candidates, promote drafts, and approve/reject rules.",
-});

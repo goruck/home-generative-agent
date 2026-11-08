@@ -525,7 +525,7 @@ The file must be inside Home Assistant's `/media` folder so it is accessible to 
 
 ### Enroll via Dashboard Card
 
-After registering the `hga-enroll-card.js` resource (see [Installation](installation.md#optional-apps)), add the card to any dashboard:
+HGA loads the card itself. Add it to any dashboard:
 
 ```yaml
 type: custom:hga-enroll-card
