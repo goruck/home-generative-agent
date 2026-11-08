@@ -7,6 +7,8 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ## [Unreleased]
 
+## [3.45.1] - 2026-11-08
+
 ### Fixed
 
 - **Claude Opus 4.7 works with Thinking on** ([#932](https://github.com/goruck/home-generative-agent/issues/932)). Claude Opus 4.7 is offered for every Anthropic feature, but it no longer accepts the extended-thinking request HGA sent (`budget_tokens`), so with **Thinking** on every request to it failed. It now gets adaptive thinking (`{"type": "adaptive"}`) with an effort level read from the thinking budget (up to 2048 `low`, up to 8192 `medium`, otherwise `high`). Opus 4.7 also rejects `temperature`, `top_p` and `top_k` on any API version, so they are no longer sent to it, with older `anthropic` SDKs too (Home Assistant before 2026.11). The same applies to later Claude models. Sonnet 4.6 and Haiku 4.5 keep extended thinking with a budget.
