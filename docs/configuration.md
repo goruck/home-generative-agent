@@ -235,6 +235,8 @@ It shares the exclusion picker's contract: empty is the default (nothing extra i
 - **The tool must exist this turn.** An inclusion is reconciled against the live tool universe like every other candidate; a tool the server no longer advertises is skipped, not invented.
 - **Inclusions survive the read-only strip.** On read-only state questions ("which doors are open?") the agent normally drops actuation tools from the turn's list; an always-included actuation tool stays bound anyway — always means always. The critical-action PIN still gates any critical call at execution time, and at most 16 inclusions are honoured per turn.
 
+HGA's own long-term memory tool (`upsert_memory`) is included on every turn without being ticked, so a "remember this" request can always be saved. Like HGA's other built-in tools, it is not listed in either picker.
+
 Each inclusion adds its schema and description to the prompt on every turn, so keep the list short — it is meant for the one or two fallback tools (typically web search) that similarity ranking systematically misses, not as a way around retrieval.
 
 A **Tool Index Status** diagnostic sensor (`sensor.tool_index_status`) shows the current index state:

@@ -507,6 +507,52 @@ async def test_retrieve_tools_appends_an_included_tool_rag_missed() -> None:
     assert "HassBroadcast" in result["tool_routing_map"]
 
 
+def _memory_config(options: dict[str, Any]) -> RunnableConfig:
+    config = _config(options=options, live={"assist": ["HassBroadcast"]})
+    config["configurable"]["langchain_tools"] = {"upsert_memory": MagicMock()}
+    return config
+
+
+@pytest.mark.asyncio
+async def test_memory_tool_is_offered_when_rag_misses_it() -> None:
+    """A request to remember something must be able to save it on every turn."""
+    store = _store(
+        [_search_item("HassBroadcast", score=0.6)],
+        {"hga_local::upsert_memory": _index_row("upsert_memory", "hga_local")},
+    )
+
+    result = await _retrieve_tools(
+        _state("Запомни, что я покормил рыб"),
+        _memory_config({"llm_hass_api": ["assist"], "tool_retrieval_limit": 1}),
+        store=store,
+    )
+
+    assert result["tool_routing_map"].get("upsert_memory") == "hga_local"
+    assert "HassBroadcast" in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_excluded_memory_tool_is_not_offered() -> None:
+    """An exclusion still beats the built-in offer."""
+    store = _store(
+        [_search_item("HassBroadcast", score=0.6)],
+        {"hga_local::upsert_memory": _index_row("upsert_memory", "hga_local")},
+    )
+
+    result = await _retrieve_tools(
+        _state("Запомни, что я покормил рыб"),
+        _memory_config(
+            {
+                "llm_hass_api": ["assist"],
+                CONF_TOOL_EXCLUSIONS: {"hga_local": ["upsert_memory"]},
+            }
+        ),
+        store=store,
+    )
+
+    assert "upsert_memory" not in result["tool_routing_map"]
+
+
 @pytest.mark.asyncio
 async def test_included_tool_binds_outside_the_retrieval_limit() -> None:
     """A limit already consumed by RAG selections cannot squeeze the inclusion out."""
