@@ -63,6 +63,7 @@ from ..const import (  # noqa: TID252
     CONF_SENTINEL_NETWORK_GUEST_IDLE_DAYS,
     CONF_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
     CONF_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN,
+    CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY,
     CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     CONF_SENTINEL_PERSISTENT_RECORD,
     CONF_SENTINEL_QUIET_HOURS_END,
@@ -426,6 +427,7 @@ def _carry_basic_setup_survivors(
       applies it after this runs.
     * the autonomy level and its override duration (#783): what the user chose
       Sentinel to do, not a tuning of how.
+    * the outdoor temperature entity (#922), picked by hand.
 
     Both maps are rebuilt rather than assigned: the values are mutable lists that
     would otherwise stay aliased to the previous subentry's stored data.
@@ -451,6 +453,12 @@ def _carry_basic_setup_survivors(
     exclusions = _exclusions_map(stored)
     if exclusions:
         data[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] = exclusions
+
+    # The outdoor temperature entity is picked by hand; no default rebuilds it
+    # (#922).
+    outdoor = stored.get(CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY)
+    if isinstance(outdoor, str) and outdoor:
+        data[CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY] = outdoor
 
     links = stored.get(CONF_SENTINEL_CAMERA_ENTRY_LINKS)
     if isinstance(links, dict):
@@ -626,6 +634,7 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
 
     def _schema(self, payload: dict[str, Any]) -> vol.Schema:
         """Build Sentinel form schema from payload."""
+        outdoor_entity = payload.get(CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY)
         schema: dict[Any, Any] = {
             vol.Required(
                 CONF_SENTINEL_ENABLED,
@@ -920,6 +929,20 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     )
                 ),
             ): BooleanSelector(),
+            vol.Optional(
+                CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY,
+                # Suggested only when set: an empty one fails the selector.
+                description=(
+                    {"suggested_value": outdoor_entity} if outdoor_entity else None
+                ),
+            ): EntitySelector(
+                EntitySelectorConfig(
+                    filter=[
+                        {"domain": "weather"},
+                        {"domain": "sensor", "device_class": "temperature"},
+                    ]
+                )
+            ),
             vol.Optional(
                 CONF_SENTINEL_QUIET_HOURS_START,
                 default=_quiet_hour_str(payload, CONF_SENTINEL_QUIET_HOURS_START),
@@ -1289,6 +1312,12 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
 
         data = dict(user_input)
         errors: dict[str, str] = {}
+        outdoor_cleared = not str(
+            data.get(CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY) or ""
+        ).strip()
+        if outdoor_cleared:
+            # Cleared: the first weather entity is used (#922).
+            data.pop(CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY, None)
         notify_service = str(data.get(CONF_NOTIFY_SERVICE, "") or "").strip()
         if notify_service:
             data[CONF_NOTIFY_SERVICE] = notify_service
@@ -1370,6 +1399,9 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             # helper receives a dict and json.dumps() produces valid JSON for the
             # form pre-fill rather than a Python repr string.
             error_payload = {**payload, **data}
+            if outdoor_cleared:
+                # The stored entity must not come back on a redisplay.
+                error_payload.pop(CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY, None)
             if not isinstance(
                 error_payload.get(CONF_SENTINEL_CAMERA_ENTRY_LINKS), dict
             ):

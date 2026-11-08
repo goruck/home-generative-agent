@@ -41,6 +41,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_ENABLED,
     CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
     CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT,
+    CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY,
     CONF_SENTINEL_PERSISTENT_RECORD,
     CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
@@ -279,6 +280,126 @@ def test_a_sentinel_without_the_record_key_resolves_to_off() -> None:
 
     options = resolve_runtime_options(entry)  # type: ignore[arg-type]
     assert options[CONF_SENTINEL_PERSISTENT_RECORD] is False
+
+
+@pytest.mark.asyncio
+async def test_advanced_setup_stores_the_outdoor_temperature_entity(
+    hass: HomeAssistant,
+) -> None:
+    """The outdoor temperature entity picked in Advanced setup is saved (#922)."""
+    flow = _make_sentinel_flow_for_mode(hass, DummyEntry())
+    payload = _default_payload()
+    payload[CONF_SENTINEL_AUTONOMY_LEVEL] = str(payload[CONF_SENTINEL_AUTONOMY_LEVEL])
+    payload[CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY] = "sensor.outdoor_temperature"
+
+    result = await flow.async_step_settings(payload)
+
+    data = result.get("data") or {}
+    assert data[CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY] == (
+        "sensor.outdoor_temperature"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_cleared_outdoor_temperature_entity_is_not_stored(
+    hass: HomeAssistant,
+) -> None:
+    """Cleared, the first weather entity is used: nothing is stored (#922)."""
+    flow = _make_sentinel_flow_for_mode(hass, DummyEntry())
+    payload = _default_payload()
+    payload[CONF_SENTINEL_AUTONOMY_LEVEL] = str(payload[CONF_SENTINEL_AUTONOMY_LEVEL])
+    payload[CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY] = ""
+
+    result = await flow.async_step_settings(payload)
+
+    assert CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY not in (result.get("data") or {})
+
+
+@pytest.mark.asyncio
+async def test_basic_setup_keeps_the_outdoor_temperature_entity(
+    hass: HomeAssistant,
+) -> None:
+    """A Basic re-run does not drop the entity picked in Advanced setup."""
+    flow, update_calls = _sentinel_flow_with_existing(
+        hass,
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY: "weather.home",
+        },
+    )
+
+    await flow.async_step_setup_mode({"setup_mode": "basic"})
+    await flow.async_step_basic_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_DAILY_DIGEST_ENABLED: False,
+            CONF_SENTINEL_DAILY_DIGEST_TIME: "08:00:00",
+        }
+    )
+
+    data = update_calls[0]["data"]
+    assert data[CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY] == "weather.home"
+
+
+@pytest.mark.asyncio
+async def test_the_form_shows_the_stored_outdoor_temperature_entity(
+    hass: HomeAssistant,
+) -> None:
+    """Reopened, the form keeps the stored entity; with none, nothing is shown."""
+    flow = _make_sentinel_flow_for_mode(hass, DummyEntry())
+    payload = _default_payload()
+
+    def _suggested(schema_payload: dict[str, Any]) -> Any:
+        schema = flow._schema(schema_payload)
+        (key,) = [
+            k for k in schema.schema if k == CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY
+        ]
+        return (getattr(key, "description", None) or {}).get("suggested_value")
+
+    assert _suggested(payload) is None
+    payload[CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY] = "weather.home"
+    assert _suggested(payload) == "weather.home"
+
+
+@pytest.mark.asyncio
+async def test_a_cleared_entity_stays_cleared_on_a_redisplay(
+    hass: HomeAssistant,
+) -> None:
+    """Cleared, then another field fails: the old entity must not come back."""
+    flow, _update_calls = _sentinel_flow_with_existing(
+        hass, {CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY: "weather.home"}
+    )
+    payload = _default_payload()
+    payload[CONF_SENTINEL_AUTONOMY_LEVEL] = str(payload[CONF_SENTINEL_AUTONOMY_LEVEL])
+    payload[CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY] = ""
+    payload[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = "{not json"
+
+    result = await flow.async_step_settings(payload)
+
+    assert result.get("type") == "form"
+    data_schema = result.get("data_schema")
+    assert data_schema is not None
+    schema = data_schema.schema
+    (key,) = [k for k in schema if k == CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY]
+    assert (getattr(key, "description", None) or {}).get("suggested_value") is None
+
+
+def test_the_outdoor_temperature_entity_reaches_the_engine_options() -> None:
+    """The resolver copies the setting; without one it is empty (auto)."""
+    entry = DummyEntry(options={})
+    sentinel = DummySubentry(
+        "sentinel1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {CONF_SENTINEL_ENABLED: True},
+    )
+    entry.subentries[sentinel.subentry_id] = sentinel
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY] == ""
+
+    sentinel.data[CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY] = "weather.home"
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY] == "weather.home"
 
 
 @pytest.mark.asyncio

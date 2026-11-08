@@ -243,6 +243,7 @@
             "sentinel_daily_digest_enabled": "Enable daily digest notification",
             "sentinel_daily_digest_time": "Daily digest time (HH:MM:SS)",
             "sentinel_persistent_record": "Also keep each pushed alert's full text in Home Assistant notifications",
+            "sentinel_outdoor_temperature_entity": "Outdoor temperature entity (shown when heating or cooling explains a power alert)",
             "sentinel_quiet_hours_start": "Quiet hours start (suppresses selected severities)",
             "sentinel_quiet_hours_end": "Quiet hours end",
             "sentinel_quiet_hours_severities": "Quiet hours suppressed severities",

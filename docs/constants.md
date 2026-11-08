@@ -420,6 +420,7 @@ The model Sentinel's triage, discovery and explanation calls run on when a **Sen
 | `RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED` | `sentinel_daily_digest_enabled` | `False` | Send a daily push summary of the past 24 hours |
 | `RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME` | `sentinel_daily_digest_time` | `08:00:00` | Local delivery time for the daily digest |
 | `RECOMMENDED_SENTINEL_PERSISTENT_RECORD` | `sentinel_persistent_record` | `False` | Also keep each alert sent to a notify service as a full-text persistent notification, one per anomaly, except network and HA-security findings (#922; see `docs/sentinel.md`) |
+| `RECOMMENDED_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY` | `sentinel_outdoor_temperature_entity` | `""` | Weather entity or temperature sensor for the outdoor temperature in the heating/cooling context of power findings; empty uses the first weather entity (#922; see `docs/sentinel.md`) |
 
 **Code-only:**
 

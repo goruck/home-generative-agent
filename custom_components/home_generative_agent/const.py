@@ -397,6 +397,13 @@ RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME: str = "08:00:00"
 CONF_SENTINEL_PERSISTENT_RECORD = "sentinel_persistent_record"
 RECOMMENDED_SENTINEL_PERSISTENT_RECORD: bool = False
 
+# ---- Sentinel heating/cooling context (#922) ----
+# Weather entity or temperature sensor for the outdoor temperature shown when
+# heating or cooling explains a power finding (#922). Empty: the first
+# weather entity with a temperature.
+CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY = "sentinel_outdoor_temperature_entity"
+RECOMMENDED_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY = ""
+
 # ---- Sentinel network security audit (docs/network-security-plan.md) ----
 # Master switch for the network section of the snapshot and every network /
 # HA-security rule. Off = the section carries no capabilities, so the rules

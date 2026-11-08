@@ -170,7 +170,8 @@ DISPLAY_ONLY_EVIDENCE_KEYS: frozenset[str] = frozenset(
     # times that grow every cycle of one episode (last_changed already marks
     # the episode); hashing them minted a new id per cycle, so the pending
     # prompt never matched and a standing condition re-alerted every type
-    # cooldown (issue #723).
+    # cooldown (issue #723).  "hvac_context" (#922) is added after the id
+    # is minted and carries live temperatures.
     {
         "friendly_name",
         "unit_of_measurement",
@@ -178,6 +179,7 @@ DISPLAY_ONLY_EVIDENCE_KEYS: frozenset[str] = frozenset(
         "summary",
         "duration_hours",
         "age_hours",
+        "hvac_context",
     }
 )
 

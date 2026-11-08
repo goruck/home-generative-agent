@@ -43,6 +43,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_NETWORK_GUEST_IDLE_DAYS,
     CONF_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
     CONF_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN,
+    CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY,
     CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     CONF_SENTINEL_PRESENCE_GRACE_MINUTES,
     CONF_SENTINEL_QUIET_HOURS_END,
@@ -65,6 +66,7 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_NETWORK_GUEST_IDLE_DAYS,
     RECOMMENDED_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN,
     RECOMMENDED_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN,
+    RECOMMENDED_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY,
     RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     RECOMMENDED_SENTINEL_PRESENCE_GRACE_MINUTES,
     RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
@@ -108,6 +110,7 @@ from .execution import (
     executable_actions,
     level_increase_pin_required,
 )
+from .hvac_context import apply_hvac_context
 from .lock_enrichment import async_enrich_lock_last_changed
 from .logging_utils import RepeatingLogLimiter
 from .models import SEVERITY_RANK, AnomalyFinding, CompoundFinding
@@ -2084,6 +2087,7 @@ class SentinelEngine:
 
         if self._rule_entity_exclusions:
             all_findings = self._filter_excluded_findings(all_findings)
+        all_findings = self._with_hvac_context(all_findings, snapshot)
 
         # Whether this run's auth-change finding reached the user: None when
         # there was none, False when suppression/triage/policy stopped it.
@@ -2253,6 +2257,60 @@ class SentinelEngine:
     _GATED_TEMPLATE_IDS: frozenset[str] = frozenset(
         {"baseline_deviation", "time_of_day_anomaly"}
     )
+
+    def _home_temperature_unit(self) -> str:
+        """Return the home's temperature unit, °C or °F (°C if not known)."""
+        units = getattr(getattr(self._hass, "config", None), "units", None)
+        unit = str(getattr(units, "temperature_unit", "") or "")
+        return "°F" if unit.endswith("F") else "°C"
+
+    def _with_hvac_context(
+        self, findings: list[AnomalyFinding], snapshot: FullStateSnapshot
+    ) -> list[AnomalyFinding]:
+        """
+        Explain power findings by heating or cooling demand (#922).
+
+        Context only adds evidence; a failure here, of any kind, returns the
+        findings unchanged rather than lose the run's findings.
+        """
+
+        def _device_climates(entity_id: str) -> list[str]:
+            # Read only when a power finding meets a climate entity.
+            registry = er.async_get(self._hass)
+            entry = registry.async_get(entity_id)
+            if entry is None or entry.device_id is None:
+                return []
+            return [
+                device_entry.entity_id
+                for device_entry in er.async_entries_for_device(
+                    registry, entry.device_id
+                )
+                if device_entry.domain == "climate"
+            ]
+
+        try:
+            result = apply_hvac_context(
+                findings,
+                snapshot,
+                device_climates=_device_climates,
+                outdoor_entity_id=str(
+                    self._options.get(CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY)
+                    or RECOMMENDED_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY
+                ),
+                temperature_unit=self._home_temperature_unit(),
+            )
+        except Exception:  # noqa: BLE001 - enrichment only; never lose findings
+            self._log_limiter.warning(
+                "hvac_context",
+                "Heating and cooling context failed; power findings go out without it.",
+                exc_info=True,
+            )
+            return findings
+        self._log_limiter.recovered(
+            "hvac_context",
+            "Heating and cooling context recovered after %d failed cycle(s).",
+        )
+        return result
 
     def _apply_sustained_gate(
         self,
