@@ -184,6 +184,9 @@ CONF_VOICE_TOOL_ACK_TIMING = "voice_tool_acknowledgement_timing"
 VOICE_ACK_TIMING_TURN_START = "turn_start"
 VOICE_ACK_TIMING_TOOL_CALL = "tool_call"
 VOICE_ACK_TIMINGS = (VOICE_ACK_TIMING_TURN_START, VOICE_ACK_TIMING_TOOL_CALL)
+# Sensors that name the voice a satellite recognized. Each applies to requests
+# from the device it belongs to. Empty means speaker recognition is off.
+CONF_SPEAKER_SENSORS = "speaker_sensors"
 RECOMMENDED_VOICE_ACK_TIMING = VOICE_ACK_TIMING_TURN_START
 DEFAULT_STT_HALLUCINATION_PATTERNS: list[str] = []
 DEFAULT_STT_HALLUCINATION_EXACT_PATTERNS: list[str] = []
@@ -1194,7 +1197,6 @@ Always call tools again with your mistakes corrected. Do not repeat mistakes.
 # stopped both models retrying a correctable
 # error under the rule below. The last sentence only exempts tool results, so
 # the retry rule still governs them.
-SPEAKER_SENSOR_NAME = "Speaker"
 SPEAKER_KNOWN_PROMPT = (
     'Voice recognition identified the current speaker as "{name}". '
     "Use the name only to personalize answers, never to authorize anything."

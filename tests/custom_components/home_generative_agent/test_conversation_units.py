@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 from custom_components.home_generative_agent.const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
     CONF_NOTIFY_SERVICE,
+    CONF_SPEAKER_SENSORS,
     CONF_TOOL_EXCLUSIONS,
     TOOL_SUBSET_PROMPT,
 )
@@ -2245,23 +2246,22 @@ def _speaker_entity(
     state: str | None,
     *,
     persons: list[Any] | None = None,
-    **fields: str,
+    sensors: list[str] | None = None,
+    devices: dict[str, str] | None = None,
 ) -> Any:
-    entry = types.SimpleNamespace(
-        **{
-            "entity_id": "sensor.midi_speaker",
-            "platform": "esphome",
-            "domain": "sensor",
-            "original_name": "Speaker",
-            **fields,
-        }
+    """Entity whose speaker sensors sit on the given devices ("device" by default)."""
+    devices = {"sensor.voice": "device"} if devices is None else devices
+    registry = MagicMock()
+    registry.async_get.side_effect = lambda entity_id: (
+        types.SimpleNamespace(entity_id=entity_id, device_id=devices[entity_id])
+        if entity_id in devices
+        else None
     )
-    monkeypatch.setattr(f"{_CONV}.er.async_get", MagicMock())
-    monkeypatch.setattr(
-        f"{_CONV}.er.async_entries_for_device", MagicMock(return_value=[entry])
+    monkeypatch.setattr(f"{_CONV}.er.async_get", MagicMock(return_value=registry))
+    entity = _render_entity(
+        {CONF_SPEAKER_SENSORS: list(devices) if sensors is None else sensors}
     )
-    entity = _render_entity({})
-    entity.hass.states.get.return_value = (
+    entity.hass.states.get.side_effect = lambda _entity_id: (
         None if state is None else types.SimpleNamespace(state=state)
     )
     entity.hass.states.async_all.return_value = persons or []
@@ -2271,18 +2271,30 @@ def _speaker_entity(
     return entity
 
 
-@pytest.mark.parametrize("platform", ["esphome", "mqtt", "template"])
 async def test_speaker_prompt_names_the_recognized_voice(
-    monkeypatch: pytest.MonkeyPatch, platform: str
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A recognized voice is named, whatever integration publishes it."""
-    entity = _speaker_entity(monkeypatch, "Пётр", platform=platform)
+    """A recognized voice from a picked sensor on the device is named."""
+    entity = _speaker_entity(monkeypatch, "Пётр")
     speaker = await entity._async_speaker("device")
     assert speaker == Speaker(name="Пётр")
     prompt = entity._speaker_prompt(speaker)
     assert '"Пётр"' in prompt
     assert "never to authorize" in prompt
     assert "Home Assistant person" not in prompt
+
+
+async def test_speaker_uses_the_sensor_on_the_requesting_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With a sensor per satellite, each request reads its own satellite's."""
+    entity = _speaker_entity(
+        monkeypatch,
+        "Пётр",
+        devices={"sensor.kitchen_voice": "kitchen", "sensor.hall_voice": "hall"},
+    )
+    await entity._async_speaker("hall")
+    entity.hass.states.get.assert_called_once_with("sensor.hall_voice")
 
 
 @pytest.mark.parametrize("value", ["Иван", "иван", "ivan", "person.ivan"])
@@ -2324,13 +2336,19 @@ async def test_speaker_prompt_without_a_recognized_voice(
 
 
 @pytest.mark.parametrize(
-    "other", [{"domain": "binary_sensor"}, {"original_name": "Volume"}]
+    ("sensors", "devices"),
+    [
+        ([], {"sensor.voice": "device"}),
+        (["sensor.voice"], {"sensor.voice": "other"}),
+        (["sensor.gone"], {}),
+    ],
+    ids=["none picked", "other device", "not in registry"],
 )
-async def test_speaker_prompt_ignores_other_entities(
-    monkeypatch: pytest.MonkeyPatch, other: dict[str, str]
+async def test_speaker_needs_a_picked_sensor_on_the_device(
+    monkeypatch: pytest.MonkeyPatch, sensors: list[str], devices: dict[str, str]
 ) -> None:
-    """Only a speaker text sensor on the device counts."""
-    entity = _speaker_entity(monkeypatch, "Иван", **other)
+    """Without a picked sensor on the requesting device, nothing is said."""
+    entity = _speaker_entity(monkeypatch, "Иван", sensors=sensors, devices=devices)
     assert await entity._async_speaker("device") is None
     assert entity._speaker_prompt(None) == ""
 

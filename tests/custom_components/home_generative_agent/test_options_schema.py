@@ -13,6 +13,7 @@ from homeassistant.const import CONF_LLM_HASS_API
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers.selector import (
     ConstantSelector,
+    EntitySelector,
     NumberSelector,
     TextSelector,
 )
@@ -26,6 +27,7 @@ from custom_components.home_generative_agent.const import (
     CONF_CRITICAL_ACTION_PIN,
     CONF_CRITICAL_ACTION_PIN_ENABLED,
     CONF_SCHEMA_FIRST_YAML,
+    CONF_SPEAKER_SENSORS,
     CONF_STT_HALLUCINATION_EXACT_PATTERNS,
     CONF_STT_HALLUCINATION_PATTERNS,
     CONF_VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_S,
@@ -344,6 +346,23 @@ async def test_clearing_voice_acknowledgement_turns_it_off(hass: Any) -> None:
     assert CONF_VOICE_TOOL_ACK not in await _submit_options(hass, stored, {})
     kept = await _submit_options(hass, stored, {CONF_VOICE_TOOL_ACK: "One moment."})
     assert kept[CONF_VOICE_TOOL_ACK] == "One moment."
+
+
+@pytest.mark.asyncio
+async def test_speaker_sensors_are_offered_and_can_be_cleared(hass: Any) -> None:
+    """Any sensor can be picked; an emptied or omitted picker turns it off."""
+    schema = await _schema_for_options(hass, {})
+    selector = cast("Any", schema[_schema_key(schema, CONF_SPEAKER_SENSORS)])
+    assert isinstance(selector, EntitySelector)
+    assert selector.config["multiple"] is True
+
+    stored = {CONF_SPEAKER_SENSORS: ["sensor.kitchen_voice"]}
+    picked = {CONF_SPEAKER_SENSORS: ["sensor.hall_voice"]}
+    assert (await _submit_options(hass, stored, picked))[CONF_SPEAKER_SENSORS] == [
+        "sensor.hall_voice"
+    ]
+    for cleared in ({}, {CONF_SPEAKER_SENSORS: []}):
+        assert CONF_SPEAKER_SENSORS not in await _submit_options(hass, stored, cleared)
 
 
 @pytest.mark.parametrize(

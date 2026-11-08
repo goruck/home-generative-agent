@@ -23,6 +23,8 @@ from homeassistant.helpers.selector import (
     BooleanSelector,
     ConstantSelector,
     ConstantSelectorConfig,
+    EntitySelector,
+    EntitySelectorConfig,
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
@@ -60,6 +62,7 @@ from .const import (
     CONF_NOTIFY_SERVICE,
     CONF_PROMPT,
     CONF_SCHEMA_FIRST_YAML,
+    CONF_SPEAKER_SENSORS,
     CONF_STT_HALLUCINATION_EXACT_PATTERNS,
     CONF_STT_HALLUCINATION_PATTERNS,
     CONF_TOOL_EXCLUSIONS,
@@ -795,6 +798,11 @@ async def _schema_for_options(
     schema.update(
         {
             vol.Optional(
+                CONF_SPEAKER_SENSORS,
+                description={"suggested_value": opts.get(CONF_SPEAKER_SENSORS, [])},
+                default=[],
+            ): EntitySelector(EntitySelectorConfig(domain="sensor", multiple=True)),
+            vol.Optional(
                 CONF_VOICE_TOOL_ACK,
                 description={"suggested_value": opts.get(CONF_VOICE_TOOL_ACK, "")},
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
@@ -1122,6 +1130,8 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         # would keep the stored value and the feature could not be turned off.
         if CONF_VOICE_TOOL_ACK not in user_input:
             options.pop(CONF_VOICE_TOOL_ACK, None)
+        if not user_input.get(CONF_SPEAKER_SENSORS):
+            options.pop(CONF_SPEAKER_SENSORS, None)
         errors: dict[str, str] = {}
 
         # Field-specific edits with validation/normalization

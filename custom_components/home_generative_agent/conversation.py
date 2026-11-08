@@ -99,6 +99,7 @@ from .const import (
     CONF_PROMPT,
     CONF_SCHEMA_FIRST_YAML,
     CONF_SENTINEL_NETWORK_ENABLED,
+    CONF_SPEAKER_SENSORS,
     CONF_STT_HALLUCINATION_EXACT_PATTERNS,
     CONF_STT_HALLUCINATION_PATTERNS,
     CONF_VOICE_TOOL_ACK,
@@ -115,7 +116,6 @@ from .const import (
     SIGNAL_TOOL_INDEX_UPDATED,
     SPEAKER_KNOWN_PROMPT,
     SPEAKER_PERSON_PROMPT,
-    SPEAKER_SENSOR_NAME,
     SPEAKER_UNKNOWN_PROMPT,
     SUBENTRY_TYPE_MODEL_PROVIDER,
     TOOL_CALL_ERROR_SYSTEM_MESSAGE,
@@ -1547,21 +1547,22 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         """
         Return who is speaking, when the requesting device recognizes voices.
 
-        A satellite that recognizes voices publishes the speaker as a text
-        sensor named "Speaker" on its device, whatever integration provides it.
-        Looking it up on the requesting device keeps a request typed elsewhere
-        from picking up the last name heard. A device without the sensor gives
-        None; one that heard no known voice gives a Speaker without a name.
+        The user picks the sensors that name a recognized voice, from any
+        integration. Only a picked sensor on the requesting device counts, so a
+        request typed elsewhere never picks up the last name heard. A device
+        without one gives None; one that heard no known voice gives a Speaker
+        without a name.
         """
-        if not device_id:
+        sensors = self.entry.runtime_data.options.get(CONF_SPEAKER_SENSORS) or []
+        if not device_id or not sensors:
             return None
         registry = er.async_get(self.hass)
         sensor = next(
             (
-                entry.entity_id
-                for entry in er.async_entries_for_device(registry, device_id)
-                if entry.domain == "sensor"
-                and entry.original_name == SPEAKER_SENSOR_NAME
+                entity_id
+                for entity_id in sensors
+                if (entry := registry.async_get(entity_id))
+                and entry.device_id == device_id
             ),
             None,
         )
