@@ -3239,6 +3239,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 min_size=5,
                 max_size=20,
                 kwargs=connection_kwargs,
+                # Validate each connection on checkout and replace it if the
+                # server dropped it (e.g. Postgres restarted during an HA
+                # backup), instead of handing out a dead one. check_connection
+                # is a staticmethod typed for AsyncConnection[Any]; the cast
+                # only narrows it to this pool's DictRow connections.
+                check=cast(
+                    "Callable[[AsyncConnection[DictRow]], Awaitable[None]]",
+                    psycopg_pool.AsyncConnectionPool.check_connection,
+                ),
                 open=False,
             )
         )
