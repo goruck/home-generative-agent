@@ -428,3 +428,33 @@ async def test_a_store_that_cannot_be_rebuilt_leaves_the_checkpointer_set_up(
     )
 
     assert checkpointer.setup_calls == 1
+
+
+@pytest.mark.parametrize(("dropped", "recorded"), [({"store_vectors"}, 1), (set(), 0)])
+@pytest.mark.asyncio
+async def test_a_rebuilt_vector_table_is_recorded_before_anything_writes(
+    hass: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    dropped: set[str],
+    recorded: int,
+) -> None:
+    """#857 item 4: the new, empty table gets the current model's record."""
+    state = _with_tables(monkeypatch, _ALL_TABLES - dropped)
+    store = _Store({"dims": 768}, state)
+    calls: list[Any] = []
+
+    async def _record(pool: Any, fingerprint: Any) -> None:
+        calls.append((pool, fingerprint))
+
+    monkeypatch.setattr(hga_component, "async_record_rebuilt_vector_table", _record)
+    fingerprint = object()
+
+    await bootstrap_vectors_once(
+        hass,
+        _entry(hass, **{CONF_VECTORS_BOOTSTRAPPED: True}),
+        store,
+        _POOL,
+        fingerprint,
+    )
+
+    assert calls == [(_POOL, fingerprint)] * recorded

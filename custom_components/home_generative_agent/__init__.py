@@ -286,10 +286,12 @@ from .core.embedding_model_guard import (
 from .core.embedding_record import (
     DIGEST_FETCH_TIMEOUT_S,
     EmbeddingFallbackGate,
+    EmbeddingFingerprint,
     FallbackBuild,
     async_clear_embedding_model_changed_issue,
     async_clear_held_fallback_issue,
     async_clear_other_build_fallback_issue,
+    async_record_rebuilt_vector_table,
     async_recorded_ollama_digest,
     async_sync_embedding_record,
     async_sync_other_build_fallback_issue,
@@ -1676,6 +1678,7 @@ async def _bootstrap_vectors_once(
     entry: ConfigEntry,
     store: AsyncPostgresStore,
     pool: AsyncConnectionPool[AsyncConnection[DictRow]],
+    fingerprint: EmbeddingFingerprint | None = None,
 ) -> None:
     """
     Bootstrap vector index if needed.
@@ -1683,7 +1686,8 @@ async def _bootstrap_vectors_once(
     Again when the vector table is gone after it was bootstrapped, such as
     one dropped to change its size (#760): it is created at the configured
     size. langgraph skips the vector migrations it has recorded, so they are
-    forgotten first.
+    forgotten first. The new, empty table is recorded as *fingerprint*'s
+    before anything writes into it (#857).
     """
     if not store.index_config:
         return
@@ -1698,6 +1702,7 @@ async def _bootstrap_vectors_once(
             store.index_config.get("dims"),
         )
         await _async_rebuild_tables(pool, tables, (VECTOR_MIGRATIONS,), (store.setup,))
+        await async_record_rebuilt_vector_table(pool, fingerprint)
         return
 
     await store.setup()
@@ -3254,7 +3259,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             await async_ensure_pgvector(pool)
             # First-time setup (if needed)
             await _bootstrap_db_once(hass, entry, store, checkpointer, pool)
-            await _bootstrap_vectors_once(hass, entry, store, pool)
+            await _bootstrap_vectors_once(
+                hass, entry, store, pool, current_embedding_fingerprint
+            )
 
             # Migrate person gallery DB schema (if needed)
             try:
@@ -5382,6 +5389,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
         # Writes on the pool closed next; it resumes at the next setup (#855).
         await _cancel_and_wait(rd.reembed_task, "memory store re-embed")
         rd.reembed_task = None
+        await _cancel_and_wait(rd.vacuum_task, "memory store vacuum")
+        rd.vacuum_task = None
         # Same for the caption camera backfill (#706).
         await _cancel_and_wait(rd.caption_backfill_task, "caption camera backfill")
         rd.caption_backfill_task = None
