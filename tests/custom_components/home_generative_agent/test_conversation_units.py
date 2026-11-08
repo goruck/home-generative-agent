@@ -170,6 +170,7 @@ from custom_components.home_generative_agent.conversation import (  # noqa: E402
     _STREAM_ERROR_REASON_MAX_CHARS,
     HGAConversationEntity,
     MultiLLMAPI,
+    Speaker,
     _get_stt_hallucination_exact_patterns,
     _get_stt_hallucination_patterns,
     _is_stt_hallucination,
@@ -2233,19 +2234,27 @@ def _render_entity(options: dict[str, Any], *, sentinel: Any = None) -> Any:
     return entity
 
 
+_PERSON = types.SimpleNamespace(
+    entity_id="person.ivan",
+    attributes={"id": "ivan", "friendly_name": "Иван", "user_id": "u1"},
+)
+
+
 def _speaker_entity(
     monkeypatch: pytest.MonkeyPatch,
     state: str | None,
     *,
-    platform: str = "esphome",
-    domain: str = "sensor",
-    original_name: str = "Speaker",
+    persons: list[Any] | None = None,
+    **fields: str,
 ) -> Any:
     entry = types.SimpleNamespace(
-        entity_id="sensor.midi_speaker",
-        platform=platform,
-        domain=domain,
-        original_name=original_name,
+        **{
+            "entity_id": "sensor.midi_speaker",
+            "platform": "esphome",
+            "domain": "sensor",
+            "original_name": "Speaker",
+            **fields,
+        }
     )
     monkeypatch.setattr(f"{_CONV}.er.async_get", MagicMock())
     monkeypatch.setattr(
@@ -2255,46 +2264,80 @@ def _speaker_entity(
     entity.hass.states.get.return_value = (
         None if state is None else types.SimpleNamespace(state=state)
     )
+    entity.hass.states.async_all.return_value = persons or []
+    entity.hass.auth.async_get_user = AsyncMock(
+        return_value=types.SimpleNamespace(name="Ivan")
+    )
     return entity
 
 
-def test_speaker_prompt_names_the_recognized_voice(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("platform", ["esphome", "mqtt", "template"])
+async def test_speaker_prompt_names_the_recognized_voice(
+    monkeypatch: pytest.MonkeyPatch, platform: str
 ) -> None:
-    """A recognized voice is named, and never as authorization."""
-    entity = _speaker_entity(monkeypatch, "Иван")
-    prompt = entity._speaker_prompt(entity._speaker_name("device"))
-    assert '"Иван"' in prompt
+    """A recognized voice is named, whatever integration publishes it."""
+    entity = _speaker_entity(monkeypatch, "Пётр", platform=platform)
+    speaker = await entity._async_speaker("device")
+    assert speaker == Speaker(name="Пётр")
+    prompt = entity._speaker_prompt(speaker)
+    assert '"Пётр"' in prompt
     assert "never to authorize" in prompt
+    assert "Home Assistant person" not in prompt
 
 
-@pytest.mark.parametrize("state", ["unknown", "unavailable", "", None])
-def test_speaker_prompt_without_a_recognized_voice(
+@pytest.mark.parametrize("value", ["Иван", "иван", "ivan", "person.ivan"])
+async def test_speaker_is_the_matching_person(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """A voice taught as a person's name, id or entity id becomes that person."""
+    entity = _speaker_entity(monkeypatch, value, persons=[_PERSON])
+    speaker = await entity._async_speaker("device")
+    assert speaker == Speaker(name="Иван", person="person.ivan", user="Ivan")
+    assert speaker.key == "person.ivan"
+    prompt = entity._speaker_prompt(speaker)
+    assert '"Иван"' in prompt
+    assert "person.ivan" in prompt
+
+
+async def test_speaker_person_without_a_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A person without a login still names the voice, but has no memories."""
+    person = types.SimpleNamespace(
+        entity_id="person.petr", attributes={"friendly_name": "Пётр"}
+    )
+    entity = _speaker_entity(monkeypatch, "Пётр", persons=[person])
+    speaker = await entity._async_speaker("device")
+    assert speaker == Speaker(name="Пётр", person="person.petr")
+    entity.hass.auth.async_get_user.assert_not_called()
+
+
+@pytest.mark.parametrize("state", ["unknown", "unavailable", "", " ", None])
+async def test_speaker_prompt_without_a_recognized_voice(
     monkeypatch: pytest.MonkeyPatch, state: str | None
 ) -> None:
     """A device that recognizes voices but heard no known one forbids using a name."""
-    entity = _speaker_entity(monkeypatch, state)
-    prompt = entity._speaker_prompt(entity._speaker_name("device"))
+    entity = _speaker_entity(monkeypatch, state, persons=[_PERSON])
+    speaker = await entity._async_speaker("device")
+    assert speaker == Speaker(name=None)
+    prompt = entity._speaker_prompt(speaker)
     assert "do not address them by name" in prompt
     assert "unavailable" not in prompt
 
 
 @pytest.mark.parametrize(
-    "other",
-    [{"platform": "mqtt"}, {"domain": "binary_sensor"}, {"original_name": "Volume"}],
+    "other", [{"domain": "binary_sensor"}, {"original_name": "Volume"}]
 )
-def test_speaker_prompt_ignores_other_entities(
+async def test_speaker_prompt_ignores_other_entities(
     monkeypatch: pytest.MonkeyPatch, other: dict[str, str]
 ) -> None:
-    """Only a Pulsar speaker sensor on the device counts."""
+    """Only a speaker text sensor on the device counts."""
     entity = _speaker_entity(monkeypatch, "Иван", **other)
-    assert entity._speaker_name("device") is None
+    assert await entity._async_speaker("device") is None
     assert entity._speaker_prompt(None) == ""
 
 
-def test_speaker_prompt_needs_a_device(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_speaker_prompt_needs_a_device(monkeypatch: pytest.MonkeyPatch) -> None:
     """A request from no device says nothing about who is speaking."""
-    assert _speaker_entity(monkeypatch, "Иван")._speaker_prompt(None) == ""
+    assert await _speaker_entity(monkeypatch, "Иван")._async_speaker(None) is None
 
 
 def test_render_system_prompt_audit_instruction_follows_sentinel_availability(
@@ -3551,10 +3594,23 @@ async def test_a_renamed_remote_server_is_indexed_again() -> None:
     assert rd.tool_index_houses == {"mcp-cabin": "Cabin"}
 
 
+def test_memory_user_follows_a_recognized_person() -> None:
+    """A voice linked to a login reads its memories; a logged-in user wins."""
+    memory = HGAConversationEntity._memory_user
+    person = Speaker(name="Иван", person="person.ivan", user="Ivan")
+    assert memory(None, person) == "Ivan"
+    assert memory("Platon", person) == "Platon"
+    assert memory(None, Speaker(name="Пётр")) is None
+    assert memory(None, Speaker(name=None)) is None
+    assert memory(None, None) is None
+
+
 def test_thread_is_per_speaker_only_on_devices_that_recognize_voices() -> None:
     """Each voice gets its own history; other requests keep the conversation's."""
     thread = HGAConversationEntity._thread_id
-    assert thread("conv", "Иван") == "conv:Иван"
-    assert thread("conv", "Иван") != thread("conv", "Пётр")
-    assert thread("conv", "unknown") == "conv:unknown"
+    assert thread("conv", Speaker(name="Пётр")) == "conv:Пётр"
+    assert thread("conv", Speaker(name="Пётр")) != thread("conv", Speaker("Мария"))
+    person = Speaker(name="Иван", person="person.ivan")
+    assert thread("conv", person) == "conv:person.ivan"
+    assert thread("conv", Speaker(name=None)) == "conv:unknown"
     assert thread("conv", None) == "conv"

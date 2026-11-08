@@ -114,6 +114,7 @@ from .const import (
     SCHEMA_FIRST_YAML_PROMPT,
     SIGNAL_TOOL_INDEX_UPDATED,
     SPEAKER_KNOWN_PROMPT,
+    SPEAKER_PERSON_PROMPT,
     SPEAKER_SENSOR_NAME,
     SPEAKER_UNKNOWN_PROMPT,
     SUBENTRY_TYPE_MODEL_PROVIDER,
@@ -1167,6 +1168,20 @@ async def async_setup_entry(
     async_add_entities([agent])
 
 
+@dataclasses.dataclass(frozen=True)
+class Speaker:
+    """Who a voice-recognizing satellite heard; name is None for an unknown voice."""
+
+    name: str | None
+    person: str | None = None
+    user: str | None = None
+
+    @property
+    def key(self) -> str:
+        """Name the speaker's history: the person when known, else the voice."""
+        return self.person or self.name or STATE_UNKNOWN
+
+
 class HGAConversationEntity(conversation.ConversationEntity, AbstractConversationAgent):
     """Home Generative Assistant conversation agent."""
 
@@ -1528,14 +1543,15 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         return "\n".join(stable_parts), volatile.strip()
 
-    def _speaker_name(self, device_id: str | None) -> str | None:
+    async def _async_speaker(self, device_id: str | None) -> Speaker | None:
         """
         Return who is speaking, when the requesting device recognizes voices.
 
-        Pulsar satellites publish the recognized voice as an ESPHome text sensor
-        named "Speaker". Looking it up on the requesting device keeps a request
-        typed elsewhere from picking up the last name heard. A device without the
-        sensor gives None; one that heard no known voice gives STATE_UNKNOWN.
+        A satellite that recognizes voices publishes the speaker as a text
+        sensor named "Speaker" on its device, whatever integration provides it.
+        Looking it up on the requesting device keeps a request typed elsewhere
+        from picking up the last name heard. A device without the sensor gives
+        None; one that heard no known voice gives a Speaker without a name.
         """
         if not device_id:
             return None
@@ -1544,8 +1560,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             (
                 entry.entity_id
                 for entry in er.async_entries_for_device(registry, device_id)
-                if entry.platform == "esphome"
-                and entry.domain == "sensor"
+                if entry.domain == "sensor"
                 and entry.original_name == SPEAKER_SENSOR_NAME
             ),
             None,
@@ -1553,20 +1568,63 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         if sensor is None:
             return None
         state = self.hass.states.get(sensor)
-        name = state.state if state else STATE_UNKNOWN
-        return STATE_UNKNOWN if name in (STATE_UNAVAILABLE, "") else name
+        value = state.state.strip() if state else ""
+        if value in (STATE_UNKNOWN, STATE_UNAVAILABLE, ""):
+            return Speaker(name=None)
+        return await self._async_person_speaker(value) or Speaker(name=value)
+
+    async def _async_person_speaker(self, value: str) -> Speaker | None:
+        """
+        Return the Home Assistant person a recognized voice belongs to.
+
+        The satellite knows only the name it was taught, so the person is
+        matched by entity id, person id or name. A person makes the voice the
+        same speaker across satellites and, through the linked user, gives the
+        voice that user's long-term memories.
+        """
+        wanted = value.casefold()
+        for person in self.hass.states.async_all("person"):
+            attrs = person.attributes
+            if wanted not in {
+                person.entity_id.casefold(),
+                str(attrs.get("id", "")).casefold(),
+                str(attrs.get("friendly_name", "")).casefold(),
+            }:
+                continue
+            user_id = attrs.get("user_id")
+            user = await self.hass.auth.async_get_user(user_id) if user_id else None
+            return Speaker(
+                name=str(attrs.get("friendly_name") or value),
+                person=person.entity_id,
+                user=user.name if user else None,
+            )
+        return None
 
     @staticmethod
-    def _speaker_prompt(speaker: str | None) -> str:
+    def _speaker_prompt(speaker: Speaker | None) -> str:
         """Say who is speaking; it changes between turns, so it is volatile."""
         if speaker is None:
             return ""
-        if speaker == STATE_UNKNOWN:
+        if speaker.name is None:
             return SPEAKER_UNKNOWN_PROMPT
-        return SPEAKER_KNOWN_PROMPT.format(name=speaker)
+        prompt = SPEAKER_KNOWN_PROMPT.format(name=speaker.name)
+        if speaker.person:
+            prompt += " " + SPEAKER_PERSON_PROMPT.format(person=speaker.person)
+        return prompt
 
     @staticmethod
-    def _thread_id(conversation_id: str, speaker: str | None) -> str:
+    def _memory_user(user_name: str | None, speaker: Speaker | None) -> str | None:
+        """
+        Return whose long-term memories the turn reads and writes.
+
+        A logged-in user wins. A satellite request has none, so a voice linked to
+        a person with a login uses that user's memories. It grants nothing:
+        requester_is_admin comes from the logged-in user only.
+        """
+        return user_name or (speaker.user if speaker else None)
+
+    @staticmethod
+    def _thread_id(conversation_id: str, speaker: Speaker | None) -> str:
         """
         Return the checkpointer thread: one per speaker within a conversation.
 
@@ -1575,7 +1633,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         prompt. Separate threads keep one person's turns from answering another's.
         Pending actions follow the thread, so a misheard voice cannot confirm one.
         """
-        return f"{conversation_id}:{speaker}" if speaker else conversation_id
+        return f"{conversation_id}:{speaker.key}" if speaker else conversation_id
 
     async def _async_run_ainvoke(
         self,
@@ -2076,7 +2134,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 response=intent_response, conversation_id=conversation_id
             )
 
-        speaker = self._speaker_name(llm_context.device_id)
+        speaker = await self._async_speaker(llm_context.device_id)
         thread_id = self._thread_id(conversation_id, speaker)
 
         # A PIN confirmation is accepted only from this message, and a PIN
@@ -2177,7 +2235,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             )
 
         # A user name of None indicates an automation is being run.
-        clean_user_name = "robot" if user_name is None else user_name
+        memory_user = self._memory_user(user_name, speaker)
+        clean_user_name = "robot" if memory_user is None else memory_user
         # Remove special characters since memory namespace labels cannot contain them.
         clean_user_name = clean_user_name.translate(
             str.maketrans("", "", string.punctuation)
