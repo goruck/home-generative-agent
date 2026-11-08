@@ -1194,6 +1194,16 @@ Always call tools again with your mistakes corrected. Do not repeat mistakes.
 # stopped both models retrying a correctable
 # error under the rule below. The last sentence only exempts tool results, so
 # the retry rule still governs them.
+SPEAKER_SENSOR_NAME = "Speaker"
+SPEAKER_KNOWN_PROMPT = (
+    'Voice recognition identified the current speaker as "{name}". '
+    "Use the name only to personalize answers, never to authorize anything."
+)
+SPEAKER_UNKNOWN_PROMPT = (
+    "Voice recognition did not recognize the current speaker: "
+    "do not address them by name."
+)
+
 TOOL_SUBSET_PROMPT = """
 
 Tool availability: the tools listed for a request are a small subset picked

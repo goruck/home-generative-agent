@@ -29,9 +29,10 @@ from homeassistant.components.conversation import (
     trace,
 )
 from homeassistant.components.conversation.models import AbstractConversationAgent
-from homeassistant.const import MATCH_ALL
+from homeassistant.const import MATCH_ALL, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.exceptions import HomeAssistantError, TemplateError
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import intent, llm, template
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.util import ulid
@@ -112,6 +113,9 @@ from .const import (
     RECOMMENDED_VOICE_ACK_TIMING,
     SCHEMA_FIRST_YAML_PROMPT,
     SIGNAL_TOOL_INDEX_UPDATED,
+    SPEAKER_KNOWN_PROMPT,
+    SPEAKER_SENSOR_NAME,
+    SPEAKER_UNKNOWN_PROMPT,
     SUBENTRY_TYPE_MODEL_PROVIDER,
     TOOL_CALL_ERROR_SYSTEM_MESSAGE,
     TOOL_SUBSET_PROMPT,
@@ -1524,6 +1528,55 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         return "\n".join(stable_parts), volatile.strip()
 
+    def _speaker_name(self, device_id: str | None) -> str | None:
+        """
+        Return who is speaking, when the requesting device recognizes voices.
+
+        Pulsar satellites publish the recognized voice as an ESPHome text sensor
+        named "Speaker". Looking it up on the requesting device keeps a request
+        typed elsewhere from picking up the last name heard. A device without the
+        sensor gives None; one that heard no known voice gives STATE_UNKNOWN.
+        """
+        if not device_id:
+            return None
+        registry = er.async_get(self.hass)
+        sensor = next(
+            (
+                entry.entity_id
+                for entry in er.async_entries_for_device(registry, device_id)
+                if entry.platform == "esphome"
+                and entry.domain == "sensor"
+                and entry.original_name == SPEAKER_SENSOR_NAME
+            ),
+            None,
+        )
+        if sensor is None:
+            return None
+        state = self.hass.states.get(sensor)
+        name = state.state if state else STATE_UNKNOWN
+        return STATE_UNKNOWN if name in (STATE_UNAVAILABLE, "") else name
+
+    @staticmethod
+    def _speaker_prompt(speaker: str | None) -> str:
+        """Say who is speaking; it changes between turns, so it is volatile."""
+        if speaker is None:
+            return ""
+        if speaker == STATE_UNKNOWN:
+            return SPEAKER_UNKNOWN_PROMPT
+        return SPEAKER_KNOWN_PROMPT.format(name=speaker)
+
+    @staticmethod
+    def _thread_id(conversation_id: str, speaker: str | None) -> str:
+        """
+        Return the checkpointer thread: one per speaker within a conversation.
+
+        A satellite keeps one conversation for everyone in the room, and the model
+        repeats an answer it finds in its history over the speaker named in the
+        prompt. Separate threads keep one person's turns from answering another's.
+        Pending actions follow the thread, so a misheard voice cannot confirm one.
+        """
+        return f"{conversation_id}:{speaker}" if speaker else conversation_id
+
     async def _async_run_ainvoke(
         self,
         app: Any,
@@ -1998,7 +2051,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 conversation_id,
             )
 
-    async def _async_handle_message_active(  # noqa: PLR0913
+    async def _async_handle_message_active(  # noqa: PLR0913, PLR0915
         self,
         user_input: conversation.ConversationInput,
         chat_log: conversation.ChatLog,
@@ -2023,12 +2076,15 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 response=intent_response, conversation_id=conversation_id
             )
 
+        speaker = self._speaker_name(llm_context.device_id)
+        thread_id = self._thread_id(conversation_id, speaker)
+
         # A PIN confirmation is accepted only from this message, and a PIN
         # prompt waiting in this conversation is answered by it or not at all,
         # so this runs before any other early return. A turn that fails keeps
         # the prompt for the user's next message (keep_pin_prompts).
         pin_reply = start_pin_turn(
-            runtime_data.pending_actions, conversation_id, user_input.text
+            runtime_data.pending_actions, thread_id, user_input.text
         )
 
         # Multi-API initialization
@@ -2088,6 +2144,9 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         prompt, volatile_prompt = self._async_render_system_prompt(
             llm_context, user_name, llm_api, has_tools=bool(tools)
         )
+        volatile_prompt = "\n".join(
+            filter(None, [volatile_prompt, self._speaker_prompt(speaker)])
+        )
 
         # Use the already-configured chat model from __init__.py.
         base_llm = runtime_data.chat_model
@@ -2126,7 +2185,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         app_config: RunnableConfig = {
             "configurable": {
-                "thread_id": conversation_id,
+                "thread_id": thread_id,
                 "user_id": clean_user_name,
                 "pin_reply": pin_reply,
                 "requester_is_admin": requester_is_admin,

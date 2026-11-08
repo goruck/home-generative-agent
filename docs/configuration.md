@@ -11,6 +11,7 @@ The configuration UI is available in English, Czech, Simplified Chinese, and Tur
 - [Control Home Assistant (LLM API)](#control-home-assistant-llm-api)
 - [Speech-to-Text (STT)](#speech-to-text-stt)
 - [Text-to-Speech (TTS)](#text-to-speech-tts)
+- [Speaker Recognition on Voice Satellites](#speaker-recognition-on-voice-satellites)
 - [Schema-first YAML Mode](#schema-first-yaml-mode)
 - [Critical Action PIN](#critical-action-pin)
 - [Global Options](#global-options)
@@ -414,6 +415,17 @@ Two things to know about the local backend:
 
 - **Kokoro needs a reasonably modern machine.** On a modern CPU (AVX2) or a recent GPU it is fast and sounds good. On an old CPU without AVX2 it can take several times the audio duration to synthesize a sentence, and ONNX Runtime's CUDA path does not help it on Pascal-class GPUs. In that case use a piper voice instead — `speaches-ai/piper-en_US-hfc_female-medium` (voice `hfc_female`) or a `-low` variant — which synthesizes a sentence in about a second on CPU and needs no GPU. Browse the available models with `GET /v1/registry?task=text-to-speech`.
 - **Speaches does not produce opus or aac.** HGA never asks it to; a pipeline that wants those gets mp3 converted by Home Assistant.
+
+---
+
+## Speaker Recognition on Voice Satellites
+
+Some voice satellites recognize who is speaking. [Pulsar](https://github.com/Morvex885/pulsar), firmware for Yandex Stations that talks to Home Assistant over the ESPHome API, publishes the recognized voice as a text sensor named **Speaker** on the satellite's device. When a request comes from a device with such a sensor, HGA uses it in two ways. There is nothing to configure: a device without the sensor works exactly as before.
+
+- **The agent is told who is speaking.** The prompt names the recognized voice, so "what is my name?" or "remind me" can be answered for that person. The name is for personalization only: the prompt says never to use it to authorize anything, and the [Critical Action PIN](#critical-action-pin) still applies. When the satellite heard a voice it does not know (`unknown`, empty or `unavailable`), the prompt says not to address the speaker by name.
+- **Each voice keeps its own history.** A satellite usually keeps one conversation for everyone in the room, and a model tends to repeat an answer from that history even when the prompt names someone else. So on such a device each recognized voice, and the unrecognized voice, gets its own conversation history within the satellite's conversation. A pending Critical Action PIN prompt follows the same history, so a different voice cannot answer it.
+
+Only the sensor on the device that sent the request counts, so a request typed in the browser never picks up the last name a satellite heard. History from before upgrading stays under the satellite's shared conversation and is not split by voice.
 
 ---
 
