@@ -122,10 +122,17 @@ def default_max_tokens(model: str) -> int:
         )
 
         limit = _get_default_model_profile(model).get("max_output_tokens")
-    except (ImportError, AttributeError, TypeError):
+    except (ImportError, AttributeError, TypeError) as exc:
+        LOGGER.debug("No langchain-anthropic model profile for %s: %r", model, exc)
         limit = None
     if isinstance(limit, int) and limit > 0:
         return min(limit, ANTHROPIC_DEFAULT_MAX_TOKENS)
+    LOGGER.debug(
+        "No usable max_output_tokens for %s (%r); using %d",
+        model,
+        limit,
+        ANTHROPIC_DEFAULT_MAX_TOKENS,
+    )
     return ANTHROPIC_DEFAULT_MAX_TOKENS
 
 
