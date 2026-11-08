@@ -22,6 +22,7 @@ from homeassistant.helpers.httpx_client import get_async_client
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 from ..const import (  # noqa: TID252
+    ANTHROPIC_DEFAULT_MAX_TOKENS,
     ANTHROPIC_THINKING_MAX_BUDGET,
     ANTHROPIC_THINKING_MIN_BUDGET,
     ANTHROPIC_THINKING_RESPONSE_TOKENS,
@@ -41,6 +42,7 @@ from ..const import (  # noqa: TID252
     OPENAI_CHAT_COMPLETIONS_PATH,
     RECOMMENDED_OLLAMA_URL,
 )
+from .anthropic_client import model_is_adaptive_only
 from .face_api import face_api_request, face_api_url
 from .fallback import (
     ainvoke_dropping_unsupported_params,
@@ -1690,8 +1692,23 @@ def _thinking_gemini(
     return {"thinking_budget": budget or -1}
 
 
+# The thinking budget a user set, read as an effort level for a model that
+# only takes adaptive thinking (#932): there is no exact mapping, so the
+# budget's three ranges pick the nearest level.
+_ANTHROPIC_EFFORT_BY_BUDGET = ((2048, "low"), (8192, "medium"))
+_ANTHROPIC_DEFAULT_EFFORT = "high"
+
+
+def _anthropic_effort(budget: int | None) -> str:
+    if budget:
+        for ceiling, level in _ANTHROPIC_EFFORT_BY_BUDGET:
+            if budget <= ceiling:
+                return level
+    return _ANTHROPIC_DEFAULT_EFFORT
+
+
 def _thinking_anthropic(
-    reasoning: Any, _effort: str | None, budget: int | None, _model: str
+    reasoning: Any, _effort: str | None, budget: int | None, model: str
 ) -> dict[str, Any]:
     # Only an explicit On enables extended thinking; effort strings can only
     # arrive as stale data from another provider type and must not enable it.
@@ -1701,6 +1718,19 @@ def _thinking_anthropic(
         max(budget or 0, ANTHROPIC_THINKING_MIN_BUDGET),
         ANTHROPIC_THINKING_MAX_BUDGET,
     )
+    if model_is_adaptive_only(model):
+        # Opus 4.7 and later reject budget_tokens and temperature: adaptive
+        # thinking, its depth set by an effort level (#932). Thinking counts
+        # against max_tokens, so it keeps the room the budget gave, and at
+        # least the default.
+        return {
+            "thinking": {"type": "adaptive"},
+            "reasoning_effort": _anthropic_effort(budget),
+            "max_tokens": max(
+                budget_tokens + ANTHROPIC_THINKING_RESPONSE_TOKENS,
+                ANTHROPIC_DEFAULT_MAX_TOKENS,
+            ),
+        }
     # Extended thinking requires max_tokens > budget_tokens and
     # temperature=1; these override the feature-level temperature.
     # core/anthropic_client.py drops temperature again under anthropic>=2,

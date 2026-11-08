@@ -2736,6 +2736,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 temperature=ConfigurableField(id="temperature"),
                 thinking=ConfigurableField(id="thinking"),
                 max_tokens=ConfigurableField(id="max_tokens"),
+                # Adaptive thinking's depth on Opus 4.7 and later (#932).
+                reasoning_effort=ConfigurableField(id="reasoning_effort"),
             )
         except Exception:
             LOGGER.exception("Anthropic provider init failed; continuing without it.")

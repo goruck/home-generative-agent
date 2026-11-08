@@ -519,3 +519,163 @@ async def test_wire_request_matches_the_installed_sdk() -> None:
     else:
         assert requests[0].headers["anthropic-version"] != "2026-10-21"
         assert body["temperature"] == 0.7
+
+
+# --- #932: Opus 4.7 and later take adaptive thinking, no sampling params ----
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("claude-opus-4-7", True),
+        ("claude-opus-4-8", True),
+        ("claude-opus-4-7-20260101", True),
+        ("claude-opus-5", True),
+        ("claude-opus-5-5", True),
+        ("claude-sonnet-5", True),
+        ("claude-sonnet-5-5", True),
+        ("claude-fable-5-1", True),
+        ("claude-opus-4-10", True),
+        ("claude-opus-4-6", False),
+        ("claude-opus-4-1", False),
+        ("claude-opus-4-20250514", False),
+        ("claude-opus-4-1-20250805", False),
+        ("claude-sonnet-4-20250514", False),
+        ("claude-sonnet-4-6", False),
+        ("claude-sonnet-4-5", False),
+        ("claude-haiku-4-5-20251001", False),
+        ("claude-3-7-sonnet-latest", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_model_is_adaptive_only(model: object, *, expected: bool) -> None:
+    assert anthropic_client.model_is_adaptive_only(model) is expected
+
+
+@pytest.mark.parametrize(
+    ("budget", "effort"),
+    [(None, "high"), (1024, "low"), (2048, "low"), (4096, "medium"), (32768, "high")],
+)
+def test_thinking_on_opus_4_7_is_adaptive_with_an_effort(
+    budget: int | None, effort: str
+) -> None:
+    thinking = thinking_configurable(
+        provider_type="anthropic",
+        reasoning=True,
+        budget=budget,
+        model="claude-opus-4-7",
+    )
+    assert thinking["thinking"] == {"type": "adaptive"}
+    assert thinking["reasoning_effort"] == effort
+    assert "temperature" not in thinking
+
+
+@pytest.mark.parametrize(
+    ("budget", "max_tokens"),
+    [
+        (1024, ANTHROPIC_DEFAULT_MAX_TOKENS),
+        (32768, 32768 + ANTHROPIC_THINKING_RESPONSE_TOKENS),
+    ],
+)
+def test_adaptive_thinking_keeps_the_room_the_budget_gave(
+    budget: int, max_tokens: int
+) -> None:
+    """Adaptive thinking still needs output room; a large budget keeps it."""
+    thinking = thinking_configurable(
+        provider_type="anthropic",
+        reasoning=True,
+        budget=budget,
+        model="claude-opus-4-7",
+    )
+    assert thinking["max_tokens"] == max_tokens
+
+
+@pytest.mark.usefixtures("sdk_1")
+@pytest.mark.parametrize("model", ["claude-fable-5", "claude-sonnet-5-5"])
+def test_langchains_own_checks_never_see_a_rejected_temperature(model: str) -> None:
+    """langchain-anthropic raises on temperature for these models; drop it first."""
+    bound = _adaptive_provider().with_config(
+        config={"configurable": {"model": model, "temperature": 0.2}}
+    )
+    copy, _ = bound._prepare(bound.config)
+    assert _sent_sampling(_payload(copy), "temperature") is None
+
+
+def test_thinking_off_on_opus_4_7_sends_nothing() -> None:
+    """Adaptive thinking is off by default on Opus 4.7: no field is needed."""
+    assert (
+        thinking_configurable(
+            provider_type="anthropic", reasoning=False, model="claude-opus-4-7"
+        )
+        == {}
+    )
+
+
+def test_thinking_on_older_models_keeps_its_budget() -> None:
+    thinking = thinking_configurable(
+        provider_type="anthropic",
+        reasoning=True,
+        budget=4096,
+        model="claude-sonnet-4-6",
+    )
+    assert thinking["thinking"] == {"type": "enabled", "budget_tokens": 4096}
+
+
+def _adaptive_provider() -> Any:
+    return _model().configurable_fields(
+        model=ConfigurableField(id="model"),
+        temperature=ConfigurableField(id="temperature"),
+        thinking=ConfigurableField(id="thinking"),
+        max_tokens=ConfigurableField(id="max_tokens"),
+        reasoning_effort=ConfigurableField(id="reasoning_effort"),
+    )
+
+
+@pytest.mark.usefixtures("sdk_1")
+def test_opus_4_7_gets_no_sampling_params_even_on_an_old_sdk() -> None:
+    """Rejected on any API version, so the 1.x SDK's requests omit them too."""
+    bound = _adaptive_provider().with_config(
+        config={"configurable": {"model": "claude-opus-4-7", "temperature": 0.2}}
+    )
+    copy, _ = bound._prepare(bound.config)
+    payload = _payload(copy)
+    for name in ("temperature", "top_p", "top_k"):
+        assert _sent_sampling(payload, name) is None
+
+
+@pytest.mark.usefixtures("sdk_1")
+def test_older_models_keep_their_temperature_on_an_old_sdk() -> None:
+    bound = _adaptive_provider().with_config(
+        config={"configurable": {"model": "claude-sonnet-4-6", "temperature": 0.2}}
+    )
+    copy, _ = bound._prepare(bound.config)
+    assert _sent_sampling(_payload(copy), "temperature") == 0.2
+
+
+@pytest.mark.parametrize("rejects", [True, False])
+def test_opus_4_7_thinking_request_is_adaptive_with_effort(
+    monkeypatch: pytest.MonkeyPatch, *, rejects: bool
+) -> None:
+    """The request the API gets: adaptive thinking, an effort, no budget."""
+    monkeypatch.setattr(
+        anthropic_client, "sdk_rejects_sampling_params", lambda: rejects
+    )
+    thinking = thinking_configurable(
+        provider_type="anthropic", reasoning=True, budget=4096, model="claude-opus-4-7"
+    )
+    bound = _adaptive_provider().with_config(
+        config={
+            "configurable": {"model": "claude-opus-4-7", "temperature": 0.2, **thinking}
+        }
+    )
+    copy, _ = bound._prepare(bound.config)
+    payload = _payload(copy)
+    assert payload["thinking"] == {"type": "adaptive"}
+    assert "budget_tokens" not in payload["thinking"]
+    effort = (payload.get("output_config") or {}).get("effort") or (
+        payload.get("extra_body", {}).get("output_config", {}).get("effort")
+    )
+    assert effort == "medium"
+    assert _sent_sampling(payload, "temperature") is None
+    assert payload["max_tokens"] == thinking["max_tokens"]

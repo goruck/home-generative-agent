@@ -26,9 +26,10 @@ also inherits the client parameters the client was built from and compares
 them with its own before reusing it, so a copy that somehow differs in API
 key, base URL, timeout, retries, headers or proxy builds its own client the
 way the base class would instead of silently talking to the wrong endpoint.
-Today that cannot happen: only model, temperature, thinking and max_tokens
-are configurable, and a credential change reloads the entry. The client dies
-with the provider on unload, so a rotated key is not retained.
+Today that cannot happen: only model, temperature, thinking, max_tokens and
+reasoning_effort are configurable, and a credential change reloads the
+entry. The client dies with the provider on unload, so a rotated key is not
+retained.
 
 The fields are typed ``Any`` on purpose. ``anthropic`` is imported only for
 type checking, and a pydantic field annotated with an unresolvable name fails
@@ -48,7 +49,8 @@ The subclass also adapts requests to the API version the installed SDK sends
 rejects ``temperature``, ``top_p`` and ``top_k`` ("Extra inputs are not
 permitted"). Under that SDK they are dropped from every instance, so neither
 the payload nor langchain-anthropic's per-model checks see them; older SDKs
-send ``2023-06-01`` and keep them. ``max_tokens`` is not left to
+send ``2023-06-01`` and keep them, except for Claude Opus 4.7 and later,
+which reject them on any API version (#932). ``max_tokens`` is not left to
 langchain-anthropic's default, the output limit of the model the provider was
 *built* with, which every per-request copy inherits whatever model it serves:
 a request that does not set it gets ``ANTHROPIC_DEFAULT_MAX_TOKENS``, capped at
@@ -114,6 +116,23 @@ def sdk_rejects_sampling_params() -> bool:
     )
 
 
+# Claude Opus 4.7 and later, and every Claude 5 or later model: extended
+# thinking with `budget_tokens` and the sampling parameters are rejected on
+# any API version; they take adaptive thinking and an effort level (#932).
+# A version part is one digit, or two not starting with 0 and not followed by
+# another digit: a dated id's eight-digit suffix (claude-opus-4-20250514) is
+# not a version.
+_ADAPTIVE_ONLY_MODEL_RE = re.compile(
+    r"claude-(?:opus-4-(?:[7-9]|[1-9]\d)|(?:opus|sonnet|haiku|fable)-(?:[5-9]|[1-9]\d))"
+    r"(?![\d.])"
+)
+
+
+def model_is_adaptive_only(model: object) -> bool:
+    """Return True for a Claude model that only takes adaptive thinking (#932)."""
+    return bool(_ADAPTIVE_ONLY_MODEL_RE.search(str(model or "").lower()))
+
+
 def default_max_tokens(model: str) -> int:
     """Return ``max_tokens`` for a request to ``model`` that does not set it."""
     try:
@@ -161,8 +180,17 @@ class SharedClientChatAnthropic(ChatAnthropic):
     @model_validator(mode="before")
     @classmethod
     def _drop_sampling_params_rejected_by_api(cls, values: Any) -> Any:
-        """Drop sampling parameters the SDK's API version rejects (#929)."""
-        if not isinstance(values, dict) or not sdk_rejects_sampling_params():
+        """
+        Drop sampling parameters the API rejects (#929, #932).
+
+        Under SDK 2 for every model; for Opus 4.7 and later on any SDK, and
+        before validation, since langchain-anthropic's own per-model checks
+        refuse some of them outright.
+        """
+        if not isinstance(values, dict):
+            return values
+        model = values.get("model") or values.get("model_name")
+        if not sdk_rejects_sampling_params() and not model_is_adaptive_only(model):
             return values
         return {
             k: v
@@ -180,10 +208,13 @@ class SharedClientChatAnthropic(ChatAnthropic):
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
         if payload.get("max_tokens") is None:
             payload["max_tokens"] = default_max_tokens(str(payload.get("model", "")))
-        if sdk_rejects_sampling_params():
+        if sdk_rejects_sampling_params() or model_is_adaptive_only(
+            payload.get("model")
+        ):
             # Call-time kwargs or model_kwargs bypass the field validator, and
             # langchain-anthropic moves the parameters into extra_body for
-            # SDKs whose create() no longer names them.
+            # SDKs whose create() no longer names them. Opus 4.7 and later
+            # reject them on any API version, older SDKs included (#932).
             for name in SAMPLING_PARAMS_REJECTED_BY_SDK_2:
                 payload.pop(name, None)
             extra_body = payload.get("extra_body")
