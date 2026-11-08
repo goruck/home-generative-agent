@@ -68,6 +68,7 @@ from .agent.helpers import (
     start_pin_turn,
     tool_exclusions,
     tool_index_key,
+    waiting_pin_prompt,
 )
 from .agent.indirect_pin import (
     api_tool_name,
@@ -115,6 +116,7 @@ from .const import (
     SCHEMA_FIRST_YAML_PROMPT,
     SIGNAL_TOOL_INDEX_UPDATED,
     SPEAKER_KNOWN_PROMPT,
+    SPEAKER_NAME_MAX_CHARS,
     SPEAKER_PERSON_PROMPT,
     SPEAKER_UNKNOWN_PROMPT,
     SUBENTRY_TYPE_MODEL_PROVIDER,
@@ -1168,6 +1170,20 @@ async def async_setup_entry(
     async_add_entities([agent])
 
 
+# What a speaker sensor reports when it heard nobody it knows.
+_NO_SPEAKER_STATES = frozenset({"", "none", STATE_UNKNOWN, STATE_UNAVAILABLE})
+# Characters that could break out of the quoted name in the prompt.
+_SPEAKER_NAME_UNSAFE = re.compile(
+    r"[\x00-\x1f\x7f\"`{}<>\[\]\u201c\u201d\u201e\u00ab\u00bb]"
+)
+
+
+def _clean_speaker_name(value: str) -> str:
+    """Return a recognized voice's name, safe to quote in the system prompt."""
+    name = _SPEAKER_NAME_UNSAFE.sub("", " ".join(value.split()))
+    return name[:SPEAKER_NAME_MAX_CHARS].strip()
+
+
 @dataclasses.dataclass(frozen=True)
 class Speaker:
     """Who a voice-recognizing satellite heard; name is None for an unknown voice."""
@@ -1274,7 +1290,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         Return the chat_log turns that the agent's own thread does not hold yet.
 
         The LangGraph checkpointer already persists, in full, every turn this
-        entity handled: the thread is keyed on the conversation_id. The only
+        entity handled: the thread is keyed on the conversation_id (with a
+        recognized voice, per voice, and the caller ignores this result). The only
         chat_log content worth ingesting is therefore what ANOTHER agent added
         to the same conversation — Home Assistant's built-in agent answering a
         quick local command on a shared pipeline, say — because the checkpointer
@@ -1569,8 +1586,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         if sensor is None:
             return None
         state = self.hass.states.get(sensor)
-        value = state.state.strip() if state else ""
-        if value in (STATE_UNKNOWN, STATE_UNAVAILABLE, ""):
+        value = _clean_speaker_name(state.state) if state else ""
+        if value.casefold() in _NO_SPEAKER_STATES:
             return Speaker(name=None)
         return await self._async_person_speaker(value) or Speaker(name=value)
 
@@ -1579,27 +1596,38 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         Return the Home Assistant person a recognized voice belongs to.
 
         The satellite knows only the name it was taught, so the person is
-        matched by entity id, person id or name. A person makes the voice the
-        same speaker across satellites and, through the linked user, gives the
-        voice that user's long-term memories.
+        matched by entity id or person id, then by name. A name two people share
+        matches neither, since a wrong guess would hand over the other's
+        memories. A person makes the voice the same speaker across satellites
+        and, through the linked user, gives the voice that user's long-term
+        memories.
         """
         wanted = value.casefold()
-        for person in self.hass.states.async_all("person"):
-            attrs = person.attributes
-            if wanted not in {
+        persons = self.hass.states.async_all("person")
+        matches = [
+            person
+            for person in persons
+            if wanted
+            in (
                 person.entity_id.casefold(),
-                str(attrs.get("id", "")).casefold(),
-                str(attrs.get("friendly_name", "")).casefold(),
-            }:
-                continue
-            user_id = attrs.get("user_id")
-            user = await self.hass.auth.async_get_user(user_id) if user_id else None
-            return Speaker(
-                name=str(attrs.get("friendly_name") or value),
-                person=person.entity_id,
-                user=user.name if user else None,
+                str(person.attributes.get("id", "")).casefold(),
             )
-        return None
+        ] or [
+            person
+            for person in persons
+            if wanted == str(person.attributes.get("friendly_name", "")).casefold()
+        ]
+        if len(matches) != 1:
+            return None
+        person = matches[0]
+        attrs = person.attributes
+        user_id = attrs.get("user_id")
+        user = await self.hass.auth.async_get_user(user_id) if user_id else None
+        return Speaker(
+            name=str(attrs.get("friendly_name") or value),
+            person=person.entity_id,
+            user=user.name if user else None,
+        )
 
     @staticmethod
     def _speaker_prompt(speaker: Speaker | None) -> str:
@@ -1614,15 +1642,25 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         return prompt
 
     @staticmethod
-    def _memory_user(user_name: str | None, speaker: Speaker | None) -> str | None:
+    def _memory_user(
+        user_name: str | None,
+        speaker: Speaker | None,
+        waiting_prompt: Mapping[str, Any] | None = None,
+    ) -> str | None:
         """
         Return whose long-term memories the turn reads and writes.
 
         A logged-in user wins. A satellite request has none, so a voice linked to
         a person with a login uses that user's memories. It grants nothing:
         requester_is_admin comes from the logged-in user only.
+        A reply to a waiting PIN prompt runs as the user who asked for the action,
+        whichever voice it was attributed to; the PIN still decides.
         """
-        return user_name or (speaker.user if speaker else None)
+        if user_name:
+            return user_name
+        if waiting_prompt and waiting_prompt.get("user"):
+            return waiting_prompt["user"]
+        return speaker.user if speaker else None
 
     @staticmethod
     def _thread_id(conversation_id: str, speaker: Speaker | None) -> str:
@@ -1632,9 +1670,25 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         A satellite keeps one conversation for everyone in the room, and the model
         repeats an answer it finds in its history over the speaker named in the
         prompt. Separate threads keep one person's turns from answering another's.
-        Pending actions follow the thread, so a misheard voice cannot confirm one.
         """
         return f"{conversation_id}:{speaker.key}" if speaker else conversation_id
+
+    def _turn_thread(
+        self, conversation_id: str, speaker: Speaker | None
+    ) -> tuple[str, dict[str, Any] | None]:
+        """
+        Return the thread for this turn, and the PIN prompt it answers, if any.
+
+        The next message answers a waiting PIN prompt, whichever voice it was
+        attributed to, so it joins the thread that holds the prompt.
+        """
+        thread_id = self._thread_id(conversation_id, speaker)
+        if speaker is None:
+            return thread_id, None
+        prompt = waiting_pin_prompt(
+            self.entry.runtime_data.pending_actions, conversation_id
+        )
+        return (prompt["thread_id"], prompt) if prompt else (thread_id, None)
 
     async def _async_run_ainvoke(
         self,
@@ -2136,7 +2190,10 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             )
 
         speaker = await self._async_speaker(llm_context.device_id)
-        thread_id = self._thread_id(conversation_id, speaker)
+        thread_id, waiting_prompt = self._turn_thread(conversation_id, speaker)
+        # A chat_log is shared by the room, so another agent's turn cannot be
+        # attributed to a voice and stays out of every voice's history.
+        message_history = [] if speaker else message_history
 
         # A PIN confirmation is accepted only from this message, and a PIN
         # prompt waiting in this conversation is answered by it or not at all,
@@ -2236,7 +2293,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             )
 
         # A user name of None indicates an automation is being run.
-        memory_user = self._memory_user(user_name, speaker)
+        memory_user = self._memory_user(user_name, speaker, waiting_prompt)
         clean_user_name = "robot" if memory_user is None else memory_user
         # Remove special characters since memory namespace labels cannot contain them.
         clean_user_name = clean_user_name.translate(

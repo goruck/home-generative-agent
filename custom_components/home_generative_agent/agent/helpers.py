@@ -1090,6 +1090,33 @@ def start_pin_turn(
     return reply
 
 
+def waiting_pin_prompt(
+    pending_actions: Mapping[str, dict[str, Any]], conversation_id: str
+) -> dict[str, Any] | None:
+    """
+    Return the PIN prompt still waiting for a reply in a conversation, if any.
+
+    On a device that recognizes voices each voice has its own thread, and a short
+    spoken PIN is the utterance most likely to be attributed to the wrong one. The
+    prompt is found across the conversation's threads so the reply reaches it
+    instead of going to the model as an ordinary message. The PIN still decides.
+    """
+    now = dt_util.utcnow()
+    for action in reversed(list(pending_actions.values())):
+        thread_id = str(action.get("thread_id") or "")
+        if (
+            (
+                thread_id == conversation_id
+                or thread_id.startswith(f"{conversation_id}:")
+            )
+            and action.get("disclosed")
+            and (action.get("reply_turn") is None or action.get("renew"))
+            and not pending_action_expired(action, now)
+        ):
+            return action
+    return None
+
+
 def keep_pin_prompt(action: dict[str, Any], reply: PinReply | None) -> bool:
     """
     Keep the action's prompt for the user's next message, if this turn answers it.
