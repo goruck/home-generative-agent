@@ -1703,6 +1703,8 @@ def _thinking_anthropic(
     )
     # Extended thinking requires max_tokens > budget_tokens and
     # temperature=1; these override the feature-level temperature.
+    # core/anthropic_client.py drops temperature again under anthropic>=2,
+    # whose API version rejects it (#929).
     return {
         "thinking": {"type": "enabled", "budget_tokens": budget_tokens},
         "max_tokens": budget_tokens + ANTHROPIC_THINKING_RESPONSE_TOKENS,

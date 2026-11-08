@@ -12,7 +12,9 @@ workaround exists for, and the sharing that neutralises it.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import importlib.util
+import json
 import logging
 import threading
 from typing import TYPE_CHECKING, Any
@@ -20,17 +22,26 @@ from unittest.mock import patch
 
 import pytest
 from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage
 from langchain_core.runnables import ConfigurableField
 from pydantic import SecretStr
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
+from custom_components.home_generative_agent.const import (
+    ANTHROPIC_DEFAULT_MAX_TOKENS,
+    ANTHROPIC_THINKING_MAX_BUDGET,
+    ANTHROPIC_THINKING_RESPONSE_TOKENS,
+)
+from custom_components.home_generative_agent.core import anthropic_client
 from custom_components.home_generative_agent.core.anthropic_client import (
     LOGGER,
+    SAMPLING_PARAMS_REJECTED_BY_SDK_2,
     SharedClientChatAnthropic,
     async_prime_async_client,
 )
+from custom_components.home_generative_agent.core.utils import thinking_configurable
 
 _CONFIG = {"configurable": {"model": "claude-sonnet-4-6", "temperature": 0.7}}
 _INSTANCES: list[_FakeSdkClient] = []
@@ -303,3 +314,208 @@ async def test_real_sdk_reads_the_credential_file_once_off_the_loop() -> None:
     assert len(reads) <= 1
     assert threading.current_thread().name not in reads
     assert "MainThread" not in reads
+
+
+# --- Issue #929: anthropic>=2 sends API version 2026-10-21 -------------------
+
+
+def _payload(model: Any, **kwargs: Any) -> dict[str, Any]:
+    return model._get_request_payload([HumanMessage(content="hi")], **kwargs)
+
+
+def _sent_sampling(payload: dict[str, Any], name: str) -> Any:
+    """Return a sampling param wherever langchain-anthropic put it, or None."""
+    if name in payload:
+        return payload[name]
+    return (payload.get("extra_body") or {}).get(name)
+
+
+@pytest.fixture
+def sdk_2(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(anthropic_client, "sdk_rejects_sampling_params", lambda: True)
+
+
+@pytest.fixture
+def sdk_1(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(anthropic_client, "sdk_rejects_sampling_params", lambda: False)
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        ("0.125.0", False),
+        ("1.17.0", False),
+        ("2.0.0", True),
+        ("2.3.0", True),
+        ("v2.3.0", True),
+        ("", False),
+    ],
+)
+def test_sdk_major_version_decides_whether_sampling_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, version: str, *, expected: bool
+) -> None:
+    import anthropic  # noqa: PLC0415
+
+    monkeypatch.setattr(anthropic, "__version__", version)
+    anthropic_client.sdk_rejects_sampling_params.cache_clear()
+    try:
+        assert anthropic_client.sdk_rejects_sampling_params() is expected
+    finally:
+        anthropic_client.sdk_rejects_sampling_params.cache_clear()
+
+
+@pytest.mark.usefixtures("sdk_2")
+def test_sdk_2_sends_no_sampling_params() -> None:
+    """``temperature: Extra inputs are not permitted`` (#929)."""
+    provider = _provider()
+    copy = _per_call_copy(provider)
+    assert copy.temperature is None
+
+    payload = _payload(copy)
+    for name in SAMPLING_PARAMS_REJECTED_BY_SDK_2:
+        assert _sent_sampling(payload, name) is None
+
+    direct = _model(temperature=0.2, top_p=0.9, top_k=5)
+    assert (direct.temperature, direct.top_p, direct.top_k) == (None, None, None)
+    payload = _payload(direct, temperature=0.3, top_p=0.8, top_k=3)
+    for name in SAMPLING_PARAMS_REJECTED_BY_SDK_2:
+        assert _sent_sampling(payload, name) is None
+    assert "extra_body" not in payload
+
+
+@pytest.mark.usefixtures("sdk_2")
+def test_sdk_2_keeps_unrelated_extra_body() -> None:
+    payload = _payload(_model(), extra_body={"temperature": 0.5, "metadata_x": 1})
+    assert payload["extra_body"] == {"metadata_x": 1}
+
+
+@pytest.mark.usefixtures("sdk_1")
+def test_older_sdks_keep_sending_temperature() -> None:
+    copy = _per_call_copy(_provider())
+    assert copy.temperature == _CONFIG["configurable"]["temperature"]
+    assert _sent_sampling(_payload(copy), "temperature") == 0.7
+
+
+@pytest.mark.parametrize("model", ["claude-haiku-4-5-20251001", "claude-sonnet-4-6"])
+def test_max_tokens_default_is_sized_for_the_requested_model(model: str) -> None:
+    """``max_tokens: 128000 > 64000 ... claude-haiku-4-5-20251001`` (#929)."""
+    provider = _provider()
+    assert provider.default.max_tokens is None
+    bound = provider.with_config(config={"configurable": {"model": model}})
+    copy, _ = bound._prepare(bound.config)
+    assert copy.max_tokens is None
+    assert _payload(copy)["max_tokens"] == ANTHROPIC_DEFAULT_MAX_TOKENS
+
+
+def _profile_raises(_model: str) -> dict[str, Any]:
+    msg = "unhashable"
+    raise TypeError(msg)
+
+
+@pytest.mark.parametrize(
+    ("profile", "expected"),
+    [
+        (lambda _model: {"max_output_tokens": 8192}, 8192),
+        (lambda _model: {"max_output_tokens": 0}, ANTHROPIC_DEFAULT_MAX_TOKENS),
+        (lambda _model: {"max_output_tokens": None}, ANTHROPIC_DEFAULT_MAX_TOKENS),
+        (_profile_raises, ANTHROPIC_DEFAULT_MAX_TOKENS),
+    ],
+    ids=["limit", "zero", "none", "type-error"],
+)
+def test_max_tokens_default_is_capped_at_the_model_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    profile: Callable[[str], dict[str, Any]],
+    expected: int,
+) -> None:
+    import langchain_anthropic.chat_models as lc_chat_models  # noqa: PLC0415
+
+    monkeypatch.setattr(lc_chat_models, "_get_default_model_profile", profile)
+    assert _payload(_model(model="claude-small"))["max_tokens"] == expected
+
+
+def test_max_tokens_default_for_an_unknown_model() -> None:
+    model = _model(model="claude-not-in-any-profile")
+    assert _payload(model)["max_tokens"] == ANTHROPIC_DEFAULT_MAX_TOKENS
+
+
+def test_explicit_max_tokens_is_kept() -> None:
+    model = _model(max_tokens=2048)
+    assert _payload(model)["max_tokens"] == 2048
+
+
+@pytest.mark.parametrize("rejects", [True, False])
+def test_extended_thinking_keeps_its_max_tokens(
+    monkeypatch: pytest.MonkeyPatch, *, rejects: bool
+) -> None:
+    monkeypatch.setattr(
+        anthropic_client, "sdk_rejects_sampling_params", lambda: rejects
+    )
+    thinking = thinking_configurable(
+        provider_type="anthropic", reasoning=True, budget=ANTHROPIC_THINKING_MAX_BUDGET
+    )
+    bound = _provider().with_config(
+        config={"configurable": {"model": "claude-haiku-4-5-20251001", **thinking}}
+    )
+    copy, _ = bound._prepare(bound.config)
+    payload = _payload(copy)
+    assert payload["max_tokens"] == (
+        ANTHROPIC_THINKING_MAX_BUDGET + ANTHROPIC_THINKING_RESPONSE_TOKENS
+    )
+    assert payload["thinking"]["budget_tokens"] == ANTHROPIC_THINKING_MAX_BUDGET
+    assert _sent_sampling(payload, "temperature") == (None if rejects else 1)
+
+
+async def test_wire_request_matches_the_installed_sdk() -> None:
+    """
+    The real SDK, no patching of the SDK-version gate: what goes on the wire.
+
+    Pins the assumption the gate rests on: SDK major 2 sends API version
+    ``2026-10-21``, so no sampling parameter may reach the body.
+    """
+    import anthropic  # noqa: PLC0415
+
+    # anthropic 2.x is built on httpx2, older SDKs on httpx.
+    httpx: Any = importlib.import_module(
+        "httpx2" if importlib.util.find_spec("httpx2") else "httpx"
+    )
+    requests: list[Any] = []
+
+    def _handler(request: Any) -> Any:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-haiku-4-5",
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    bound = _provider().with_config(
+        config={"configurable": {"model": "claude-haiku-4-5", "temperature": 0.7}}
+    )
+    copy, _ = bound._prepare(bound.config)
+    copy.streaming = False
+    transport = httpx.MockTransport(_handler)
+    async with anthropic.DefaultAsyncHttpxClient(transport=transport) as http:
+        copy.shared_async_client = anthropic.AsyncClient(
+            api_key="sk-test", http_client=http
+        )
+        copy.shared_client_params = copy._shared_client_params()
+        await copy.ainvoke([HumanMessage(content="hi")])
+
+    assert len(requests) == 1
+    body = json.loads(requests[0].content)
+    assert body["max_tokens"] == ANTHROPIC_DEFAULT_MAX_TOKENS
+    if anthropic_client.sdk_rejects_sampling_params():
+        assert requests[0].headers["anthropic-version"] == "2026-10-21"
+        for name in SAMPLING_PARAMS_REJECTED_BY_SDK_2:
+            assert name not in body
+    else:
+        assert requests[0].headers["anthropic-version"] != "2026-10-21"
+        assert body["temperature"] == 0.7
