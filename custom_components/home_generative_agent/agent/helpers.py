@@ -834,8 +834,9 @@ def pin_digits(text: str) -> str | None:
     """
     Return the digits of the one number in the text, else None.
 
-    For the PIN as the model passes it, which may be said in words or
-    labelled ("one two three four", "PIN 1234"); two numbers give None.
+    For the PIN as the model passes it, or a user's message checked for a PIN
+    reply to another voice's prompt. Either may be said in words or labelled
+    ("one two three four", "PIN 1234"); two numbers give None.
     """
     runs = _number_runs(text)
     return runs[0] if len(runs) == 1 else None
@@ -975,9 +976,28 @@ def _same_request(existing: Mapping[str, Any], action: Mapping[str, Any]) -> boo
     return _request_key(existing) == _request_key(action)
 
 
+def _reissued_for_owner(
+    existing: Mapping[str, Any], action: Mapping[str, Any], pin_owner: str | None
+) -> bool:
+    """
+    Return True when a followed PIN reply repeats the prompt owner's request.
+
+    The turn runs as its speaker, so the action arrives under another user, but
+    it is still the owner's request. A different request stays the speaker's.
+    """
+    return (
+        pin_owner is not None
+        and existing.get("user") == pin_owner
+        and existing.get("user") != action.get("user")
+        and _same_request(existing, action)
+    )
+
+
 def register_pending_action(
     pending_actions: dict[str, dict[str, Any]],
     action: dict[str, Any],
+    *,
+    pin_owner: str | None = None,
 ) -> str | None:
     """
     Store a pending PIN-confirmation action and return its action ID.
@@ -997,6 +1017,10 @@ def register_pending_action(
     turn, the request was most likely repeated by the user, who now gets the
     prompt again, so the prompt is also kept for their next message. An
     expired action is dropped first and carries nothing.
+
+    `pin_owner` is the prompt's owner on a turn that followed another voice's
+    PIN prompt: the same request re-issued there stays the owner's, so the PIN
+    still confirms it and its failed attempts are kept.
     """
     now = dt_util.utcnow()
     thread_id = action.get("thread_id")
@@ -1007,8 +1031,12 @@ def register_pending_action(
         elif (
             thread_id
             and existing.get("thread_id") == thread_id
-            and existing.get("user") == action.get("user")
+            and (
+                existing.get("user") == action.get("user")
+                or _reissued_for_owner(existing, action, pin_owner)
+            )
         ):
+            action = {**action, "user": existing.get("user")}
             if _same_request(existing, action) and existing.get("turn_id"):
                 reissued_in_reply = bool(
                     existing.get("reply_turn")

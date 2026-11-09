@@ -577,7 +577,9 @@ def _critical_action_guard(  # noqa: PLR0913
         "api_tool_name": origin.tool_name if origin is not None else None,
         "remote": origin is not None and origin.remote,
     }
-    action_id = register_pending_action(ctx.pending_actions, action)
+    action_id = register_pending_action(
+        ctx.pending_actions, action, pin_owner=configurable.get("pin_owner")
+    )
     if action_id is None:
         # Another protected request is already waiting for this turn's PIN
         # prompt; the user asks for this one after answering it.

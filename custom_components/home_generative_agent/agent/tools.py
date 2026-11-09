@@ -965,7 +965,9 @@ def _maybe_require_pin_for_automation(
         "thread_id": cfg.get("thread_id"),
         "turn_id": _turn_id(cfg),
     }
-    action_id = register_pending_action(pending_actions, action)
+    action_id = register_pending_action(
+        pending_actions, action, pin_owner=cfg.get("pin_owner")
+    )
     if action_id is None:
         return pin_msg(cfg.get("hass"), "pin_one_action_at_a_time")
     return json.dumps(

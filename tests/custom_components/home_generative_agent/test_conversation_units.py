@@ -170,6 +170,7 @@ from homeassistant.components import conversation as ha_conversation  # noqa: E4
 from homeassistant.util import dt as dt_util  # noqa: E402
 
 from custom_components.home_generative_agent.agent.helpers import (  # noqa: E402
+    register_pending_action,
     start_pin_turn,
     waiting_pin_prompt,
 )
@@ -3814,6 +3815,80 @@ def test_pin_owner_decides_the_owner_check_for_a_followed_prompt() -> None:
     assert _is_wrong_user({"user_id": "Mary", "pin_owner": "ivan"}, action) is False
     assert _is_wrong_user({"user_id": "Mary", "pin_owner": None}, action) is True
     assert _is_wrong_user({"user_id": "Mary"}, action) is True
+
+
+def _held_request(**fields: Any) -> dict[str, Any]:
+    return {
+        "tool_name": "HassTurnOn",
+        "tool_args": {"name": "Front door"},
+        "thread_id": "conv:ivan",
+        "created_at": dt_util.utcnow().isoformat(),
+        **fields,
+    }
+
+
+def test_followed_reply_reissuing_the_request_keeps_the_owners_action() -> None:
+    """The model repeats the held request; the owner's PIN must still confirm it."""
+    pending: dict[str, dict[str, Any]] = {
+        "a": _held_request(user="ivan", turn_id="t0", attempts=2, disclosed=True)
+    }
+    action_id = register_pending_action(
+        pending, _held_request(user="Mary", turn_id="t1"), pin_owner="ivan"
+    )
+    assert action_id is not None
+    assert list(pending) == [action_id]
+    action = pending[action_id]
+    assert action["user"] == "ivan"
+    assert action["attempts"] == 2
+    assert action["disclosed"] is True
+    assert _is_wrong_user({"user_id": "Mary", "pin_owner": "ivan"}, action) is False
+
+
+def test_followed_reply_making_a_new_request_stays_the_speakers() -> None:
+    """Only the same request is the owner's; a new one is whoever asked for it."""
+    pending: dict[str, dict[str, Any]] = {
+        "a": _held_request(user="ivan", turn_id="t0", attempts=2, disclosed=True)
+    }
+    new = _held_request(user="Mary", turn_id="t1", tool_args={"name": "Garage"})
+    action_id = register_pending_action(pending, new, pin_owner="ivan")
+    assert action_id is not None
+    assert pending[action_id]["user"] == "Mary"
+    assert pending[action_id]["attempts"] == 0
+    assert pending["a"]["user"] == "ivan"
+
+
+def test_another_users_same_request_is_not_the_owners_without_a_followed_prompt() -> (
+    None
+):
+    """With no prompt followed, two users' requests stay apart as before."""
+    pending: dict[str, dict[str, Any]] = {
+        "a": _held_request(user="ivan", turn_id="t0", attempts=2)
+    }
+    action_id = register_pending_action(
+        pending, _held_request(user="Mary", turn_id="t1")
+    )
+    assert action_id is not None
+    assert len(pending) == 2
+    assert pending[action_id]["user"] == "Mary"
+
+
+@pytest.mark.parametrize(
+    ("text", "follows"),
+    [
+        ("123", False),
+        ("1234", True),
+        ("1234567890", True),
+        ("12345678901", False),
+        ("between 1234 and 5678", False),
+    ],
+)
+def test_only_one_number_of_pin_length_follows_a_prompt(
+    *, text: str, follows: bool
+) -> None:
+    """The bounds are the PIN's own: 4 to 10 digits, and only one number."""
+    action = _waiting_action("conv:Пётр")
+    found = waiting_pin_prompt({"a": action}, "conv", text)
+    assert (found is action) is follows
 
 
 def test_other_message_from_another_voice_stays_with_its_speaker() -> None:
