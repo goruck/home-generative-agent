@@ -764,6 +764,34 @@ async def test_a_pending_action_keeps_the_pin_tool_past_the_history() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "reply",
+    ["Incorrect PIN. Action not executed.", "Nesprávný PIN. Akce nebyla provedena."],
+)
+async def test_a_wrong_pin_keeps_the_pin_tool_while_the_action_waits(
+    reply: str,
+) -> None:
+    """In any language: the store decides, not the reply's words (#955)."""
+    api = _FakeAPI()
+    turns = _Turns(api)
+    action_id = turns.request_unlock()
+    messages: list[Any] = [
+        ToolMessage(
+            content=json.dumps({"status": "requires_pin", "action_id": action_id}),
+            tool_call_id="tc1",
+            name="HassTurnOn",
+        ),
+        ToolMessage(content=reply, tool_call_id="tc2", name="confirm_sensitive_action"),
+    ]
+    store = cast("Any", _ToolStore())
+
+    tools = await graph._get_pending_pin_tools(
+        messages, store, cast("Any", turns.config)
+    )
+
+    assert [tool["name"] for tool in tools] == ["confirm_sensitive_action"]
+
+
 async def test_a_new_protected_request_replaces_the_conversations_older_one() -> None:
     """
     The user's PIN never runs a request they moved on from.

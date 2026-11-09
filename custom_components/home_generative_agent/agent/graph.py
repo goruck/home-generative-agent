@@ -2779,8 +2779,10 @@ def _has_pending_pin_confirmation(messages: Sequence[AnyMessage]) -> bool:
     Detects two cases:
 
     Case 1 (normal flow): A ``requires_pin`` ToolMessage exists with no later
-    ``confirm_sensitive_action`` reply that resolved it. A wrong PIN, an
-    ``awaiting_user_pin`` refusal or a routing error leave it pending.
+    ``confirm_sensitive_action`` reply that resolved it. An
+    ``awaiting_user_pin`` refusal or a routing error leave it pending. A wrong
+    PIN reads as resolved here, since its reply is in the user's language: the
+    pending-action store keeps the tool while the action still waits.
 
     Case 2 (degraded flow): An actuation tool was routing-rejected and the model
     subsequently asked for a PIN in an AI message.  Injecting
@@ -2793,9 +2795,6 @@ def _has_pending_pin_confirmation(messages: Sequence[AnyMessage]) -> bool:
         for msg in recent[pin_idx + 1 :]:
             if isinstance(msg, ToolMessage) and msg.name == CONFIRM_TOOL_NAME:
                 content = msg.content if isinstance(msg.content, str) else ""
-                if "Incorrect PIN" in content:
-                    # Wrong PIN entered — action is still pending, keep scanning.
-                    continue
                 if pin_refusal(content) is not None:
                     # Refused before the PIN was checked (not in the user's
                     # message, or the message already used) — still pending.
@@ -2829,7 +2828,7 @@ async def _get_pending_pin_tools(
     """Return [confirm_sensitive_action] when a PIN confirmation is pending."""
     cfg = (config or {}).get("configurable", {})
     # The store, not only the history: the history is trimmed to a lookback
-    # window and its detector reads English text, while the store holds the
+    # window and cannot read a wrong PIN's reply, while the store holds the
     # conversation's action until its reply turn ends.
     if not (
         _has_pending_pin_confirmation(messages)
