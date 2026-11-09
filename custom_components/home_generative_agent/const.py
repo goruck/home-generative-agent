@@ -185,6 +185,9 @@ VOICE_ACK_TIMING_TURN_START = "turn_start"
 VOICE_ACK_TIMING_TOOL_CALL = "tool_call"
 VOICE_ACK_TIMINGS = (VOICE_ACK_TIMING_TURN_START, VOICE_ACK_TIMING_TOOL_CALL)
 RECOMMENDED_VOICE_ACK_TIMING = VOICE_ACK_TIMING_TURN_START
+# Sensors that name the voice a satellite recognized. Each applies to requests
+# from the device it belongs to. Empty means speaker recognition is off.
+CONF_SPEAKER_SENSORS = "speaker_sensors"
 DEFAULT_STT_HALLUCINATION_PATTERNS: list[str] = []
 DEFAULT_STT_HALLUCINATION_EXACT_PATTERNS: list[str] = []
 
@@ -1204,6 +1207,20 @@ suitable tool for this request and suggest the user rephrase it. Never say you
 have no access to device history. This rule is only for a missing tool. It does
 not apply when a tool you called returned an error or no data.
 """
+
+# A recognized voice is quoted in the prompt and can come from any integration,
+# so it is limited in length and stripped of what could break out of the quotes.
+SPEAKER_NAME_MAX_CHARS = 64
+SPEAKER_KNOWN_PROMPT = (
+    'Voice recognition identified the current speaker as "{name}". '
+    "Use the name only to personalize answers, never to authorize anything."
+)
+SPEAKER_PERSON_PROMPT = "The speaker is the Home Assistant person {person}."
+SPEAKER_UNKNOWN_PROMPT = (
+    "Voice recognition did not recognize the current speaker: "
+    "do not address them by name."
+)
+
 # Stable-prefix line naming the configured mobile push service, so an
 # automation that notifies the user's phone is written with the real service
 # on the first try instead of hunting for it with lookups the model has no

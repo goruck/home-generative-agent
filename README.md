@@ -107,6 +107,8 @@ You can now open the HA Assist panel and start talking to your home.
 
 **Optional — voice in and out:** click **+ STT Provider** and **+ TTS Provider** on the integration page to add HGA's own speech-to-text and text-to-speech engines (OpenAI, or a local [Speaches](https://speaches.ai/) server on any machine), then select them in your Assist pipeline. See [STT setup](docs/configuration.md#speech-to-text-stt) and [TTS setup](docs/configuration.md#text-to-speech-tts).
 
+**Optional — who is speaking:** on a satellite that recognizes voices, pick its sensor under [Speaker recognition sensors](docs/configuration.md#speaker-recognition-on-voice-satellites), so the agent knows who is talking and each voice keeps its own history.
+
 ## Documentation
 
 | Guide | Contents |

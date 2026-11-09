@@ -11,6 +11,7 @@ The configuration UI is available in English, Czech, Simplified Chinese, and Tur
 - [Control Home Assistant (LLM API)](#control-home-assistant-llm-api)
 - [Speech-to-Text (STT)](#speech-to-text-stt)
 - [Text-to-Speech (TTS)](#text-to-speech-tts)
+- [Speaker Recognition on Voice Satellites](#speaker-recognition-on-voice-satellites)
 - [Schema-first YAML Mode](#schema-first-yaml-mode)
 - [Critical Action PIN](#critical-action-pin)
 - [Global Options](#global-options)
@@ -414,6 +415,22 @@ Two things to know about the local backend:
 
 - **Kokoro needs a reasonably modern machine.** On a modern CPU (AVX2) or a recent GPU it is fast and sounds good. On an old CPU without AVX2 it can take several times the audio duration to synthesize a sentence, and ONNX Runtime's CUDA path does not help it on Pascal-class GPUs. In that case use a piper voice instead — `speaches-ai/piper-en_US-hfc_female-medium` (voice `hfc_female`) or a `-low` variant — which synthesizes a sentence in about a second on CPU and needs no GPU. Browse the available models with `GET /v1/registry?task=text-to-speech`.
 - **Speaches does not produce opus or aac.** HGA never asks it to; a pipeline that wants those gets mp3 converted by Home Assistant.
+
+---
+
+## Speaker Recognition on Voice Satellites
+
+Some voice satellites recognize who is speaking and publish the recognized voice as a sensor, for example the **Speaker** sensor of [Pulsar](https://github.com/Morvex885/pulsar), firmware for Yandex Stations that talks to Home Assistant over the ESPHome API. Any integration works: an ESPHome, MQTT or template sensor will do, as long as it belongs to the satellite's device and its state is the recognized name (`unknown`, empty or `unavailable` when the voice is not recognized).
+
+To turn it on, open **Settings → Devices & Services → Home Generative Agent → Configure** and pick the sensors under **Speaker recognition sensors**, one per satellite. A request uses the picked sensor on the device that sent it; requests from other devices, and every request while nothing is picked, work exactly as before. For each request from a device with a picked sensor:
+
+- **The agent is told who is speaking.** The prompt names the recognized voice, so "what is my name?" or "remind me" can be answered for that person. The name is for personalization only: the prompt says never to use it to authorize anything, and the [Critical Action PIN](#critical-action-pin) still applies. When the satellite heard a voice it does not know (`unknown`, empty or `unavailable`), the prompt says not to address the speaker by name.
+- **A voice can be a Home Assistant person.** When the sensor's value matches a [person](https://www.home-assistant.io/integrations/person/) (its name, ignoring case, its id, or its entity id such as `person.alex`), the prompt also names that person entity, so the agent can look up where they are or what belongs to them. If the person is linked to a Home Assistant user, the voice reads and writes that user's long-term memories, the same ones the user has when typing in the app. A name two people share matches neither of them; publish the person's id or entity id instead. Without a match, satellite requests share one memory namespace as before. Recognition still grants no rights: an admin-only action from a satellite stays refused whoever is speaking.
+- **Each voice keeps its own history.** A satellite usually keeps one conversation for everyone in the room, and a model tends to repeat an answer from that history even when the prompt names someone else. So on such a device each recognized voice or person, and the unrecognized voice, gets its own conversation history within the satellite's conversation. While a voice's Critical Action PIN prompt is waiting, a message holding one number of PIN length (4 to 10 digits) answers that prompt whichever voice it was attributed to, because a short spoken PIN is easily misattributed, and the PIN itself still decides. Such a message joins the history of the voice that was asked, but keeps its speaker's long-term memories. Any other message stays with whoever said it: from another voice, that leaves the prompt waiting, while the voice that was asked still answers or abandons it with its next message. Turns answered by Home Assistant's built-in agent cannot be attributed to a voice, so they stay out of these histories.
+
+Only the sensor on the device that sent the request counts, so a request typed in the browser never picks up the last name a satellite heard. A template sensor must be attached to the satellite's device in its settings to be used; a picked sensor that does not exist or has no device is logged once as a warning. The sensor must update before the request reaches the agent and report `unknown` when it heard no known voice, since a value left over from an earlier utterance is taken as the current speaker. History from before upgrading stays under the satellite's shared conversation and is not split by voice.
+
+Voice recognition can be wrong. When a voice is linked to a person, a misrecognized voice can hear that person's memories, so link only the people whose memories are fine to share with the household.
 
 ---
 

@@ -965,7 +965,9 @@ def _maybe_require_pin_for_automation(
         "thread_id": cfg.get("thread_id"),
         "turn_id": _turn_id(cfg),
     }
-    action_id = register_pending_action(pending_actions, action)
+    action_id = register_pending_action(
+        pending_actions, action, pin_owner=cfg.get("pin_owner")
+    )
     if action_id is None:
         return pin_msg(cfg.get("hass"), "pin_one_action_at_a_time")
     return json.dumps(
@@ -1354,7 +1356,7 @@ async def _warn_if_correct_pin_refused(
 
 
 def _is_wrong_user(cfg: Mapping[str, Any], action: Mapping[str, Any]) -> bool:
-    requester_id = cfg.get("user_id")
+    requester_id = cfg.get("pin_owner") or cfg.get("user_id")
     action_owner = action.get("user")
     return bool(requester_id and action_owner and requester_id != action_owner)
 

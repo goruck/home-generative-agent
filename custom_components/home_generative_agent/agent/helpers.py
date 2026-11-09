@@ -32,6 +32,8 @@ from custom_components.home_generative_agent.const import (
     CONF_CRITICAL_ACTIONS,
     CONF_TOOL_EXCLUSIONS,
     CONF_TOOL_INCLUSIONS,
+    CRITICAL_PIN_MAX_LEN,
+    CRITICAL_PIN_MIN_LEN,
     RECOMMENDED_CRITICAL_ACTIONS,
 )
 
@@ -468,6 +470,8 @@ class ConfigurableData(TypedDict, total=False):
     user_id: str
     ha_llm_api: Any
     thread_id: str
+    # The user a reply that follows a voice's PIN prompt is checked as.
+    pin_owner: str | None
     # The user's message for this turn. A PIN confirmation is accepted only
     # when the PIN is in it, and runs at most one action.
     pin_reply: PinReply
@@ -830,8 +834,9 @@ def pin_digits(text: str) -> str | None:
     """
     Return the digits of the one number in the text, else None.
 
-    For the PIN as the model passes it, which may be said in words or
-    labelled ("one two three four", "PIN 1234"); two numbers give None.
+    For the PIN as the model passes it, or a user's message checked for a PIN
+    reply to another voice's prompt. Either may be said in words or labelled
+    ("one two three four", "PIN 1234"); two numbers give None.
     """
     runs = _number_runs(text)
     return runs[0] if len(runs) == 1 else None
@@ -971,9 +976,28 @@ def _same_request(existing: Mapping[str, Any], action: Mapping[str, Any]) -> boo
     return _request_key(existing) == _request_key(action)
 
 
+def _reissued_for_owner(
+    existing: Mapping[str, Any], action: Mapping[str, Any], pin_owner: str | None
+) -> bool:
+    """
+    Return True when a followed PIN reply repeats the prompt owner's request.
+
+    The turn runs as its speaker, so the action arrives under another user, but
+    it is still the owner's request. A different request stays the speaker's.
+    """
+    return (
+        pin_owner is not None
+        and existing.get("user") == pin_owner
+        and existing.get("user") != action.get("user")
+        and _same_request(existing, action)
+    )
+
+
 def register_pending_action(
     pending_actions: dict[str, dict[str, Any]],
     action: dict[str, Any],
+    *,
+    pin_owner: str | None = None,
 ) -> str | None:
     """
     Store a pending PIN-confirmation action and return its action ID.
@@ -993,6 +1017,10 @@ def register_pending_action(
     turn, the request was most likely repeated by the user, who now gets the
     prompt again, so the prompt is also kept for their next message. An
     expired action is dropped first and carries nothing.
+
+    `pin_owner` is the prompt's owner on a turn that followed another voice's
+    PIN prompt: the same request re-issued there stays the owner's, so the PIN
+    still confirms it and its failed attempts are kept.
     """
     now = dt_util.utcnow()
     thread_id = action.get("thread_id")
@@ -1003,8 +1031,12 @@ def register_pending_action(
         elif (
             thread_id
             and existing.get("thread_id") == thread_id
-            and existing.get("user") == action.get("user")
+            and (
+                existing.get("user") == action.get("user")
+                or _reissued_for_owner(existing, action, pin_owner)
+            )
         ):
+            action = {**action, "user": existing.get("user")}
             if _same_request(existing, action) and existing.get("turn_id"):
                 reissued_in_reply = bool(
                     existing.get("reply_turn")
@@ -1088,6 +1120,39 @@ def start_pin_turn(
         else:
             pending_actions.pop(key, None)
     return reply
+
+
+def waiting_pin_prompt(
+    pending_actions: Mapping[str, dict[str, Any]], conversation_id: str, text: str
+) -> dict[str, Any] | None:
+    """
+    Return the voice's PIN prompt this message may be answering, if any.
+
+    On a device that recognizes voices each voice has its own thread, and a short
+    spoken PIN is the utterance most likely to be attributed to the wrong one. A
+    message holding one number of PIN length is looked up across the conversation's
+    voices so it reaches the prompt instead of going to the model as an ordinary
+    message; the PIN still decides. Any other message stays with whoever said it,
+    and only a prompt a voice created is followed, so a typed request keeps its
+    owner check.
+    """
+    digits = pin_digits(text)
+    if (
+        digits is None
+        or not CRITICAL_PIN_MIN_LEN <= len(digits) <= CRITICAL_PIN_MAX_LEN
+    ):
+        return None
+    now = dt_util.utcnow()
+    prefix = f"{conversation_id}:"
+    for action in reversed(list(pending_actions.values())):
+        if (
+            str(action.get("thread_id") or "").startswith(prefix)
+            and action.get("disclosed")
+            and (action.get("reply_turn") is None or action.get("renew"))
+            and not pending_action_expired(action, now)
+        ):
+            return action
+    return None
 
 
 def keep_pin_prompt(action: dict[str, Any], reply: PinReply | None) -> bool:
