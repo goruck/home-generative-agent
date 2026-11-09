@@ -8,7 +8,7 @@ from typing import Any, cast
 import pytest
 from homeassistant.exceptions import ConfigEntryNotReady
 from psycopg import OperationalError
-from psycopg_pool import PoolTimeout
+from psycopg_pool import AsyncConnectionPool, PoolTimeout
 from pytest_homeassistant.common import MockConfigEntry
 
 import custom_components.home_generative_agent as hga_component
@@ -22,8 +22,9 @@ from custom_components.home_generative_agent.core.database_guard import (
 class DummyPool:
     """AsyncConnectionPool stand-in that tracks close calls."""
 
-    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+    def __init__(self, *_args: Any, **kwargs: Any) -> None:
         """Initialize the dummy pool."""
+        self.kwargs = kwargs
         self.open_called = False
         self.close_called = False
 
@@ -181,3 +182,25 @@ async def test_unreachable_database_retries_before_building_the_pool(
         await cast("Any", hga_component).async_setup_entry(hass, entry)
 
     assert "pool" not in pool_holder
+
+
+@pytest.mark.asyncio
+async def test_pool_checks_connections_on_checkout(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pool replaces connections the server dropped (e.g. a DB restart)."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    pool_holder: dict[str, DummyPool] = {}
+
+    async def _stop(*_args: Any, **_kwargs: Any) -> None:
+        msg = "stop after pool creation"
+        raise RuntimeError(msg)
+
+    _patch_setup(monkeypatch, pool_holder, _stop)
+
+    result = await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert result is False
+    assert pool_holder["pool"].close_called is True
+    assert pool_holder["pool"].kwargs["check"] == AsyncConnectionPool.check_connection
