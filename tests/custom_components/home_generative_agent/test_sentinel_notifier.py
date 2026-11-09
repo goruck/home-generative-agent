@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
 from homeassistant.core import Context
@@ -3876,6 +3878,172 @@ def _high(anomaly_id: str, ftype: str, entities: list[str]) -> AnomalyFinding:
     )
 
 
+def _alarm() -> AnomalyFinding:
+    return _finding(
+        "alarm",
+        "alarm_disarmed_during_external_threat",
+        triggering_entities=["alarm_control_panel.home", "camera.front"],
+    )
+
+
+def _stranger(
+    anomaly_id: str = "stranger",
+    ftype: str = "unknown_person_camera_night_home",
+    camera: str = "camera.front",
+    **evidence: Any,
+) -> AnomalyFinding:
+    return replace(
+        _finding(anomaly_id, ftype, triggering_entities=[camera]),
+        evidence={"camera_entity_id": camera, **evidence},
+    )
+
+
+_CAMERA_NAMES = (("camera.front", "Front Camera"), ("camera.back", "Back Camera"))
+
+
+def test_related_line_names_a_stranger_whatever_leads() -> None:
+    """The alarm alert keeps its place; the sighting must still be told (#964)."""
+    stranger = _stranger()
+
+    line, named = _also(_alarm(), [stranger], _named_snapshot(*_CAMERA_NAMES))
+
+    assert line == "Also: Unknown person on Front Camera"
+    assert named == [stranger]
+
+
+def test_related_line_puts_a_stranger_before_other_partners() -> None:
+    shown = _finding("shown", triggering_entities=["binary_sensor.front_door"])
+    window = _finding("w", triggering_entities=["binary_sensor.w1"])
+    stranger = _stranger()
+    snapshot = _named_snapshot(
+        *_CAMERA_NAMES,
+        ("binary_sensor.front_door", "Front Door"),
+        ("binary_sensor.w1", "Kitchen Window"),
+    )
+
+    line, named = _also(shown, [window, stranger], snapshot)
+
+    assert line == "Also: Unknown person on Front Camera, Kitchen Window"
+    assert named == [stranger, window]
+
+
+def test_related_line_names_a_stranger_from_a_dynamic_rule_by_its_template() -> None:
+    """A dynamic rule's id may be anything; its template says what it is."""
+    stranger = _stranger(
+        ftype="v1_subject_camera_person",
+        template_id="unknown_person_camera_when_home",
+    )
+
+    line, named = _also(_alarm(), [stranger], _named_snapshot(*_CAMERA_NAMES))
+
+    assert line == "Also: Unknown person on Front Camera"
+    assert named == [stranger]
+
+
+def test_related_line_ignores_a_rule_only_named_like_a_stranger() -> None:
+    """An approved rule's id comes from the model; its template decides."""
+    other = _stranger(
+        ftype="unknown_person_camera_battery",
+        template_id="low_battery_sensors",
+    )
+
+    assert _also(_alarm(), [other], _named_snapshot(*_CAMERA_NAMES)) == (None, [])
+
+
+def test_related_line_lists_two_sightings_on_one_camera_once() -> None:
+    first, second = _stranger("a"), _stranger("b", "unknown_person_camera_no_home")
+
+    line, named = _also(_alarm(), [first, second], _named_snapshot(*_CAMERA_NAMES))
+
+    assert line == "Also: Unknown person on Front Camera"
+    assert named == [first, second]
+
+
+def test_related_line_says_only_a_camera_when_its_name_is_shared() -> None:
+    """Two cameras with one name: the line must not point at the wrong one."""
+    front, back = _stranger("a"), _stranger("b", camera="camera.back")
+    snapshot = _named_snapshot(("camera.front", "Yard"), ("camera.back", "Yard"))
+
+    line, named = _also(_alarm(), [front, back], snapshot)
+
+    assert line == "Also: Unknown person on camera"
+    assert named == [front, back]
+
+
+def test_related_line_leaves_a_stranger_for_another_phone_due() -> None:
+    """Told on the wrong phone it would be held and never reach the right one."""
+    stranger = _stranger()
+    snapshot = _named_snapshot(*_CAMERA_NAMES)
+
+    with patch(
+        "custom_components.home_generative_agent.sentinel.notifier"
+        "._resolve_notify_service",
+        side_effect=lambda finding, *_args: (
+            "notify.other" if finding is stranger else "notify.mine"
+        ),
+    ):
+        assert _also(_alarm(), [stranger], snapshot) == (None, [])
+
+
+def test_related_line_keeps_a_sighting_whose_camera_name_does_not_fit() -> None:
+    """Left off, it would go stale before its cooldown ended and never be told."""
+    cameras = [f"camera.c{i}" for i in range(6)]
+    strangers = [_stranger(f"s{i}", camera=c) for i, c in enumerate(cameras)]
+    snapshot = _named_snapshot(*((c, f"Front Door Camera {c[-1]}") for c in cameras))
+
+    line, named = _also(_alarm(), strangers, snapshot)
+
+    assert line is not None
+    assert line.endswith("Unknown person on camera")
+    assert len(line) <= MAX_ALSO_LINE_CHARS
+    assert named == strangers
+
+
+def test_related_line_caps_a_long_camera_name() -> None:
+    """One name cannot take the whole line."""
+    stranger = _stranger()
+    snapshot = _named_snapshot(("camera.front", "F" * 200))
+
+    line, named = _also(_alarm(), [stranger], snapshot)
+
+    assert line == "Also: Unknown person on " + "F" * 30
+    assert named == [stranger]
+
+
+def test_related_line_names_another_rules_sighting_on_another_camera() -> None:
+    """A dynamic rule's type differs from the built-in's, so no device line."""
+    shown = _stranger("a", "unknown_person_camera_no_home")
+    other = _stranger(
+        "b",
+        "unknown_person_camera_when_home_camera_back",
+        camera="camera.back",
+        template_id="unknown_person_camera_when_home",
+    )
+
+    line, named = _also(shown, [other], _named_snapshot(*_CAMERA_NAMES))
+
+    assert line == "Also: Unknown person on Back Camera"
+    assert named == [other]
+
+
+def test_related_line_skips_a_sighting_on_the_camera_already_shown() -> None:
+    shown = _stranger("a", "unknown_person_camera_no_home")
+    same_camera = _stranger("b", "unknown_person_camera_night_home")
+
+    assert _also(shown, [same_camera], _named_snapshot(*_CAMERA_NAMES)) == (None, [])
+
+
+def test_related_line_lets_a_sighting_alone_name_other_cameras_as_before() -> None:
+    """A shown stranger says so itself; other cameras go by device."""
+    shown = _stranger("a")
+    other = _stranger("b", camera="camera.back")
+
+    line, named = _also(shown, [other], _named_snapshot(*_CAMERA_NAMES))
+
+    assert line == "Also: Back Camera"
+    assert named == [other]
+
+
 def test_related_line_names_partners_by_snapshot_friendly_name() -> None:
     shown = _finding("shown", triggering_entities=["binary_sensor.front_door"])
     kitchen = _finding("k", triggering_entities=["binary_sensor.w1"])
@@ -3951,9 +4119,9 @@ def test_related_line_names_only_the_shown_findings_type() -> None:
     """
     A device name says what is wrong only for the condition the push shows.
 
-    A stranger on camera is low severity and pairs with an open door while
-    away; reduced to "Also: Driveway Camera" it was held without being
-    described.  Any severity of a different type keeps its own push.
+    Any severity of a different type keeps its own push. The exception is a
+    stranger on camera (#964): "Also: Driveway Camera" would hold it without
+    describing it, so it is named by what was seen.
     """
     shown = _high("shown", "open_entry_while_away", ["binary_sensor.front_door"])
     lock = _high("lock", "unlocked_lock_at_night", ["lock.back_door_lock"])
@@ -3966,8 +4134,8 @@ def test_related_line_names_only_the_shown_findings_type() -> None:
 
     line, named = _also(shown, [lock, stranger, same_kind])
 
-    assert line == "Also: Back Door"
-    assert named == [same_kind]
+    assert line == "Also: Unknown person on camera, Back Door"
+    assert named == [stranger, same_kind]
 
 
 def test_related_line_does_not_name_a_device_sharing_another_devices_name() -> None:

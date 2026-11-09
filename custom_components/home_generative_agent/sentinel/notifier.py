@@ -63,6 +63,7 @@ from custom_components.home_generative_agent.sentinel.models import (
     SEMANTIC_KEY_SLUG_PREFIX,
     SEVERITY_RANK,
     enrolled_people,
+    is_stranger_sighting,
     motion_subject,
     subject_entity,
     trust_device_ids,
@@ -2089,7 +2090,10 @@ def related_findings_line(
     * it is routed to the same notify service as *shown*, so a finding for
       another area's phone is not held after reaching the wrong one.
 
-    Any other finding is left out and keeps coming due on its own.
+    A stranger on camera is named whatever *shown* is (issue #964), first on
+    the line, because rules set their own severity and confidence and a
+    stranger is seldom what a group leads with. Any other finding is left out
+    and keeps coming due on its own.
 
     The constituents in ``partners.held`` are not due yet, held back only by
     their own reminder clock. One about *shown*'s door or window is named with
@@ -2123,6 +2127,14 @@ def related_findings_line(
     listed: dict[str, str] = {}
     left_out: set[str] = set()
     named: list[AnomalyFinding] = []
+    strangers, sighted = _stranger_phrases(
+        shown, ordered, target, snapshot, options, names, owners, budget, hass
+    )
+    named.extend(sighted)
+    # What the sightings take comes off the room for every other name.
+    budget -= len(_also_text(["", *strangers], 0, hass)) - len(
+        _also_text([""], 0, hass)
+    )
     conditions = _same_device_conditions(
         shown, ordered, snapshot, options, names, owners, budget, hass
     )
@@ -2191,11 +2203,66 @@ def related_findings_line(
         ):
             head = [with_held[0]]
             named.extend(f for f in with_held[1] if f not in same_device)
-    if not head and not listed:
+    if not strangers and not head and not listed:
         # Nothing on the line: hold nothing, so a push the batch or a failed
         # delivery loses can never take a partner down with it.
         return None, []
-    return _also_text([*head, *listed.values()], len(left_out), hass), named
+    return _also_text([*strangers, *head, *listed.values()], len(left_out), hass), named
+
+
+# Longest camera name on the also line, so one name cannot fill it.
+_ALSO_CAMERA_NAME_MAX = 30
+
+
+def _stranger_phrases(  # noqa: PLR0913
+    shown: AnomalyFinding,
+    ordered: Sequence[AnomalyFinding],
+    target: str | None,
+    snapshot: FullStateSnapshot,
+    options: Mapping[str, Any],
+    names: Mapping[str, str],
+    owners: Mapping[str, set[str]],
+    budget: int,
+    hass: HomeAssistant | None,
+) -> tuple[list[str], list[AnomalyFinding]]:
+    """
+    Return the also-line phrases for stranger sightings, and the findings told.
+
+    When *shown* is itself a sighting, its own text already says so, and
+    findings of its type are named by device: only another rule's sighting on
+    another camera is added. A camera whose name is missing or shared is not
+    guessed at, and one too long for the room left gives way to the short
+    phrase, because a sighting left off here is not alerted again: it goes
+    stale before its cooldown ends.
+    """
+    shown_sighting = is_stranger_sighting(shown)
+    phrases: list[str] = []
+    told: list[AnomalyFinding] = []
+    for finding in ordered:
+        if (
+            not is_stranger_sighting(finding)
+            or _resolve_notify_service(finding, snapshot, options) != target
+        ):
+            continue
+        camera = str(finding.evidence.get("camera_entity_id") or "")
+        if shown_sighting and (
+            finding.type == shown.type or camera in shown.triggering_entities
+        ):
+            continue
+        name = _entity_display_name(camera, names) if camera else None
+        generic = notif_msg(hass, "also_unknown_person_any")
+        for phrase in (
+            notif_msg(hass, "also_unknown_person", camera=name[:_ALSO_CAMERA_NAME_MAX])
+            if name is not None and owners.get(name.casefold(), {camera}) == {camera}
+            else generic,
+            generic,
+        ):
+            candidate = [*phrases, *([] if phrase in phrases else [phrase])]
+            if len(_also_text(candidate, 0, hass)) <= budget:
+                phrases = candidate
+                told.append(finding)
+                break
+    return phrases, told
 
 
 def _same_device_conditions(  # noqa: PLR0913

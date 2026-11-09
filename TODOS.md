@@ -2,6 +2,18 @@
 
 ## Agent
 
+### No test proves the handler passes a followed PIN prompt's owner into the run
+
+**What:** `_async_handle_message_active` (`conversation.py`) sets `user_id` to the speaker's memory user and `pin_owner` to the prompt's owner, but no test runs the handler: the check only searches the source text. Renaming the config key, or setting `user_id` from the prompt's owner (the leak #941's review closed), would still pass every test.
+
+**Why:** Testing specialist, third review of #941 (2026-11-09). The wiring is right today, confirmed by reading it.
+
+**How to apply:** Run the handler with a stub compiled app that captures the config, or extract a helper that builds it. For a guest's `1234` while another voice's prompt waits, assert `user_id` is the guest's, `pin_owner` is the prompt's owner and `thread_id` is the prompt's thread. Add a logged-in case with `pin_owner` None.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
 ### The PIN line describes the match at hold time; HA matches again when the confirmed call runs
 
 **What:** `describe_pending_action` resolves an intent's targets with `async_match_targets` when the call is held, and the fixed line names that match ("open every cover in Garage"). The confirmed call (`_execute_pending_action`, `agent/tools.py`) sends the held arguments, and HA matches them again at that moment. A device renamed, re-aliased or moved into the area between the prompt and the PIN reply changes what runs without changing the line the user confirmed.

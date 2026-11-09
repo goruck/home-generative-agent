@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1128,6 +1129,39 @@ async def test_compound_shows_the_most_severe_due_constituent(
     )
 
     assert notifier.calls[0]["finding"] is lock
+
+
+@pytest.mark.asyncio
+async def test_compound_keeps_the_alarm_leading_and_names_the_stranger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The alarm's button and wording stay; the sighting is told and prompted."""
+    engine, notifier, audit = _make_engine(monkeypatch, _make_snapshot())
+    alarm = _standing_finding(
+        "alarm-id",
+        "alarm_disarmed_during_external_threat",
+        severity="low",
+        confidence=0.9,
+        entities=["alarm_control_panel.home", "camera.front"],
+    )
+    stranger = dataclasses.replace(
+        _standing_finding(
+            "stranger-id",
+            "unknown_person_camera_night_home",
+            severity="low",
+            confidence=0.7,
+            entities=["camera.front"],
+        ),
+        evidence={"camera_entity_id": "camera.front"},
+    )
+
+    assert await _dispatch_group(
+        engine, alarm, stranger, at=datetime(2025, 1, 1, tzinfo=UTC)
+    )
+
+    assert notifier.calls[0]["finding"] is alarm
+    assert "Unknown person on" in str(notifier.calls[0]["also_line"])
+    assert audit.calls[-1]["named_anomaly_ids"] == ["stranger-id"]
 
 
 def _window(

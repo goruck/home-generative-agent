@@ -239,6 +239,7 @@ _CALL_SITE_KWARGS: dict[str, set[str]] = {
     "body_baseline_noval_pct": {"appliance", "noun", "pct", "direction", "cta"},
     "body_stale_person": {"name", "age"},
     "body_stale_sensor": {"name", "age"},
+    "also_unknown_person": {"camera"},
     "age_days_few": {"count"},
     "age_days_many": {"count"},
     "age_hours_few": {"count"},
