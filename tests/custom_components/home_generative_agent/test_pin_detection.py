@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from custom_components.home_generative_agent.agent.graph import (
@@ -47,13 +48,22 @@ class TestHasPendingPinConfirmation:
         msgs = [_requires_pin_msg(), _confirm_msg(success_content)]
         assert _has_pending_pin_confirmation(msgs) is False
 
-    def test_requires_pin_then_wrong_pin_still_pending(self) -> None:
-        """Core regression: wrong PIN should NOT clear the pending state."""
-        msgs = [
-            _requires_pin_msg(),
-            _confirm_msg("Incorrect PIN. Action not executed."),
-        ]
-        assert _has_pending_pin_confirmation(msgs) is True
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            "Incorrect PIN. Action not executed.",
+            "Nesprávný PIN. Akce nebyla provedena.",
+        ],
+    )
+    def test_a_wrong_pin_reads_the_same_in_every_language(self, reply: str) -> None:
+        """
+        The reply is in the user's language, so history cannot read it (#955).
+
+        The pending-action store keeps the tool while the action still waits:
+        test_a_wrong_pin_keeps_the_pin_tool_while_the_action_waits.
+        """
+        msgs = [_requires_pin_msg(), _confirm_msg(reply)]
+        assert _has_pending_pin_confirmation(msgs) is False
 
     def test_requires_pin_then_wrong_pin_then_correct(self) -> None:
         """After wrong PIN, correct PIN resolves the flow."""
@@ -72,15 +82,6 @@ class TestHasPendingPinConfirmation:
             _confirm_msg("Too many incorrect attempts; please re-run the request."),
         ]
         assert _has_pending_pin_confirmation(msgs) is False
-
-    def test_multiple_wrong_pins_still_pending(self) -> None:
-        """Multiple wrong PINs — flow remains pending until correct or expired."""
-        msgs = [
-            _requires_pin_msg(),
-            _confirm_msg("Incorrect PIN. Action not executed."),
-            _confirm_msg("Incorrect PIN. Action not executed."),
-        ]
-        assert _has_pending_pin_confirmation(msgs) is True
 
 
 class TestAddAutomationChallenge:
@@ -112,9 +113,9 @@ class TestAddAutomationChallenge:
         ]
         assert _has_pending_pin_confirmation(msgs) is False
 
-    def test_add_automation_challenge_survives_a_wrong_pin(self) -> None:
+    def test_add_automation_challenge_reads_a_wrong_pin_like_any_other(self) -> None:
         msgs = [
             self._automation_challenge(),
             _confirm_msg("Incorrect PIN. Action not executed."),
         ]
-        assert _has_pending_pin_confirmation(msgs) is True
+        assert _has_pending_pin_confirmation(msgs) is False
