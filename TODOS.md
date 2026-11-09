@@ -2718,6 +2718,30 @@ label pair ("Server URL" vs "Base URL").
 **Priority:** P3
 **Depends on:** None
 
+### Build watch (#857 item 5): accounting and timing gaps left after its review
+
+**What:** (1) `chain.served` counts calls since setup, so a fallback that answered on the store's own build hours ago is noted as a writer when its server later pulls another build: a needless multi-hour re-embed. (2) A fallback the adopt leaves held (its build unreadable during `recheck_held`) is only checked again when the chain needs it, so its held-fallback issue can stand for a long time. (3) The primary's and the fallbacks' builds are read at different moments in a tick; one Ollama server serving both can be pulled between the two reads, and the fallback is removed until a reload. (4) A tick that starts while a run is in flight drops the build it read if the run ends during the read, stretching the unnoticed window to two ticks. (5) `_async_note_build_during_run` dedupes by exact digest string while the change check uses `builds_differ`. (6) The run-stop repair issue names the run's old build as "current" after a build change. (7) docs/configuration.md says a build seen during a run is "noted in the record at once"; before the run's first batch commits, a build equal to the record's model or already in `mixed_with` writes nothing, and the run stops only at the next tick or its end check (no data at risk).
+
+**Why:** Found by the Claude adversarial, Red Team and cycle 2-3 passes of the #857 item 5 review (2026-11-08); each is Low, and none lets vectors of another build go unnoted. The user-visible gaps from the same review are in #942.
+
+**How to apply:** (1) Snapshot `served` at each tick the fallback's build matched, and count only calls since. (2) Run `chain.recheck_held()` in the tick when a kept fallback is held. (3) Re-read the primary's build before removing a fallback. (4) Fall through to the adopt path when the run ended during the read. (5) Compare with `builds_differ` against each seen build. (6) Raise `_StoppedError` with the label of the build that stopped the run. (7) Soften the wording to "noted by the next batch at the latest", or have the note always reset the cursor while a target is set.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+### Build watch (#857 item 5): log noise and untracked note tasks
+
+**What:** (1) `async_watch_embedding_builds` logs a full traceback every 5 minutes for a failure that repeats, with no backoff or once-only flag. (2) The `hga_embedding_fallback_writer_note` tasks started by `_async_check_fallback_build` are not kept in runtime data, so unload neither cancels nor waits for them before `pool.close`; a note mid-retry then hits `PoolClosed`, sees the entry unloading and returns silently. The same holds for a note the watch awaits inline when unload cancels the watch first.
+
+**Why:** Cycle 2 Claude adversarial pass of the #857 item 5 review (2026-11-08); Low, a reload or restart is a narrow window and the next setup's checks still run.
+
+**How to apply:** (1) Log the traceback once, then a one-line warning until a tick succeeds. (2) Keep the note tasks in a set on runtime data and await them in `_cancel_reembed` before the pool closes, or shield the note.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
 ## Config Entry Lifecycle
 
 ### services.yaml advertises confirm_enroll but nothing registers it

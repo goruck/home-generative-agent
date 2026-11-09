@@ -584,7 +584,7 @@
           }
         },
         "abort": {
-          "not_ready": "无法开始重新嵌入：Home Generative Agent 未加载或没有数据库，其嵌入提供方没有响应，或其 Ollama 服务器没有说明所提供的模型版本。如果 Ollama 服务器现在的版本与 Home Generative Agent 启动时不同，请先重新加载 Home Generative Agent，然后重试。"
+          "not_ready": "无法开始重新嵌入：Home Generative Agent 未加载或没有数据库，其嵌入提供方没有响应，或其 Ollama 服务器没有说明所提供的模型版本。解决后请重试。"
         }
       }
     },

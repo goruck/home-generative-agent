@@ -119,8 +119,14 @@ class HGAData:
     # kept ones it could not fully check, read again in the background (#860).
     embedding_fallback_gate: EmbeddingFallbackGate | None = None
     reembed_task: asyncio.Task[None] | None = None
+    # Builds of the primary the build watch saw served during the run in
+    # flight, other than its target: its end check stops on them, even on
+    # one pulled back since (#857).
+    reembed_other_builds: list[str] | None = None
     # The vacuum after a finished re-embed (#857).
     vacuum_task: asyncio.Task[None] | None = None
+    # Reads the Ollama builds again while the entry runs (#857).
+    build_watch_task: asyncio.Task[None] | None = None
     # The caption camera backfill, cancelled at unload before the pool (#706).
     caption_backfill_task: asyncio.Task[None] | None = None
     # The hourly prune of old camera captions (#709), cancelled at unload

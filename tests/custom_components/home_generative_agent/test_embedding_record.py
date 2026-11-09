@@ -1831,8 +1831,9 @@ async def test_the_run_embeds_with_the_primary_not_the_fallback_chain(
         ("w:a1", "w:a1", True, "w:a1"),
         # Unread at setup, read now: learned, and the run can go.
         (None, "w:a1", True, "w:a1"),
-        # Another build since setup: the target is stale.
-        ("w:a1", "w:b2", False, "w:a1"),
+        # Another build since setup: adopted, and the run re-embeds with it
+        # (#857).
+        ("w:a1", "w:b2", True, "w:b2"),
         # Unread now but known at setup: go with what setup read.
         ("w:a1", None, True, "w:a1"),
         # Never read: nobody can say which build the store would hold.
@@ -1864,6 +1865,50 @@ async def test_the_repair_reads_the_primary_build_again(  # noqa: PLR0913
     assert await er.async_start_reembed(hass, entry) is starts
     assert created == (["hga_embedding_reembed"] if starts else [])
     assert entry.runtime_data.embedding_fingerprint.digest == recorded_digest
+
+
+@pytest.mark.asyncio
+async def test_the_repair_leaves_a_running_reembed_unjudged(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A confirm during a run reads nothing: the run checks the build itself."""
+    entry = _entry(hass, record=None, monkeypatch=monkeypatch)
+    entry.runtime_data.embedding_digest_source = ("http://ollama", "mxbai-embed-large")
+    fetch = AsyncMock(return_value="w:b2")
+    monkeypatch.setattr(er, "fetch_ollama_model_digest", fetch)
+    before = entry.runtime_data.embedding_fingerprint
+    running = asyncio.get_running_loop().create_future()
+    entry.runtime_data.reembed_task = running
+
+    assert await er.async_start_reembed(hass, entry)
+
+    fetch.assert_not_awaited()
+    assert entry.runtime_data.embedding_fingerprint is before
+    running.cancel()
+
+
+@pytest.mark.asyncio
+async def test_a_run_started_during_the_repairs_read_is_left_alone(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another confirm won the race: this one adopts nothing and starts nothing."""
+    entry = _entry(hass, record=None, monkeypatch=monkeypatch)
+    entry.runtime_data.embedding_digest_source = ("http://ollama", "mxbai-embed-large")
+    before = entry.runtime_data.embedding_fingerprint
+    running = asyncio.get_running_loop().create_future()
+
+    async def _read(*_a: Any, **_k: Any) -> str:
+        entry.runtime_data.reembed_task = running
+        return "w:b2"
+
+    monkeypatch.setattr(er, "fetch_ollama_model_digest", _read)
+    created = _no_task(monkeypatch, entry)
+
+    assert await er.async_start_reembed(hass, entry)
+
+    assert created == []
+    assert entry.runtime_data.embedding_fingerprint is before
+    running.cancel()
 
 
 @pytest.mark.asyncio
@@ -2585,7 +2630,7 @@ async def test_a_build_pulled_during_the_run_is_not_certified(
 
     assert conn.ran(er._FINISH_REEMBED_SQL) == []
     assert conn.record["model"] == OPENAI.as_json().obj
-    assert "now serves another build" in caplog.text
+    assert "served another build during the run" in caplog.text
     # The rows done may hold the pulled build: the next run starts over, and
     # that build counts as a writer.
     assert conn.record["reembed_cursor"] is None
@@ -3132,6 +3177,7 @@ async def _setup_two_ollama_servers(  # noqa: PLR0913
     database: bool = True,
     primary_client: bool = True,
     openai_fallback: bool = False,
+    build_watch: bool = False,
 ) -> tuple[MockConfigEntry, Any, list[Any]]:
     """
     Set up an Ollama primary with a second Ollama server as embedding fallback.
@@ -3139,6 +3185,8 @@ async def _setup_two_ollama_servers(  # noqa: PLR0913
     With `record_check` the real background check runs, which needs a loaded
     entry (setup is called directly here, so the state is set by hand).
     Without `database` no build is read and nothing is handed to the check.
+    The build watch runs for as long as the entry does, so a wait for the
+    background tasks would never end: it returns at once unless `build_watch`.
     """
     if entry is None:
         entry = MockConfigEntry(domain=DOMAIN, data={})
@@ -3168,6 +3216,10 @@ async def _setup_two_ollama_servers(  # noqa: PLR0913
 
     monkeypatch.setattr(hga_component, "OllamaEmbeddings", _client)
     _capture_recheck(monkeypatch)
+    if not build_watch:
+        monkeypatch.setattr(
+            hga_component, "async_watch_embedding_builds", AsyncMock(return_value=None)
+        )
     if not primary_up:
 
         async def _primary_down(_hass: Any, url: str, **_kwargs: Any) -> bool:
@@ -3352,11 +3404,22 @@ async def test_setup_hands_the_fallbacks_it_could_not_fully_check_to_the_record_
     """
     entry, _data, _asked = await _setup_two_ollama_servers(hass, monkeypatch, digests)
 
+    # Every kept fallback, checked or not, is watched for a later pull.
+    kept = (
+        ()
+        if left_out
+        else (
+            FallbackBuild(
+                "ollama2", "Ollama Secondary", FALLBACK_URL, digests.get(FALLBACK_URL)
+            ),
+        )
+    )
     assert entry.runtime_data.embedding_fallback_gate == EmbeddingFallbackGate(
         primary="Ollama",
         model="configured-embed",
         left_out=left_out,
         unchecked=unchecked,
+        kept=kept,
     )
     chain = entry.runtime_data.embeddings
     if left_out:
@@ -3393,6 +3456,7 @@ async def test_with_the_primarys_build_unread_a_fallback_unlike_the_record_waits
         model="configured-embed",
         left_out=(),
         unchecked=(FallbackBuild("ollama2", "Ollama Secondary", FALLBACK_URL, "w:b2"),),
+        kept=(FallbackBuild("ollama2", "Ollama Secondary", FALLBACK_URL, "w:b2"),),
     )
 
 
@@ -3482,6 +3546,7 @@ async def test_setup_with_two_secondaries_syncs_the_one_it_left_out(
         model="configured-embed",
         left_out=("Ollama Secondary",),
         unchecked=(FallbackBuild("ollama3", "Ollama Third", THIRD_URL, None),),
+        kept=(FallbackBuild("ollama3", "Ollama Third", THIRD_URL, None),),
     )
 
 
@@ -6521,3 +6586,428 @@ async def test_a_failed_vacuum_reset_closes_the_connection() -> None:
     await er.async_vacuum_vectors(_vacuum_pool(conn))
 
     assert conn.closed
+
+
+# --- Builds pulled while Home Assistant runs (#857 item 5) -----------------
+
+PRIMARY_URL = OLLAMA_SOURCE[0]
+
+
+def _watched(
+    hass: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    answers: dict[str, list[str | None]],
+    *,
+    record: dict[str, Any] | None = None,
+    fingerprint: EmbeddingFingerprint = OLLAMA_A,
+) -> tuple[MockConfigEntry, FallbackEmbeddings, _Cursor, AsyncMock]:
+    """
+    Set up an Ollama primary and an admitted Ollama fallback over build A.
+
+    `answers` gives each server's build reads in turn. The record check is
+    the real one, on a scripted cursor holding `record` (A's by default).
+    """
+    chain = FallbackEmbeddings(
+        [
+            (FakeEmbeddings("primary"), "edge", "p1"),
+            (FakeEmbeddings("f"), "edge", FALLBACK_ID),
+        ],
+        switch_callback=MagicMock(),
+        removed_callback=MagicMock(),
+    )
+    entry = _entry(
+        hass,
+        record=None,
+        fingerprint=fingerprint,
+        embeddings=chain,
+        monkeypatch=monkeypatch,
+    )
+    monkeypatch.setattr(er, "_async_check_record", _REAL_CHECK)
+    cur = _Cursor(record=record if record is not None else _row(OLLAMA_A))
+    rd = entry.runtime_data
+    rd.pool = _Pool(cur)
+    rd.embedding_digest_source = OLLAMA_SOURCE
+    kept = FallbackBuild(FALLBACK_ID, SECONDARY, FALLBACK_URL, "w:a1")
+    rd.embedding_fallback_gate = EmbeddingFallbackGate(
+        primary="Ollama", model="mxbai-embed-large", kept=(kept,)
+    )
+    chain.hold_until_verified(
+        [],
+        partial(
+            er.async_verify_embedding_fallback,
+            hass,
+            entry,
+            {FALLBACK_ID: kept},
+            chain=chain,
+            warned=set(),
+        ),
+    )
+    fetch = AsyncMock(side_effect=lambda _h, url, *_a, **_k: answers[url].pop(0))
+    monkeypatch.setattr(er, "fetch_ollama_model_digest", fetch)
+    return entry, chain, cur, fetch
+
+
+@pytest.mark.asyncio
+async def test_a_build_pulled_on_the_primary_is_adopted_and_noted(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The new build becomes the store's model, is noted, and the repair is raised."""
+    entry, chain, cur, _fetch = _watched(
+        hass,
+        monkeypatch,
+        # The fallback is read once when held again, once by the fallback pass.
+        {PRIMARY_URL: ["w:b2"], FALLBACK_URL: ["w:b2", "w:b2"]},
+    )
+
+    await er._async_check_builds(hass, entry)
+
+    assert entry.runtime_data.embedding_fingerprint == OLLAMA_B
+    (marked,) = cur.ran(er._MARK_MIXED_SQL)
+    assert marked["mixed"].obj == [asdict(OLLAMA_B)]
+    issue = _issue(hass, ISSUE_EMBEDDING_MODEL_CHANGED)
+    assert issue is not None
+    assert issue.translation_placeholders == {
+        "recorded": f"{OLLAMA_A.label} + {OLLAMA_B.label}",
+        "current": OLLAMA_B.label,
+    }
+    # Same build as the primary's new one: admitted again.
+    assert _chain_ids(chain) == ["p1", FALLBACK_ID]
+    assert FALLBACK_ID not in chain.unverified
+    assert "now serves another build of mxbai-embed-large" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_fallback_left_on_the_old_build_is_removed_when_the_primary_moves(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Admitted against the old build, it is held and its build checked anew."""
+    entry, chain, cur, _fetch = _watched(
+        hass, monkeypatch, {PRIMARY_URL: ["w:b2"], FALLBACK_URL: ["w:a1"]}
+    )
+
+    await er._async_check_builds(hass, entry)
+
+    assert _chain_ids(chain) == ["p1"]
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD) is not None
+    # Its writes were the old build, the one the record already names.
+    (marked,) = cur.ran(er._MARK_MIXED_SQL)
+    assert marked["mixed"].obj == [asdict(OLLAMA_B)]
+
+
+@pytest.mark.parametrize("served", [True, False], ids=["answered", "silent"])
+@pytest.mark.asyncio
+async def test_a_fallback_the_primarys_new_build_removes_is_noted_if_it_wrote(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, *, served: bool
+) -> None:
+    """Held again and found on a third build: one that answered is a writer."""
+    entry, chain, cur, _fetch = _watched(
+        hass, monkeypatch, {PRIMARY_URL: ["w:b2"], FALLBACK_URL: ["w:c3"]}
+    )
+    if served:
+        chain.served.add(FALLBACK_ID)
+
+    await er._async_check_builds(hass, entry)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert _chain_ids(chain) == ["p1"]
+    assert entry.runtime_data.embedding_fingerprint == OLLAMA_B
+    noted = [m["mixed"].obj for m in cur.ran(er._MARK_MIXED_SQL)]
+    third = asdict(replace(OLLAMA_B, digest="w:c3"))
+    assert any(third in mixed for mixed in noted) is served
+
+
+@pytest.mark.parametrize("served", [True, False], ids=["answered", "silent"])
+@pytest.mark.asyncio
+async def test_a_build_pulled_on_an_admitted_fallback_removes_it(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, *, served: bool
+) -> None:
+    """One that answered calls is noted as a writer; the primary stays as it was."""
+    entry, chain, cur, _fetch = _watched(
+        hass, monkeypatch, {PRIMARY_URL: ["w:a1"], FALLBACK_URL: ["w:b2"]}
+    )
+    if served:
+        chain.served.add(FALLBACK_ID)
+
+    await er._async_check_builds(hass, entry)
+
+    assert _chain_ids(chain) == ["p1"]
+    assert entry.runtime_data.embedding_fingerprint == OLLAMA_A
+    gate = entry.runtime_data.embedding_fallback_gate
+    assert gate.left_out == (SECONDARY,)
+    assert _issue(hass, ISSUE_EMBEDDING_FALLBACK_OTHER_BUILD) is not None
+    marked = cur.ran(er._MARK_MIXED_SQL)
+    issue = _issue(hass, ISSUE_EMBEDDING_MODEL_CHANGED)
+    if served:
+        assert [m["mixed"].obj for m in marked] == [[asdict(OLLAMA_B)]]
+        assert issue is not None
+        assert issue.translation_placeholders is not None
+        assert issue.translation_placeholders["current"] == OLLAMA_A.label
+    else:
+        assert marked == []
+        assert issue is None
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_build_changes_nothing(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entry, chain, cur, fetch = _watched(
+        hass, monkeypatch, {PRIMARY_URL: ["w:a1"], FALLBACK_URL: ["w:a1"]}
+    )
+
+    await er._async_check_builds(hass, entry)
+
+    assert fetch.await_count == 2
+    assert entry.runtime_data.embedding_fingerprint == OLLAMA_A
+    assert _chain_ids(chain) == ["p1", FALLBACK_ID]
+    assert cur.executed == []
+
+
+@pytest.mark.asyncio
+async def test_an_unread_build_decides_nothing(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A server that does not answer is neither a change nor a match."""
+    entry, chain, cur, _fetch = _watched(
+        hass, monkeypatch, {PRIMARY_URL: [None], FALLBACK_URL: [None]}
+    )
+
+    await er._async_check_builds(hass, entry)
+
+    assert entry.runtime_data.embedding_fingerprint == OLLAMA_A
+    assert _chain_ids(chain) == ["p1", FALLBACK_ID]
+    assert FALLBACK_ID not in chain.unverified
+    assert cur.executed == []
+
+
+@pytest.mark.asyncio
+async def test_a_reembed_in_flight_keeps_the_primary_build_unjudged(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A build seen during a run is kept for the run's own end check, not adopted.
+
+    One pulled and pulled back before the run ends wrote vectors all the same,
+    and the end check alone would read the old build again (#857).
+    """
+    entry, _chain, cur, fetch = _watched(
+        hass, monkeypatch, {PRIMARY_URL: ["w:b2"], FALLBACK_URL: ["w:a1"]}
+    )
+    running = asyncio.get_running_loop().create_future()
+    entry.runtime_data.reembed_task = running
+    entry.runtime_data.reembed_other_builds = []
+
+    await er._async_check_builds(hass, entry)
+
+    assert entry.runtime_data.embedding_fingerprint == OLLAMA_A
+    assert entry.runtime_data.reembed_other_builds == ["w:b2"]
+    assert [c.args[1] for c in fetch.await_args_list] == [PRIMARY_URL, FALLBACK_URL]
+    # Noted in the record too, so a reload before the run ends keeps it.
+    (marked,) = cur.ran(er._MARK_MIXED_SQL)
+    assert asdict(OLLAMA_B) in marked["mixed"].obj
+    assert _issue(hass, ISSUE_EMBEDDING_MODEL_CHANGED) is None
+    running.cancel()
+
+
+@pytest.mark.asyncio
+async def test_a_build_seen_during_the_run_stops_it_though_pulled_back(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The run's end check reports the build the watch saw, not the one now."""
+    entry = _entry(hass, record=None, monkeypatch=monkeypatch)
+    entry.runtime_data.embedding_digest_source = OLLAMA_SOURCE
+    monkeypatch.setattr(er, "_can_reembed", lambda _entry: True)
+    monkeypatch.setattr(er, "fetch_ollama_model_digest", AsyncMock(return_value="w:a1"))
+    checks: list[Any] = []
+
+    async def _reembed(*_a: Any, current_build: Any, **_k: Any) -> bool:
+        checks.append(current_build)
+        return False
+
+    monkeypatch.setattr(er, "_async_reembed", _reembed)
+
+    assert er._start_reembed_task(hass, entry, start=True)
+    await entry.runtime_data.reembed_task
+    (current_build,) = checks
+
+    assert await current_build() == "w:a1"
+    # Seen by the watch mid-run, then pulled back.
+    entry.runtime_data.reembed_other_builds.append("w:b2")
+    assert await current_build() == "w:b2"
+
+
+@pytest.mark.asyncio
+async def test_a_reembed_started_during_the_primary_read_leaves_it_unjudged(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repair confirmed while the watch waits on the server: the run judges."""
+    entry, _chain, cur, fetch = _watched(
+        hass, monkeypatch, {PRIMARY_URL: [], FALLBACK_URL: ["w:a1"]}
+    )
+    running = asyncio.get_running_loop().create_future()
+
+    async def _read(_h: Any, url: str, *_a: Any, **_k: Any) -> str | None:
+        if url == PRIMARY_URL:
+            entry.runtime_data.reembed_task = running
+            return "w:b2"
+        return "w:a1"
+
+    fetch.side_effect = _read
+
+    await er._async_check_builds(hass, entry)
+
+    assert entry.runtime_data.embedding_fingerprint == OLLAMA_A
+    assert cur.ran(er._MARK_MIXED_SQL) == []
+    running.cancel()
+
+
+@pytest.mark.asyncio
+async def test_fallback_reads_spanning_an_adopted_build_decide_nothing(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A build adopted while the fallbacks were read: next tick compares anew."""
+    entry, chain, cur, fetch = _watched(
+        hass, monkeypatch, {PRIMARY_URL: [], FALLBACK_URL: []}
+    )
+
+    async def _read(_h: Any, url: str, *_a: Any, **_k: Any) -> str | None:
+        if url == PRIMARY_URL:
+            return "w:a1"
+        # The repair adopts B while this read waits.
+        entry.runtime_data.embedding_fingerprint = OLLAMA_B
+        return "w:a1"
+
+    fetch.side_effect = _read
+
+    await er._async_check_builds(hass, entry)
+
+    assert _chain_ids(chain) == ["p1", FALLBACK_ID]
+    assert entry.runtime_data.embedding_fallback_gate.left_out == ()
+    assert cur.ran(er._MARK_MIXED_SQL) == []
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_primary_build_is_left_to_its_own_watch(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#873's watch reads a build setup missed; this one reads nothing then."""
+    entry, _chain, _cur, fetch = _watched(
+        hass, monkeypatch, {}, fingerprint=OLLAMA_UNREAD
+    )
+
+    await er._async_check_builds(hass, entry)
+
+    fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_build_watch_ticks_until_the_entry_stops(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed tick is logged and the next one runs; an unloaded entry ends it."""
+    entry = _entry(hass, record=None, monkeypatch=monkeypatch)
+    waits: list[float] = []
+
+    async def _sleep(delay: float) -> None:
+        waits.append(delay)
+        await _REAL_SLEEP(0)
+
+    monkeypatch.setattr(er.asyncio, "sleep", _sleep)
+    ticks: list[int] = []
+
+    async def _tick(_hass: Any, the_entry: Any) -> None:
+        ticks.append(1)
+        if len(ticks) == 1:
+            msg = "boom"
+            raise RuntimeError(msg)
+        the_entry.mock_state(hass, ConfigEntryState.NOT_LOADED)
+
+    monkeypatch.setattr(er, "_async_check_builds", _tick)
+
+    await er.async_watch_embedding_builds(hass, entry)
+
+    assert len(ticks) == 2
+    assert waits == [er._BUILD_WATCH_S] * 3
+    assert "Could not check which embedding builds" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_failed_tick_that_echoes_a_header_logs_no_traceback(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """h11 can put a rejected API key in the error: only its safe text is logged."""
+    entry = _entry(hass, record=None, monkeypatch=monkeypatch)
+
+    async def _sleep(_delay: float) -> None:
+        await _REAL_SLEEP(0)
+
+    monkeypatch.setattr(er.asyncio, "sleep", _sleep)
+    secret = "sk-test-not-a-real-key"  # noqa: S105 - a fake key to find in the log
+
+    async def _tick(_hass: Any, the_entry: Any) -> None:
+        the_entry.mock_state(hass, ConfigEntryState.NOT_LOADED)
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(er, "_async_check_builds", _tick)
+    monkeypatch.setattr(er, "echoes_request_headers", lambda err: secret in str(err))
+    monkeypatch.setattr(er, "safe_error_text", lambda _err: "RuntimeError")
+
+    await er.async_watch_embedding_builds(hass, entry)
+
+    assert "Could not check which embedding builds" in caplog.text
+    assert secret not in caplog.text
+    assert "Traceback" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_setup_starts_the_build_watch_and_unload_cancels_it(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every kept fallback is known to the chain's check, so it can be held again."""
+    entry, _data, _asked = await _setup_two_ollama_servers(
+        hass,
+        monkeypatch,
+        {"http://ollama": "w:a1", FALLBACK_URL: "w:a1"},
+        build_watch=True,
+    )
+    entry.mock_state(hass, ConfigEntryState.LOADED)
+    rd = entry.runtime_data
+    watch = rd.build_watch_task
+    assert watch is not None
+    assert not watch.done()
+    gate = rd.embedding_fallback_gate
+    assert [fb.url for fb in gate.kept] == [FALLBACK_URL]
+    assert gate.unchecked == ()
+    chain = rd.embeddings
+    (fallback_id,) = [fb.provider_id for fb in gate.kept]
+    chain.hold_again(fallback_id)
+    assert fallback_id in chain.unverified
+    # The chain's own check knows it, so the same build admits it again.
+    monkeypatch.setattr(er, "fetch_ollama_model_digest", AsyncMock(return_value="w:a1"))
+    await chain.recheck_held()
+    assert fallback_id not in chain.unverified
+    monkeypatch.setattr(
+        hass.config_entries, "async_unload_platforms", AsyncMock(return_value=True)
+    )
+
+    assert await hga_component.async_unload_entry(hass, entry)
+
+    assert watch.cancelled()
+    assert rd.build_watch_task is None
+
+
+@pytest.mark.asyncio
+async def test_a_fallback_unread_when_the_primary_moves_stays_held(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Admitted against the old build, it answers nothing until its build is read."""
+    entry, chain, _cur, _fetch = _watched(
+        hass, monkeypatch, {PRIMARY_URL: ["w:b2"], FALLBACK_URL: [None]}
+    )
+
+    await er._async_check_builds(hass, entry)
+
+    assert _chain_ids(chain) == ["p1", FALLBACK_ID]
+    assert FALLBACK_ID in chain.unverified
+    held = _issue(hass, ISSUE_EMBEDDING_FALLBACK_HELD)
+    assert held is not None

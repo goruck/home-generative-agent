@@ -584,7 +584,7 @@
           }
         },
         "abort": {
-          "not_ready": "The re-embed cannot start: Home Generative Agent is not loaded or has no database, its embedding provider is not answering, or its Ollama server does not say which build of the model it serves. If the Ollama server now holds another build than when Home Generative Agent started, reload Home Generative Agent first. Then try again."
+          "not_ready": "The re-embed cannot start: Home Generative Agent is not loaded or has no database, its embedding provider is not answering, or its Ollama server does not say which build of the model it serves. Try again once that is fixed."
         }
       }
     },
