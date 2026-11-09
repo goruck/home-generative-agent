@@ -127,6 +127,7 @@ from .core.conversation_helpers import (
 )
 from .core.pipeline_guard import async_check_pin_pipeline_conflict
 from .core.utils import (
+    builds_differ,
     extract_final,
     gather_store_puts_in_chunks,
     local_chat_session,
@@ -2710,6 +2711,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         cheaply from the already-loaded API instances, so a transient store or
         embedding-provider blip recovers on its own.
         """
+        before = runtime_data.embedding_fingerprint
         try:
             # Time budget: this write sits on the user-facing turn's critical
             # path; a hung embedding provider must not stall the voice turn.
@@ -2718,13 +2720,20 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         except Exception:
             _LOGGER.exception("Tool index top-up write failed; retrying next turn")
             # Terminal sensor signal: retrieval still serves the pre-delta
-            # index, so the state is "ready", not a stuck "indexing".
+            # index, so the state is "ready", not a stuck "indexing", unless
+            # a build adopted during the write made that index stale.
             async_dispatcher_send(
                 self.hass,
                 SIGNAL_TOOL_INDEX_UPDATED,
-                "ready",
+                "ready" if runtime_data.tool_index_ready else "stale",
                 len(runtime_data.tool_content_hashes),
             )
+            return
+        after = runtime_data.embedding_fingerprint
+        if before and after and builds_differ(before.digest, after.digest):
+            # A build adopted during the write: these vectors are the old
+            # build's, and a hash would keep the rebuild from replacing them.
+            async_dispatcher_send(self.hass, SIGNAL_TOOL_INDEX_UPDATED, "stale", 0)
             return
         runtime_data.tool_content_hashes.update(new_hashes)
         _LOGGER.info(

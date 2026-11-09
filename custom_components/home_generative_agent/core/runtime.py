@@ -123,6 +123,12 @@ class HGAData:
     # flight, other than its target: its end check stops on them, even on
     # one pulled back since (#857).
     reembed_other_builds: list[str] | None = None
+    # Adopted builds whose record check the database did not answer (#942).
+    pending_build_notes: list[EmbeddingFingerprint] = field(default_factory=list)
+    # Retries left for a failed tool index rebuild after an adopted build (#942).
+    tool_index_rebuilds_left: int = 0
+    # Fallback writer notes in flight, ended at unload before the pool (#857).
+    embedding_note_tasks: set[asyncio.Task[None]] = field(default_factory=set)
     # The vacuum after a finished re-embed (#857).
     vacuum_task: asyncio.Task[None] | None = None
     # Reads the Ollama builds again while the entry runs (#857).

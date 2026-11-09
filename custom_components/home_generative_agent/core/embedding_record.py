@@ -79,6 +79,7 @@ from .utils import (
     builds_differ,
     fetch_ollama_model_digest,
     generate_embeddings,
+    mark_tool_index_stale,
     ollama_model_key,
     safe_error_text,
 )
@@ -318,6 +319,8 @@ _PRIMARY_BUILD_WATCH_S = 300.0
 # the primary's is known: a build pulled while Home Assistant runs is noted
 # within this long (#857). Quoted in docs/configuration.md.
 _BUILD_WATCH_S = _PRIMARY_BUILD_WATCH_S
+# Times a tick may unlatch a failed tool index rebuild after a build change.
+_TOOL_INDEX_REBUILD_RETRIES = 6
 # Waits before trying again to note a removed fallback as a writer (#860): a
 # re-embed holds the record row for a batch at a time.
 _NOTE_RETRY_DELAYS_S = (10.0, 30.0, 60.0)
@@ -1100,14 +1103,23 @@ async def async_watch_embedding_builds(hass: HomeAssistant, entry: ConfigEntry) 
     `_async_check_builds` for what a change does. A primary whose build is
     still unknown is left to `_async_watch_primary_build` (#873).
     """
+    failing = False
     while True:
         await asyncio.sleep(_BUILD_WATCH_S)
         if entry.state not in ACTIVE_ENTRY_STATES:
             return
         try:
             await _async_check_builds(hass, entry)
+            failing = False
         except Exception as err:  # The next tick tries again.
-            if echoes_request_headers(err):
+            repeated, failing = failing, True
+            if repeated:
+                LOGGER.warning(
+                    "Still could not check which embedding builds write into the "
+                    "memory store: %s",
+                    safe_error_text(err),
+                )
+            elif echoes_request_headers(err):
                 # Its traceback would repeat a rejected header, the API key.
                 LOGGER.error(  # noqa: TRY400
                     "Could not check which embedding builds write into the "
@@ -1141,25 +1153,91 @@ async def _async_check_builds(hass: HomeAssistant, entry: ConfigEntry) -> None:
         or not _primary_built(entry)
     ):
         return
-    if _reembed_running(entry):
-        await _async_note_build_during_run(hass, entry, current)
-    else:
-        build = await _async_primary_build(hass, entry)
+    _retry_failed_tool_index_after_adopt(hass, rd)
+    if rd.pending_build_notes and not _reembed_running(entry):
+        await _async_flush_build_notes(hass, entry)
         if entry.state not in ACTIVE_ENTRY_STATES:
             return
-        if (
-            build is not None
-            # A run the repair started during the read checks it itself.
-            and not _reembed_running(entry)
-            and rd.embedding_fingerprint is current
-            and builds_differ(build, current.digest)
-        ):
-            await _async_adopt_primary_build(hass, entry, current, build)
+    was_running = _reembed_running(entry)
+    build = await _async_primary_build(hass, entry)
+    if entry.state not in ACTIVE_ENTRY_STATES:
+        return
+    if build is not None:
+        await _async_take_primary_build(
+            hass, entry, current, build, was_running=was_running
+        )
     await _async_check_admitted_fallbacks(hass, entry)
+    await _async_recheck_held_fallbacks(entry, build)
+
+
+def _retry_failed_tool_index_after_adopt(hass: HomeAssistant, rd: Any) -> None:
+    """
+    Let the tool index build again while an adopted build's rebuild is failing.
+
+    A failed build latches until a reload, and this rebuild runs while Ollama
+    loads the build just pulled, so one failed call would leave tool selection
+    on keywords. A tick clears the latch so the next conversation turn builds
+    it again, a limited number of times, so a build that always fails ends
+    latched as before instead of logging at every turn.
+    """
+    if not rd.tool_index_rebuilds_left:
+        return
+    if rd.tool_index_ready:
+        rd.tool_index_rebuilds_left = 0
+    elif rd.tool_index_failed:
+        rd.tool_index_rebuilds_left -= 1
+        mark_tool_index_stale(hass, rd)
+
+
+async def _async_take_primary_build(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    current: EmbeddingFingerprint,
+    build: str,
+    *,
+    was_running: bool,
+) -> None:
+    """
+    Act on a build read from the primary: adopt it, or note it for the run.
+
+    Decided after the read: a run that ended during it must not cost the build
+    a tick, and one that started during it checks the build itself.
+    """
+    if entry.runtime_data.embedding_fingerprint is not current or not builds_differ(
+        build, current.digest
+    ):
+        return
+    if not _reembed_running(entry):
+        await _async_adopt_primary_build(hass, entry, current, build)
+    elif was_running:
+        await _async_note_build_during_run(entry, current, build)
+
+
+async def _async_recheck_held_fallbacks(entry: ConfigEntry, build: str | None) -> None:
+    """
+    Check a kept fallback left held, so its issue does not wait for a failover.
+
+    Only when the primary was read and serves the adopted build: a fallback
+    already on a build a run holds back would be judged by the old one and
+    removed.
+    """
+    rd = entry.runtime_data
+    chain, gate = rd.embeddings, rd.embedding_fallback_gate
+    current = rd.embedding_fingerprint
+    if (
+        entry.state in ACTIVE_ENTRY_STATES
+        and current is not None
+        and build is not None
+        and not builds_differ(build, current.digest)
+        and isinstance(chain, FallbackEmbeddings)
+        and gate is not None
+        and any(fb.provider_id in chain.unverified for fb in gate.kept)
+    ):
+        await chain.recheck_held()
 
 
 async def _async_note_build_during_run(
-    hass: HomeAssistant, entry: ConfigEntry, current: EmbeddingFingerprint
+    entry: ConfigEntry, current: EmbeddingFingerprint, build: str
 ) -> None:
     """
     Keep a build the primary serves during a re-embed for the run's end check.
@@ -1170,15 +1248,7 @@ async def _async_note_build_during_run(
     """
     rd = entry.runtime_data
     seen = rd.reembed_other_builds
-    build = await _async_primary_build(hass, entry)
-    if (
-        build is None
-        or rd.pool is None
-        or seen is None
-        or seen is not rd.reembed_other_builds
-        or not _reembed_running(entry)
-        or not builds_differ(build, current.digest)
-    ):
+    if rd.pool is None or seen is None:
         return
     writer = replace(current, digest=build)
     if build not in seen:
@@ -1211,14 +1281,13 @@ async def _async_adopt_primary_build(
     entry: ConfigEntry,
     current: EmbeddingFingerprint,
     build: str,
-    *,
-    retry: bool = True,
 ) -> None:
     """
     Take a build the primary was found to serve now as the store's model (#857).
 
-    `retry`: try the record check again if the database did not answer; the
-    repair flow does not wait for that, its own run notes the store's state.
+    The primary's old build is what the tool index was embedded with, so it is
+    marked stale. A record check the database did not answer stays pending
+    (`_async_flush_build_notes`), since only it notes the new build as a writer.
     """
     rd = entry.runtime_data
     learned = replace(current, digest=build)
@@ -1229,6 +1298,14 @@ async def _async_adopt_primary_build(
         learned.label,
     )
     _learn_primary_fingerprint(entry, learned)
+    # Before anything can fail: the build is no longer read as a change.
+    rd.pending_build_notes.append(learned)
+    mark_tool_index_stale(hass, rd)
+    rd.tool_index_rebuilds_left = _TOOL_INDEX_REBUILD_RETRIES
+    LOGGER.warning(
+        "Tool index marked stale after the embedding primary's build changed; it "
+        "will be rebuilt on the next indexing pass."
+    )
     chain = rd.embeddings
     gate = rd.embedding_fallback_gate
     if isinstance(chain, FallbackEmbeddings) and gate is not None:
@@ -1238,12 +1315,76 @@ async def _async_adopt_primary_build(
             if fb.provider_id not in chain.unverified:
                 chain.hold_again(fb.provider_id)
         await chain.recheck_held()
-    if (
-        entry.state in ACTIVE_ENTRY_STATES
-        and not await _async_apply_record_check(hass, entry, learned)
-        and retry
+    if entry.state in ACTIVE_ENTRY_STATES and await _async_apply_record_check(
+        hass, entry, learned
     ):
-        await _async_retry_model_record(hass, entry)
+        # A tick may have landed the note during the awaits above.
+        with contextlib.suppress(ValueError):
+            rd.pending_build_notes.remove(learned)
+
+
+async def _async_flush_build_notes(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """
+    Note adopted builds whose record check the database did not answer (#942).
+
+    Each is the only trace of the vectors its build wrote: with it lost, pulling
+    the old build back would clear the repair while those vectors stayed. So
+    each tick tries again until both the note and the check land.
+    """
+    rd = entry.runtime_data
+    current = rd.embedding_fingerprint
+    if rd.pool is None or current is None:
+        return
+    pending = list(rd.pending_build_notes)
+    # The current build is the record check's to note: as a writer, it would
+    # cost a stopped run to that build its place.
+    writers = [writer for writer in pending if not writer.same_model(current)]
+    try:
+        if writers:
+            await _async_mark_writers(rd.pool, current, writers)
+    except (TimeoutError, psycopg.Error) as err:
+        LOGGER.warning(
+            "Could not note %s as a writer of the memory store (%s); tried again "
+            "in %d s.",
+            ", ".join(writer.label for writer in writers),
+            err,
+            _BUILD_WATCH_S,
+        )
+        return
+    if await _async_apply_record_check(hass, entry, current):
+        # By value: a repair's flush can overlap a tick's, and an adopt add one.
+        rd.pending_build_notes[:] = [
+            note for note in rd.pending_build_notes if note not in pending
+        ]
+
+
+async def _async_primary_moved(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    chain: FallbackEmbeddings,
+    current: EmbeddingFingerprint,
+) -> bool:
+    """
+    Read the primary again before a fallback is removed; True to leave it be.
+
+    One server can be pulled between a tick's reads: the primary may be on the
+    fallback's build by now, which is then taken instead of a removal.
+    """
+    rd = entry.runtime_data
+    was_running = _reembed_running(entry)
+    primary = await _async_primary_build(hass, entry)
+    if (
+        entry.state not in ACTIVE_ENTRY_STATES
+        or rd.embeddings is not chain
+        or rd.embedding_fingerprint is not current
+    ):
+        return True
+    if primary is None or not builds_differ(primary, current.digest):
+        return False
+    await _async_take_primary_build(
+        hass, entry, current, primary, was_running=was_running
+    )
+    return True
 
 
 async def _async_check_admitted_fallbacks(
@@ -1263,6 +1404,9 @@ async def _async_check_admitted_fallbacks(
     if not admitted:
         return
     judged_by = rd.embedding_fingerprint
+    calls_before = {
+        fb.provider_id: chain.served_calls[fb.provider_id] for fb in admitted
+    }
     builds = await asyncio.gather(
         *(
             fetch_ollama_model_digest(
@@ -1280,6 +1424,20 @@ async def _async_check_admitted_fallbacks(
         or current is None
         or current.digest is None
     ):
+        return
+    for fb, build in zip(admitted, builds, strict=True):
+        if (
+            build is not None
+            and not builds_differ(build, current.digest)
+            # A call during the read may have followed a pull: it stays counted.
+            and chain.served_calls[fb.provider_id] == calls_before[fb.provider_id]
+        ):
+            # What it answered until now was this build: only calls after a
+            # later pull can have written another (a needless re-embed else).
+            chain.served.discard(fb.provider_id)
+    if not any(builds_differ(build, current.digest) for build in builds):
+        return
+    if await _async_primary_moved(hass, entry, chain, current):
         return
     other = [
         (fb, build)
@@ -1668,7 +1826,7 @@ async def _async_check_fallback_build(  # noqa: PLR0913
         # One admitted before (held again when the primary's build changed)
         # may have written its build's vectors (#857). In the background: this
         # check can run inside an embedding call, and the note retries.
-        entry.async_create_background_task(
+        task = entry.async_create_background_task(
             hass,
             _async_note_fallback_writers(
                 hass,
@@ -1678,6 +1836,9 @@ async def _async_check_fallback_build(  # noqa: PLR0913
             ),
             name="hga_embedding_fallback_writer_note",
         )
+        # Kept so unload ends it before the pool closes.
+        rd.embedding_note_tasks.add(task)
+        task.add_done_callback(rd.embedding_note_tasks.discard)
     _update_held(hass, entry, released=[provider_id])
     # The live gate, read after the waits: the record check may have settled
     # other fallbacks meanwhile (#857).
@@ -1803,11 +1964,21 @@ async def async_start_reembed(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _learn_primary_fingerprint(entry, replace(fingerprint, digest=build))
         elif build is not None and builds_differ(build, fingerprint.digest):
             # Pulled since it was last read: the run re-embeds with it (#857).
-            await _async_adopt_primary_build(
-                hass, entry, fingerprint, build, retry=False
-            )
+            await _async_adopt_primary_build(hass, entry, fingerprint, build)
             if entry.state not in ACTIVE_ENTRY_STATES:
                 return False
+    return await _async_start_after_notes(hass, entry)
+
+
+async def _async_start_after_notes(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Start the repair's run once pending notes were tried (#942)."""
+    if entry.runtime_data.pending_build_notes:
+        # Noted first, so a resume cannot skip rows that build overwrote.
+        await _async_flush_build_notes(hass, entry)
+        if entry.state not in ACTIVE_ENTRY_STATES:
+            return False
+        if _reembed_running(entry):
+            return True
     return _start_reembed_task(hass, entry, start=True)
 
 
@@ -1830,11 +2001,17 @@ def _start_reembed_task(
     rd.reembed_other_builds = other_builds
 
     @callback
-    def _stopped(recorded: str) -> None:
+    def _stopped(recorded: str, current: str | None = None) -> None:
         # The fix flow deleted the issue when the run started: bring it back
         # so a stopped run can be started again.
         if entry.state in ACTIVE_ENTRY_STATES:
-            _raise_changed_issue(hass, entry, recorded, target.label)
+            # The newest build seen wins: a stop on the watch's note has no other.
+            label = (
+                replace(target, digest=other_builds[-1]).label
+                if other_builds
+                else current or target.label
+            )
+            _raise_changed_issue(hass, entry, recorded, label)
 
     async def _current_build() -> str | None:
         # Read before the run records its target: a build pulled during the
@@ -2122,7 +2299,7 @@ async def _async_reembed(  # noqa: PLR0913
     target: EmbeddingFingerprint,
     *,
     start: bool,
-    stopped: Callable[[str], None],
+    stopped: Callable[[str, str | None], None],
     current_build: Callable[[], Awaitable[str | None]],
 ) -> bool:
     """
@@ -2157,14 +2334,14 @@ async def _async_reembed(  # noqa: PLR0913
                         "store; this one does not start. Start the repair again "
                         "once that run ends."
                     )
-                    stopped(recorded)
+                    stopped(recorded, None)
                     return False
                 finished = await _async_run_locked(
                     conn, embeddings, target, start=start, current_build=current_build
                 )
             except _StoppedError as err:
                 if err.recorded is not None:
-                    stopped(err.recorded)
+                    stopped(err.recorded, err.current)
             except BaseException:
                 aborted = True
                 raise
@@ -2180,7 +2357,7 @@ async def _async_reembed(  # noqa: PLR0913
             target.label,
             err,
         )
-        stopped(recorded)
+        stopped(recorded, None)
     return False
 
 
@@ -2342,11 +2519,17 @@ async def async_vacuum_vectors(
 
 
 class _StoppedError(Exception):
-    """The run ended without finishing; `recorded` brings the repair back."""
+    """
+    The run ended without finishing; `recorded` brings the repair back.
 
-    def __init__(self, recorded: str | None) -> None:
+    `current`: the build that stopped it, which the repair names as the current
+    model instead of the run's own target.
+    """
+
+    def __init__(self, recorded: str | None, current: str | None = None) -> None:
         super().__init__(recorded)
         self.recorded = recorded
+        self.current = current
 
 
 async def _async_held_if_target(
@@ -2467,7 +2650,10 @@ async def _async_run_locked(  # noqa: PLR0912, PLR0915 - a handler per stop
             if err.build is not None
             else "did not say which build it serves",
         )
-        raise _StoppedError(recorded) from None
+        raise _StoppedError(
+            recorded,
+            replace(target, digest=err.build).label if err.build is not None else None,
+        ) from None
     except _TooManyRejectedError as err:
         if stored is not None:
             await _async_end_on_rejections(conn, stored)

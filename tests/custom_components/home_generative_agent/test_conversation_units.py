@@ -480,6 +480,33 @@ async def test_index_tools_skips_an_admin_only_api() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("adopted", [False, True])
+async def test_tool_index_delta_hashes_skip_a_build_adopted_meanwhile(
+    *, adopted: bool
+) -> None:
+    """Vectors of the old build must not look current to the rebuild (#942)."""
+    rd = MagicMock()
+    rd.embedding_fingerprint = before = types.SimpleNamespace(digest="w:a1")
+    rd.tool_content_hashes = {}
+
+    async def _write(_tasks: Any) -> None:
+        if adopted:
+            rd.embedding_fingerprint = types.SimpleNamespace(digest="w:b2")
+
+    self_stub = MagicMock()
+    with patch(
+        "custom_components.home_generative_agent.conversation.gather_store_puts_in_chunks",
+        new=_write,
+    ):
+        await HGAConversationEntity._async_write_tool_index_delta(
+            self_stub, rd, [AsyncMock()], {"key": "hash"}
+        )
+
+    assert (rd.embedding_fingerprint is before) is not adopted
+    assert rd.tool_content_hashes == ({} if adopted else {"key": "hash"})
+
+
+@pytest.mark.asyncio
 async def test_run_tool_index_background_failure_sets_flag() -> None:
     """Indexing failure sets tool_index_failed=True and resets tool_indexing_in_progress."""
     rd = MagicMock()
@@ -950,6 +977,7 @@ def _index_entity() -> Any:
 def _index_runtime_data(**overrides: Any) -> Any:
     rd = types.SimpleNamespace(
         tool_index_ready=True,
+        embedding_fingerprint=None,
         tool_indexing_in_progress=False,
         tool_index_failed=False,
         tool_content_hashes={},
