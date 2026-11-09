@@ -44,6 +44,7 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_OLLAMA_URL,
 )
 from .anthropic_client import model_is_adaptive_only
+from .db_utils import db_client_keepalives
 from .face_api import face_api_request, face_api_url
 from .fallback import (
     ainvoke_dropping_unsupported_params,
@@ -1595,6 +1596,8 @@ async def _db_probe_connect(db_uri: str) -> None:
         if "connect_timeout" in params
         else {"connect_timeout": _DB_PROBE_CONNECT_TIMEOUT_S}
     )
+    # The deadline in the caller stops waiting; this ends the connection (#937).
+    kwargs.update(db_client_keepalives(db_uri))
     conn = await psycopg.AsyncConnection.connect(db_uri, **kwargs)
     try:
         async with conn.cursor() as cur:

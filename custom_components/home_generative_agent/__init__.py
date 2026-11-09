@@ -278,7 +278,7 @@ from .core.database_guard import (
     database_unreachable,
     is_connection_failure,
 )
-from .core.db_utils import parse_postgres_uri
+from .core.db_utils import db_client_keepalives, parse_postgres_uri
 from .core.embedding_model_guard import (
     async_clear_ollama_embedding_model_issue,
     async_sync_ollama_embedding_model_issue,
@@ -3238,13 +3238,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         )
 
     # Open Postgres
-    connection_kwargs = {
+    connection_kwargs: dict[str, Any] = {
         "autocommit": True,
         "prepare_threshold": 0,
         "row_factory": dict_row,
     }
 
     if db_uri is not None:
+        connection_kwargs.update(db_client_keepalives(db_uri))
         pool: AsyncConnectionPool[AsyncConnection[DictRow]] | None = (
             AsyncConnectionPool(
                 conninfo=db_uri,

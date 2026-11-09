@@ -3842,6 +3842,25 @@ async def test_the_recorded_build_is_read_for_the_configured_model(
 
 
 @pytest.mark.asyncio
+async def test_the_recorded_build_read_uses_client_keepalives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeout cannot end a query on a vanished host; keepalives can (#937)."""
+    seen: dict[str, Any] = {}
+
+    async def _connect(*_args: Any, **kwargs: Any) -> _DigestConn:
+        seen.update(kwargs)
+        return _DigestConn(None)
+
+    monkeypatch.setattr(er.psycopg.AsyncConnection, "connect", _connect)
+
+    await er.async_recorded_ollama_digest("postgresql://x/y", "mxbai-embed-large")
+
+    assert seen["keepalives_idle"] == 30
+    assert seen["tcp_user_timeout"] == 60000
+
+
+@pytest.mark.asyncio
 async def test_an_unreachable_database_has_no_recorded_build(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
