@@ -371,6 +371,7 @@ from .core.utils import (
     generate_embeddings,
     is_edge_deployment,
     make_gated_probe_runner,
+    mark_tool_index_stale,
     normalize_openai_compatible_base_url,
     normalized_ollama_url,
     ollama_healthy,
@@ -3132,14 +3133,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 runtime_data = getattr(entry, "runtime_data", None)
                 if runtime_data is None:
                     return
-                runtime_data.tool_content_hashes.clear()
-                runtime_data.tool_index_ready = False
-                runtime_data.tool_index_failed = False
-                # A build in flight embedded with the previous provider: let
-                # it finish and it would declare that index ready.
-                task = runtime_data.tool_index_task
-                if task is not None and not task.done():
-                    task.cancel()
+                mark_tool_index_stale(hass, runtime_data)
                 LOGGER.warning(
                     "Tool index marked stale after embedding provider %s %s to "
                     "%s; it will be rebuilt on the next indexing pass.",
@@ -3147,7 +3141,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "switched" if notify else "was removed, handing the chain",
                     provider_id,
                 )
-                async_dispatcher_send(hass, SIGNAL_TOOL_INDEX_UPDATED, "stale", 0)
                 if not notify:
                     return
                 provider = providers.get(provider_id)
@@ -5348,6 +5341,14 @@ async def _cancel_and_wait(task: object, what: str) -> None:
     )
 
 
+async def _cancel_build_watch(rd: HGAData) -> None:
+    """End the embedding build watch and the writer notes it started (#857)."""
+    await _cancel_and_wait(rd.build_watch_task, "embedding build watch")
+    rd.build_watch_task = None
+    for note in tuple(rd.embedding_note_tasks):
+        await _cancel_and_wait(note, "embedding writer note")
+
+
 async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     """Unload the config entry."""
     # Platforms come down FIRST, and a refusal aborts before anything is torn
@@ -5419,8 +5420,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
     async def _cancel_reembed() -> None:
         # The build watch writes the record on the same pool and can start a
         # resume, so it goes first (#857).
-        await _cancel_and_wait(rd.build_watch_task, "embedding build watch")
-        rd.build_watch_task = None
+        await _cancel_build_watch(rd)
         # Writes on the pool closed next; it resumes at the next setup (#855).
         await _cancel_and_wait(rd.reembed_task, "memory store re-embed")
         rd.reembed_task = None

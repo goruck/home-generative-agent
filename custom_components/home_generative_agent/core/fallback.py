@@ -6,6 +6,7 @@ import asyncio
 import importlib
 import logging
 import math
+from collections import Counter
 from time import monotonic
 from typing import TYPE_CHECKING, Any, cast
 
@@ -1471,12 +1472,15 @@ class FallbackEmbeddings:
         self.switch_callback = switch_callback
         self.removed_callback = removed_callback
         self._active_provider_id = chain[0][2] if chain else None
-        # Providers that answered an embedding call: the store embeds a save
-        # and a search alike, so any of them may have written vectors (#860).
+        # Providers that answered an embedding call since the build watch last
+        # found them on the store's build: the store embeds a save and a
+        # search alike, so any of them may have written vectors (#860).
         # In memory only; a member held by `hold_until_verified` answers
         # nothing before its build is checked, so a reload loses no write of
         # an unchecked build (#857).
         self.served: set[str] = set()
+        # Calls answered per member, to tell whether one landed during a read.
+        self.served_calls: Counter[str] = Counter()
         # Members whose build nobody compared with the store's: skipped until
         # the verifier admits them (#857).
         self._unverified: set[str] = set()
@@ -1772,6 +1776,7 @@ class FallbackEmbeddings:
         if self.circuit_breaker:
             self.circuit_breaker.record_success(provider_id)
         self.served.add(provider_id)
+        self.served_calls[provider_id] += 1
         previous_provider_id = self._active_provider_id
         self._active_provider_id = provider_id
         if previous_provider_id and previous_provider_id != provider_id:

@@ -42,6 +42,7 @@ from ..const import (  # noqa: TID252
     OLLAMA_OSS_TAG,
     OPENAI_CHAT_COMPLETIONS_PATH,
     RECOMMENDED_OLLAMA_URL,
+    SIGNAL_TOOL_INDEX_UPDATED,
 )
 from .anthropic_client import model_is_adaptive_only
 from .db_utils import db_client_keepalives
@@ -1580,6 +1581,23 @@ async def validate_face_api_url(
 # healthy server fails cleanly before the deadline.
 _DB_PROBE_DEADLINE_S = 20.0
 _DB_PROBE_CONNECT_TIMEOUT_S = 10
+
+
+def mark_tool_index_stale(hass: HomeAssistant, runtime_data: Any) -> None:
+    """
+    Make the next indexing pass rebuild the tool vectors.
+
+    For a change in what embeds: the vectors in the index no longer compare
+    with what queries embed to. A build in flight used the old embedder; left
+    to finish, it would declare that index ready.
+    """
+    runtime_data.tool_content_hashes.clear()
+    runtime_data.tool_index_ready = False
+    runtime_data.tool_index_failed = False
+    task = runtime_data.tool_index_task
+    if task is not None and not task.done():
+        task.cancel()
+    async_dispatcher_send(hass, SIGNAL_TOOL_INDEX_UPDATED, "stale", 0)
 
 
 async def _db_probe_connect(db_uri: str) -> None:

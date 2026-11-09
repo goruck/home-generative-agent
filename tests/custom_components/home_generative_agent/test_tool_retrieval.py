@@ -353,6 +353,7 @@ async def test_retrieve_tools_fallback_when_live_index_becomes_stale(
     }
     runtime_data = SimpleNamespace(
         tool_index_ready=True,
+        embedding_fingerprint=None,
         tool_indexing_in_progress=False,
         tool_index_failed=False,
     )
