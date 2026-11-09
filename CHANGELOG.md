@@ -15,7 +15,8 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ### Fixed
 
-- **Memory store re-embedding: four gaps closed** ([#857](https://github.com/goruck/home-generative-agent/issues/857)).
+- **Memory store re-embedding: five gaps closed** ([#857](https://github.com/goruck/home-generative-agent/issues/857)).
+  - An Ollama embedding build pulled while Home Assistant runs is noticed within 5 minutes instead of at the next restart. When the primary's server serves another build, memory search used to return wrong results with no repair until the next start, and pulling the old build back before then left the new build's vectors unnoted for good. Now the new build becomes the store's model and the "embedding model changed" repair is raised to re-embed with it. A fallback still on the old build is held, then removed, and a fallback server that pulled another build is removed too (noted as a writer if it answered). Starting the repair after a pull no longer asks for a reload first. A build pulled during a re-embed is noted in the record at once and stops the run at its next batch, even if it is pulled back before the run ends, instead of the store being recorded as clean.
   - Dropping the vector table to change its size no longer raises a needless "memory needs re-embedding" repair: the new, empty table is recorded as the current model's before anything writes into it.
   - A re-embed whose host stopped mid-run no longer holds the store for about two hours: its database connection is checked every 10 to 30 seconds, so PostgreSQL lets go of it in about a minute and a half (not behind a proxy or connection pooler), and a resume meanwhile waits for it instead of raising the repair.
   - A second entry on the same database and model no longer shows the repair while the first is already re-embedding: it waits for that run (up to 6 hours, then the repair comes back with a warning), then finishes its work or finds it done.

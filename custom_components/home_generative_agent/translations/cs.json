@@ -584,7 +584,7 @@
           }
         },
         "abort": {
-          "not_ready": "Nové vytvoření embeddingů nelze spustit: Home Generative Agent není načten nebo nemá databázi, jeho poskytovatel embeddingů neodpovídá, nebo jeho server Ollama neuvádí, které sestavení modelu poskytuje. Pokud má server Ollama nyní jiné sestavení než při spuštění Home Generative Agent, nejprve Home Generative Agent znovu načtěte. Pak to zkuste znovu."
+          "not_ready": "Nové vytvoření embeddingů nelze spustit: Home Generative Agent není načten nebo nemá databázi, jeho poskytovatel embeddingů neodpovídá, nebo jeho server Ollama neuvádí, které sestavení modelu poskytuje. Až to bude vyřešeno, zkuste to znovu."
         }
       }
     },
