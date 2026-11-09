@@ -1237,6 +1237,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             )
 
         self.tz = dt_util.get_default_time_zone()
+        self._warned_speaker_sensors: set[str] = set()
 
     async def async_added_to_hass(self) -> None:
         """When entity is added to Home Assistant."""
@@ -1574,6 +1575,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         if not device_id or not sensors:
             return None
         registry = er.async_get(self.hass)
+        self._warn_unusable_speaker_sensors(sensors, registry)
         sensor = next(
             (
                 entity_id
@@ -1586,10 +1588,28 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         if sensor is None:
             return None
         state = self.hass.states.get(sensor)
-        value = _clean_speaker_name(state.state) if state else ""
+        value = state.state.strip() if state else ""
         if value.casefold() in _NO_SPEAKER_STATES:
             return Speaker(name=None)
-        return await self._async_person_speaker(value) or Speaker(name=value)
+        return await self._async_person_speaker(value) or Speaker(
+            name=_clean_speaker_name(value) or None
+        )
+
+    def _warn_unusable_speaker_sensors(
+        self, sensors: list[str], registry: er.EntityRegistry
+    ) -> None:
+        """Log once a picked sensor that can never apply to a request."""
+        for entity_id in sensors:
+            entry = registry.async_get(entity_id)
+            if entry is not None and entry.device_id is not None:
+                continue
+            if entity_id not in self._warned_speaker_sensors:
+                self._warned_speaker_sensors.add(entity_id)
+                _LOGGER.warning(
+                    "Speaker recognition sensor %s is ignored: it does not exist "
+                    "or is not attached to a device.",
+                    entity_id,
+                )
 
     async def _async_person_speaker(self, value: str) -> Speaker | None:
         """
@@ -1624,7 +1644,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         user_id = attrs.get("user_id")
         user = await self.hass.auth.async_get_user(user_id) if user_id else None
         return Speaker(
-            name=str(attrs.get("friendly_name") or value),
+            name=_clean_speaker_name(str(attrs.get("friendly_name") or value))
+            or person.entity_id,
             person=person.entity_id,
             user=user.name if user else None,
         )
@@ -1674,19 +1695,20 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         return f"{conversation_id}:{speaker.key}" if speaker else conversation_id
 
     def _turn_thread(
-        self, conversation_id: str, speaker: Speaker | None
+        self, conversation_id: str, speaker: Speaker | None, text: str
     ) -> tuple[str, dict[str, Any] | None]:
         """
         Return the thread for this turn, and the PIN prompt it answers, if any.
 
-        The next message answers a waiting PIN prompt, whichever voice it was
-        attributed to, so it joins the thread that holds the prompt.
+        A message with a number in it may be the PIN for a prompt another voice
+        was asked, so it joins the thread that holds the prompt. Any other
+        message stays on its speaker's thread and leaves the prompt waiting.
         """
         thread_id = self._thread_id(conversation_id, speaker)
         if speaker is None:
             return thread_id, None
         prompt = waiting_pin_prompt(
-            self.entry.runtime_data.pending_actions, conversation_id
+            self.entry.runtime_data.pending_actions, conversation_id, text
         )
         return (prompt["thread_id"], prompt) if prompt else (thread_id, None)
 
@@ -2190,7 +2212,9 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             )
 
         speaker = await self._async_speaker(llm_context.device_id)
-        thread_id, waiting_prompt = self._turn_thread(conversation_id, speaker)
+        thread_id, waiting_prompt = self._turn_thread(
+            conversation_id, speaker, user_input.text
+        )
         # A chat_log is shared by the room, so another agent's turn cannot be
         # attributed to a voice and stays out of every voice's history.
         message_history = [] if speaker else message_history

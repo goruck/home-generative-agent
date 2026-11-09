@@ -2270,6 +2270,7 @@ def _speaker_entity(
         None if state is None else types.SimpleNamespace(state=state)
     )
     entity.hass.states.async_all.return_value = persons or []
+    entity._warned_speaker_sensors = set()
     entity.hass.auth.async_get_user = AsyncMock(
         return_value=types.SimpleNamespace(name="Ivan")
     )
@@ -3704,17 +3705,18 @@ def _waiting_action(thread_id: str, **fields: Any) -> dict[str, Any]:
     }
 
 
-@pytest.mark.parametrize("thread", ["conv", "conv:Пётр", "conv:unknown"])
+@pytest.mark.parametrize("thread", ["conv:Пётр", "conv:unknown"])
 def test_waiting_pin_prompt_is_found_on_any_voices_thread(thread: str) -> None:
     """A short spoken PIN is easily attributed to the wrong voice."""
     action = _waiting_action(thread)
-    assert waiting_pin_prompt({"a": action}, "conv") is action
+    assert waiting_pin_prompt({"a": action}, "conv", "1234") is action
 
 
 @pytest.mark.parametrize(
     "action",
     [
         _waiting_action("other:Пётр"),
+        _waiting_action("conv"),
         _waiting_action("conversation"),
         _waiting_action("conv:Пётр", disclosed=False),
         _waiting_action("conv:Пётр", reply_turn="t1"),
@@ -3724,13 +3726,13 @@ def test_waiting_pin_prompt_ignores_prompts_nobody_can_answer(
     action: dict[str, Any],
 ) -> None:
     """Another conversation's, an undelivered or an answered prompt is not waiting."""
-    assert waiting_pin_prompt({"a": action}, "conv") is None
+    assert waiting_pin_prompt({"a": action}, "conv", "1234") is None
 
 
 def test_waiting_pin_prompt_keeps_a_renewed_prompt() -> None:
     """A wrong PIN keeps the prompt for one more reply."""
     action = _waiting_action("conv:Пётр", reply_turn="t1", renew=True)
-    assert waiting_pin_prompt({"a": action}, "conv") is action
+    assert waiting_pin_prompt({"a": action}, "conv", "1234") is action
 
 
 def test_waiting_pin_prompt_skips_an_expired_prompt(
@@ -3741,24 +3743,133 @@ def test_waiting_pin_prompt_skips_an_expired_prompt(
         "custom_components.home_generative_agent.agent.helpers.pending_action_expired",
         lambda _action, _now: True,
     )
-    assert waiting_pin_prompt({"a": _waiting_action("conv:Пётр")}, "conv") is None
+    assert (
+        waiting_pin_prompt({"a": _waiting_action("conv:Пётр")}, "conv", "1234") is None
+    )
 
 
-def test_recognized_voice_joins_the_waiting_prompt() -> None:
-    """The reply runs in the prompt's thread, as the user who asked for it."""
+def _turn_entity(*actions: dict[str, Any]) -> Any:
     entity = _render_entity({})
+    entity.entry.runtime_data.pending_actions = {
+        str(index): action for index, action in enumerate(actions)
+    }
+    return entity
+
+
+def test_number_from_another_voice_joins_the_waiting_prompt() -> None:
+    """A PIN attributed to the wrong voice still reaches the prompt it answers."""
     action = _waiting_action("conv:Пётр")
-    entity.entry.runtime_data.pending_actions = {"a": action}
-    entity._thread_id = HGAConversationEntity._thread_id
-    turn_thread = HGAConversationEntity._turn_thread
-    assert turn_thread(entity, "conv", Speaker(name=None)) == ("conv:Пётр", action)
-    assert turn_thread(entity, "conv", None) == ("conv", None)
+    entity = _turn_entity(action)
+    turn = entity._turn_thread("conv", Speaker(name=None), "1 2 3 4")
+    assert turn == ("conv:Пётр", action)
     memory = HGAConversationEntity._memory_user
     assert memory(None, Speaker(name=None), action) == "ivan"
     assert memory("Logged", Speaker(name=None), action) == "Logged"
+
+
+def test_other_message_from_another_voice_stays_with_its_speaker() -> None:
+    """A guest's request must not see or write the prompt owner's memories."""
+    action = _waiting_action("conv:Пётр")
+    entity = _turn_entity(action)
+    guest = Speaker(name="Мария", user="Mary")
+    text = "remember my address is on Main street"
+    thread, prompt = entity._turn_thread("conv", guest, text)
+    assert (thread, prompt) == ("conv:Мария", None)
+    assert HGAConversationEntity._memory_user(None, guest, prompt) == "Mary"
+    assert action.get("reply_turn") is None
+
+
+def test_recognized_voice_with_no_waiting_prompt_keeps_its_thread() -> None:
+    """Without a prompt a number is an ordinary message of its speaker's."""
+    entity = _turn_entity()
+    speaker = Speaker(name="Мария")
+    assert entity._turn_thread("conv", speaker, "1234") == ("conv:Мария", None)
+    assert entity._turn_thread("conv", None, "1234") == ("conv", None)
+
+
+def test_typed_prompt_is_not_inherited_by_a_voice() -> None:
+    """Only a prompt a voice created is followed, so the owner check stays."""
+    entity = _turn_entity(_waiting_action("conv"))
+    speaker = Speaker(name="Мария")
+    assert entity._turn_thread("conv", speaker, "1234") == ("conv:Мария", None)
+
+
+def test_handler_passes_the_speaker_to_thread_memory_and_prompt() -> None:
+    """The resolved speaker has to reach everything it is meant to change."""
+    src = inspect.getsource(HGAConversationEntity._async_handle_message_active)
+    assert "conversation_id, speaker, user_input.text" in src
+    assert "self._memory_user(user_name, speaker, waiting_prompt)" in src
+    assert "self._speaker_prompt(speaker)" in src
 
 
 def test_recognized_voice_skips_foreign_turns() -> None:
     """Another agent's turn cannot be attributed to one voice in the room."""
     src = inspect.getsource(HGAConversationEntity._async_handle_message_active)
     assert "message_history = [] if speaker else message_history" in src
+
+
+@pytest.mark.parametrize("name", ['Alex "Al" Smith', "Alex «Al» Smith"])
+async def test_person_is_matched_on_the_original_value(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """Cleaning is for the prompt, so a quoted name still finds its person."""
+    person = types.SimpleNamespace(
+        entity_id="person.alex", attributes={"id": "alex", "friendly_name": name}
+    )
+    entity = _speaker_entity(monkeypatch, name, persons=[person])
+    assert await entity._async_speaker("device") == Speaker(
+        name="Alex Al Smith", person="person.alex"
+    )
+
+
+async def test_cleaned_value_does_not_match_another_person(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ann"e is not Anne: stripping a quote must not change who it names."""
+    person = types.SimpleNamespace(
+        entity_id="person.anne", attributes={"id": "anne", "friendly_name": "Anne"}
+    )
+    entity = _speaker_entity(monkeypatch, 'Ann"e', persons=[person])
+    assert await entity._async_speaker("device") == Speaker(name="Anne")
+
+
+async def test_person_name_is_cleaned_when_matched_by_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A friendly name reaches the prompt whichever way the person was found."""
+    person = types.SimpleNamespace(
+        entity_id="person.alex",
+        attributes={"id": "alex", "friendly_name": 'Alex"\n' + "x" * 300},
+    )
+    entity = _speaker_entity(monkeypatch, "person.alex", persons=[person])
+    speaker = await entity._async_speaker("device")
+    assert speaker is not None
+    assert speaker.name is not None
+    assert speaker.person == "person.alex"
+    assert len(speaker.name) <= SPEAKER_NAME_MAX_CHARS
+    assert not set(speaker.name) & set('"\n')
+
+
+@pytest.mark.parametrize("devices", [{}, {"sensor.voice": None}])
+async def test_unusable_speaker_sensor_is_logged_once(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    devices: dict[str, Any],
+) -> None:
+    """A renamed or unattached sensor must not turn the feature off silently."""
+    entity = _speaker_entity(
+        monkeypatch, "Пётр", sensors=["sensor.voice"], devices=devices
+    )
+    assert await entity._async_speaker("device") is None
+    assert await entity._async_speaker("device") is None
+    warnings = [r for r in caplog.records if "sensor.voice" in r.getMessage()]
+    assert len(warnings) == 1
+
+
+async def test_sensor_on_another_device_is_not_logged(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A request from another device is the normal case, not a problem."""
+    entity = _speaker_entity(monkeypatch, "Пётр")
+    assert await entity._async_speaker("other") is None
+    assert "sensor.voice" not in caplog.text

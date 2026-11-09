@@ -1091,24 +1091,25 @@ def start_pin_turn(
 
 
 def waiting_pin_prompt(
-    pending_actions: Mapping[str, dict[str, Any]], conversation_id: str
+    pending_actions: Mapping[str, dict[str, Any]], conversation_id: str, text: str
 ) -> dict[str, Any] | None:
     """
-    Return the PIN prompt still waiting for a reply in a conversation, if any.
+    Return the voice's PIN prompt this message may be answering, if any.
 
     On a device that recognizes voices each voice has its own thread, and a short
-    spoken PIN is the utterance most likely to be attributed to the wrong one. The
-    prompt is found across the conversation's threads so the reply reaches it
-    instead of going to the model as an ordinary message. The PIN still decides.
+    spoken PIN is the utterance most likely to be attributed to the wrong one. A
+    message with a number in it is looked up across the conversation's voices so
+    it reaches the prompt instead of going to the model as an ordinary message;
+    the PIN still decides. Any other message stays with whoever said it, and only
+    a prompt a voice created is followed, so a typed request keeps its owner check.
     """
+    if not _number_runs(text):
+        return None
     now = dt_util.utcnow()
+    prefix = f"{conversation_id}:"
     for action in reversed(list(pending_actions.values())):
-        thread_id = str(action.get("thread_id") or "")
         if (
-            (
-                thread_id == conversation_id
-                or thread_id.startswith(f"{conversation_id}:")
-            )
+            str(action.get("thread_id") or "").startswith(prefix)
             and action.get("disclosed")
             and (action.get("reply_turn") is None or action.get("renew"))
             and not pending_action_expired(action, now)
