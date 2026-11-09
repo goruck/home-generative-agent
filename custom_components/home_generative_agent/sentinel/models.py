@@ -245,6 +245,29 @@ SEMANTIC_KEY_SLUG_PREFIX = "v1_subject_"
 SEVERITY_RANK: dict[Severity, int] = {"low": 0, "medium": 1, "high": 2}
 
 
+# Rules, built-in and dynamic templates alike, for a stranger on camera.
+_STRANGER_SIGHTING_RULES = frozenset(
+    {
+        "unknown_person_camera_no_home",
+        "unknown_person_camera_night_home",
+        "unknown_person_camera_when_home",
+    }
+)
+
+
+def is_stranger_sighting(finding: AnomalyFinding) -> bool:
+    """
+    Return True for a finding about an unidentified person on camera.
+
+    By rule, not by ``recognized_people``: other findings carry that evidence
+    too, and an alarm left disarmed during the same visit is not the sighting.
+    A dynamic rule is judged by its template, since its id may be anything.
+    """
+    return (
+        finding.evidence.get("template_id") or finding.type
+    ) in _STRANGER_SIGHTING_RULES
+
+
 def anomaly_finding_from_dict(data: Mapping[str, Any]) -> AnomalyFinding:
     """
     Rebuild a finding saved with ``AnomalyFinding.as_dict``.

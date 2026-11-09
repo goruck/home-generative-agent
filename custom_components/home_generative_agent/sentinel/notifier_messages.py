@@ -152,6 +152,8 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "batch_message": "{count} home update{plural}: {type_summary}.",
         "batch_more": "\u2026and {count} more",
         "also_line": "Also: {names}",
+        "also_unknown_person": "Unknown person on {camera}",
+        "also_unknown_person_any": "Unknown person on camera",
         # Canary mode (#783): what auto-execution would have run, without acting.
         "canary_would_run": "Dry run: Sentinel would have run {actions} on {targets}.",
         "also_more": "+{count} more",
@@ -404,6 +406,8 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "batch_message": "{count} novinek z domova: {type_summary}.",
         "batch_more": "\u2026a dal\u0161\u00edch {count}",
         "also_line": "Také: {names}",
+        "also_unknown_person": "Neznámá osoba na kameře {camera}",
+        "also_unknown_person_any": "Neznámá osoba na kameře",
         "canary_would_run": (
             "Zkušební režim: Sentinel by spustil {actions} pro {targets}."
         ),
@@ -632,6 +636,8 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "batch_message": "{count} 条家庭动态：{type_summary}。",
         "batch_more": "…以及另外 {count} 条",
         "also_line": "另外：{names}",
+        "also_unknown_person": "{camera} 检测到陌生人",
+        "also_unknown_person_any": "摄像头检测到陌生人",
         "canary_would_run": "试运行：Sentinel 本会对 {targets} 执行 {actions}。",
         "also_more": "另有 {count} 个",
         "condition_open_while_away": "离家时开着",
