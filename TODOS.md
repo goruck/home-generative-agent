@@ -2,20 +2,6 @@
 
 ## Agent
 
-### PIN-flow detection reads English text and tracks one challenge at a time
-
-**What:** `_has_pending_pin_confirmation` (`agent/graph.py`) decides whether `confirm_sensitive_action` is force-injected on the user's next turn. It keeps a flow pending after a wrong PIN by matching `"Incorrect PIN"`, but that reply is Czech on a Czech install ("Nesprávný PIN. Akce nebyla provedena."), and an invalid-format reply (`pin_invalid_format`, e.g. a mistranscribed spoken PIN) is not recognized in any language, so the flow reads as resolved while the action is still pending. It also does not correlate replies with action ids: for `requires_pin(A) → requires_pin(B) → completed(A) → awaiting_user_pin(B)` it returns False at A's completion. PR #769 covers that case from the other side (`_get_pending_pin_tools` also injects the tool while the conversation has an unexpired action in the pending store), so what is left is the language and invalid-format cases, which matter after that store entry is gone or for the text the detector feeds elsewhere.
-
-**Why:** First filed from my review of PR #769 (2026-10-14); the full review (red team, Codex P2 x2) confirmed it and added the invalid-format and multi-action cases. Pre-existing; PR #769 made only its own refusal (`awaiting_user_pin`) a JSON status.
-
-**How to apply:** Return every recoverable confirmation reply (`pin_incorrect`, `pin_invalid_format`) as JSON with a status and the `action_id`, like `awaiting_user_pin`, and have the detector track the set of unresolved `requires_pin` action ids, removing one only on a terminal reply for that id. Add a cs test and the A/B ordering test next to `test_pin_detection.py`.
-
-**Effort:** M
-**Priority:** P2
-**Depends on:** None
-
----
-
 ### The PIN line describes the match at hold time; HA matches again when the confirmed call runs
 
 **What:** `describe_pending_action` resolves an intent's targets with `async_match_targets` when the call is held, and the fixed line names that match ("open every cover in Garage"). The confirmed call (`_execute_pending_action`, `agent/tools.py`) sends the held arguments, and HA matches them again at that moment. A device renamed, re-aliased or moved into the area between the prompt and the PIN reply changes what runs without changing the line the user confirmed.
@@ -27,32 +13,6 @@
 **Effort:** S
 **Priority:** P3
 **Depends on:** None
-
----
-
-### An empty model reply passes the no-reply guard in schema-first mode
-
-**What:** `_async_finish_reply` (conversation.py) judges a turn by the type of the last chat_log entry, not by whether it says anything. In schema-first (ainvoke) mode a model reply with empty content and no tool calls is backfilled as an `AssistantContent` with no text, so the guard adds no apology, the user gets a blank bubble (and a satellite nothing), and the empty `AIMessage` stays in the checkpoint for the next model call. `_call_model`'s empty-reply fallback covers only a reply that follows a `ToolMessage`.
-
-**Why:** Codex adversarial finding in the review of the loop-guard fix (2026-10-16); inherited, not introduced there. The streamed path is covered by its own recovery (`_normalize_ai_content("")` is None, so the failure text is added).
-
-**How to apply:** In `_async_finish_reply`, treat an `AssistantContent` with no content and no tool calls as no reply; in `_call_model`, apply the empty-reply fallback to a first response too, so the checkpoint never ends on an empty assistant message. Test both in `test_conversation_units.py` next to the no-reply cases.
-
-**Effort:** S
-**Priority:** P3
-
----
-
-### A cancelled turn leaves the model's tool calls unanswered in the checkpoint
-
-**What:** When a streamed turn is cancelled (the client disconnects, or the pipeline aborts) after the model's tool-call message was checkpointed and before the `action` node committed its results, the thread ends on an `AIMessage` with tool calls and no `ToolMessage`. The next turn sends that history to the provider; OpenAI and Anthropic reject an assistant tool call with no result, so the conversation fails until trimming drops the exchange. `_get_synthetic_rejections` (conversation.py) repairs only HA's chat log, never the checkpoint, and the round-limit guard's new "not run" results (`_unanswered_calls`, graph.py) run only on the guard path.
-
-**Why:** Codex adversarial finding in the review of the loop-guard fix (2026-10-16); inherited, not introduced there. Rare (a cancellation inside a tool round) but hard to diagnose from the field: the symptom is a provider 400 on the next request.
-
-**How to apply:** On cancellation (`_async_run_astream`'s `CancelledError` path), or at the start of the next turn in `_retrieve_tools`, append a "not run" `ToolMessage` for every tool call of a trailing `AIMessage` that has none, recording an unknown outcome when the call may have started (a device call in flight). Reuse `_unanswered_calls` with a cancellation-specific text. Test: a graph state ending on a tool-call message, then `start`→`_call_model` input, asserts every tool call has a result.
-
-**Effort:** S
-**Priority:** P3
 
 ---
 
@@ -150,34 +110,6 @@
 
 ---
 
-### `maybe_fill_lock_entity` maps any name with "lock" in it to the nearest real lock
-
-**What:** `maybe_fill_lock_entity` (`agent/helpers.py`) runs when the lock normalizer set `domain: ["lock"]`, which it does for any name containing "lock" ("Kitchen Clock" does). With no exact or compact match it falls back to the best-ranked lock by substring and length, so a HassTurnOff on "Kitchen Clock" can be rewritten to a real lock and held for the PIN as an unlock of that lock. The fixed line now names that lock, so the user sees it before answering, but the rewrite itself is a guess.
-
-**Why:** Fourth review round of PR #769 (2026-10-15), Claude adversarial, out of that commit's scope: the best-match fallback predates the PIN work.
-
-**How to apply:** Drop the ranked fallback (keep the exact and compact matches), or require the compact match to contain the whole target; add a "Kitchen Clock" row to the lock-normalizer tests asserting no entity id is filled.
-
-**Effort:** S
-**Priority:** P3
-**Depends on:** None
-
----
-
-### A PIN-confirmed call that half-succeeded reads as done
-
-**What:** Home Assistant's intents return success when at least one target succeeded and list the rest in `data.failed`. `parse_tool_response` (`agent/helpers.py`) reads `success`, `warning` and the alarm state only, so a confirmed "unlock every lock in Kitchen" with one of three locks failing gets "PIN accepted: unlock every lock in Kitchen." The normal tool path has the same blind spot.
-
-**Why:** Fourth review round of PR #769 (2026-10-15), Claude adversarial cycle 2 (INVESTIGATE); pre-existing, now surfaced in a fixed trust line.
-
-**How to apply:** Read `failed` (a non-empty list) in `parse_tool_response` as a partial outcome, give it a status of its own, and a `pin_partial_line` ("PIN accepted: unlock every lock in Kitchen, but 1 did not respond.") in `pin_messages.py`.
-
-**Effort:** S
-**Priority:** P3
-**Depends on:** None
-
----
-
 ### Two overlapping turns in one conversation drop each other's undelivered PIN prompt
 
 **What:** `start_pin_turn` drops a pending action from an earlier turn whose fixed line was never delivered. Two `conversation.process` calls with the same `conversation_id` running at once: the second starts while the first is mid-run and drops the first's not-yet-disclosed action; the first then finishes with the model's own PIN request and no fixed line, and the PIN reads as "not found". Fail-safe, and not reachable from one satellite or chat panel, but confusing for an automation that fires twice.
@@ -199,20 +131,6 @@
 **Why:** Third review pass of PR #769 (2026-10-14), Claude adversarial (INVESTIGATE). A denial of a pending action, not a bypass. The other half of the original entry (a coincidental number in a later message confirming a waiting action) was fixed in the fourth pass: a prompt is answered by the next message only (kept for one more message, up to three replies, only while the user is still answering it).
 
 **How to apply:** When the cap is reached, evict an expired entry or the registering conversation's own first; otherwise refuse the new registration with a "too many PIN prompts waiting" reply instead of dropping another conversation's.
-
-**Effort:** S
-**Priority:** P3
-**Depends on:** None
-
----
-
-### Resolve the schema converter from probatio directly on HA 2026.10
-
-**What:** `_resolve_converter` in `agent/helpers.py` looks for `to_openapi` / `UNSUPPORTED` on `homeassistant.helpers.llm` first. HA 2026.10's `llm.py` imports `probatio` and no longer re-exports either name, so every 2026.10 install falls through to the fallback that checks whether `vol.Schema.__module__` starts with `probatio`. That works today (probatio 0.13.0 reports `probatio.schema`, and the box ran fine), but if the check ever misses, the code imports `voluptuous_openapi`, which 2026.10 does not install, and the module fails at import. The docstring's claim that core re-exports these names is no longer true.
-
-**Why:** Found by the red-team pass in the #735 hotfix review (2026-10-08). Not fixed there because it works on every shipped HA version and the hotfix was kept to what was broken. No test runs the 2026.10 path, because the 2026.9.4 venv still has the re-exports.
-
-**How to apply:** Before the `__module__` check, look up probatio directly: if `importlib.util.find_spec("probatio")` and `vol.Schema is probatio.Schema`, use `probatio.to_openapi` and `probatio.UNSUPPORTED`. Update the docstring. Add a test that removes `llm.to_openapi` and `llm.UNSUPPORTED` with monkeypatch and asserts the converter still resolves to probatio.
 
 **Effort:** S
 **Priority:** P3
@@ -281,18 +199,7 @@
 
 **How to apply:** Decide the product shape first: either (a) disambiguate duplicate names at bind time (rename the later tool's advertised name, keep a reverse map for dispatch), or (b) refuse to bind a second same-named tool from a different API and warn — extending the inclusion-shadow warning to all candidates. (b) is a small deterministic change that keeps today's behavior for the non-colliding majority; (a) preserves both tools. Either way, add a regression test with two APIs advertising one name and assert where the call lands.
 
-**Effort:** M
-**Priority:** P2
-
----
-
-### "No LLM APIs" is not an expressible choice, and its two spellings behave oppositely
-
-**What:** `CONF_LLM_HASS_API` has two distinct falsy storage states that mean the same thing to the user and opposite things to the code. Deselecting every API in the options flow hits `_cleanup_none_llm_api` (`config_flow.py:528`), which *pops* the key — and an absent key means "default to `[LLM_API_ASSIST]`" to every reader, so the Assist API is silently re-enabled and the user's choice is discarded. The v5 → v6 migration (`__init__.py:4042`) instead writes an explicit `[]` for the same intent, which really does disable everything. Same apparent user choice, opposite outcome, decided entirely by whether the entry predates v6. The options-flow form compounds it: `config_flow.py:233` suggests `[]` when the key is absent, so the UI shows "nothing selected" on installs that are actively running Assist.
-
-**Why:** Surfaced twice during the v3.30.9 ship — once by inspection, once independently by the Codex adversarial pass, which correctly rejected an earlier claim that `[]` was unreachable. v3.30.9 makes the *security* consequence moot (the CONTROL flag is now also set whenever a PIN is configured, so neither spelling can bypass the gate), but the configuration semantics remain incoherent and a user who genuinely wants no LLM API still cannot express it through the UI.
-
-**How to apply:** Pick one canonical spelling for "no APIs" and migrate the other to it. Storing `[]` is the better choice: it is explicit, it already round-trips through the migration, and it lets the form show the real state. That means deleting `_cleanup_none_llm_api`, adding a v6 → v7 migration that writes `[]` where the key is absent, and changing the readers' fallback from `[LLM_API_ASSIST]` to "only when the key was never present" — which, once the migration has run, is never. Note this is a user-visible behavior change: installs currently running Assist via an absent key would stop, so it needs a release note and probably a repair issue rather than a silent flip. `active_llm_api_ids()` (`agent/helpers.py`) is the single choke point for the read side.
+**Same root cause (from a removed entry, 2026-11-09):** the step-3d injection guard keys on the bare name, so a remote API exposing `add_automation` can suppress injection of the local tool. `_has_local_tool` narrows this for remote Home Assistant servers only.
 
 **Effort:** M
 **Priority:** P2
@@ -349,19 +256,7 @@
 
 **How to apply:** Resolve the tool object from the merged LLM API (unwrap `NamespacedTool`) and treat it as a script tool only when it is HA's `ScriptTool`; hold any other `script__*`-shaped tool. Test with a namespaced fake tool. The same applies to the bare names Home Assistant 2026.8 gives script tools (`<object id>`), which `script_tool_entity_id` also takes for a local script when one has that object id. Also: HA names a script's tool from its entity id but runs the script by its registry unique id, so a harmless script renamed to `script.turn_on` has its `script__turn_on` tool held as targetless `script.turn_on` (an extra PIN prompt, not a bypass; #837 review 3).
 
-**Effort:** S
-**Priority:** P3
-**Depends on:** #775
-
----
-
-### A scene setting a group helper is screened as the group, not its members
-
-**What:** `_state_is_critical` (`agent/indirect_pin.py`) applies a rule's `entity_match` to the entity id a scene names. A new-style group helper (a cover or lock group such as `cover.all_doors`) is screened as itself, so a rule whose `entity_match` names a member (`left_garage`) misses a scene that opens the group. A direct call on the group has the same gap. `automation_pin`'s inline `scene.apply` screen ignores `entity_match` for this reason.
-
-**Why:** Security specialist, review cycle 4 of #775 (2026-10-17), low confidence. The default rules match `door`/`garage`/`gate`, which group names usually carry too.
-
-**How to apply:** For a state whose entity has an `entity_id` attribute in `hass.states` (a group helper), also screen each member, or fall back to domain-only matching as `_domain_is_guarded` does. Cover the direct-call path in the gate the same way.
+**Status (2026-11-09):** the bypass is closed for a server judged to be a remote Home Assistant: `_is_critical_action` judges it before any script screen. What remains is the extra PIN prompt when a harmless script shares a name.
 
 **Effort:** S
 **Priority:** P3
@@ -460,40 +355,11 @@ complete shadow index that outranked the live rows (same embedding text, one
 prefix shorter) and starved the model of real tools. Gaps (1), (2) and (4-8)
 are still open.
 
+**Status (2026-11-09):** (3) is done, and so is cancelling a background build on a provider switch. (1), (2) and (4) and the later items stay open.
+
 **Effort:** M
 **Priority:** P3
 **Depends on:** v3.30.4
-
----
-
-### Stored tool exclusions/inclusions still display the pre-rename name
-
-**What:** Enforcement is fixed (see Resolution below); what remains is
-cosmetic and optional. A stored exclusion saved before HA 2026.9 still holds
-the bare name (`HassTurnOff`), so `_tool_exclusion_choices` cannot find it in
-the live tool list and labels it `(not currently available)` even though it is
-actively excluding `intent__HassTurnOff`. The label is wrong, not the control.
-
-**How to apply:** On entry setup, rewrite a stored exclusion/inclusion value
-whose name is absent from the live tool set but whose base name matches exactly
-one live tool; log anything ambiguous and leave it. Note the interaction with
-gap (4) of the tool-index hygiene TODO: any re-encoding of the composite key
-has to migrate these same stored values.
-
-**Resolution (v3.41.1):** the fail-open is closed. `is_tool_excluded`
-(agent/helpers.py) matches a live tool against the stored deny-list by exact
-name first, then — only for stored entries carrying no `__`, i.e. legacy
-pre-rename ones — by base name, so `HassTurnOff` keeps excluding
-`intent__HassTurnOff`. A stored name that already carries a namespace is
-matched exactly and never stripped, so one specific exclusion can never widen
-to a same-suffix tool from another domain. All three enforcement sites route
-through it: `filter_excluded_tools`, the RAG leg of `_get_rag_retrieved_tools`,
-and `_append_included_tools`. The picker already merges stored-but-not-live
-values back on submit, so no exclusion is lost by opening and saving the form.
-
-**Effort:** S
-**Priority:** P3
-**Depends on:** v3.41.1
 
 ---
 
@@ -577,38 +443,6 @@ v3.41.1 rather than deferred; see the TODO above.
 
 ---
 
-### Follow-up turns retrieve tools from a pronoun-only query
-
-**What:** `_retrieve_tools` built its RAG query from the last message only, so
-"turn it off" / "do that again" ranked tools on text carrying no entity,
-domain, or action target.
-
-**Resolution (v3.41.1):** `_retrieval_query` (agent/graph.py) prepends the
-previous human turn when the current one is short AND matches
-`REFERENTIAL_FOLLOW_UP_REGEX`. Joined with ". " so `_split_query_intents`
-searches the combined text and each turn separately and the best score per
-tool wins, meaning added context can never displace a tool the new phrasing
-alone would have found. Deliberately confined to the RANKING query: `query`
-stays the raw last message for `_query_wants_automation`,
-`_query_is_read_only_open_state` and `_query_wants_security_audit`, because
-those gate behaviour — "close it" after "is the garage door open?" would
-otherwise read as a read-only state query and have its actuation tools
-stripped.
-
-**Field data it was built from (2026-09-12, after the index cleanup):**
-"Turn on the garage lights." scored `light__HassLightSet` at 0.564;
-"Turn them off." scored five media-player tools 0.600 / 0.553 / 0.541 / 0.516
-/ 0.512 and no light tool at all. Searching both turns puts the light tool
-second. Whether `intent__HassTurnOff` itself also enters the window was NOT
-predicted — the last such prediction was wrong — and is left to field
-validation.
-
-**Effort:** M
-**Priority:** P2
-**Depends on:** v3.41.1
-
----
-
 ### Mixed-provider fallback chains: lossy schema for capable fallbacks, schema 400s do not advance the chain
 
 **What:** `_bind_model_tools` now re-runs the provider-gated schema passes per chain member (`_tools_for_chain_member`, `agent/graph.py`), which fixed the field failure (Ollama primary, Gemini fallback, `any_of[0].required` 400, 2026-10-03). Two leftovers: (1) the passes are subtractive and run on the primary's already-shaped list, so an OpenAI/Anthropic/Gemini primary still hands its lossy flattened or sanitized schema to a union-capable fallback (Ollama); (2) `_is_retryable` (`core/fallback.py`) does not classify an invalid-function-schema 400 as a chain-advance error, so a novel rejected shape on a middle member hard-fails the wrapper and relies on the graph-level drop-and-retry, which re-walks the chain from the primary.
@@ -661,16 +495,6 @@ validation.
 **Effort:** M
 **Priority:** P3
 **Depends on:** v3.32.0
-
----
-
-### Tool-name collision hardening for force-injection guard
-
-**What:** The step-3d injection guard and `_format_and_dedupe_tools` key on bare tool name. A remote (e.g. MCP) API exposing a tool named `add_automation` would suppress injection of the local tool and route automation YAML to the foreign tool (first-seen-wins dedupe predates v3.20.2). Consider `(api_id, name)` matching for the guard and explicit precedence in dedupe.
-
-**Effort:** S
-**Priority:** P4
-**Depends on:** v3.20.2
 
 ---
 
@@ -741,32 +565,6 @@ validation.
 **Effort:** M
 **Priority:** P2
 **Depends on:** feat/streaming-chatlog
-
----
-
-### Expose-aware camera resolution and enumeration
-
-**What:** `_resolve_camera_entity_id` and `_available_camera_names` (agent/tools.py) scan every `camera.*` state with no Assist expose filtering. The not-found hint lists every camera name — including entities deliberately hidden from the conversation LLM API — and resolution captures any camera by name.
-
-**Why:** Cross-model adversarial finding on the #502 camera resolver (Codex rated P1). Deferred at ship time (2026-07-23, user decision): strict `async_should_expose` filtering would break camera analysis on default installs, because HA does not expose cameras to Assist by default. Capture-by-name reach is pre-existing behavior; the new surface is the name enumeration. Needs a deliberate design — likely an opt-in option (`respect Assist expose settings`) or filtering the hint list only, with migration notes.
-
-**How to apply:** Evaluate `homeassistant.components.homeassistant.exposed_entities.async_should_expose(hass, "conversation", entity_id)` for both the resolver candidate set and the hint list, behind a config option; decide the default with reporter input.
-
-**Effort:** M
-**Priority:** P2
-
----
-
-### A refused history lookup is logged at ERROR with a traceback
-
-**What:** `get_entity_history` (`agent/tools.py`) catches the `ValueError` from `_get_existing_entity_id` and logs it with `LOGGER.exception("Invalid name %s or domain: %s", ...)`, which writes an ERROR line and a full traceback. Since [#718](https://github.com/goruck/home-generative-agent/pull/718) that path is also the normal answer for an entity hidden from Assist, and it was already the answer for a misheard or mistyped name, so expected refusals now show up in the HA log as errors with stack traces. The live box logged one for a deliberate hidden-light test on 2026-10-04.
-
-**Why:** Left out of #718 to keep that PR to the exposure gate. Nothing breaks: the tool still returns `{"error": ...}` to the model. The cost is log noise that looks like a fault, and a user or reviewer reading the log can mistake a privacy refusal for a crash.
-
-**How to apply:** Log the `ValueError` branch at WARNING (or DEBUG) with the message only, no traceback, and keep `exception` for unexpected errors. Pin it with a `caplog` test that a hidden entity produces no ERROR record and no `exc_info`.
-
-**Effort:** S
-**Priority:** P3
 
 ---
 
@@ -884,34 +682,6 @@ validation.
 
 **Effort:** M
 **Priority:** P2
-
----
-
-### The tool-loop guard's give-up message is still blind after an ordinary round
-
-**What:** `_tool_loop_guard` (`agent/graph.py`) now repeats the last tool result when that result was a refused `add_automation`, so the user sees what was wrong. After any other final round (a `GetLiveContext` that returned "Action failed.", a tool error, a lookup that came back empty) it still replies with the bare "I wasn't able to complete this request after several tool-use attempts", which tells the user nothing about which step failed or what the model was trying to do.
-
-**Why:** Found in the review of #669 (red team) and fixed there only for the refusal case, because that was the field failure. The general case is the same user experience: the assistant apologises and the reason is only in the debug log.
-
-**How to apply:** In `_tool_loop_guard`, summarise the last round rather than only a refusal: name the tool that was called last and, when its `ToolMessage` has `status == "error"` or content starting with a known failure marker, include one sanitized line of it (`sanitize_tool_text`, capped). Never echo raw tool payloads, which can carry home data or remote text, and keep the refusal special case, which is already safe to show. Tests: extend `test_action_round_guard.py` with an error round and an empty-lookup round.
-
-**Effort:** S
-**Priority:** P3
-
----
-
-### Voice replies end with an offer, and a declined offer comes back
-
-**What:** On voice turns the agent often closes with an offer ("Shall I look into the automations?", "Want me to check any other cameras?", "Would you like me to turn it off?"). The Assist pipeline treats a reply ending in a question as a request to keep listening, so the satellite reopens its mic for a follow-up turn. Two things then go wrong. First, after the user answers "No", the agent sometimes makes the same offer again in its next reply, so the user has to decline twice to get out (reported by @andymcmanus on #671, 2026-10-01). Second, every such reply opens a continued-conversation turn, which is where stray speech-to-text noise turned into turns nobody made ("Frigate", "Ha ha ha" in the maintainer's 2026-10-01 trials) and where a "No" still costs a full model call (and, with the turn-start acknowledgement, a spoken "One moment" before the agent says "OK").
-
-**Why:** Conversational design, not a failure: each offer was executed correctly when accepted (#687 made "Yes" work). But on a voice satellite an offer is never free: it holds the mic open, and repeating a declined one makes the assistant feel stuck. Nothing in the system prompt discourages either, and the model has no signal that the turn is spoken.
-
-**How to apply:** Two independent pieces, smallest first:
-- A voice-turn instruction in the system prompt (only when the turn comes from a satellite, the same `satellite_id` signal the acknowledgement uses): end with an offer only when there is a concrete next action, and never repeat an offer the user has just declined. Measure on qwen3:8b with replayed turns before and after (the #684 method), since prompt clauses alone have been ignored before.
-- A cheap path for a bare decline: a short "No" / "No thanks" / "Nope" (and the cs/ru/tr equivalents, mirroring `AFFIRMATIVE_FOLLOW_UP_REGEX`) right after an agent offer ends the turn with a fixed "OK." without a model call, and without the turn-start acknowledgement. Gate it on the previous assistant message ending in a question, so "No" to anything else still reaches the model.
-
-**Effort:** M
-**Priority:** P3
 
 ---
 
@@ -1033,30 +803,6 @@ validation.
 
 ---
 
-### Network and HA-security rule summaries are English-only
-
-**What:** Each rule in the network / HA-security family (`ha_*`, `network_*`, `radio_*`, `zwave_*`, `zigbee_*`) builds its own English `summary` at evaluation time, without `hass`, and the notifier shows that sentence as the push body and the persistent message in every language. Only `security_device_unavailable` is re-rendered per language (`_security_device_summary` in `sentinel/notifier.py`), because its evidence already carries the names and minutes.
-
-**Why:** Found while localizing the deterministic bodies. These summaries name tokens, ports, accounts and devices, so they must stay exact (#523) and are not paraphrased by a model. A Czech home still gets English text for these alerts.
-
-**How to apply:** Follow the `security_device_unavailable` pattern: keep the figures in `evidence` / `display`, add `summary_*` templates to `notifier_messages.py` (with `one` / `few` / `many` forms where a count is named, via `notif_plural_category`), and re-render in `_network_summary` per rule type, falling back to the stored sentence when the figures are missing. One rule per PR keeps review small; `test_security_device_unavailable_finding_renders_in_czech` is the model for the rule-to-notifier contract test.
-
-**Effort:** M
-**Priority:** P3
----
-
-### Dynamic `sensor_threshold_condition` rules don't normalize units
-
-**What:** Discovery's `sensor_threshold_condition` template (`sentinel/proposal_templates.py`) compares an LLM-extracted numeric threshold against the sensor's native state with no unit normalization — the #461 bug class: a rule meaning "over 100 watts" against a kW sensor never fires (the template only extracts above-thresholds today; a below-variant would invert the failure — always firing). Arguably the user's threshold is native-unit by intent, but nothing disambiguates. Surfaced by adversarial review during the v3.21.3 ship.
-
-**How to apply:** When the target sensor has `device_class: power` (or a power unit), normalize both the threshold and the reading via `sentinel/power_units.watts_per_unit` — requires deciding/recording the threshold's intended unit at proposal-approval time (candidate text usually names it: "100 W", "1.5 kW").
-
-**Effort:** M
-**Priority:** P3
-**Depends on:** v3.21.3
-
----
-
 ### Add `unknown_person_camera_night_home` branch to `_covered_builtin_rule_for_candidate()`
 
 **What:** Add a detection branch in `_covered_builtin_rule_for_candidate()` (`__init__.py`) that recognizes a discovery candidate as already covered by the `unknown_person_camera_night_home` static rule.
@@ -1102,20 +848,6 @@ validation.
 **Why:** Codex outside review, all three cycles of the PR #800 review (2026-10-18). The swallow-and-continue save is the suppression store's existing pattern; only the owed list makes a lost write lose an alert.
 
 **How to apply:** Have `async_save` return whether it wrote, keep a dirty flag on `SuppressionManager`, and retry a dirty save at the start of the next run.
-
-**Effort:** S
-**Priority:** P3
-**Depends on:** None
-
----
-
-### A replay that told a triage-stopped admin change does not commit the auth inventory
-
-**What:** When triage stops a live `ha_new_admin_or_token` alert, `auth_change_delivered` is False and `_commit_auth_inventory` holds the change back, so the rule fires again next run. If an owed replay told the same accounts or tokens that run, the replay's outcome never reaches that flag, so once triage lets the live alert through it is sent again.
-
-**Why:** Codex outside review, cycle 3 of the PR #800 review (2026-10-18). Needs triage on, a level-0 hold and the change still present; the cost is one repeated alert.
-
-**How to apply:** Return the auth items a delivered replay told from `_send_owed_changes` and treat the live finding as delivered for the commit when those cover it.
 
 **Effort:** S
 **Priority:** P3
@@ -1371,20 +1103,6 @@ Since step 6 this also covers `radio_new_device_joined`, and since step 7 `netwo
 
 ---
 
-### Sentinel model-call wrappers swallow shutdown cancellation
-
-**What:** `run_sentinel_llm_call_in_executor` and its async twin convert every `asyncio.CancelledError` into `SentinelLLMDeferredError` (`core/utils.py:483`), on the assumption that cancellation means "interrupted by foreground chat". Cancellation raised by `SentinelEngine.stop()` is caught by the same handler, so triage reads it as a deferral and fails open to `notify`; the cycle then continues through notification dispatch and, in principle, authorized actions after shutdown was requested. `stop()` waits for that cycle, and the loop can wait another polling interval (300 s by default) before re-checking its stop flag. Swallowing `CancelledError` rather than re-raising is also the documented asyncio anti-pattern.
-
-**Why:** Codex adversarial pass, 2026-09-22; confirmed at the cited line. Pre-existing and *not* newly exposed by the triage switch -- discovery and explain use the same wrappers and are already reachable -- so it was filed rather than fixed on that branch.
-
-**How to apply:** Distinguish the two cancellation sources: check the stop event (or a dedicated "shutting down" flag) in the handler and re-raise `CancelledError` when the engine is stopping, converting to `SentinelLLMDeferredError` only for the foreground-chat pre-emption the message claims.
-
-**Effort:** M
-**Priority:** P3
-**Depends on:** None
-
----
-
 ### A timed-out Sentinel model call leaves its worker thread running
 
 **What:** `run_sentinel_model_call` (`core/utils.py:501`) prefers the model's sync `invoke` and runs it through `asyncio.to_thread`. `asyncio.wait_for` cancels the awaiting task, but nothing can interrupt the thread already inside the provider client, and the `finally` discards it from `_sentinel_llm_tasks` -- so the call stops being tracked while it is still consuming an executor slot and provider capacity. Concrete for the OpenAI clients, whose transport timeout is 120 s against a triage timeout that now defaults to 10 s: up to twelve abandoned calls can stack per timed-out one.
@@ -1616,34 +1334,6 @@ That satisfies all three cases at once: different devices with identical prose s
 
 ---
 
-### A null-key candidate persists the LLM's own `semantic_key` and can suppress an unrelated proposal
-
-**What:** `DISCOVERY_OUTPUT_SCHEMA` accepts an optional model-supplied `semantic_key` (discovery_schema.py). In `_filter_novel_candidates` (discovery_engine.py) the stored record is `enriched = dict(candidate)` and the computed key is written back only under `if key:` — so whenever `candidate_semantic_key` returns `None`, whatever string the model put in `semantic_key` survives into the stored discovery record. `_collect_existing_keys` then prefers that stored value over recomputation (`key = str(candidate.get("semantic_key", "")) or candidate_semantic_key(candidate)`), so the model's string lands in `filter_keys`. A candidate that keys `None` but declares e.g. `v1|subject=entry_window|predicate=open|night=1|home=0|scope=any|entities=` suppresses the real open-windows-at-night-while-away proposal as `existing_semantic_key` until that record ages out of the 200-record window.
-
-**Why:** Codex adversarial finding during the PR #572 review (2026-08-25). Pre-existing — every Bug-2-fix null-key class (staleness, subject-less candidates) already reaches it — but #572 enlarges the null-key population, and discovery output is LLM prose that entity names and attributes feed into, so it is not purely hypothetical. Not fixed in #572 because the fix belongs in the engine, not the key function, and wants its own tests.
-
-**How to apply:** On the null-key path, drop the field rather than leaving it: `enriched.pop("semantic_key", None)` when `key` is falsy. Consider also recomputing rather than trusting stored keys in `_collect_existing_keys`, which would close this and the migration gap below together. Pin with a test that a candidate declaring a foreign `semantic_key` cannot suppress a differently-keyed candidate.
-
-**Effort:** S
-**Priority:** P2
-**Depends on:** —
-
----
-
-### Stored discovery keys are never migrated when the key function changes
-
-**What:** `_collect_existing_keys` prefers a record's stored `semantic_key` over recomputation, and there is no key-version stamp. Any change to `candidate_semantic_key` therefore silently desynchronizes history from freshly computed keys: after #572, records holding the old constant `v1|subject=unknown|predicate=low_battery|night=any|home=any|scope=any|entities=` match nothing, so every previously-suppressed evidence-less battery topic — including ones the user **rejected** (`_collect_existing_keys` is the only thing keeping rejected proposals suppressed, the "Bug 1 fix") — reappears once as a fresh card. Pending proposals do not have this problem: they recompute.
-
-**Why:** The class is known and documented (docs/sentinel.md notes a one-shot re-proposal after the v3.25.0 structured-context migration), and it self-heals after one cycle, so it has been accepted each time. It has now happened at least twice; a stamp would make it a non-event and would let CHANGELOG stop hand-writing the warning.
-
-**How to apply:** Stamp records with the key-generation version (`DISCOVERY_SCHEMA_VERSION` or a dedicated `semantic_key_version`) and recompute on read when the stamp is older, or drop stored-key preference entirely and always recompute in `_collect_existing_keys` (cheap: it is a pure function over a dict). Until then, note the one-shot re-proposal in the CHANGELOG entry for any PR that changes the key chain.
-
-**Effort:** S
-**Priority:** P2
-**Depends on:** —
-
----
-
 ### Sanitized candidate IDs can collide across distinct sensors
 
 **What:** `_strip_env_context_id_tokens` (discovery_semantic.py) folds occupancy/time-of-day tail tokens off environmental candidate IDs — not just `*_away`/`*_day`/`*_night` but the full `_ENV_CONTEXT_ID_TOKENS` set (`home`, `daytime`, `nighttime`, `occupied`, `unoccupied`, `overnight`, `present`, …) plus dangling connectives, so e.g. `..._deviation_home` and `..._deviation_away` both collapse to `..._deviation` — so two candidates with different sensors (distinct semantic keys, both stored) can converge on one `candidate_id`; `discovery_store.find_candidate` returns the newest match and `proposal_store` lookups are ID-keyed, so promoting one card could resolve to the other candidate or report a false existing-rule collision (Codex adversarial, env-context-sanitizer ship 2026-08-15).
@@ -1679,6 +1369,8 @@ That satisfies all three cases at once: different devices with identical prose s
 **Why:** Each new template or branch reorder currently requires a matching key-chain edit, and misses surface as silent dedup breakage (infinite re-proposal or cross-suppression). The decoupling convention exists to avoid importing the normalization module into the key module; inverting the dependency (engine calls normalize first, keys from its result) respects that boundary.
 
 **How to apply:** In the discovery engine's novelty filter and semantic-context builders, attempt `explain_normalize_candidate(candidate)`; on success key via `rule_semantic_key` of the would-be rule, else fall back to `candidate_semantic_key`. Keep the textual key for history-record hashing so stored keys stay comparable. Requires re-verifying every dedup test and the coverage semantics for unsupported candidates.
+
+**Known residual (from a removed entry, 2026-11-09):** a candidate citing a motion sensor plus a temperature sensor with environmental-only prose keys `subject=motion` while promotion registers `subject=sensor`, so context variants of that shape can re-propose after approval. Deriving keys from the routing fixes it.
 
 **Effort:** M
 **Priority:** P3
@@ -1740,20 +1432,6 @@ That satisfies all three cases at once: different devices with identical prose s
 
 ---
 
-### Surface dead unavailable-sensors rules (unresolvable entity IDs, all-of semantics)
-
-**What:** `_eval_unavailable_sensors` / `_eval_unavailable_sensors_while_home` (dynamic_rules.py) return `[]` for the whole rule when any single listed entity fails to resolve in the snapshot, with no logging, audit entry, or KPI. This resolve-abort alone means one hallucinated LLM evidence ID, a re-paired zigbee device (hex-address entity IDs change on re-pair — the exact issue #514 ID shape), or a renamed entity permanently disarms an approved rule with zero diagnostics — in both variants. (Trigger semantics differ: the plain variant is all-of — every listed sensor must be unavailable — while the while-home variant emits one finding per unavailable sensor.)
-
-**Why:** Flagged independently by both the Claude adversarial review and Codex during the v3.21.2 ship (issue #514) — cross-model agreement. The abort-on-missing behavior is deliberate and test-pinned (conservative fail-closed), so changing it is a product decision: skip-unresolvable-with-warning, any-of semantics, an audit metric for rules whose entities never resolve, or surfacing unresolved params in the approval preview.
-
-**How to apply:** Prefer the least invasive option first: emit a low-severity audit/diagnostic entry when an approved rule's entity fails to resolve during evaluation, and show unresolved entity IDs in the proposals card preview at approval time. Revisit any-of semantics only with field data.
-
-**Effort:** M
-**Priority:** P2
-**Depends on:** v3.21.2 (fix/514-unavailable-binary-occupancy-sensors)
-
----
-
 ### Widen entity_staleness normalization to binary_sensor evidence
 
 **What:** The `entity_staleness` branch in `explain_normalize_candidate` still keys on `person_ids or sensor_ids` (sensor.* only), so "occupancy sensor not updated / last seen" candidates citing only `binary_sensor.*` evidence fail normalization as `unsupported_pattern` — the same bug class as issue #514, one branch down.
@@ -1789,44 +1467,6 @@ That satisfies all three cases at once: different devices with identical prose s
 **Effort:** M
 **Priority:** P3
 **Depends on:** v3.21.0 (fix/sentinel-window-open-at-night-504)
-
----
-
-### Text/device_class fallback for locale-named motion sensors
-
-**What:** `_find_motion_entity_ids` matches only the substrings `motion`/`vmd` in entity IDs, so a locale-named PIR like `binary_sensor.chodba` (`device_class: motion`) can never normalize into `motion_detected_at_night_while_away` or the alarm-motion templates — the candidate dies as `missing_required_entities`. Flagged by Codex adversarial review during the v3.22.0 ship (issue #516). The v3.23.0 prose fallback (issue #518) shares the same substring limitation — a locale-named ID in prose is not promoted either.
-
-**How to apply:** Mirror the issue-504 locale entry fallback: when candidate text names motion and evidence cites `binary_sensor.*` IDs not classified as any other kind, promote them as motion sensors — with the same gating pitfalls (word-bounded text, absence of higher-priority entity classes, JS card mirror). Alternatively use snapshot `device_class` as the positive signal (see the existing device_class TODO above).
-
-**Effort:** M
-**Priority:** P2
-**Depends on:** v3.22.0
-
----
-
-### Card severity preview disagrees with server-registered severity
-
-**What:** `_severityForCandidate` in hga-proposals-card.js returns "high" for any away/night candidate, but the server registers e.g. `motion_detected_at_night_while_away` as medium and `open_entry_at_night_when_home` as medium — the GitHub rule-request prefill and UI disagree with what gets stored. Pre-existing; surfaced during the v3.22.0 ship review.
-
-**How to apply:** Mirror the per-template severity table from `proposal_templates.py` into the card, or include the normalized severity in the proposal record and display that.
-
-**Superseded by:** "Mirror server per-template severities in the proposals card instead of the isAway/hasNight heuristic" (P2, 2026-08-02, Discovery section) — same fix; #524's structured away detection widened the mismatch and raised the priority.
-
-**Effort:** S
-**Priority:** P3
-**Depends on:** v3.22.0
-
----
-
-### Dispatch-level dedup for overlapping night/day away-motion findings
-
-**What:** A household running both `motion_detected_at_night_while_away` and `motion_detected_while_away` over the same sensors gets two findings (two pushes, doubled audit rows) for every night motion event. An evaluator-level dedup was implemented and reverted during the v3.23.0 ship: `evaluate_dynamic_rules` runs before snooze/exclusion/pending-prompt suppression, so dropping the day finding while the night rule was snoozed silently lost the alert entirely (verification round 5). Docs currently advise replacing the night rule instead.
-
-**How to apply:** Dedup at dispatch time in the engine/notifier, after per-finding suppression decisions are known: when both findings for overlapping sensors would dispatch, send only the night one; when the night finding is suppressed, the day finding dispatches normally.
-
-**Effort:** M
-**Priority:** P2
-**Depends on:** v3.23.0
 
 ---
 
@@ -1880,34 +1520,6 @@ That satisfies all three cases at once: different devices with identical prose s
 
 ---
 
-### Low-side ("drops below") thresholds silently degrade to baseline rules
-
-**What:** `_NUMERIC_THRESHOLD_PATTERN` matches only high-side wording (above/exceeds/over/more than) and rejects zero/negative values, so "crawlspace temperature drops below 3" registers a generic `baseline_deviation` instead of a low-side threshold rule — the approved card's semantics (freeze warning) do not match the registered rule, silently.
-
-**Why:** Low-side thresholds are the primary environmental safety case (freeze, low humidity), newly reachable via #541. Fixing it needs `sensor_threshold_condition` to grow a direction/comparator param — an evaluator change the #541 scope decision ("no new evaluator templates") deliberately excluded. Found by ship adversarial review (2026-08-11, reproduced).
-
-**How to apply:** Add a `below: bool` (or `comparator`) param to `sensor_threshold_condition`'s evaluator, extend the threshold extraction with a low-side pattern (mirroring `_RELATIVE_THRESHOLD_PATTERN`'s vocabulary), route low-side prose accordingly, and mirror whatever the candidate keys do per the threshold-coverage TODO above.
-
-**Effort:** M
-**Priority:** P2
-**Depends on:** v3.28.0
-
----
-
-### Percent-deviation baseline physics are wrong for interval-scale environmental quantities
-
-**What:** `evaluate_baseline_deviation` computes `|cur−base|/|base|·100` with `base==0 → any non-zero = 100%`. Celsius temperatures near zero make tiny absolute swings read as huge percentages (a 0.0 °C baseline fires on every non-zero reading — winter alert spam), and atmospheric pressure (~1000 hPa) can never move 50%, so an approved pressure rule is permanently inert monitoring presented as coverage.
-
-**Why:** Pre-existing evaluator behavior, explicitly deferred by #541's scope ("separate issue if it bites"), but #541 is what steers these quantities into the evaluator. Illuminance — the third pathological class — was mitigated in-ship by routing to `time_of_day_anomaly`. Flagged by both ship adversarial passes (2026-08-11).
-
-**How to apply:** Make the deviation class/unit-aware: absolute-delta or stddev-based thresholds for interval-scale units (°C/°F, hPa), keeping pct deviation for ratio-scale quantities (W, lx, ppm). Applies to `evaluate_baseline_deviation` (and `time_of_day_anomaly`'s pct floor); needs unit metadata from the snapshot or baseline store.
-
-**Effort:** L
-**Priority:** P2
-**Depends on:** v3.28.0
-
----
-
 ### Per-device-class budget for the discovery snapshot entity cap
 
 **What:** The reduced snapshot's `_MAX_ENTITIES=100` cap has no per-class slices. v3.28.0 stops environmental sensors from systematically outranking idle security entities (their recency bonus is zeroed), but score ties still evict alphabetically — a large enough env/power fleet can still push closed doors and locked locks out of the snapshot, and with them out of `baseline_ready_entities` gap analysis.
@@ -1915,20 +1527,6 @@ That satisfies all three cases at once: different devices with identical prose s
 **Why:** Ship red-team review (2026-08-11) reproduced eviction with a synthetic 110-entity home; the recency fix removes the systematic bias but not the tie-break residual. The #541 scope decision deferred score redesign pending field reports.
 
 **How to apply:** Reserve per-domain/device-class budget slices before the global cap (e.g. security binary_sensors/locks/covers first, then measurement classes), or add a deterministic round-robin across classes for tied scores. Verify the budget-trim passes still fit `_TOKEN_BUDGET_CHARS`.
-
-**Effort:** M
-**Priority:** P3
-**Depends on:** v3.28.0
-
----
-
-### Locale-named environmental candidates stay unsupported
-
-**What:** The environmental routing signal is English-token-only (prose or entity ID), so a home where both the entity ID and the generated prose are localized (`sensor.podkrovi_teplota` + Czech prose) returns `unsupported_pattern` even though the reducer admitted the entity via `device_class: temperature`.
-
-**Why:** Codex structured review during the #541 ship (2026-08-11). Same class as the locale-named motion/entry/battery fallbacks; the clean fix is locale-independent metadata (device_class from the snapshot) reaching the normalizer, which is currently a pure text function — a design change shared with the approval-time-validation TODO above.
-
-**How to apply:** Either thread snapshot device_class metadata into normalization (candidate-enrichment at the engine layer, keeping the normalizer pure), or accept the structured `pattern` field (`statistical_baseline_deviation` / `time_of_day_anomaly` are English machine tokens even in locale homes) as a routing signal when sensor evidence exists — mirror whatever the keying side needs for parity.
 
 **Effort:** M
 **Priority:** P3
@@ -1964,34 +1562,7 @@ That satisfies all three cases at once: different devices with identical prose s
 
 ---
 
-### Mixed motion+environmental candidates key subject=motion while promotion registers subject=sensor
-
-**What:** A candidate citing `binary_sensor.attic_motion` plus `sensor.attic_temperature` with environmental-only prose keys `subject=motion|entities=binary_sensor.attic_motion` (the #541 env leg is subject-gated off to protect motion rules), but when no motion branch claims it the normalizer's statistical branch registers `baseline_deviation` on the temperature sensor — the rule key (`subject=sensor`) never covers the candidate key, so context variants of that mixed shape can re-propose after approval.
-
-**Why:** Residual accepted during the #541 ship: the subject gate exists to prevent the worse steal (motion candidates keyed power_anomaly, breaking motion-rule dedup — the #540 lesson), and gap-hint candidates are prompted to cite only their gap entity, so mixed shapes are uncommon. Same class as the pre-existing mixed battery shapes recorded in the derive-keys-from-routing TODO above, which is the structural fix.
-
-**How to apply:** Covered by "Consider deriving candidate keys from the normalizer's actual routing" — keying from the normalized rule eliminates the whole class. No separate mirror patch recommended.
-
-**Effort:** S
-**Priority:** P3
-**Depends on:** v3.28.0
-
----
-
 ## Video Analyzer
-
-### An exception in the notification step skips storing the analysis
-
-**What:** `_finalize` (core/video_analyzer.py) awaits `_handle_notification` and only then `_store_results`. Anything `_handle_notification` raises before or around the push skips the store: `publish_latest_atomic` (a filesystem error publishing the latest frame), `_is_caption_novel` (it catches only `TimeoutError` from the vector search, so any other store error propagates), or the notify service call itself when the cooldown is off. The batch's caption then never reaches the vector store, so camera-activity recall misses it and the next similar caption is treated as new.
-
-**Why:** Found while designing the notification cooldown ([#672](https://github.com/goruck/home-generative-agent/issues/672), Codex cold read 2026-10-02). The cooldown PR left these paths alone to keep it to one behavior.
-
-**How to apply:** One constraint first: when the push itself is what failed, storing the caption is wrong, because caption dedup would then match it and suppress the next notification for 30 minutes on the strength of an alert that never went out (Codex, #672 review). So separate the two cases: store when the failure was in publishing the latest frame or in the novelty search, do not store when the notify call raised. Then run `_store_results` in a `finally` for the first case, or store first and notify second (check that `_is_caption_novel` would then not match the batch's own just-stored caption: it searches the same namespace). Either way keep `CancelledError` propagating. Pin with a test where `publish_latest_atomic` raises and the store is still written.
-
-**Effort:** S
-**Priority:** P3
-
----
 
 ### Identity merge: temporal-adjacency guard for gray-zone faces
 
@@ -2032,33 +1603,6 @@ That satisfies all three cases at once: different devices with identical prose s
 **Effort:** S
 **Priority:** P3
 **Depends on:** v3.30.0
-
----
-
-### Caption novelty: per-analysis notification-status metadata
-
-**What:** Store whether each video analysis triggered a notification alongside the
-caption in the vector store. Add `notified`, `decision_reason`, and `matched_key`
-fields to the stored value written by `_store_results`. Update `_is_caption_novel`
-to optionally filter `store.asearch` results to notification-worthy records only,
-so suppressed artifact captions do not inflate the similarity baseline.
-
-**Why:** `_store_results` is called unconditionally, meaning suppressed captions
-(e.g. repeated nighttime blur) are stored and can later cause a genuinely new
-artifact caption to be suppressed against a non-notified prior. Filtering by
-`notified=True` in the search would improve precision but requires a metadata
-field and a query-time filter that the store API must support.
-
-**How to apply:** Add `notified: bool`, `decision_reason: str`, and
-`matched_caption_key: str | None` fields to the dict written in `_store_results`.
-Pass `decision.notify` and `decision.reason` from `_handle_notification` into
-`_store_results`. Update `store.asearch` call to include a metadata filter when
-the store API supports it. Until the filter lands, the current behavior (compare
-against all stored analyses) is acceptable.
-
-**Effort:** M
-**Priority:** P3
-**Depends on:** v3.14.0 (CaptionNoveltyDecision)
 
 ---
 
@@ -2142,84 +1686,6 @@ early-frame selection.
 
 **Effort:** S
 **Priority:** P3
-
----
-
-### Scale stale-snapshot budget from the camera's own refresh interval
-
-**What:** The stale-snapshot guard (issue #490) uses a fixed 30-minute budget
-(`_SNAPSHOT_STALE_MAX_AGE_SEC = 1800`), sized as 3× the battery-camera
-interval. ring-mqtt publishes each camera's actual interval as
-`number.<camera>_snapshot_interval` (field-observed: 600 s battery, 30 s
-wired), so the budget is ~60× too lenient for wired cameras — a frozen wired
-cam goes undetected for half an hour. Better still for `event_select`-owned
-windows: compare the snapshot `timestamp` against the event that opened the
-window, which is exact rather than a heuristic.
-
-**Why:** Raised by @andymcmanus in #466 field testing (2026-07-18 comment,
-n=12 events: frame staleness at event open ranged 3–54 min, mean 21 min,
-with 2/12 over the 30-min budget — so 10/12 passed it and were analyzed).
-The guard already only applies to ring-mqtt `event_select` cameras, so
-reading ring-mqtt's own interval entity adds no new integration coupling.
-
-**How to apply:** Two candidate checks, NOT interchangeable, each with a
-precondition that must be solved first.
-
-*Interval scaling (tightens wired cameras only).* In
-`_retained_frame_is_stale`, resolve `number.<base>_snapshot_interval` via
-the same sibling/device-registry lookup as `_has_event_select_sibling`;
-budget = 3× that value, falling back to 1800 s when absent. Do NOT apply
-this unconditionally: the entity is a configured timer period, not a bound
-on frame age, and it is published even when nothing is scheduled to honour
-it. ring-mqtt defaults it in the camera constructor
-(`devices/camera.js:58-60`, v5.9.3) to 600 on battery / 30 on wired and
-publishes it whenever any snapshot mode is active, while `Auto` separately
-disables the *interval* path for battery devices (`:415-417`). A battery
-camera in the default mode therefore advertises 600 while no interval
-refresh is scheduled at all — only the motion path remains, and that fires
-only when Ring's push carries an image UUID (`:758-769`), which #466 field
-testing reports never happening on the two battery models tested. Scaling off the
-entity there yields an 1800 s budget on exactly the cameras needing the
-tightest check. Even on wired cameras it is a nominal cadence rather than a
-ceiling: scheduled refreshes are skipped while offline or while a motion
-ding is active (`:735`), and requests can fail, so real age can exceed it.
-**Precondition:** `_has_event_select_sibling` carries no power-source or
-snapshot-mode signal, so there is currently no way to enforce the
-wired-only restriction. Gate on a resolved mode/power signal (or on the
-camera's `type` attribute reading `interval`) before using this leg at all.
-
-*Event-timestamp comparison (the only check that works in Auto/Motion).*
-For loops the `event_select` path owns, compare the snapshot `timestamp`
-against the event that opened the window. **Precondition:**
-`_handle_event_select_change` sees only an HA state change carrying
-`eventId`/`recordingUrl`, and ring-mqtt discovers new events on a ~1-minute
-poll cycle and publishes `eventId` only after fetching the recording URL
-(`:439-448`). That state-change time is therefore *detection* time, not
-Ring capture time, and a strict comparison would reject a genuinely current
-frame published before the delayed `eventId`. Propagate the real Ring event
-timestamp, or allow a documented skew.
-
-**Sidestep (2026-09-28):** the opt-in event-recording path (#491,
-`video_analyzer_event_recording_enabled`) replaces the held pre-event frames
-with frames from the event's own MP4 when a `recordingUrl` is present, so the
-misattribution below no longer happens on Ring Protect cameras with the
-option on. The two checks here still matter for cameras without a recording.
-**Open (P3, from the #673 review):** a user picking an older option on
-`select.<name>_event_select` changes `eventId` too, which already opens a
-capture window and now also ingests that older recording as current. ring-mqtt
-exposes no attribute that separates "new event" from "user browsed"; a fix
-needs either an event timestamp attribute upstream or a heuristic on the
-select's own state change, and neither is in hand.
-
-This comparison also governs the common case today: at a mean staleness of
-21 min at event open (10/12 events under the 30-min budget), the previous
-event's frame usually passes and is analyzed as if current (misattributed
-imagery). With the take_snapshot automation installed, quiet cameras (>30
-min gaps) log one expected snapshot-failure WARNING per event that a
-window-scoped check could suppress.
-
-**Effort:** M
-**Priority:** P2
 
 ---
 
@@ -2345,7 +1811,6 @@ names, so check it stays collision-safe).
 
 ---
 
-
 ### Sanitize friendly_name-derived text in notification copy like the unit string
 
 **What:** The v3.31.1 baseline-copy fix strips control/bidi characters and length-caps the untrusted `unit_of_measurement` before it reaches push text (`_baseline_deviation_mobile_message`), but the appliance/sensor display name (`friendly_name` → `_strip_power_suffix(...).title()`) is still embedded uncapped and unfiltered in the same messages, and camera names elsewhere use only a `[:30]` cap with no control-char strip. A crafted device name can carry the same bidi-reorder / instruction-text spoofing the unit fix closed (raised by both the Claude adversarial and Codex passes on v3.31.1; same class, pre-existing convention).
@@ -2357,20 +1822,6 @@ names, so check it stays collision-safe).
 **Effort:** S
 **Priority:** P3
 **Depends on:** None
-
----
-
-### Remaining notification-localization gaps after PR #565 (buttons, cs plural, uncurated labels)
-
-**What:** Three gaps deliberately shipped with the v3.31.0 notification-chrome localization (PR #565), awaiting @hruba202's input (asked in the close-out comment, issuecomment-5386281819): (1) **action-button titles stay English** — "Confirm"/"Cancel" under the Czech permanent-snooze prompt guide a destructive action in the wrong language (cross-model review's top remaining finding), plus "Ask Agent"/"Arm Alarm"/"Snooze Always"; (2) **cs `batch_message` plural** — "{count} novinek" is grammatically wrong for counts 1–4, the common batch size (needs novinka/novinky/novinek forms or a count-agnostic phrasing); (3) **uncurated type labels** — `camera_missing_snapshot_night_home`, `unknown_person_camera_no_home`, `phone_battery_low_at_night_home`, `vehicle_detected_near_camera_home`, `pet_detected_at_night_no_occupancy` are absent from `_KNOWN_TYPE_LABEL_KEYS`, so they render as prettified English slugs on Czech installs.
-
-**Why:** Merged without waiting for the native-speaker answers (maintainer decision 2026-08-23); these need Czech wording from a native speaker, and (1) needs a scope decision on how button titles flow through the mobile-app notification payload.
-
-**How to apply:** (1) route the `actions[].title` strings through `notif_msg` with new keys; (2)+(3) add the corrected/new cs strings and label keys to `_MESSAGES` in `sentinel/notifier_messages.py` — parity tests will enforce key coverage.
-
-**Effort:** S
-**Priority:** P2
-**Depends on:** hruba202 wording input (PR #565 close-out)
 
 ---
 
@@ -2402,32 +1853,6 @@ names, so check it stays collision-safe).
 
 ---
 
-### Compound notifications hide the unknown-person signal behind the alarm title
-
-**What:** When the correlator bundles same-cycle findings into a `CompoundFinding`, `_dispatch_compound` picks the representative for notification rendering by highest confidence (`engine.py`: `best = max(compound.constituent_findings, key=lambda f: f.confidence)`). `alarm_disarmed_during_external_threat` (confidence 0.9) therefore always outranks `unknown_person_camera_night_home` (0.7) and the dynamic `unknown_person_camera_when_home` rules, so a genuine stranger sighting renders under the title "Outdoor activity while alarm disarmed" and the alarm rule's mobile copy. Field-observed 2026-08-23 (first-ever `unknown_person_camera_night_home` firings, 11:51/11:52 UTC): the user saw only alarm-disarmed pushes and concluded the unknown-person rules were not firing — the stranger evidence was only visible in the audit store. A person-on-camera alert is also arguably the more actionable headline than the alarm state that merely contextualizes it.
-
-**How to apply:** Rank compound representatives by security salience before confidence — e.g. a small type-priority table (unknown-person types > alarm-disarmed types > entry/motion types) used as the primary sort key with confidence as tiebreak, or simply prefer any constituent whose evidence has `unknown_person_present`/a stranger label when choosing `best`. Alternatively keep `best` for execution policy but render the notification title/copy from the highest-salience constituent, and consider appending a one-line "+ N related findings" suffix so the compound's breadth is visible. Mind the localization boundary: security-critical copy stays deterministic English (`is_security_copy` (`sentinel/notifier.py:1252` -- public since the network-audit work, not the private name this item was written against)), and the existing per-type deterministic formatters must keep receiving the constituent they were written for.
-
-**Why:** The whole point of the v3.30.11 unknown-person fix was making stranger sightings visible; the confidence-ranked compound title re-hides them at the last hop. Surfaced during v3.30.11 field validation.
-
-**Effort:** S
-**Priority:** P2
-**Depends on:** v3.30.11
-
----
-
-### Deduplicate the _friendly_type label maps
-
-**What:** `sentinel/notifier.py` and `explain/llm_explain.py` each carry a byte-identical `_friendly_type` `known` map (and matching prefix-stripping fallback). Every new anomaly type requires the same entries in both maps plus mirrored tests in `test_sentinel_notifier.py` and `test_llm_explain.py` — the v3.21.0 ship added the four `open_entry_at_night*` keys in four places. A missed side silently regresses user-visible labels to the title-cased fallback. The v3.22.0 ship widened the duplication: `_KNOWN_TYPE_LABELS` and a `_display_type` helper (template-label fallback for slugified dynamic-rule IDs) are now mirrored verbatim in both modules, so each new rule type needs two edits plus two mirrored tests. Re-flagged by the maintainability specialist during the v3.22.0 ship.
-
-**How to apply:** Hoist `_KNOWN_TYPE_LABELS`, `_display_type`, and the fallback prettifier into one shared module (e.g. `sentinel/labels.py` or a small `core/labels.py`), import it from both `notifier.py` and `llm_explain.py`, and collapse the duplicated tests into one suite against the shared module.
-
-**Effort:** S
-**Priority:** P3
-**Depends on:** None
-
----
-
 ## Speech-to-Text
 
 ### Fold the STT and TTS provider flow skeletons into one base class
@@ -2452,27 +1877,6 @@ only its model step (~40 lines). Swap `_schedule_reload` for `async_schedule_rel
 while there.
 
 **Effort:** M
-**Priority:** P3
-
----
-
-### STT entities are not bound to their subentry in the entity registry
-
-**What:** `stt.py::async_setup_entry` calls `async_add_entities(entities)` without
-`config_subentry_id=`, while `tts.py` (added later) passes it, following core's
-`openai_conversation` platforms. Without the binding, deleting an STT provider subentry leaves an
-orphaned entity-registry entry (restored as unavailable) until the next reload prunes it, and the
-entity is not listed under its subentry in the UI.
-
-**Why:** Parity with TTS and core; cosmetic today because the flow's `_schedule_reload()` rebuilds the
-platform, but the orphan is visible after a delete.
-
-**How to apply:** Loop the subentries and add each entity with
-`config_subentry_id=subentry.subentry_id` (type the callback as
-`AddConfigEntryEntitiesCallback`), mirroring `tts.py`; add a setup test like
-`test_tts.py::test_setup_entry_adds_one_entity_per_tts_subentry`.
-
-**Effort:** S
 **Priority:** P3
 
 ---
@@ -2535,19 +1939,6 @@ label pair ("Server URL" vs "Base URL").
 
 ---
 
-### The STT Prompt field is dead config on some endpoints, with nothing in the UI to say so
-
-**What:** `CONF_STT_PROMPT` is offered on both provider types and described as "hints for domain-specific vocabulary", but whether it does anything depends entirely on the endpoint. On OpenRouter it is inert on **both** transports: their multipart compatibility layer documents `prompt` as "accepted but ignored", and it is not a parameter of their native JSON shape at all, so `_build_json_request` (`stt.py`) deliberately omits it. A user configuring OpenRouter can type a careful vocabulary hint, see no error, and get no effect — the same silent-failure shape that [#610](https://github.com/goruck/home-generative-agent/issues/610) was filed about.
-
-**Why:** Found while building #610 (v3.41.0); pre-existing and unrelated to that change, so left out of it. It is cosmetic in the sense that nothing breaks, but the cost is a user's time spent tuning a field that cannot work, and the failure is invisible by construction. The #610 docs now state it for the JSON format and the release notes mention it, but the form itself still reads as though the field always applies.
-
-**How to apply:** Cheapest first: (a) extend the `prompt` `data_description` in `strings.json` (plus cs/ru/tr) to say the field is endpoint-dependent and ignored by some OpenAI-compatible servers, naming OpenRouter — no code, and it covers every provider we cannot probe. (b) Log once per subentry at INFO when a prompt is configured and the request format is JSON, so the log says what the form cannot. Do **not** try to detect OpenRouter by base URL and hide the field — that is the provider-sniffing this feature was deliberately designed to avoid, and it would break any other endpoint that does honour `prompt`.
-
-**Effort:** S
-**Priority:** P3
-
----
-
 ## Model Providers
 
 ### Embedding calls and budget-less callers are not covered by stall detection
@@ -2592,20 +1983,6 @@ label pair ("Server URL" vs "Base URL").
 
 ---
 
-### A frozen model server (connections never accepted) can hold a turn past its budget
-
-**What:** In the #828 beta.4 field test, a conversation turn against an Ollama server frozen with `kill -STOP` hung for more than four minutes, past the 180 s turn budget: no timeout fired, no provider was marked stalled. A frozen process leaves new connections sitting in the kernel's accept backlog, so the TCP connect completes but nothing is ever read or written. The budget from `model_call_budget` evidently does not cover that state, while a live server that hangs on `/api/chat` does time out as designed (Andy's second run).
-
-**Why:** Reported by andymcmanus on #828 (2026-10-21) as a test artifact, but a host that freezes (swap storm, suspended VM, stopped container) produces the same socket state, and the safety net is meant to be the budget. Promised to look at it in the reply on #828 (2026-10-26).
-
-**How to apply:** Reproduce with a throwaway Ollama (or `nc -l` that never reads) frozen with `kill -STOP`, and find which await ignores the cancellation: `asyncio.timeout` around the call should cancel it unless the client blocks in a thread (sync httpx in an executor) or shields the request. If it is a thread, a cancel cannot interrupt it: give the Ollama httpx clients a connect and read timeout (see the entry above) so the thread returns. Add a test with a socket that accepts but never responds.
-
-**Effort:** M
-**Priority:** P3
-**Depends on:** None
-
----
-
 ### Migrate to langchain-google-genai 4.x (consolidated google-genai SDK)
 
 **What:** `manifest.json` pins `langchain-google-genai==3.1.0`; 4.x is current. 4.0.0 swapped the legacy `google-ai-generativelanguage` SDK for the consolidated `google-genai` SDK, which is where new capability lands, so staying a major behind gets more expensive the longer it runs. Moved here from [#584](https://github.com/goruck/home-generative-agent/issues/584) (2026-09-24) because it is internal maintenance with no reporter or contributor attached — the issue carries the full write-up and the links.
@@ -2621,7 +1998,7 @@ label pair ("Server URL" vs "Base URL").
 - `agent/token_counter.py` calls `v1beta/models/{model}:countTokens` over REST directly, independent of the SDK. Confirm it still behaves under 4.x, and whether the SDK now offers a counter worth using instead.
 - `gemini-embedding-001` is fine (shutdown no earlier than May 2028). `gemini-embedding-2-preview` exists and is multimodal, but its embeddings are **not** comparable to `-001`, so adopting it means re-embedding the whole vector store. Out of scope; noted so it is not discovered mid-migration.
 
-**How to apply:** Its own branch and its own review round — never bundled into a Gemini bugfix, which is why it was split out of #583 in the first place. Acceptance: tool calling, structured output, embeddings and the Gemini schema sanitizers verified against a **live key**, not only unit tests; fallback-chain retry classification confirmed against the REST exception types; latency measured before and after. Mind that `configurable_fields` reconstructs the model via `__init__` on every call (see the Gemini temperature item in `## Completed`), so any 4.x change to `__init__` signatures or non-Optional fields surfaces there first.
+**How to apply:** Its own branch and its own review round — never bundled into a Gemini bugfix, which is why it was split out of #583 in the first place. Acceptance: tool calling, structured output, embeddings and the Gemini schema sanitizers verified against a **live key**, not only unit tests; fallback-chain retry classification confirmed against the REST exception types; latency measured before and after. Mind that `configurable_fields` reconstructs the model via `__init__` on every call, so any 4.x change to `__init__` signatures or non-Optional fields surfaces there first.
 
 **Effort:** L
 **Priority:** P2
@@ -2638,19 +2015,6 @@ label pair ("Server URL" vs "Base URL").
 **How to apply:** Give "no capable provider" its own value rather than absence — the resolver writes an explicit sentinel, and `__init__.py` turns the `else` catch-all into an explicit `elif embedding_provider == "ollama"` so an unrecognised value disables embeddings instead of silently selecting Ollama. Check `build_model_deployments` and `resolve_fallback_chains` for the same absent-means-default assumption before changing the sentinel.
 
 **Effort:** M
-**Priority:** P2
-
----
-
-### Two providers of the same type share one global API-key slot
-
-**What:** `_apply_provider_to_category` (`core/subentry_resolver.py`) writes credentials to flat global option keys — `CONF_API_KEY`, `CONF_GEMINI_API_KEY`, `CONF_ANTHROPIC_API_KEY` — one per provider *type*, not per category. Each is overwritten once per category as `category_provider` is iterated. With Conversation pinned to a "Work OpenAI" provider and Camera Image Analysis pinned to a "Personal OpenAI" provider, both categories run on whichever key was written last; the adversarial pass reproduced `CONF_API_KEY = sk-WORK` serving both.
-
-**Why:** Surfaced by the adversarial review of [#593](https://github.com/goruck/home-generative-agent/issues/593). Keys never cross provider *types* (each type has its own const), only instances of the same type — but #593 is precisely a request to run several providers side by side, and two accounts of the same provider (work/personal, or separate billing per feature) is the natural next configuration. The user sees no error: the second provider's key is simply never used, and its billing never moves. The v3.33.5 guard changes which instances enter `category_provider` and in what order, so it also changes which key wins.
-
-**How to apply:** The option keys are consumed all over `__init__.py`, so this is not a rename. Either give the per-category model builders the resolved `ModelProviderConfig` (which already carries its own settings) instead of reading global option keys, or add per-category key overrides that fall back to the global. Until then, document in `docs/configuration.md` that two providers of the same type cannot hold different credentials.
-
-**Effort:** L
 **Priority:** P2
 
 ---
@@ -2744,20 +2108,6 @@ label pair ("Server URL" vs "Base URL").
 
 ## Config Entry Lifecycle
 
-### services.yaml advertises confirm_enroll but nothing registers it
-
-**What:** `services.yaml:19` defines `confirm_enroll`, but no `async_register` call for it exists anywhere in the integration — 18 services advertised, 17 registered. The Developer Tools services page shows a service that errors with "Unable to find service" when called.
-
-**Why:** Pre-existing metadata staleness surfaced by the cross-model doc review during the v3.30.10 ship (the ship's service-deregistration sweep enumerated the real 17). Docs-only scope kept it out of that PR.
-
-**How to apply:** Either delete the `confirm_enroll` block from `services.yaml` (if the confirm flow it referenced is gone for good) or register the handler it was meant to describe. Check translations for a matching `services.confirm_enroll` key and remove it in the same change.
-
-**Effort:** S
-**Priority:** P3
-**Depends on:** —
-
----
-
 ### Decide whether face enrollment should be admin-only
 
 **What:** `EnrollPersonView` (`http.py`) has `requires_auth = True` but no admin check, and the `hga.enroll_person` service is likewise callable by any user context — so any authenticated HA user (or a leaked limited-scope long-lived token) can enroll faces into the gallery that feeds security-relevant recognition (Sentinel unknown-person rules, recognized-people sensors). Poisoning shape: enroll an arbitrary face under a trusted resident's name and the phantom becomes "recognized". Reserved-label refusal still applies; this is about *who*, not *what*.
@@ -2781,20 +2131,6 @@ label pair ("Server URL" vs "Base URL").
 **How to apply:** Cheap guard in the shared handler path: refuse with a deterministic message when `entry.state is not ConfigEntryState.LOADED` (services only matter on a loaded entry). Alternatively accept and document — the window is a few awaits wide.
 
 **Effort:** S
-**Priority:** P3
-**Depends on:** v3.30.10
-
----
-
-### Zero-camera platform setup after HA has started arms a listener that never fires
-
-**What:** `image.py` and `sensor.py` defer camera discovery to `EVENT_HOMEASSISTANT_STARTED` whenever initial discovery finds zero cameras — with no `hass.is_running` branch, unlike the four engine call sites. An entry set up *after* HA finished starting (first install before any camera integration, or a reload while cameras are momentarily absent) arms a listener for an event that already fired: no camera entities are ever created until the next reload, and the listener sits dead until unload cancels it (v3.30.10; before that it leaked outright).
-
-**Why:** Pre-existing behavior surfaced by the red-team and adversarial passes during the v3.30.10 ship; the refactor makes it tidier but not better. Every current test runs under `CoreState.not_running`, so the already-running case is unpinned.
-
-**How to apply:** Either skip registration when `hass.is_running` (documenting discovery as a one-shot snapshot), or replace the STARTED listener with entity-registry/state-changed-driven camera discovery (the structural fix — cameras added later would get entities without a reload). Pin the chosen behavior with a `CoreState.running` test.
-
-**Effort:** M
 **Priority:** P3
 **Depends on:** v3.30.10
 
@@ -2967,799 +2303,3 @@ label pair ("Server URL" vs "Base URL").
 
 **Effort:** S
 **Priority:** P3
-
----
-
-## Completed
-
-### Two Sentinel autonomy options are unreachable, and the docs call them UI-configurable
-
-**What:** `sentinel_autonomy_level` and `sentinel_runtime_override_ttl_minutes` (`const.py:216-217`) are read only from `self._options` in `SentinelEngine.get_autonomy_level` (`sentinel/engine.py:616`) and `set_autonomy_level` (`:588`). Neither has a config-flow field, neither has a `strings.json` label, and neither is in `_apply_sentinel_options`' defaults dict in `core/subentry_resolver.py` — and that dict is the allowlist: the overlay is `for key, value in sentinel_defaults.items(): options[key] = data.get(key, value)`, so a value placed in Sentinel subentry data is never copied. The only live path is the legacy top-level base at `subentry_resolver.py:208` (`{**entry.data, **entry.options}`). Meanwhile `docs/constants.md:310` heads the whole *Sentinel Autonomy Level* section **"UI-configurable"**, and lists both rows under it.
-
-This is the same allowlist-omission class as #480 and as the triage options fixed in #651 — but it bites harder, because the autonomy level is what gates the layers above it: triage runs only at level >= 1 (`engine.py:1684`), and auto-execution needs level >= 2 (`_MIN_AUTO_EXECUTE_LEVEL`). Every install therefore sits permanently at the recommended default of `1`, and the only way to move it is `sentinel_set_autonomy_level`, whose override is TTL-bounded (default 60 minutes) and reverts. A user cannot persistently choose level 0 (fully passive, no notifications) or level 2/3 at all. The third row in that docs table, `sentinel_require_pin_for_level_increase`, *is* exposed in the Advanced schema, which is probably why the section's "UI-configurable" header was never questioned.
-
-**Why:** Found on 2026-09-23 while answering "where is `sentinel_set_autonomy_level` set?" after the #651 PIN work — the same question that surfaced the triage gap surfaces this one one layer down. Not fixed in #651 because that PR was scoped to three named TODOS items and this is a fourth, with a product question attached: whether a persistent level 3 should be settable from a dropdown at all, given that level 3 is what allows autonomous actuation.
-
-**How to apply:** Decide the product shape first, because the two options are not equal. The TTL is a plain tunable and can go straight into the Sentinel Advanced schema plus the resolver allowlist. The level itself is a safety control: exposing a persistent `3` in a dropdown makes autonomous actuation a two-click change, where today it needs an admin service call, a PIN when `require_pin` is on, and it lapses by itself. Options: (a) expose levels 0-2 in the flow and leave 3 to the service only; (b) expose 0-3 and lean on the existing PIN gate, which covers increases; (c) expose only the TTL, keep the level service-only, and correct the docs. Whichever is chosen, add both keys to `_apply_sentinel_options` if they are to be settable per subentry, add a resolver plumbing test in the #480 regression shape, and fix the `docs/constants.md` section header for whatever stays unexposed. Note `get_autonomy_level` already coerces through `_coerce_int`, so a `NumberSelector`'s float is safe.
-
-**Effort:** M
-**Priority:** P2
-**Depends on:** None
-
-**Completed:** #783 (in `[Unreleased]`, ships in 3.45.0). Sentinel's Advanced setup now has **Autonomy level** (0–3, default 1) and **Autonomy override duration**; levels 2/3 notify like level 1 until automatic actions land (#789).
-
----
-
-### A PIN refusal that hits the action-round limit ends with a generic apology
-
-**What:** A model that keeps calling `confirm_sensitive_action` without the user's PIN gets `awaiting_user_pin` each time; on the third action round `_tool_loop_guard` (`agent/graph.py`) replies "I wasn't able to complete this request after several tool-use attempts…" and the user is never asked for the PIN. On a voice satellite the mic then closes. Separately, HA keeps a satellite listening only when the reply ends with "?", so a model that writes "Please say your PIN." makes the user say the wake word again. Since the fourth review pass of PR #769, a PIN is accepted only in the reply to the prompt, so a model that tries to confirm in the request turn ("unlock the door, 1234") is always refused first: this path is now the common case for one-breath requests, not a corner case.
-
-**Why:** Claude adversarial and red-team findings in the full review of PR #769 (2026-10-14). Left out of that PR by the maintainer's scope choice. **Field test 2026-10-16 (voice, 32f483e):** on "Unlock the garage door lock" the local model called `confirm_sensitive_action` with a made-up PIN three times in the request turn, re-spoke "please provide your security PIN" each round, and the turn ended with the apology; the PIN flow still completed because the fixed lines ("Your PIN will confirm: … What is your PIN?") follow the apology and keep the mic open. The mic half of this entry is done in PR #769 (a fixed question is appended when the reply lacks one); the apology and the repeated sentence remain.
-
-**How to apply:** In `_tool_loop_guard`, when the last ToolMessage is an `awaiting_user_pin` refusal, end the turn with no apology (the fixed lines already ask for the PIN), or end the turn right after the first refusal so the prompt is spoken once. (The duplicate pending action this entry used to list is gone: a conversation now holds one pending action.)
-
-**Effort:** S
-**Priority:** P1 (more common since one-breath requests are refused first)
-**Depends on:** None
-
-**Completed:** PR #771 (2026-10-16). A confirmation refused because the user has not been asked for the PIN yet (`pin_reply_to_prompt_only`, the request turn, when this message's PIN was not used) carries `ends_turn` in its payload (`_confirmation_refusal`, tools.py); the graph's new conditional edge after `action` (`_after_tools`) ends the turn when every call in the round was such a refusal, so the fixed line and "What is your PIN?" are the reply and the prompt is spoken once (`_async_finish_reply`; the streamed path adds no failure text and recovers no text that came with a tool call; the schema-first path backfills the chain instead of logging an error and writing the tool JSON as the reply). `_tool_loop_guard` first answers every call it cuts off with a "not run" result (the pre-existing guard left them dangling, which a strict provider rejects on the next turn), then adds nothing when the last round refused a confirmation and a PIN line follows (`pin_lines_follow`: a prompt waits, an action ran, or a PIN was wrong); the apology stays when nothing would otherwise be said. A wrong PIN now has its own fixed line, "That PIN was incorrect." (review: the guard's silence would otherwise have had the user repeat the wrong PIN). The refusal predicates read only `confirm_sensitive_action`'s results (a third-party tool's result shaped like the refusal cannot steer the turn). Left as is: a model that loops in the reply turn on an unreadable PIN still speaks its own text each round, which carries the digits hint the fixed lines do not; see the entry below.
-
----
-
-### The PIN prompt does not say which action it confirms, deterministically
-
-**What:** The `requires_pin` payload carries a `reason` ("Critical action requires PIN confirmation."), and the model writes the prompt the user hears. Nothing the user sees is generated from the pending action itself, so a model misled by text it read (a camera description, a device name) can describe a different action than the one the PIN will run.
-
-**Why:** Fourth review pass of PR #769, third cycle (2026-10-15), Claude adversarial: the trust boundary of the PIN is the model's description of the action.
-
-**How to apply:** Build a "Confirming: unlock Front Door" line from the pending action (tool name, target names, automation alias) in `_critical_action_guard` and the automation hold, and append it to the spoken reply deterministically in `conversation.py`, so it does not depend on the model repeating it.
-
-**Effort:** M
-**Priority:** P2
-
-**Completed:** PR #769 (2026-10-15), after a field test where the model asked for the PIN "to lock" the door while the held call was HassTurnOff, which unlocked it. `describe_pending_action` (pin_messages.py) names the held action, HassTurnOn/HassTurnOff on a lock as lock/unlock the way HA runs them. `_async_add_pin_lines` (conversation.py) joins "Your PIN will confirm: …" for every prompt awaiting the next message and "PIN accepted: …" after a confirmed action to the reply, streamed as a delta so a speaking pipeline says it. The `requires_pin` payload also carries `action`. Same PR: `_append_on_off_partners` (graph.py) binds HassTurnOn and HassTurnOff together, so the model cannot be left with only the opposite command. The fourth review round (2026-10-15) made the line say what HA runs: the verb per domain (lock/unlock, open/close, turn on/off), the scope of a call with no name (`every lock in Garage`), the critical calls of an automation, and outcome lines for failed and may-have-run; put it in front of the model's reply so `continue_conversation` keeps a satellite listening; made the confirm path send the same minimal payload as the normal path; and made a prompt answerable only once its line was delivered (`disclose_pin_prompts`).
-
----
-
-### A tool timeout after a confirmation is claimed keeps the PIN flow "pending"
-
-**Resolution:** Fixed in PR #769's fourth review pass. After the claim, `_execute_pending_action` and `_execute_pending_automation` run the device call or automation write under `asyncio.timeout_at`, with the deadline `POST_CLAIM_TIMEOUT_S` (25 s, inside the graph's 30 s tool timeout) counted from the start of `confirm_sensitive_action` since the fourth pass's third cycle, and any exception there, timeout included, returns the `action_outcome_unknown` / `automation_outcome_unknown` reply ("may have run; check the device"), naming only the error type so its text (which can hold URLs or tokens) stays out of the model. For an automation, every error after the claim gets that reply (the third cycle: a timeout is an `OSError`, which had been reported as a definite failure that asked for the automation again). Pinned by `test_a_slow_action_after_the_claim_says_it_may_have_run`, `test_the_deadline_counts_from_the_start_of_the_confirmation`, `test_a_slow_install_after_the_claim_says_it_may_exist` and `test_an_unexpected_error_still_uses_up_the_confirmation`.
-
-### A confirmed critical action that fails can be re-run without a new PIN
-
-**What:** When a PIN-confirmed action fails (`_execute_pending_action` in `agent/tools.py`: a raised `HomeAssistantError`, or since #735 a `ToolResult` with `error=True`), the pending action stays queued for its 10-minute TTL so the user can retry. A correct PIN never increments `attempts`, and the PIN is already in the conversation, so the model can call `confirm_sensitive_action` again on its own, in the same turn, bounded only by the graph recursion limit. Each call actuates the device again. A tool that half-acted before reporting failure (a cover toggle, an alarm arm that timed out) can act twice.
-
-**Why:** Found by the second Claude adversarial pass in the #735 hotfix review (2026-10-08). The raised-error path has always behaved this way; #735 only made error-flag failures behave the same, as the review intended. Left out of the hotfix because a retry policy for critical actions is a design call.
-
-**How to apply:** Count executions on the pending action and drop it after one failed execute, or require a new user turn before the same action can be confirmed again (record the turn's request id on the pending action). Pin it with a test that confirms once, gets `error=True`, then calls confirm again in the same turn and asserts the device tool ran once.
-
-**Effort:** S
-**Priority:** P2
-**Depends on:** None
-
-**Resolution:** `_execute_pending_action` now claims the pending action (pops it) before calling the tool, as `_execute_pending_automation` already did, so a failed execute uses up the confirmation and the reply asks the user to re-run the request. Claiming first also closes a second path found while testing: two confirmations of one action in an `asyncio.gather` batch both passed the PIN check and both ran. Pinned by `test_failed_confirmed_action_cannot_be_confirmed_again`, `test_raised_error_uses_up_the_confirmation` and `test_concurrent_confirmations_run_the_action_once`. Claiming alone left one path: in the same turn the model could re-issue the tool and confirm the new prompt with the same PIN. The same PR therefore spends the user's PIN message on the first verified confirmation (`PinReply.spent`, set before anything awaits), so one message runs one action, and pending actions now record their conversation (`thread_id`), which a confirmation must match; see the next entry.
-
-### The model invents a PIN before the user supplies one
-
-**What:** Field test 2026-09-12 on the live box, qwen3.8 local. "Unlock the
-garage door lock." correctly hit the PIN gate (`status: requires_pin`), and the
-model then called `confirm_sensitive_action(action_id=..., pin="1234")` in the
-SAME turn, before the user had said anything. The gate rejected it ("Incorrect
-PIN. Action not executed.") and the user's real PIN worked on the next turn, so
-nothing unsafe happened — but the guess consumed one of the five attempts
-(`max_pin_attempts = 5`, agent/tools.py:986) before the user had typed a digit.
-
-**Intermittent.** The immediately following round in the same session ("Lock the
-garage door lock" -> `requires_pin` -> user PIN -> completed) produced NO
-invented PIN: the model asked and waited. So this is nondeterministic model
-behaviour, not a reliable trigger — which argues for the deterministic guard
-rather than against it, since it cannot be caught by testing.
-
-**Why:** The system prompt already forbids it in as many words: "Never guess or
-invent a PIN. Do not proceed without a PIN." A small local model did it anyway.
-The lesson recorded on issue #571 applies exactly — a prompt clause forbidding a
-shape that is still being emitted is not enforcement; enforce it
-deterministically instead of adding another sentence.
-
-Practical impact today is a wasted attempt, not a bypass: PINs are 4-10 digits,
-so five attempts against even a 4-digit PIN is a 0.05% chance. It gets worse if
-a model emits several guesses across a multi-round turn, which
-`_MAX_ACTION_ROUNDS = 3` permits.
-
-**How to apply:** Reject a `confirm_sensitive_action` call whose PIN did not
-come from a user message in this turn — the pending-action record already
-carries the requesting user, so the guard can require that a HumanMessage
-arrived after the `requires_pin` ToolMessage before any attempt is counted. A
-model-supplied PIN with no intervening user turn should be refused WITHOUT
-incrementing `attempts`, so a chatty model cannot burn the user's budget.
-
-**Effort:** S
-**Priority:** P2
-**Depends on:** v3.41.1
-
-**Resolution:** Fixed together with "A confirmed critical action that fails can be re-run without a new PIN" (PR #769). `conversation.py` puts the user's message for the turn into the configurable as a `PinReply` (`agent/helpers.py`), and `confirm_sensitive_action` refuses, before the PIN is checked and without counting an attempt, any PIN that is not exactly one of the numbers `pin_in_text` reads from that message (written, in space-separated groups, or digit by digit with commas, dashes, ". " or "and" between single digits, as digits or English/Czech digit words). The match is exact, not a substring: the third review pass showed "nine one two three four five", `1234,56`, `1.1.1.1` and `one234` matching the earlier substring version. Compounds written without spaces (dates, times, decimals, phone numbers, addresses) are never read as or split into a PIN. A model that passes the PIN as the user said it ("1 2 3 4") is normalized by `pin_digits`. A failed PIN check spends the message, so one message is one attempt, and so does claiming the action, so one message runs one action; a correct PIN whose action cannot start (no HA LLM API) leaves it unspent. The fourth review pass made a new protected request replace the conversation's older pending one (`register_pending_action`), after the Claude adversarial pass and the red team showed the model otherwise chose which of two pending actions the user's PIN ran, including one the user had abandoned. Its second pass then showed that replacement plus same-turn confirmation made an action injected mid-turn the guaranteed target of the user's PIN, so (the maintainer's choice, reversing the earlier "PIN in the request confirms") a PIN now confirms only an action waiting from before the message: each turn's `PinReply` has a `turn_id`, `start_pin_turn` (called by `conversation.py` at the start of every turn) gives a waiting action that turn as its one reply turn and drops it at the next, and `_confirmation_refusal` requires `action["reply_turn"] == pin_reply.turn_id`. A re-issue of the same tool and arguments keeps its turn; a different second protected request in one turn is refused (`pin_one_action_at_a_time`). `_get_pending_pin_tools` also keeps the confirm tool available while the store holds the conversation's unexpired action, for when the history no longer shows it. The same pass folded Unicode digits in the model's PIN before the hash (a correct full-width PIN failed it and cost an attempt), NFC-normalized the text, and closed three false accepts ("1,2,3,4, 5", "555 - 1234", a trailing spoken "oh"). The refusal is JSON with status `awaiting_user_pin`, which `_has_pending_pin_confirmation` treats as still pending. A first version compared turn ids instead (refuse a confirm in the turn that created the action); the full review showed it only delayed history replay by one turn (an unrelated reply such as "never mind" still passed, with the confirm tool force-injected) and could lock out a model that re-issued the tool in the reply turn, so it was replaced. The pass's third cycle (2026-10-15, the maintainer's choices) kept a prompt open for one more message while the user is still answering it: after a wrong PIN, a refusal because the PIN was not readable in the message, the same request re-issued in the reply turn (the user repeating it), or a turn that failed (`keep_pin_prompts` in `conversation.py`), up to `MAX_PIN_REPLIES` (3) replies; any other message still cancels it. The same cycle read the message in NFKC (a full-width decimal "１２３４．５６" had read as the PIN), made U+2212 a dash and a number glued to °, % or ‰ a measurement, kept "oh and one two three four" from dropping its zero, required setup PINs to be ASCII decimal digits after folding, dropped the legacy as-typed hash candidate, compared re-issued requests without the generated automation id and with names casefolded, dropped expired actions before carrying anything from them, and started the PIN turn before the dashboard and API-init early returns. Pinned by `test_pin_reply_binding.py`.
-
-### `replace_partial` drops tool calls when it re-commits the last entry
-
-**What:** `_async_run_astream`'s `replace_partial` branch (`conversation.py`) pops `chat_log.content[-1]` and re-adds it via `async_add_assistant_content_without_tools` with only `content` set. The guard checks `isinstance(..., AssistantContent)` but not `.tool_calls`, so if the last entry carries tool calls they are silently discarded. `_recommit_final_assistant_content` does guard on `not ...tool_calls`; this branch does not.
-
-**Why:** Found by the `/code-review` pass on the #628 branch; pre-existing. Hard to hit today because a turn normally ends on a text-only reply, but #628's byte-identity work is what makes it clear this branch should be rare, and any future change that makes it fire on a tool-calling turn would corrupt Show Details.
-
-**How to apply:** Mirror the `_recommit_final_assistant_content` guard — skip the replacement (or carry the tool calls through) when the popped entry has `tool_calls`.
-
-**Effort:** S
-**Priority:** P3
-
-**Resolution:** `_async_run_astream` now treats a last entry that carries tool calls as "no reply yet": the recovered text is added through the spoken delta path instead of replacing it, so the tool call survives in Show Details. Found in the field on 2026-10-01, where it also made the tool-loop guard's give-up silent on a satellite whose turn-start acknowledgement had already started the speech stream. Pinned by `test_recovered_reply_after_a_tool_call_is_added_and_spoken`.
-
-### Leaked `<think>` reasoning can become the final chat reply
-
-**What:** The streaming path commits model text to `chat_log` verbatim — `_stream_langgraph_to_ha` / `_nonstreaming_text` never run it through `extract_final`. Only the graph-state copy is cleaned. When a response is entirely reasoning (a `<think>` block with no closing tag, or think-only output), `extract_final` returns `""`, `_normalize_ai_content("")` returns `None`, so `_async_run_astream` takes neither the `replace_partial` nor the `add_recovered` branch and the raw `<think>` text stays as the user-visible reply. Reasoning emitted before a tool call likewise stays in Show Details, since recovery only inspects the final assistant entry.
-
-**Why:** Found by the Codex adversarial pass on the #628 branch; pre-existing, not introduced by it. #628 makes the normal path byte-identical, which leaves this as the remaining case where the streamed and cleaned copies diverge. User-visible: raw chain-of-thought rendered in chat and spoken by voice pipelines.
-
-**How to apply:** Strip `<think>` in the delta path rather than only in `_call_model`, which needs a small state machine — an opening tag can arrive in one delta and its closing tag several deltas later, so the generator has to suppress text between them and handle a stream that ends mid-block. Alternatively, in `_async_run_astream`, treat an empty `recovered_content` with a non-empty last `AssistantContent` as a signal to replace with the "Done."-style fallback instead of leaving raw reasoning. Add a test for the unclosed-`<think>` case.
-
-**Effort:** M
-**Priority:** P2
-
-**Resolution:** Fixed in the streaming-TTS PR for [#671](https://github.com/goruck/home-generative-agent/issues/671), which made it urgent: once HGA's TTS engine streams, the Assist pipeline speaks the deltas as they arrive, before any cleaned copy replaces them, so inline reasoning would be read aloud on every turn rather than only on a think-only reply. `_ThinkStreamFilter` (`conversation.py`) drops `<think>` blocks from the delta path with the state machine described above — a tag split across deltas is held until the next one, an unclosed block runs to the end of the model turn, held text that never became a tag is released at turn end ahead of the tool calls — and the `on_chat_model_end` fallback runs `extract_final`. A think-only reply now commits no assistant text, so the existing no-reply guard answers with its apology. Reasoning before a tool call no longer reaches Show Details either. Whitespace follows `extract_final(collapse_whitespace=False)`: after a removed block only the reply's outer whitespace is dropped (trailing whitespace is held until more text follows), so the streamed copy matches the graph-state copy and `replace_partial` does not fire. The one gap left is whitespace emitted before the first block of a turn, which cannot be recalled once streamed; harmless. Tags are matched in the original text, not `str.lower()`, which lengthens Turkish "İ" and misplaced the cut.
-
-### The Trust device button trusts every device in a multi-device finding
-
-**What:** `radio_new_device_joined` and `network_unknown_device_joined` aggregate every new device into one finding, and the push's **Trust device** button (`notify/actions.py` `_outcome_for_trust`) trusts every id in `device_ids` at once. The summary lists at most 10 names (`listed()`) and the mobile push is cut at 220 characters (`MAX_MOBILE_MESSAGE_CHARS`), so one tap can trust a device the user never saw named. Seen in the field on 2026-09-19: one tap trusted a visitor's laptop together with an unidentified `[mac]` client. `network_guest_client_present` already offers the button only for a single-device finding (`notifier._TRUST_ONE_DEVICE_TYPES`); the two shipped rules were left as they are because changing them alters released behavior.
-
-**Why:** Trust is permanent and silences both client rules for that device. Surfaced by the Codex pass on PR #646.
-
-**How to apply:** Decide between (a) the single-device gate for all three types, (b) one finding per device for the join rules (needs a per-identity cooldown so siblings are not starved), or (c) a confirm step that lists what will be trusted. Whatever is chosen, the handler should refuse ids the delivered message did not name.
-
-**Effort:** M
-**Priority:** P2
-
----
-
-**Resolution:** Option (a), refined: `_offers_trust` in `sentinel/notifier.py` requires exactly one `device_ids` entry for every trust type, and a trust finding naming several devices gets NO primary button (Ask Agent cannot trust anything, so the fallback was dropped for these types). The three rules pick their suggested action from `network_common.trust_action(count)`, so a multi-device summary points at `sentinel_trust_network_device`. `_outcome_for_trust` refuses a tap naming several ids (`several_devices`), which covers a notification built before this change. Options (b) and (c) were rejected: (b) multiplies pushes on a router reload and needs a per-identity cooldown; (c) adds a second tap to every trust and still hits the 220-character cap.
-
-### Tool index background task outlives a config-entry reload and fails on the closed pool
-
-**What:** `conversation.py` schedules `_run_tool_index_background` with a bare `hass.async_create_task` (around line 1839). It is neither tracked on the entry nor cancelled on unload, so a reload (any options change, such as toggling a Sentinel setting) closes the PostgreSQL pool while the task is still writing, and the log shows `Global tool index background task failed` with `psycopg_pool.PoolClosed: the pool 'pool-N' is already closed`. Seen three times on the maintainer's box on 2026-09-21 (19:31–19:36 local) while Sentinel options were being changed; the next load re-indexed cleanly. The failure also sets `tool_index_failed` on the OLD runtime data and fires `SIGNAL_TOOL_INDEX_UPDATED("failed")`, which the new entry's sensor may briefly show.
-
-**Why:** Same class as the lifecycle leaks fixed in PR #560: a task started from a turn is not owned by the entry that started it. Harmless today (self-heals on the next load, the index only gains rows), but it logs an ERROR with a traceback on every reload that races an index write, which users will report.
-
-**How to apply:** Create it with `entry.async_create_background_task` (or track it in `HGAData` and cancel + await it in `async_unload_entry` before the pool closes), and treat `PoolClosed` / `CancelledError` during unload as expected, without setting `tool_index_failed`.
-
-**Effort:** S
-**Priority:** P2
-
----
-
-**Resolution:** `HGAData.tool_index_task` holds the background write; `async_unload_entry` cancels and awaits it in a contained teardown step immediately before `pool.close`; `_run_tool_index_background` re-raises `CancelledError` without setting `tool_index_failed` or dispatching the failed signal, and clears the task reference. Regression tests: unload ordering (`test_entry_lifecycle_containment.py`) and the runner on cancel (`test_conversation_units.py`).
-
-### Gemini 3 models are sent temperature 0.2, which Google advises against
-
-**What:** Every Gemini call site in `__init__.py` (chat ~2394, VLM ~2463, summarization ~2539) binds `"temperature": <feature temp>` and `"top_p": 1.0` through `configurable_fields`. The feature default is `RECOMMENDED_*_TEMPERATURE = 0.2`. Google's Gemini 3 guide says "For all Gemini 3 models, we strongly recommend keeping the temperature parameter at its default value of `1.0`", and that lower values "may cause looping or degraded performance, particularly in complex mathematical or reasoning tasks". As of v3.33.1 the Gemini defaults are `gemini-3.5-flash-lite`, so the out-of-the-box configuration now hits that advice on every turn.
-
-**Why:** Surfaced while moving the Gemini defaults off the withdrawn `gemini-2.5-flash-lite` ([#575](https://github.com/goruck/home-generative-agent/issues/575)). It is not an error — Google accepts the parameter — so nothing in the logs will ever point at it; the symptom is a model that loops or reasons worse than it should, which reads as "the model is bad" rather than "we detuned it". Left out of v3.33.1 by user decision so the release stays a one-line default change. Note the existing `_invoke_chat_model_with_sampling_rebind` (`agent/graph.py:2045`) does not help here: it strips `DROPPABLE_SAMPLING_PARAMS` only *after* a provider rejects them, and Gemini never rejects.
-
-**How to apply:** Gate on the model string rather than the provider, since the same Gemini provider object serves 2.5 and 3.x: where the three gemini branches build their `configurable` dict, pass `None` for `temperature` (and `top_p`) when the selected model matches `gemini-3`, letting Google's own defaults apply. `dict.fromkeys(DROPPABLE_SAMPLING_PARAMS)` in `core/fallback.py:394` is the existing idiom for "unset these". The wrinkle is that temperature is a *per-feature* setting shared across providers (`CONF_CHAT_MODEL_TEMPERATURE` et al.), so this silently overrides a value the user typed — decide whether to override outright, or only when the value is still the recommended `0.2`, and say which in the release note. Mind that a fallback chain can route the same feature to a non-Gemini model, where 0.2 is still correct.
-
-**Resolution:** Shipped as `gemini_sampling_configurable` (`core/utils.py`), applied at all four Gemini bind sites (chat/VLM/summarization primaries + `_configured_cloud_model` for fallback members). Decision taken: override **only when the temperature still equals the feature's recommended default**; an explicitly customized value is honored with a setup-time warning citing Google's guidance. The suggested `None`-passthrough was impossible: `RunnableConfigurableFields._prepare` reconstructs `ChatGoogleGenerativeAI` via `__init__` with every field explicit, `temperature` there is a non-Optional `float` (None raises), and that same reconstruction defeats the library's own built-in Gemini-3→1.0 default (temperature always lands in `model_fields_set`). So the fix binds an explicit `1.0` and `top_p=None` (Optional; filtered from the request by `_prepare_params`), both verified against the pinned `langchain-google-genai` 3.1.0 and pinned by a real-class marshaling test. Non-Gemini chain members keep the configured 0.2. Spun off the latent `temperature: None` rebind crash as its own item, "Sampling-rebind sets `temperature: None`, which a Gemini chain member cannot accept", still open under **Agent**.
-
-**Effort:** S
-**Priority:** P2
-**Completed:** v3.36.0 (2026-09-01)
-
----
-
-### PIN-gate add_automation for critical service calls
-
-**What:** `add_automation` writes arbitrary automation YAML and reloads HA without ever passing the critical-action PIN gate: `_is_critical_action` inspects `domain`/`service` tool args, and `add_automation`'s payload is opaque `automation_yaml`. "Unlock the front door whenever I get home" installs a `lock.unlock` automation with no PIN, while the direct command "unlock the front door" is gated.
-
-**Why:** Pre-existing hole, but v3.20.2's automation-intent force-binding makes the tool deterministically available on everyday phrasings, so the bypass path is now reliable. Converged on independently by both adversarial review agents (Claude adversarial + red team) during the v3.20.2 ship as the top finding. Deferred out of that branch by user decision (2026-07-24) so the PIN-flow change gets its own focused review and live validation.
-
-**How to apply:** After `_async_validate_config_item` in `add_automation` (tools.py) — or in a langchain-branch guard in `_call_tools` (graph.py) — walk the parsed automation config's `action` list (including `choose`/`repeat`/`wait_for_trigger` nesting), extract each `service`/`action` call, and run it through `_is_critical_action` with the configured critical actions. If any matches and PIN is enabled, return the existing `requires_pin` ToolMessage flow (register in `pending_actions`) instead of writing the automation. Mind the prior pitfall: `confirm_sensitive_action` ToolMessages with `status=error` must not count as resolved.
-
-**Resolution:** Gated in `add_automation` itself. `_async_validate_config_item`'s *return value* is now used (it was discarded): it is the normalized, blueprint-substituted config, so screening sees the actions HA will really run rather than the model's prose. New `agent/automation_pin.py` classifies every step with `cv.determine_script_action` and screens it — an **allowlist over HA's own action taxonomy**, not a blocklist of service names. Rule matching moved to `matches_critical_rule` in `agent/helpers.py`, shared with `_is_critical_action`.
-
-The first draft blocklisted `action:`/`service:` steps only and was defeated by four bypasses found during pre-landing review, each verified against a real HA install by two independent reviewers: **device actions** (`device_id`+`domain`+`type`, no service key, maps to `lock.unlock`), **`scene.apply`** (target states inline, reproduced as `lock.unlock`), **indirection** (`script.turn_on`, bare `scene:`, `automation.trigger`, `event:`), and **group / entity-registry-ID targets** (ordinary-looking strings that resolve to entities named nowhere in the config, so `entity_match` substrings can't see them). A fifth, independent finding was a *rules* gap rather than a screening one: `cover.toggle` and `cover.set_cover_position` open a closed garage door and were not in `RECOMMENDED_CRITICAL_ACTIONS` — that hole applied to the direct-command gate too and is now closed.
-
-Also: unknown action types fail closed (a future HA construct over-prompts rather than slipping through); `homeassistant.*` is re-screened against each target's own domain; the automation path refuses when the PIN is enabled-but-unset (unlike the one-off tool path, an automation persists); pending actions are claimed before the write and the store is swept and capped on registration. The parity test asserts absolute verdicts on both sides — the first version stayed green with the shared matcher stubbed to `return False`.
-
-**Effort:** M
-**Priority:** P1
-**Depends on:** v3.20.2 (fix/tool-rag-automation-intent)
-**Completed:** v3.26.0 (2026-08-05)
-
----
-
-### Purge stale add_automation row from tool index when schema-first YAML is enabled
-
-**What:** The tool indexer only `aput()`s changed tools and never deletes; a user who ran normal mode once has `hga_local::add_automation` in the vector store forever. After toggling schema-first YAML on, RAG ranking can still retrieve it even though dispatch excludes it, producing a confusing routing failure. Step 3d's guard is correct but the invariant it mirrors is unenforced for pre-existing rows.
-
-**How to apply:** On entry setup with `CONF_SCHEMA_FIRST_YAML` true, `adelete` the `hga_local::add_automation` store key and drop its content hash; or filter `add_automation` out of RAG results when schema-first is active.
-
-**Resolution:** The second option shipped structurally with #554's bind-time live-tool filter: in schema-first mode `add_automation` is excluded from `langchain_tools`, so `(hga_local, add_automation)` is not in the live set and the stale index row can never bind through RAG, safety, or the force-injection legs. The row itself still exists in the store (inert); physical deletion is folded into the "Tool index hygiene" eviction TODO.
-
-**Effort:** S
-**Priority:** P3
-**Depends on:** v3.20.2
-**Completed:** v3.30.4 (2026-08-15)
-
----
-
-### Integration smoke test: on_tool_end propagation during action node
-
-**What:** After feat/streaming-chatlog lands, run a real multi-tool conversation (`get_current_time` + `get_and_analyze_camera_image`) and verify that `on_tool_end` for `get_current_time` fires BEFORE the camera tool completes.
-
-**Why:** The streaming win depends on LangGraph propagating child `on_tool_end` events from `lc_tool.ainvoke()` to the outer `astream_events` DURING node execution. Verified against LangGraph 1.1.2 source during planning, but not confirmed via integration test. If LangGraph buffers nested events until node completion, the streaming gain disappears.
-
-**How to verify:** Add a timing log in the `on_tool_end` handler (DEBUG level). Time delta between `on_tool_end` for the time tool and the camera tool should be ~3980ms apart, not ~0ms.
-
-**Effort:** S
-**Priority:** P2 (post-ship validation)
-**Depends on:** feat/streaming-chatlog
-**Completed:** v3.12.0 (2026-04-21)
-
----
-
-### Add `sentinel_camera_entry_links` config for explicit camera-to-entry mapping
-
-**What:** Add a `sentinel_camera_entry_links` config key (Sentinel subentry options flow) that allows users to explicitly associate cameras with entry sensors regardless of HA area assignment. Format: `{camera_entity_id: [entry_entity_id, ...]}`.
-
-**Why:** Removing the home-wide fallback from `camera_entry_unsecured` (PR fixing cross-area false spatial claims) creates false negatives for adjacent-area setups — e.g., a driveway camera in "Outside" area should still fire when the front door lock in "Front" area is unsecured. Area-based association is insufficient for these layouts. Flagged as an accepted trade-off during eng review and Codex outside voice.
-
-**How to apply:** In `const.py`, add `CONF_SENTINEL_CAMERA_ENTRY_LINKS`. In the Sentinel config flow subentry, add an optional text/JSON field. In `camera_entry_unsecured.py`, after the same-area unsecured lookup, check the config for explicit links for the current camera; merge any linked entities into `unsecured`. Add `unsecured_entity_areas` entries for the linked entities with their actual areas.
-
-**Effort:** M
-**Priority:** P2
-**Depends on:** None
-**Completed:** v3.8.0 (2026-04-05)
-
----
-
-### Config flow UI for CONF_SENTINEL_BASELINE_MIN_SAMPLES
-
-**Completed:** v3.11.0 (2026-04-14)
-
-`NumberSelector` added to `sentinel_subentry_flow.py` (min: 1, max: 500, step: 1, default: 20). Also added `sentinel_baseline_sustained_minutes` selector in the same PR.
-
----
-
-### Weekly / day-of-week baseline patterns
-
-**What:** Extend baseline collection to store `hourly_avg_{DOW}_{H}` metrics (e.g., `hourly_avg_1_14` = Monday 2PM). Gives 7×24=168 time slots per entity instead of 24, enabling time-of-day anomaly detection that accounts for weekday vs. weekend patterns.
-
-**Why:** The current `hourly_avg_H` treats all Mondays and Sundays at 2PM the same. For most households, weekday and weekend patterns differ significantly (cooking appliances, HVAC, occupancy). A washing machine running at 3AM on a Saturday is less anomalous than at 3AM on a Tuesday. Without DOW awareness, `time_of_day_anomaly` generates false positives on weekends.
-
-**How to apply:** Add `hourly_avg_{DOW}_{H}` as a third metric row per entity per update cycle. Update `evaluate_time_of_day_anomaly()` to prefer the DOW-specific metric when available, falling back to the global `hourly_avg_H` if not yet established. New config option `CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS` (default: False) to opt in.
-
-**Effort:** M
-**Priority:** P2
-**Depends on:** Baseline enhancement PR
-**Completed:** v3.9.0 (2026-04-06)
-
----
-
-### The battery slug topic-word list is English-only, so a locale slug never yields a device token
-
-**Priority:** P2
-
-**What:** `battery_slug_device_token` (`sentinel/discovery_semantic.py`) strips `_BATTERY_SLUG_TOPIC_WORDS` from the `candidate_id` slug and requires exactly one leftover token. That list is English (`low`, `battery`, `sensor`, `level`, …), so a slug the model writes in the home's language — `nizka_baterie_senzoru_0xffffaa67127301f8` — leaves four tokens and returns `None`. The candidate falls back to the prose hash and keeps minting a card per cycle, which is the exact drift v3.32.1 set out to remove. Reproduced during the #573 review; the #571 reporter's own screenshot shows the English `low_battery_sensor_0x…` form, so it is unknown whether his instance is actually affected — that question is open with him on the PR thread.
-
-**Why:** The whole point of preferring the slug over the prose is that the slug is the one surface that stays stable across cycles when the LLM writes prose in a non-English locale (the #522 premise). An English-only strip list silently undoes that for exactly the users who need it most.
-
-**How to apply:** Do not guess at stems. Wait for the reporter's answer on which slugs his instance emits, then either (a) anchor on the `0x…` token directly rather than by elimination — scan the slug for a token matching the device-address shape and ignore everything else, which removes the strip list from the critical path entirely, or (b) extend the strip list per supported locale. (a) is preferable: it makes the extractor locale-independent by construction and cannot drift the way a word list does.
-
-**Done via (a) in v3.33.4**, without waiting for the answer — (a) needed no information about his slugs, since it ignores every token that is not device-shaped. `_BATTERY_SLUG_TOPIC_WORDS` is deleted; the extractor now requires exactly one `_is_device_shaped_token` in the slug and reads nothing else, so `nizka_baterie_senzoru_0x…` resolves, and so does a slug the model decorated (`…_again`), which the sole-leftover rule also lost. Two device-shaped tokens still resolve nothing.
-
-**Residual, deliberately untouched:** `battery_slug_device_token` still gates on `_has_low_battery_signal(_candidate_text_blob(candidate), slug_text)`, which is English (`battery` + a qualifier). A candidate with NO English battery surface anywhere — not in the slug, not in `pattern`, not in `suggested_type` — resolves no token. That gate is shared with `candidate_semantic_key`'s battery leg on purpose (#522 mirror), so such a candidate takes the battery route nowhere in the module; widening it here alone would resurrect the mirror drift the shared surface was introduced to end. Widening it means widening both together, and that is a bigger change than this entry.
-
-**Completed:** v3.33.4 (2026-08-29)
-
----
-
-### Identity-hash dedup cannot collapse re-proposals whose prose carries live values
-
-**What:** Candidates that key `None` dedup on `_candidate_identity_hash` = SHA-256 of `title\0summary`. LLM candidate prose routinely embeds the current reading ("Baterie klesla na 12 %"), so the same topic re-proposed on successive cycles hashes differently every time and each one becomes a new pending-approval card. Measured during the #572 review: three re-proposals of one sensor with a drifting percentage produce 3 cards where the pre-#572 constant key produced 1. The 200-record exclusion window then evicts real history, resurfacing unrelated previously-suppressed topics (same hot-buffer eviction mode as PR #511).
-
-**Why:** #572 correctly stops the constant key from over-merging distinct sensors, but the fallback it routes to is a prose hash, which is the wrong primitive for a topic that is re-described every cycle. The reported #571 symptom (an evidence-less card and an evidenced card for the same sensor sitting side by side) also survives for the same reason: a hash can never equal a semantic key.
-
-**How to apply:** Derive a stable identity for evidence-less candidates from something that does not drift — the device/sensor token in the `candidate_id` slug (`low_battery_sensor_<id>`), normalized the way the battery leg already normalizes slug text — and hash that instead of, or in addition to, the prose. Alternatively tighten the discovery prompt/schema so a low-battery candidate naming a specific sensor must cite a matching `entities[entity_id=...]` evidence path (the author's own suggestion on #572), which removes the shape entirely. Both wants issue #571 kept open as the tracking home.
-
-**Done, both halves.** The device-token key landed in v3.32.1 (#573) and collapses a drifting reading under one address. The second half landed in v3.33.4: the engine resolves the address against the home's battery sensors and cites the entity, so the candidate leaves the identity-hash population altogether and keys semantically — which is what makes it meet the evidenced card about the same sensor, the reported #571 symptom, and makes it promotable rather than permanently unsupported. Note the prompt was NOT relied on: the ENTITY REQUIREMENT clause it would have been added to already existed and the model violated it anyway, so enforcement is deterministic at ingest and the prompt clause is only an ask. Residual: a candidate whose address resolves nothing (unknown address, two matches, or a non-`0x` label) keeps the prose-hash behaviour described above.
-
-**Completed:** v3.33.4 (2026-08-29)
-
-**Effort:** M
-**Priority:** P2
-**Depends on:** —
-
----
-
-### Tighten discovery prompt to require entity-backed evidence paths
-
-**Completed:** v3.9.0 (2026-04-06)
-
-Entity-backed evidence path instruction added to `USER_PROMPT_TEMPLATE` in `explain/discovery_prompts.py`. `_filter_novel_candidates()` in `explain/discovery_engine.py` now guards against derived-only paths. Tests added for the filter.
-
----
-
-### Wire `proposals_promoted` counter in discovery engine
-
-**What:** `SentinelHealthSensor` now exposes `discovery_proposals_approved_24h` — the count of proposals with `status="approved"` in the last 24 hours, queried directly from `ProposalStore` (Option B from the original TODO). The bare `proposals_promoted` in-memory counter (which always reported 0) was removed.
-
-**Why:** The counter was added to the health sensor attributes in v3.7.0 but the increment logic was not wired. Option B (direct store query) is simpler and doesn't require engine changes.
-
-**Effort:** S
-**Priority:** P1
-**Depends on:** v3.7.0 (health sensor discovery metrics)
-**Completed:** v3.7.1 (2026-04-04)
-
----
-
-### Feedback-trained per-entity cooldowns — wire feedback signal
-
-**What:** `record_cooldown_feedback(state, entity_id, rule_type)` is now called from both the snooze action (`sentinel/notifier.py`) and the dismiss action (`notify/actions.py`). Each snooze or dismiss of a rule+entity pair increments the compound-key multiplier, which extends future cooldowns for that specific combination.
-
-**Why:** Without the feedback signal, `learned_cooldown_multipliers` remained empty forever. Now every snooze/dismiss trains the system.
-
-**Effort:** S
-**Priority:** P1
-**Depends on:** v3.7.0 (suppression schema v4)
-**Completed:** v3.7.1 (2026-04-04)
-
----
-
-### Fix cooldown multiplier key scheme (entity_id → rule_type:entity_id) + schema migration v5
-
-**What:** `learned_cooldown_multipliers` is now keyed by `"{rule_type}:{entity_id}"` (e.g., `"unlocked_lock_at_night:lock.front_door"`). The v4→v5 migration in `_migrate_suppression_state()` discards all bare entity_id keys (safe: `record_cooldown_feedback` was never called in v3.7.0 production, so v4 dicts were always empty). `stored_version = 5` correctly set after migration.
-
-**Why:** The bare entity_id key caused different rules for the same entity to share a single multiplier, causing missed alerts for the more critical rule.
-
-**Effort:** S
-**Priority:** P1
-**Depends on:** Wire feedback signal TODO above
-**Completed:** v3.7.1 (2026-04-04)
-
----
-
-### Daily digest config flow UI
-
-**What:** `sentinel_subentry_flow.py` now exposes `BooleanSelector` for `CONF_SENTINEL_DAILY_DIGEST_ENABLED` and `TimeSelector` for `CONF_SENTINEL_DAILY_DIGEST_TIME`. Both appear in `_default_payload()`. `RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME` normalized to `"08:00:00"` in `const.py` to match `TimeSelector` output format. The notifier parse bug (`split(":", 1)` → `split(":")`) was fixed as part of this.
-
-**Why:** The daily digest shipped in v3.7.0 with no UI control; users had to edit raw options.
-
-**Effort:** S
-**Priority:** P1
-**Depends on:** v3.7.0 (daily digest backend)
-**Completed:** v3.7.1 (2026-04-04)
-
----
-
-### Add `learned_suppressions_active` attribute to health sensor
-
-**Completed:** v3.9.0 (2026-04-06)
-
-`learned_suppressions_active` attribute exposed on `sensor.sentinel_health`. Count reads `learned_cooldown_multipliers` from suppression state via `engine.learned_suppressions_count` property.
-
----
-
-### Add-flow provider name pre-fills for the default type, not the selected one
-
-**What:** The STT provider step's name field defaults to `ProviderNames["openai"]` ("STT - OpenAI") because the form renders before the user touches the provider dropdown, and HA forms do not live-update one field from another. A user who switches the dropdown to **Local (OpenAI-compatible)** and submits without editing the name gets a local provider labeled "STT - OpenAI" in the Assist pipeline dropdown. The reconfigure path already resets a stale default name on a type *switch* (v3.37.0 review fix); the add path has no previous type to compare against, so `type_changed` never fires.
-
-**Why:** Hit live by Lindo during v3.37.0 field validation (2026-09-03 screenshot): the add dialog showed provider "Local (OpenAI-compatible)" over name "STT - OpenAI". Cosmetic, but the label is exactly what the Assist pipeline dropdown shows, so it misidentifies which backend utterances go to — the same misdirection the reconfigure fix closed.
-
-**How to apply:** In `async_step_provider`'s submit branch, treat a submitted name equal to *any* value of `ProviderNames` that is not the selected type's own default as "untouched pre-fill" and replace it with `ProviderNames[provider_type]` — this covers add and reconfigure with one rule and still preserves any name the user actually typed. Alternatively leave the name field blank by default with a "named after the type you pick" hint, the pattern the model-provider flow's `data_description` already uses. Add an add-flow test mirroring `test_stt_provider_flow_switch_to_local_resets_openai_state`'s name assertion.
-
-**Effort:** S
-**Priority:** P3
-**Resolution:** Fixed in `flows/openai_compatible_endpoint.py::resolve_provider_name` (shared by the STT and TTS flows) with add-flow tests for both. A submitted name equal to another type's default is treated as the stale pre-fill; typed names survive.
-**Completed:** v3.38.0 (2026-09-04)
-
----
-
-### image.py and sensor.py still register unwrapped STARTED listeners
-
-**What:** `hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_started)` at `image.py:42` and `sensor.py:64` are not wrapped in `entry.async_on_unload`. Both call `async_add_entities(...)` for an entry that may already have unloaded — the same leak class the deferred-start work just closed for the four engines.
-
-**Why:** Found by the maintainability pass during the lifecycle-leak ship (2026-08-19). Recorded explicitly so the "Config entry lifecycle leaks in the deferred-start block" entry does not read as "no listener leaks remain in the integration" — it closed the four `async_setup_entry` sites, not these two platform sites.
-
-**How to apply:** Both platform setup functions have `entry` in scope, so the wrap is available. They cannot reuse `_defer_start_until_hass_started` as written — its `start` parameter is `Callable[[], None]` and these handlers are async and take the event — so either widen the helper or give each site the same fired-flag cancel inline. Adding an entity twice is louder than a duplicate background task, so confirm the actual failure mode before choosing.
-
-**Resolution:** The helper moved rather than widened: `_defer_start_until_hass_started` is now `core/lifecycle.py:defer_start_until_hass_started` (docstring intact — it is the canonical rationale other sites point at), importable by platforms without touching `__init__`. The handlers didn't need to be async — `async_add_entities` is a sync callback — so each platform passes a plain closure. Because platforms have no `_stopped` latch to close the residual window (unload starts → on-unload cancel runs only after `async_unload_entry` returns), the closures carry an entry-state guard instead: refuse unless `LOADED` or `SETUP_IN_PROGRESS` (the latter because a platform set up while HA is starting defers into exactly that state). Regression tests in `test_entry_lifecycle_containment.py`, each verified to fail against the unfixed code, with positive controls so deleting the deferred add outright can't stay green.
-
-**Effort:** S
-**Priority:** P2
-**Completed:** v3.30.10 (2026-08-21)
-
----
-
-### async_unload_entry has no failure containment
-
-**What:** `async_unload_entry` is a run of bare awaits with no `try`. Home Assistant catches any exception out of it, sets `FAILED_UNLOAD` — declared non-recoverable at `config_entries.py:160` — and returns *without* running `_async_process_on_unload`. So one raise from, say, `video_analyzer.stop()` skips every remaining teardown AND every on-unload callback: the four `EVENT_HOMEASSISTANT_STARTED` cancels never run, the listeners stay armed, and the engines below the raising line are left un-stopped and un-latched. That is exactly the orphan-start this area was hardened to prevent, reachable by a single unexpected exception.
-
-**Why:** Found by the Claude adversarial pass (2026-08-19), rated P1. Not fixed in that ship because containment needs a decision per step — some failures should abort the unload and some should not — and the branch was already carrying five review fixes. The platform-unload-first ordering landed there does reduce the blast radius, but does not close this.
-
-**How to apply:** Wrap each teardown step so unload cannot raise (`contextlib.suppress` plus `LOGGER.exception`, or one `try/finally` that still returns True), keeping the platform-unload abort at the top as the only early return. The `_stopped` latch is only "downstream of every ordering" if unload actually reaches it.
-
-**Resolution:** A local `_teardown(step, run)` wrapper in `async_unload_entry` runs each of the six stops/closes under `try/except Exception` with `LOGGER.exception`, so one raising step skips nothing and the function always returns True past the platform-unload abort — which stays the only early return, and a test pins that the containment did not swallow it. Regression test makes the *first* step (`video_analyzer.stop`) raise and asserts the sentinel/discovery stops still ran, unload reported success, and the on-unload callbacks (client close, listener cancels) still fired — the exact chain FAILED_UNLOAD severs.
-
-**Effort:** S
-**Priority:** P2
-**Completed:** v3.30.10 (2026-08-21)
-
----
-
-### Setup registers services, views, and dispatchers that unload never removes
-
-**What:** Seventeen `hass.services.async_register` calls, the `EnrollPersonView`, and the `http_registered` flag are all created in `async_setup_entry` and never removed. `grep services.async_remove` returns nothing. Service handlers close over that generation's `baseline_updater`, `audit_store`, `proposal_store`, `rule_registry`, and `person_gallery`, so after an unload `hga.sentinel_get_baselines` is still callable and reaches a closed pool. Worse for the view: `http_registered` is never cleared, so a remove-and-re-add (which builds a *new* `ConfigEntry`, unlike a reload) leaves the original view alive dereferencing `runtime_data` on the deleted entry — `AttributeError` on every enroll POST until HA restarts.
-
-**Why:** Found by the Claude adversarial pass (2026-08-19). Re-registration by name means the services pin one generation rather than accumulating per reload, so this is a correctness and stale-reference problem rather than an unbounded leak — but it is a live API surface on an unloaded entry.
-
-**How to apply:** Wrap the registrations in `entry.async_on_unload` (services via `hass.services.async_remove`), and clear `hass.data[DOMAIN]["http_registered"]` on unload, or key the view off the current entry rather than the one that happened to register it.
-
-**Resolution:** Services: all seventeen registrations route through a new `_register_entry_service` helper that registers the service and immediately registers `hass.services.async_remove` via `entry.async_on_unload` — the adjacency guarantees every remove has a matching register even when setup aborts between service blocks, and on-unload running after failed setups covers every abort path. View: clearing `http_registered` would have been the wrong fix (aiohttp routes cannot be removed, so a re-registered view would sit behind the original) — instead `EnrollPersonView` no longer pins the registering entry and resolves the currently LOADED entry per request, returning 503 when none is (and a mid-upload teardown is caught and returned as the same 503 rather than a 500); `http_registered` keeps its now-correct register-once-per-run semantics. The remove-and-re-add regression (new `ConfigEntry`, dead pinned `runtime_data`) is test-pinned, as is service removal on unload. The `_on_entry_changed` dispatcher named in the title was already wrapped. The two-loaded-entries residual (unloading either would remove domain services for both, and the view could serve an arbitrary entry) was closed structurally in the same ship: `single_config_entry: true` in the manifest — the whole integration was already de-facto single-entry (domain-global services, one DB, one Sentinel), both adversarial passes converged on it, and the flag makes HA refuse a second entry at the source.
-
-**Effort:** M
-**Priority:** P2
-**Completed:** v3.30.10 (2026-08-21)
-
----
-
-### docs/sentinel.md documents `sentinel_triage_enabled` as a settable option
-
-**What:** `docs/sentinel.md` and `docs/constants.md` presented `sentinel_triage_enabled` as a normal config option when there was no UI or supported path to set it.
-
-**Why:** Users following the docs looked for a switch that did not exist ("there is no sentinel UI switch called LLM triage" is what surfaced it). Docs should not describe unreachable configuration.
-
-**Resolution:** Resolved by the expose decision above rather than by annotating the rows: the option now has a real UI field, so the docs became true. The Sentinel rows gained the UI labels and the setup path, plus the autonomy >= 1 requirement that both docs already stated and neither config description did. `docs/constants.md` already said *UI-configurable* and is now correct without edits. (This item was deleted outright in 929200a instead of being archived; restored here from the review round so the docs fix keeps a record.)
-
-**Effort:** S
-**Priority:** P3
-**Completed:** unreleased (2026-09-22)
-
----
-
-### Migrate deprecated TargetSelectorData to TargetSelection before HA 2026.12
-
-**What:** `__init__.py:1441` instantiates `homeassistant.helpers.target.TargetSelectorData`, which HA Core deprecated with removal scheduled for 2026.12.0 ("Use TargetSelection instead"). Every startup logs a deprecation warning attributed to this integration, and the integration breaks outright on HA 2026.12.
-
-**Why:** Surfaced in the debug logs of issue #568 (2026-08-24) — the reporter's log opens with the warning, which HA explicitly asks users to file against this repo. Not fixed in the #568 ship because that fix was scoped to the stale-LLM-API options-form bug; the rename needs its own look at the `TargetSelection` API shape and a check for other `homeassistant.helpers.target` call sites.
-
-**How to apply:** Replace the `TargetSelectorData(raw_target)` construction (and the import at `__init__.py:48`) with `TargetSelection`, verifying the attribute surface the surrounding code reads still matches. Must land before supporting HA 2026.12.
-
-**Effort:** S
-**Priority:** P2
-
-**Resolution:** Swapped as prescribed. `homeassistant.helpers.target.TargetSelection` is a plain superclass of the deprecated `TargetSelectorData` with an identical `__init__` — the only thing the subclass adds is a `has_any_selector` alias nothing here called — so the call site at `__init__.py` changed name only. The import is a `try`/`except ImportError` shim that falls back to the old name, because `hacs.json` still advertises a 2025.5.0 minimum and the rename is a recent core change; the shim can go when the floor is raised past it. Pinned by `tests/.../test_silent_config_failures.py`, which asserts the bound class is *not* the deprecated one and that no call site constructs it.
-
-**Completed:** unreleased (2026-09-22)
-
----
-
-### Basic setup silently wipes Sentinel entity exclusions and camera entry links
-
-**What:** `async_step_basic_settings` does `data = _default_payload()` and its schema exposes only four fields, so re-running Basic setup resets `sentinel_rule_entity_exclusions` and `sentinel_camera_entry_links` to `{}`. The overwrite warning says settings will be overwritten with recommended defaults but does not name these two.
-
-**Why:** Pre-existing, but PR #544 changed the exposure: exclusions used to be an advanced-only JSON field, so the population that configured them and the population that runs Basic setup did not overlap. A friendly entity picker is exactly what a Basic-setup user will configure and then destroy, and the symptom — phantom alerts returning with no visible cause — is hard to attribute.
-
-**How to apply:** Carry `CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS` and `CONF_SENTINEL_CAMERA_ENTRY_LINKS` over from `current.data` in the basic path, or name them explicitly in the `sentinel_overwrite_warning` string.
-
-**Effort:** S
-**Priority:** P2
-
-**Resolution:** Took the carry-over half rather than the warning-only half: `async_step_basic_settings` now copies `CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS` and `CONF_SENTINEL_CAMERA_ENTRY_LINKS` out of `current.data` into the fresh default payload, deep enough that the persisted lists are not aliased to the subentry's. Everything else still resets, which is what Basic setup is for. `sentinel_overwrite_warning` (en + cs, and the Python fallback string) now says the two are kept, so the copy matches the behavior either way.
-
-**Completed:** unreleased (2026-09-22)
-
----
-
-### Triage is unreachable: no UI field, not in resolver allowlist — expose or remove
-
-**What:** `sentinel_triage_enabled` (and `sentinel_triage_timeout_seconds`) has no config-flow field, no strings.json label, and is absent from `_apply_sentinel_options`' defaults dict in `core/subentry_resolver.py` — so it cannot be set from the UI and would be ignored even if injected into Sentinel subentry data (same allowlist-omission class as #480, sitting latent). The only live path is a legacy top-level entry option surviving through `resolve_runtime_options`' `{**entry.data, **entry.options}` base (`subentry_resolver.py:184` → `__init__.py:2723`). Default is `False`, so the entire `SentinelTriageService` (#262) is dormant on virtually every install.
-
-**Why:** Surfaced during PR #523 review (2026-07-31): the PR wires a response-language option into a service no user can enable. Either the feature earns a UI switch (Sentinel subentry field + resolver allowlist entry + strings/en/cs labels + docs) or it should be removed rather than shipped dark. Decide product-first: triage adds an LLM call per finding for suppress-only value that quiet hours + cooldowns already partially cover.
-
-**How to apply:** If exposing: add `CONF_SENTINEL_TRIAGE_ENABLED`/`CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS` to `_apply_sentinel_options` defaults, the Sentinel subentry schema (`flows/sentinel_subentry_flow.py`), and translations; add resolver plumbing tests (the #480 regression shape). If removing: delete `SentinelTriageService` wiring from `__init__.py`, the engine triage branch, and the docs rows.
-
-**Effort:** M
-**Priority:** P2
-**Depends on:** None
-
-**Resolution:** Exposed, not removed (user decision, 2026-09-22): the service is complete, wired into the engine, the audit record, and the redaction gate, and CLAUDE.md and docs/sentinel.md both describe it as pipeline layer 3, so removing it was the larger change. `CONF_SENTINEL_TRIAGE_ENABLED` and `CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS` were added to `_apply_sentinel_options`' defaults, `_default_payload()`, and the Sentinel subentry's Advanced schema (BooleanSelector + 1-120 s NumberSelector), with en/cs labels and data descriptions; the default stays `False` so no install changes behavior. Basic setup deliberately does not expose it. The resolver leg is pinned by a test in the #480 regression shape. Docs now name the UI path instead of presenting a bare option key; `docs/constants.md` already said UI-configurable and is now correct.
-
-**Completed:** unreleased (2026-09-22)
-
----
-
-### Baseline-deviation notifications guess the display unit from the entity_id
-
-**What:** `_baseline_deviation_mobile_message` (`sentinel/notifier.py:904`) picks the display unit with `"W" if "power" in entity_id else "kWh" if "energy" in entity_id else ""`. A kW-denominated sensor renders as e.g. "0.4W vs usual 0.3W", and a power sensor without "power" in its entity_id gets no unit at all. Surfaced during the #461 unit-normalization review (v3.21.3).
-
-**How to apply:** Plumb the sensor's `unit_of_measurement` into the baseline finding evidence in `sentinel/baseline.py` (alongside `current_value`/`baseline_value`, which stay native) and render it verbatim in the notifier, falling back to the current heuristic for old persisted findings.
-
-**Resolution:** Shipped as prescribed in the metric-aware baseline-copy fix: `evaluate_baseline_deviation` and `_evaluate_dow_anomaly` capture `unit_of_measurement` and `device_class` into finding evidence, and `_baseline_deviation_mobile_message` renders the captured unit (sanitized — control/bidi characters stripped, length-capped). The entity_id heuristic survives only for legacy persisted findings whose evidence lacks the unit key; a present-but-empty unit means a genuinely unitless sensor and no unit is fabricated. Anomaly-id stability across the new evidence keys is preserved via `DISPLAY_ONLY_EVIDENCE_KEYS` / `hashable_evidence` in `sentinel/models.py`. Follow-up spoofing gap for `friendly_name`-derived text is tracked as its own P3 above.
-
-**Effort:** S
-**Priority:** P3
-**Depends on:** None
-**Completed:** v3.31.1 (2026-08-23)
-
----
-
-### Sentinel unknown-person rules are suppressed by any non-empty recognized list
-
-**What:** `unknown_person_camera_night_home` (and the dynamic no-home/when-home variants) skip whenever `recognized_people` is truthy — but the raw list dispatched to the image entity and Sentinel snapshot contains the literal `"Unknown Person"` and `"Indeterminate"` strings, so with face recognition enabled, a detected-but-unrecognized visitor *suppresses* the unknown-person rules rather than firing them. Decide whether the rules should filter negative identities before the emptiness check, or whether the snapshot layer should strip them.
-
-**Why:** Pre-existing behavior surfaced by the v3.30.0 adversarial review (the merge provably cannot change rule firing, but the rules' emptiness check is only vacuously aligned with their name). Changing it changes alerting behavior, so it needs its own focused decision, docs, and field validation — not a drive-by fix.
-
-**Effort:** M
-**Priority:** P2
-**Depends on:** v3.30.0
-
-**Resolution:** Fixed in the unknown-person rules overhaul: the rules now fire on a positive "Unknown Person" label (normalized), enrolled names suppress as accompanied-guest, and a 10-minute freshness gate keyed to the recognition event prevents stale re-fires. See the three new Sentinel Rules follow-up items for the deliberately deferred edges.
-
-**Completed:** v3.30.11 (2026-08-22)
-
----
-
-### Config entry lifecycle leaks in the deferred-start block
-
-**What:** Three sibling leaks in the same `async_setup_entry` code block that
-#559 fixed for the video analyzer alone:
-
-1. `_start_sentinel`, `_start_discovery`, and `_start_baseline` registered
-   `EVENT_HOMEASSISTANT_STARTED` listeners that were never wired into
-   `entry.async_on_unload`, so an entry that unloaded, reloaded, was disabled,
-   or failed setup before HA finished starting later started the *obsolete*
-   engines — with stale options — alongside the replacement entry. As plain
-   sync functions `HassJob` inferred `Executor`, so the bodies ran on a worker
-   thread.
-2. The `EVENT_HOMEASSISTANT_STOP` listener was registered unconditionally on
-   every setup and never removed, so each reload added another closure
-   capturing that generation's engines and client.
-3. `async_unload_entry` never closed the synchronous `openai_http_client`; its
-   only close sat inside the leaked STOP handler.
-
-**Why:** Surfaced during the #559 review (2026-08-18) by both the maintainer
-pass and the Codex adversarial pass. Deferred out of #559 by user decision so
-the contributor's focused fix could land on its own.
-
-**Resolution:** The four deferred-start sites now share one
-`_defer_start_until_hass_started(hass, entry, start)` helper carrying #559's
-full shape — `@callback` listener, `fired` flag, `@callback` cancel wrapped in
-`entry.async_on_unload`. Because the cancel cannot close the window between
-`stop()` and HA running the on-unload callbacks, `SentinelEngine`,
-`SentinelDiscoveryEngine`, and `SentinelBaselineUpdater` each gained the same
-one-way `_stopped` latch #559 gave `VideoAnalyzer`: set at the top of `stop()`,
-checked first in `start()`. The STOP listener is wrapped in
-`entry.async_on_unload` — with the same fired-flag guard as the helper, set by
-a `@callback` shim rather than inside the coroutine, because on-unload
-callbacks run only after `async_unload_entry` returns and a shutdown racing an
-in-flight reload runs both paths. It stays a listener because HA does not
-unload config entries at shutdown, making it the only stop path for a
-still-loaded entry.
-
-`openai_http_client`'s close is registered with `entry.async_on_unload` at
-construction rather than written into `async_unload_entry`. Home Assistant runs
-those callbacks on *every* failed setup as well as on unload
-(`ConfigEntry.async_setup`: `finally: if not result … _async_process_on_unload`),
-so one hook covers every abort path — including the ten or so that are raises
-rather than `return False` — and, on the success path, lands after
-`async_unload_platforms` for free. `async_unload_entry` now unloads platforms
-FIRST and aborts on refusal, so no teardown is irreversible before Home
-Assistant has agreed the entry can go.
-
-Test count went 4 → 16 in `test_deferred_start_listener.py`, each new test
-verified to fail against the unfixed code. Review found five issues in the
-first cut, four of them multi-model confirmed: the client leaked on
-setup-failure paths, the STOP remover was unguarded, the close ran before
-platform unload, the removal test passed vacuously because nothing asserted the
-listener existed, and — from the adversarial pass — the `PoolTimeout` cleanup
-in the first draft was dead code, because psycopg-pool 3.3.0 defaults `open()`
-to `wait=False` and never raises there. The Codex structured pass then caught a
-P1 introduced by the fix itself: propagating a failed platform unload while the
-teardown had already run would strand a retained entry on stopped, latched
-engines.
-
-**Effort:** S
-**Priority:** P1
-**Completed:** (2026-08-19)
-
----
-
-### Lovelace health card example for baseline attrs
-
-**What:** Add a Lovelace dashboard card YAML snippet to `README.md` showing `baseline_entity_count`, `baseline_fresh_count`, and `baseline_rules_waiting` from `sensor.sentinel_health`.
-
-**Why:** Users enabling baseline collection have no visual confirmation it's working; a README dashboard example closes the discoverability gap.
-
-**Resolution:** Completed by the README "Community Dashboards" section (discussion #513, @hruba202): the featured Sentinel health flex-table-card recipe surfaces `baseline_entity_count`, `baseline_fresh_count`, `baseline_rules_waiting`, and the other health KPIs. Placement is the Community Dashboards section rather than the Baseline section, but the discoverability goal is met.
-
-**Completed:** docs PR for discussion #513 (2026-07-29)
-
----
-
-### Snapshot retention misses batches that never reach _finalize
-
-**What:** Deletion is deque-driven (in-memory), but registration was coupled to
-successful analysis completion (`_finalize`). Six runtime paths abandoned
-captured files without registration: the two `_analyze_and_finalize` early
-returns, the worker's blanket exception handler, notify/store exceptions inside
-`_finalize`, the `_get_batch` backlog drop, and event-hold-buffer eviction.
-
-**Why:** VLM outages and backlogs made these paths routine; files accumulated
-unboundedly. Third occurrence of the same bug class (#489 dedupe-skip was a
-point patch), so the fix moved registration to capture success in
-`_capture_snapshot` — a single site that makes every downstream drop
-retention-irrelevant — and removed the per-site registrations. In-flight frames
-(≤ ~105/camera) can never reach the deque's pop position (cap 200).
-
-**Effort:** S
-**Priority:** P1
-**Completed:** v3.18.2 (2026-07-19)
-
----
-
-### Restart orphans snapshot files predating the restart
-
-**What:** Retention deques are in-memory with no filesystem sweep, so every
-on-disk snapshot from before an HA restart was orphaned forever. Fixed with a
-one-shot startup task (`_seed_retention_from_disk`) that scans each
-`camera_*` snapshot directory (skipping `_latest/` and non-camera dirs like
-`faces/`), merges pre-existing files into the retention deque as the oldest
-entries (never after live captures, so new frames can't be rotated out
-first), and runs the normal budget shrink with the usual latest-asset and
-protection guards.
-
-**Effort:** M
-**Priority:** P2
-**Completed:** v3.18.2 (2026-07-19)
-
----
-
-### iOS notification priority tiers
-
-**What:** `sentinel/notifier.py` now uses `_SEVERITY_INTERRUPT_LEVEL` (`high` → `time-sensitive`, `medium` → `active`, `low` → `passive`) and `_SEVERITY_TITLE` dicts. `async_notify()` derives severity from the finding, selects the interrupt level and title, and passes `"push": {"interruption-level": level}` in the notification data block.
-
-**Why:** All notifications previously used the same `active` interruption level, training users to ignore them — including security alerts.
-
-**Effort:** S
-**Priority:** P1
-**Completed:** v3.6.9 (2026-03-31)
-
----
-
-### Appliance completion detection in baseline deviation
-
-**What:** `sentinel/baseline.py` now detects appliance cycle completion: power-class entities on dedicated appliance circuits (washer, dryer, dishwasher, etc.) with `current_value < COMPLETION_THRESHOLD_PCT × baseline_value` emit `severity="low"` with `evidence["is_completion"] = True`. `sentinel/notifier.py` checks `finding.evidence.get("is_completion")` and uses passive interruption level with completion framing.
-
-**Why:** Washer/dryer finishing a cycle triggered `baseline_deviation` with high-severity framing ("stopped unexpectedly"), causing false-positive security alerts.
-
-**Effort:** S
-**Priority:** P1
-**Completed:** v3.6.9 (2026-03-31)
-
----
-
-### Presence-aware lock severity for `unlocked_lock_at_night`
-
-**What:** `sentinel/rules/unlocked_lock_at_night.py` now reads `anyone_home` from `snapshot["derived"]` and emits `severity="low"` when home is occupied, `severity="high"` when away. Evidence dict includes `"anyone_home": anyone_home`.
-
-**Why:** High-severity `time-sensitive` iOS alert for an unlocked door while occupants are home is noise that trains operators to ignore real alerts.
-
-**Effort:** S
-**Priority:** P1
-**Completed:** v3.6.9 (2026-03-31)
-
----
-
-### Notification batching for medium/low severity bursts
-
-**What:** `SentinelNotifier` now tracks `_notification_times`, `_held_batch`, and `_batch_cancel`. When more than `_BATCH_RATE_LIMIT` medium/low pushes are sent within `_BATCH_WINDOW_SECONDS`, subsequent notifications are buffered and flushed as a single passive-priority summary after `_BATCH_FLUSH_DELAY_SECONDS`. High-severity findings always bypass batching.
-
-**Why:** Burst of 7 notifications in 18 minutes cluttered the lock screen and trained users to dismiss without reading.
-
-**Effort:** M
-**Priority:** P1
-**Completed:** v3.6.9 (2026-03-31)
-
----
-
-### Centralize action code vocabulary in `const.py`
-
-**What:** Defined `ACTION_CODES: dict[str, str]` in `const.py` mapping action code → plain English description. Imported it in `explain/prompts.py` to build the `SYSTEM_PROMPT` vocabulary line dynamically. Used constants in notifier and execution service instead of bare strings.
-
-**Why:** `SYSTEM_PROMPT` contained a hardcoded list of action codes. Any new rule adding a new action code would silently cause the LLM to invent its own English meaning — recreating the exact class of production bug fixed in PR #346. Flagged independently by eng review and Codex outside voice.
-
-**Effort:** S
-**Priority:** P2
-**Completed:** v3.7.0 (2026-04-03)
-
----
-
-### Fix transitive union-find spatial contamination in correlator
-
-**What:** Added `_eject_camera_area_violations()` post-grouping pass to `SentinelCorrelator.correlate()`. For any group containing a `camera_entry_unsecured` finding with a known area, ejects any other finding whose area is non-empty and differs from the camera's area, returning it as a singleton.
-
-**Why:** The area-aware `_COMPLEMENTARY_PAIRS_REQUIRE_AREA_MATCH` guard only protects direct pairwise checks. With three simultaneous findings (camera Front + lock Front + entry Garage), the camera in Front ended up in a compound with the Garage entry via the bridging lock — the exact false spatial claim the camera_entry_unsecured fix was designed to prevent.
-
-**Effort:** S
-**Priority:** P2
-**Completed:** v3.7.0 (2026-04-03)
-
----
-
-### Discovery quality metrics on health sensor
-
-**What:** `SentinelDiscoveryEngine` now tracks per-cycle stats (`candidates_generated`, `candidates_novel`, `candidates_deduplicated`, `proposals_promoted`, `unsupported_ttl_expired`) in `_discovery_cycle_stats`. `SentinelHealthSensor` exposes these as attributes via `SIGNAL_SENTINEL_RUN_COMPLETE`.
-
-**Why:** After the deduplication fix, operators had no visibility into whether dedup was working — they couldn't distinguish "LLM generating zero new ideas" from "LLM generating many but all caught by dedup."
-
-**Effort:** S
-**Priority:** P2
-**Completed:** v3.7.0 (2026-04-03)
-
----
-
-### Daily digest notification
-
-**What:** `SentinelEngine` now schedules a daily push notification summarizing the past 24h findings. Controlled by `CONF_SENTINEL_DAILY_DIGEST_HOUR` (default 07:00). Duplicate digest triggers within a session are deduplicated by checking `self._digest_task.done()` before scheduling.
-
-**Why:** Operators had no visibility into Sentinel activity without actively checking the audit store or Lovelace. A morning summary gives awareness without intra-day noise.
-
-**Effort:** S
-**Priority:** P2
-**Completed:** v3.7.0 (2026-04-03)
-
----
-
-### `trigger_source` breakdown on health sensor
-
-**What:** `SentinelHealthSensor` now exposes `trigger_source_breakdown: {"poll": N, "event": M, "on_demand": K}` as a rolling 24-hour count attribute, populated by querying `AuditStore` during the health update cycle.
-
-**Why:** `trigger_source` was populated in audit records but not surfaced anywhere useful. Operators could not tell if Sentinel was poll-heavy vs event-driven without inspecting raw audit records.
-
-**Effort:** S
-**Priority:** P2
-**Completed:** v3.7.0 (2026-04-03)
-
----
-
-### Build Operational Health Entity (sentinel_plan.md §11)
-
-**What:** Registered `SentinelHealthSensor` (`core/sentinel_health_sensor.py`) — a `SensorEntity` that exposes Sentinel KPIs as HA attributes: `last_run_start`, `last_run_end`, `run_duration_ms`, `active_rule_count`, `trigger_source_stats`, `findings_count_by_severity`, `triage_suppress_rate`, `auto_exec_count`, `auto_exec_failures`, `false_positive_rate_14d`, `action_success_rate`, `user_override_rate`. Added `_timed_run` wrapper to `SentinelEngine` for per-run timing telemetry and `SIGNAL_SENTINEL_RUN_COMPLETE` dispatcher signal. State: `"ok"` / `"disabled"`.
-
-**Why:** No health sensor entity existed — the L2→L3 KPI gate (false-positive rate < 5%, action success rate > 95%) was invisible to operators; Lovelace dashboards and automations could not consume Sentinel state.
-
-**Effort:** XL
-**Priority:** P1
-**Completed:** v3.6.0 (2026-03-15)
-
----
-
-### Fix `people_home`/`people_away` to use stable entity IDs
-
-**What:** Changed `snapshot/derived.py` to populate `people_home` and `people_away` with `state.entity_id` instead of `state.attributes.get("friendly_name") or state.entity_id`. Added `SuppressionState` v2→v3 migration to drop `presence_grace_until` entries written using display-name-derived keys. Also widened `AuditStore.async_append_finding` to accept `AnomalyFinding | CompoundFinding`.
-
-**Why:** Presence-grace window keys in `SuppressionState.presence_grace_until` were keyed by display name (e.g. `"Alice"`) rather than entity ID (e.g. `"person.alice"`). If a user renamed a person in HA, the grace-window key became stale and the window silently stopped working.
-
-**Effort:** M
-**Priority:** P2
-**Completed:** v3.5.3 (2026-03-15)
-
----
-
-### Remove `_supports_suppression_reason_code()` introspection shim
-
-**What:** Deleted the `_supports_suppression_reason_code()` helper in `sentinel/engine.py` and inlined the direct call to `async_append_finding` at all `_append_finding_audit` callsites.
-
-**Why:** The shim's `else`-branch was dead code — `AuditStore.async_append_finding` has had the full v2 signature since Issue #3 (GitHub #254). The introspection added ~20 lines of complexity and a `cast("Any", ...)` bypass that defeated type checking.
-
-**Effort:** S
-**Priority:** P3
-**Completed:** v3.5.2 (2026-03-15)
-
----
-
