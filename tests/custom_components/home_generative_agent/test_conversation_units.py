@@ -170,7 +170,11 @@ from homeassistant.components import conversation as ha_conversation  # noqa: E4
 from homeassistant.util import dt as dt_util  # noqa: E402
 
 from custom_components.home_generative_agent.agent.helpers import (  # noqa: E402
+    start_pin_turn,
     waiting_pin_prompt,
+)
+from custom_components.home_generative_agent.agent.tools import (  # noqa: E402
+    _is_wrong_user,
 )
 from custom_components.home_generative_agent.conversation import (  # noqa: E402
     _STREAM_ERROR_REASON_MAX_CHARS,
@@ -3762,9 +3766,54 @@ def test_number_from_another_voice_joins_the_waiting_prompt() -> None:
     entity = _turn_entity(action)
     turn = entity._turn_thread("conv", Speaker(name=None), "1 2 3 4")
     assert turn == ("conv:Пётр", action)
-    memory = HGAConversationEntity._memory_user
-    assert memory(None, Speaker(name=None), action) == "ivan"
-    assert memory("Logged", Speaker(name=None), action) == "Logged"
+    assert HGAConversationEntity._pin_owner(None, action) == "ivan"
+    assert HGAConversationEntity._pin_owner("Logged", action) is None
+    assert HGAConversationEntity._pin_owner(None, None) is None
+
+
+@pytest.mark.parametrize("text", ["1234", "one two three four"])
+def test_pin_from_another_voice_still_reaches_the_prompt(text: str) -> None:
+    """A real PIN joins the prompt, and keeps the speaker's memories."""
+    action = _waiting_action("conv:Пётр")
+    entity = _turn_entity(action)
+    guest = Speaker(name="Мария", user="Mary")
+    assert entity._turn_thread("conv", guest, text) == ("conv:Пётр", action)
+    assert HGAConversationEntity._memory_user(None, guest) == "Mary"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "remember that I like the blue one",
+        "remember that I take 2 sugars",
+        "set a timer for 10 minutes",
+    ],
+)
+def test_sentence_with_a_short_number_stays_with_its_speaker(text: str) -> None:
+    """A number too short to be a PIN must not reach the prompt owner's thread."""
+    action = _waiting_action("conv:Пётр")
+    entity = _turn_entity(action)
+    guest = Speaker(name="Мария", user="Mary")
+    assert entity._turn_thread("conv", guest, text) == ("conv:Мария", None)
+
+
+def test_sentence_with_a_pin_length_number_keeps_the_speakers_memories() -> None:
+    """Even when a sentence joins the prompt, the owner's memories stay closed."""
+    action = _waiting_action("conv:Пётр")
+    entity = _turn_entity(action)
+    guest = Speaker(name="Мария", user="Mary")
+    text = "remember my phone number is 5551234"
+    thread, prompt = entity._turn_thread("conv", guest, text)
+    assert (thread, prompt) == ("conv:Пётр", action)
+    assert HGAConversationEntity._memory_user(None, guest) == "Mary"
+
+
+def test_pin_owner_decides_the_owner_check_for_a_followed_prompt() -> None:
+    """The speaker's own memory user must not refuse the PIN it was following."""
+    action = {"user": "ivan"}
+    assert _is_wrong_user({"user_id": "Mary", "pin_owner": "ivan"}, action) is False
+    assert _is_wrong_user({"user_id": "Mary", "pin_owner": None}, action) is True
+    assert _is_wrong_user({"user_id": "Mary"}, action) is True
 
 
 def test_other_message_from_another_voice_stays_with_its_speaker() -> None:
@@ -3775,8 +3824,10 @@ def test_other_message_from_another_voice_stays_with_its_speaker() -> None:
     text = "remember my address is on Main street"
     thread, prompt = entity._turn_thread("conv", guest, text)
     assert (thread, prompt) == ("conv:Мария", None)
-    assert HGAConversationEntity._memory_user(None, guest, prompt) == "Mary"
-    assert action.get("reply_turn") is None
+    assert HGAConversationEntity._memory_user(None, guest) == "Mary"
+    pending = entity.entry.runtime_data.pending_actions
+    start_pin_turn(pending, thread, text)
+    assert waiting_pin_prompt(pending, "conv", "1234") is action
 
 
 def test_recognized_voice_with_no_waiting_prompt_keeps_its_thread() -> None:
@@ -3798,7 +3849,8 @@ def test_handler_passes_the_speaker_to_thread_memory_and_prompt() -> None:
     """The resolved speaker has to reach everything it is meant to change."""
     src = inspect.getsource(HGAConversationEntity._async_handle_message_active)
     assert "conversation_id, speaker, user_input.text" in src
-    assert "self._memory_user(user_name, speaker, waiting_prompt)" in src
+    assert "self._memory_user(user_name, speaker)" in src
+    assert "self._pin_owner(user_name, waiting_prompt)" in src
     assert "self._speaker_prompt(speaker)" in src
 
 

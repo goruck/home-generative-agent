@@ -1354,7 +1354,7 @@ async def _warn_if_correct_pin_refused(
 
 
 def _is_wrong_user(cfg: Mapping[str, Any], action: Mapping[str, Any]) -> bool:
-    requester_id = cfg.get("user_id")
+    requester_id = cfg.get("pin_owner") or cfg.get("user_id")
     action_owner = action.get("user")
     return bool(requester_id and action_owner and requester_id != action_owner)
 

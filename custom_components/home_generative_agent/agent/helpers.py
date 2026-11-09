@@ -32,6 +32,8 @@ from custom_components.home_generative_agent.const import (
     CONF_CRITICAL_ACTIONS,
     CONF_TOOL_EXCLUSIONS,
     CONF_TOOL_INCLUSIONS,
+    CRITICAL_PIN_MAX_LEN,
+    CRITICAL_PIN_MIN_LEN,
     RECOMMENDED_CRITICAL_ACTIONS,
 )
 
@@ -468,6 +470,8 @@ class ConfigurableData(TypedDict, total=False):
     user_id: str
     ha_llm_api: Any
     thread_id: str
+    # The user a reply that follows a voice's PIN prompt is checked as.
+    pin_owner: str | None
     # The user's message for this turn. A PIN confirmation is accepted only
     # when the PIN is in it, and runs at most one action.
     pin_reply: PinReply
@@ -1098,12 +1102,17 @@ def waiting_pin_prompt(
 
     On a device that recognizes voices each voice has its own thread, and a short
     spoken PIN is the utterance most likely to be attributed to the wrong one. A
-    message with a number in it is looked up across the conversation's voices so
-    it reaches the prompt instead of going to the model as an ordinary message;
-    the PIN still decides. Any other message stays with whoever said it, and only
-    a prompt a voice created is followed, so a typed request keeps its owner check.
+    message holding one number of PIN length is looked up across the conversation's
+    voices so it reaches the prompt instead of going to the model as an ordinary
+    message; the PIN still decides. Any other message stays with whoever said it,
+    and only a prompt a voice created is followed, so a typed request keeps its
+    owner check.
     """
-    if not _number_runs(text):
+    digits = pin_digits(text)
+    if (
+        digits is None
+        or not CRITICAL_PIN_MIN_LEN <= len(digits) <= CRITICAL_PIN_MAX_LEN
+    ):
         return None
     now = dt_util.utcnow()
     prefix = f"{conversation_id}:"

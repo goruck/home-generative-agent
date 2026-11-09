@@ -1663,25 +1663,33 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         return prompt
 
     @staticmethod
-    def _memory_user(
-        user_name: str | None,
-        speaker: Speaker | None,
-        waiting_prompt: Mapping[str, Any] | None = None,
-    ) -> str | None:
+    def _memory_user(user_name: str | None, speaker: Speaker | None) -> str | None:
         """
         Return whose long-term memories the turn reads and writes.
 
         A logged-in user wins. A satellite request has none, so a voice linked to
         a person with a login uses that user's memories. It grants nothing:
         requester_is_admin comes from the logged-in user only.
-        A reply to a waiting PIN prompt runs as the user who asked for the action,
-        whichever voice it was attributed to; the PIN still decides.
         """
         if user_name:
             return user_name
-        if waiting_prompt and waiting_prompt.get("user"):
-            return waiting_prompt["user"]
         return speaker.user if speaker else None
+
+    @staticmethod
+    def _pin_owner(
+        user_name: str | None, waiting_prompt: Mapping[str, Any] | None
+    ) -> str | None:
+        """
+        Return the user this turn may answer a waiting PIN prompt for, if any.
+
+        A reply that follows a voice's prompt is checked as the user who asked for
+        the action, whichever voice it was attributed to; the PIN still decides.
+        Only the owner check uses this, so the turn keeps its speaker's memories.
+        A logged-in user is never someone else, and keeps the owner check.
+        """
+        if user_name or not waiting_prompt:
+            return None
+        return waiting_prompt.get("user")
 
     @staticmethod
     def _thread_id(conversation_id: str, speaker: Speaker | None) -> str:
@@ -1700,9 +1708,11 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         """
         Return the thread for this turn, and the PIN prompt it answers, if any.
 
-        A message with a number in it may be the PIN for a prompt another voice
-        was asked, so it joins the thread that holds the prompt. Any other
-        message stays on its speaker's thread and leaves the prompt waiting.
+        A message holding one number of PIN length may be the PIN for a prompt
+        another voice was asked, so it joins the thread that holds the prompt. Any
+        other message stays on its speaker's thread; from another voice, that
+        leaves the prompt waiting, while the owner's own message still answers
+        or abandons it.
         """
         thread_id = self._thread_id(conversation_id, speaker)
         if speaker is None:
@@ -2220,7 +2230,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         message_history = [] if speaker else message_history
 
         # A PIN confirmation is accepted only from this message, and a PIN
-        # prompt waiting in this conversation is answered by it or not at all,
+        # prompt waiting on this thread is answered by it or not at all,
         # so this runs before any other early return. A turn that fails keeps
         # the prompt for the user's next message (keep_pin_prompts).
         pin_reply = start_pin_turn(
@@ -2317,7 +2327,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             )
 
         # A user name of None indicates an automation is being run.
-        memory_user = self._memory_user(user_name, speaker, waiting_prompt)
+        memory_user = self._memory_user(user_name, speaker)
         clean_user_name = "robot" if memory_user is None else memory_user
         # Remove special characters since memory namespace labels cannot contain them.
         clean_user_name = clean_user_name.translate(
@@ -2328,6 +2338,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "configurable": {
                 "thread_id": thread_id,
                 "user_id": clean_user_name,
+                "pin_owner": self._pin_owner(user_name, waiting_prompt),
                 "pin_reply": pin_reply,
                 "requester_is_admin": requester_is_admin,
                 "chat_model": base_llm,
