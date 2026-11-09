@@ -141,6 +141,8 @@ You can point the Database subentry at any PostgreSQL server instead of the bund
 
 After fixing either pgvector problem, reload the integration.
 
+The integration's database connections check that the server is still there and give up after about a minute if it vanished without closing them (power loss, a paused VM, a network drop). To use other timings, add `keepalives_idle`, `keepalives_interval`, `keepalives_count` or `tcp_user_timeout` under **Database connection params** (the Database step of **+ Setup** → **Advanced setup**); each one you set replaces the integration's value, and setting any of the first three also leaves out the integration's `tcp_user_timeout`, which would otherwise cut those timings short. They have no effect over a Unix socket, and a proxy or connection pooler between Home Assistant and PostgreSQL answers the checks itself.
+
 ### Database tables owned by the PostgreSQL superuser
 
 The integration's tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `store`, `store_vectors`, and their `*_migrations` tables) must be owned by the database user configured in the integration (default `hga`). If they were created by the `postgres` superuser instead — common when tables are created manually during troubleshooting — the LangGraph schema migrations run by `store.setup()` fail silently on startup due to insufficient privileges, and features that depend on the store (memory, tool index, vector search) degrade or crash.

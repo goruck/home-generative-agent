@@ -17,8 +17,40 @@ from homeassistant.const import (
     CONF_PORT,
     CONF_USERNAME,
 )
+from psycopg.conninfo import conninfo_to_dict
 
 from ..const import CONF_DB_NAME, CONF_DB_PARAMS  # noqa: TID252
+
+# Defaults for noticing a server that vanished without closing the connection,
+# which the OS otherwise takes about two hours to do (#937). Keepalives cover a
+# connection waiting for an answer; they do not run while sent data is
+# unacknowledged, which tcp_user_timeout covers. libpq ignores all of these
+# over a Unix socket. A timeout in asyncio does not replace them: psycopg waits
+# on, with no limit, after a cancelled query on a connection that is gone.
+_DB_CLIENT_KEEPALIVES = {
+    "keepalives": 1,
+    "keepalives_idle": 30,
+    "keepalives_interval": 10,
+    "keepalives_count": 3,
+    "tcp_user_timeout": 60000,
+}
+_DB_KEEPALIVE_TIMING = {"keepalives_idle", "keepalives_interval", "keepalives_count"}
+
+
+def db_client_keepalives(db_uri: str) -> dict[str, Any]:
+    """
+    Return the keepalive settings to add to a connection made with ``db_uri``.
+
+    psycopg lets connection arguments override the URI, so an option the URI
+    sets is left out; a blank one counts as unset, as it does in libpq. On
+    Linux ``tcp_user_timeout`` also decides when keepalive probes give up, so
+    it is left out too when the URI sets its own probe timing.
+    """
+    set_by_uri = {key for key, value in conninfo_to_dict(db_uri).items() if value}
+    defaults = dict(_DB_CLIENT_KEEPALIVES)
+    if set_by_uri & _DB_KEEPALIVE_TIMING:
+        del defaults["tcp_user_timeout"]
+    return {key: value for key, value in defaults.items() if key not in set_by_uri}
 
 
 def parse_postgres_uri(uri: str) -> dict[str, Any]:

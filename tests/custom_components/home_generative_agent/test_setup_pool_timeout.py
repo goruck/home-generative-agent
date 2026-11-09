@@ -204,3 +204,5 @@ async def test_pool_checks_connections_on_checkout(
     assert result is False
     assert pool_holder["pool"].close_called is True
     assert pool_holder["pool"].kwargs["check"] == AsyncConnectionPool.check_connection
+    assert pool_holder["pool"].kwargs["kwargs"]["keepalives_idle"] == 30
+    assert pool_holder["pool"].kwargs["kwargs"]["tcp_user_timeout"] == 60000

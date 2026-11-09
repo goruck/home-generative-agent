@@ -93,6 +93,7 @@ from custom_components.home_generative_agent.const import (
     SUBENTRY_TYPE_STT_PROVIDER,
     SUBENTRY_TYPE_TTS_PROVIDER,
 )
+from custom_components.home_generative_agent.core.db_utils import db_client_keepalives
 from custom_components.home_generative_agent.core.subentry_resolver import (
     build_model_deployments,
     legacy_model_provider_configs,
@@ -5971,7 +5972,7 @@ async def test_the_database_test_keeps_the_users_options(
     await utils._db_probe_connect(uri)
 
     assert seen["uri"] == uri
-    assert seen["kwargs"] == {"connect_timeout": 10}
+    assert seen["kwargs"] == {"connect_timeout": 10, **db_client_keepalives(uri)}
     assert seen["sql"] == ["SET statement_timeout = 5000", "SELECT 1"]
     assert seen["closed"] is True
 
@@ -6063,7 +6064,7 @@ async def test_the_database_test_keeps_a_connect_timeout_the_user_set(
     monkeypatch.setattr(utils.psycopg.AsyncConnection, "connect", _connect)
     with pytest.raises(utils.psycopg.OperationalError):
         await utils._db_probe_connect("postgresql://u:p@db:5432/hga?connect_timeout=30")
-    assert seen == {}
+    assert "connect_timeout" not in seen
 
 
 @pytest.mark.parametrize(

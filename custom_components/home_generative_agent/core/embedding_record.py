@@ -62,6 +62,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from ..const import DOMAIN, PROVIDER_TYPE_LABELS  # noqa: TID252
+from .db_utils import db_client_keepalives
 from .embedding_model_guard import ACTIVE_ENTRY_STATES, STORE_VECTORS_TABLE
 from .embedding_store import (
     GEMINI,
@@ -2727,7 +2728,9 @@ async def async_recorded_ollama_digest(db_uri: str, model: str) -> str | None:
     try:
         async with (
             asyncio.timeout(_DIGEST_READ_TIMEOUT_S),
-            await psycopg.AsyncConnection.connect(db_uri, autocommit=True) as conn,
+            await psycopg.AsyncConnection.connect(
+                db_uri, autocommit=True, **db_client_keepalives(db_uri)
+            ) as conn,
             conn.cursor(row_factory=dict_row) as cur,
         ):
             await cur.execute(_RECORDED_MODEL_SQL)
