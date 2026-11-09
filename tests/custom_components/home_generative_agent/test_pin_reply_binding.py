@@ -514,6 +514,23 @@ async def test_an_unexpected_error_still_uses_up_the_confirmation() -> None:
         ("1234%", False),
         ("1234\u2030", False),
         ("oh and one two three four", False),
+        # Russian digit words, as speech-to-text spells them.
+        ("один два три четыре", True),
+        ("Один, два, три, четыре.", True),
+        ("ОДИН ДВА ТРИ ЧЕТЫРЕ", True),
+        ("одна две три четыре", True),
+        ("одно два три четыре", True),
+        ("один, два, три и четыре", True),
+        ("мой пин один два три четыре", True),
+        # A longer number that contains the PIN does not count in Russian either.
+        ("девять один два три четыре", False),
+        ("один два три четыре пять", False),
+        ("555 один два три четыре", False),
+        # Ordinary Russian sentences, with and without digit words between
+        # other words.
+        ("включи свет в гостиной", False),
+        ("открой две двери и три окна", False),
+        ("один раз, два раза, три раза, четыре раза", False),
     ],
 )
 def test_pin_in_text(text: str, *, expected: bool) -> None:
@@ -568,6 +585,14 @@ def test_oh_after_the_pin_makes_a_longer_number() -> None:
         ("PIN 1234", "1234"),
         ("12:34", None),
         ("12 and 34", None),
+        ("один два три четыре", "1234"),
+        ("одна две три четыре", "1234"),
+        ("ноль один два три", "0123"),
+        ("нуль один два три", "0123"),
+        ("пять шесть семь восемь девять", "56789"),
+        ("12 и 34", None),
+        ("включи свет в гостиной", None),
+        ("открой две двери и три окна", None),
     ],
 )
 def test_pin_digits(text: str, expected: str | None) -> None:

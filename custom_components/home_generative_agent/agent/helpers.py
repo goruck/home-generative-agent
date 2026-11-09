@@ -562,9 +562,10 @@ def pin_refusal(content: str, tool_name: str | None = None) -> dict[str, Any] | 
 CONFIRM_TOOL_NAME = "confirm_sensitive_action"
 
 
-# Spoken digits as speech-to-text may write them, in the languages the PIN
-# messages ship in (pin_messages.py); Czech also without diacritics, except
-# "pet" and "tri", which are English words.
+# Spoken digits as speech-to-text may write them: in the languages the PIN
+# messages ship in (pin_messages.py), and in Russian, whose speech-to-text
+# engines spell numbers out. Czech also without diacritics, except "pet" and
+# "tri", which are English words.
 _SPOKEN_DIGITS = {
     "zero": "0",
     "one": "1",
@@ -593,12 +594,27 @@ _SPOKEN_DIGITS = {
     "osm": "8",
     "devět": "9",
     "devet": "9",
+    "ноль": "0",
+    "нуль": "0",
+    "один": "1",
+    "одна": "1",
+    "одно": "1",
+    "два": "2",
+    "две": "2",
+    "три": "3",
+    "четыре": "4",
+    "пять": "5",
+    "шесть": "6",
+    "семь": "7",
+    "восемь": "8",
+    "девять": "9",
 }
 # "Oh" for zero, read as a digit only next to another digit ("one oh four",
 # "one two three oh").
 _SPOKEN_ZERO = "oh"
-# Words that may join digits read out one by one ("1, 2, 3 and 4"; Czech "a").
-_DIGIT_JOINERS = frozenset({"and", "a"})
+# Words that may join digits read out one by one ("1, 2, 3 and 4"; Czech "a",
+# Russian "и").
+_DIGIT_JOINERS = frozenset({"and", "a", "и"})
 # A token of the message: a word or number, a run of whitespace, or one other
 # character.
 _TOKEN_RE = re.compile(r"\w+|\s+|.", re.DOTALL)
