@@ -230,7 +230,9 @@ async def _resolve_fresh(  # noqa: PLR0913
     for count in (_RECENT_ROWS, _MAX_ROWS):
         rows, all_there_is = await _newest(hass, instance, entity_id, count, now)
         if len(rows) < 2:  # noqa: PLR2004
-            return None  # too little history to say anything
+            if all_there_is:
+                return None  # too little history to say anything
+            continue  # the newest are after the run began (clock set back)
         walk = _Walk()
         in_window = [row for row in rows if row.last_changed > start_time]
         checked = rows[-1].last_changed
@@ -252,6 +254,8 @@ async def _resolve_fresh(  # noqa: PLR0913
                 )
         if before or all_there_is:
             break  # no 'off' reading in all the history there is
+    if len(rows) < 2:  # noqa: PLR2004
+        return None
     return PowerOnSince(
         walk.since, unknown=True, checked=rows[-1].last_changed, factor=factor
     )
@@ -275,11 +279,13 @@ async def _resolve(  # noqa: PLR0913
     remembered position older than the window, or too many new readings),
     the newest readings are read back.
     """
+    stepped_back = cached is not None and _clock_step_back(cached, now, mono)
     if (
         cached is not None
         and cached.factor == factor
         and start_time <= cached.checked <= now
-        and not _clock_went_back(cached, now, mono)
+        and not stepped_back
+        and _still_recorded(instance, cached.checked)
     ):
         rows = await _since_checked(hass, instance, entity_id, cached.checked, now)
         if rows is not None:
@@ -298,14 +304,33 @@ async def _resolve(  # noqa: PLR0913
             return PowerOnSince(
                 since, unknown=cached.unknown, checked=checked, factor=factor
             )
-    return await _resolve_fresh(hass, instance, entity_id, factor, start_time, now)
+    result = await _resolve_fresh(hass, instance, entity_id, factor, start_time, now)
+    if result is not None and stepped_back and cached and cached.ran_at:
+        # Readings stamped after the step may still be committed below the
+        # newest one read: read from before the step again next run.
+        result.checked = min(result.checked, cached.ran_at - stepped_back)
+    return result
 
 
-def _clock_went_back(cached: PowerOnSince, now: datetime, mono: float) -> bool:
+def _clock_step_back(cached: PowerOnSince, now: datetime, mono: float) -> timedelta:
+    """How far the wall clock went back since that run; zero if not past _CLOCK_STEP."""
     if cached.ran_at is None:
-        return False
-    wall = now - cached.ran_at
-    return wall < timedelta(seconds=mono - cached.ran_mono) - _CLOCK_STEP
+        return timedelta(0)
+    back = timedelta(seconds=mono - cached.ran_mono) - (now - cached.ran_at)
+    return back if back > _CLOCK_STEP else timedelta(0)
+
+
+def _still_recorded(instance: Any, checked: datetime) -> bool:
+    """
+    Whether the recorder still keeps readings from ``checked`` on.
+
+    A sensor unavailable for longer than the recorder keeps history keeps its
+    remembered position; an off reading since then may have been purged.
+    """
+    oldest = getattr(getattr(instance, "states_manager", None), "oldest_ts", None)
+    if not isinstance(oldest, int | float):
+        return True
+    return checked.timestamp() >= oldest
 
 
 async def async_enrich_power_last_changed(
@@ -408,6 +433,12 @@ async def _enrich(
             on_since.pop(entity_id, None)
             continue
         result.ran_at, result.ran_mono = now, mono
+        if result.unknown and result.since is not None:
+            # Home Assistant's own last_changed is a bound too: the reading has
+            # stayed above the off level since then.  Keep the older of the two.
+            own = dt_util.parse_datetime(str(power_entity["last_changed"]))
+            if own is not None and dt_util.as_utc(own) < result.since:
+                result.since = dt_util.as_utc(own)
         on_since[entity_id] = result
         if result.unknown:
             # Only "on at least since" (Home Assistant's own value is one too
