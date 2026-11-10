@@ -65,6 +65,7 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     RECOMMENDED_SENTINEL_STALENESS_THRESHOLD_SECONDS,
 )
+from custom_components.home_generative_agent.snapshot.schema import entity_last_heard
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -524,14 +525,16 @@ class SentinelExecutionService:
             if entity is None:
                 unavailable_entities.append(entity_id)
                 continue
-            last_changed_raw = entity.get("last_changed")
-            last_changed = (
-                dt_util.parse_datetime(last_changed_raw) if last_changed_raw else None
+            # When it last reported: an always-on power sensor's last_changed
+            # is when its current run started (#982).
+            last_heard_raw = entity_last_heard(entity)
+            last_heard = (
+                dt_util.parse_datetime(last_heard_raw) if last_heard_raw else None
             )
-            if last_changed is None:
+            if last_heard is None:
                 stale_entities.append(entity_id)
                 continue
-            age = now - dt_util.as_utc(last_changed)
+            age = now - dt_util.as_utc(last_heard)
             if age > threshold:
                 stale_entities.append(entity_id)
             else:

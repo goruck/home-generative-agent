@@ -419,6 +419,23 @@ def test_fresh_entity_yields_fresh_quality() -> None:
     assert details["stale_entities"] == []
 
 
+def test_data_quality_reads_when_a_power_sensor_last_reported() -> None:
+    """
+    An always-on power sensor that keeps reporting is fresh (#982).
+
+    Its last_changed is the start of its current run (a day back here), set by
+    power enrichment, which also stores last_reported.
+    """
+    svc = SentinelExecutionService(_FULL_OPTIONS)
+    snapshot = _make_snapshot(last_changed="2024-12-31T01:00:00+00:00")
+    cast("Any", snapshot["entities"][0])["last_reported"] = "2025-01-01T00:59:59+00:00"
+
+    dq, details = svc._compute_data_quality(_make_finding(), snapshot, _NOW)
+
+    assert dq == DATA_QUALITY_FRESH
+    assert details["stale_entities"] == []
+
+
 # ---------------------------------------------------------------------------
 # Policy version — deterministic
 # ---------------------------------------------------------------------------

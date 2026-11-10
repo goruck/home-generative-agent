@@ -3618,3 +3618,38 @@ def test_pipeline_unknown_label_matches_sentinel_const() -> None:
     # Pin the wire value: image/sensor attributes and persisted evidence
     # carry this exact string, so it cannot change silently.
     assert UNKNOWN_PERSON_LABEL == "Unknown Person"
+
+
+@pytest.mark.parametrize(
+    ("last_reported", "fires"),
+    [("2025-01-02T23:59:59+00:00", False), (None, True)],
+)
+def test_dynamic_entity_staleness_reads_when_a_power_sensor_last_reported(
+    last_reported: str | None,
+    fires: bool,  # noqa: FBT001
+) -> None:
+    """
+    An always-on power sensor is not stale while it keeps reporting (#982).
+
+    Power enrichment moves its last_changed back to when the current run
+    started (two days here) and stores last_reported; staleness reads that.
+    Without it, last_changed decides as before.
+    """
+    snapshot = _base_snapshot()
+    snapshot["derived"]["now"] = "2025-01-03T00:00:00+00:00"
+    entity = _entity(
+        "sensor.ups_power",
+        "52.0",
+        last_changed="2025-01-01T00:00:00+00:00",
+        attributes={"device_class": "power", "unit_of_measurement": "W"},
+    )
+    if last_reported is not None:
+        entity["last_reported"] = last_reported
+    snapshot["entities"] = [entity]
+    rule = _dyn_rule(
+        "entity_staleness",
+        "ups_stale",
+        {"entity_id": "sensor.ups_power", "max_stale_hours": 24.0},
+    )
+
+    assert bool(evaluate_dynamic_rule(snapshot, rule)) is fires

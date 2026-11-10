@@ -442,6 +442,12 @@ async def _enrich(
             continue
         result.ran_at, result.ran_mono = now, mono
         on_since[entity_id] = result
+        # last_changed may move back to the run start below; keep when the
+        # sensor last reported for the checks that ask that (#982).
+        state = hass.states.get(entity_id)
+        last_reported = getattr(state, "last_reported", None)
+        if isinstance(last_reported, datetime):
+            power_entity["last_reported"] = dt_util.as_utc(last_reported).isoformat()
         if result.unknown:
             # Only "on at least since" (Home Assistant's own value is one too
             # when nothing was walked): the baseline completion check must not
