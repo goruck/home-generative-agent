@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import logging
 import math
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -35,6 +36,10 @@ _RECENT_ROWS = 1000
 _MAX_ROWS = 20_000
 # Query bounds are exclusive; this makes a bound inclusive.
 _TICK = timedelta(microseconds=1)
+# A wall clock that moved this much less than the monotonic clock between two
+# runs was set back: readings stamped in that stretch may sit below the
+# remembered position, so it is not used.
+_CLOCK_STEP = timedelta(minutes=1)
 # Below this wattage the appliance is effectively off.  Used when walking
 # recorder history to locate the last off→on transition.
 _POWER_OFF_W = 10.0
@@ -148,25 +153,34 @@ class PowerOnSince:
     unknown: bool
     checked: datetime
     factor: float
+    # When the run that found this ran, by the wall and the monotonic clock.
+    ran_at: datetime | None = None
+    ran_mono: float = 0.0
 
 
 async def _newest(
     hass: HomeAssistant, instance: Any, entity_id: str, count: int, now: datetime
-) -> list[_Reading]:
+) -> tuple[list[_Reading], bool]:
     """
-    Return the sensor's newest ``count`` readings up to ``now``, oldest first.
+    Return the sensor's newest readings up to ``now``, oldest first.
 
-    get_last_state_changes orders by time, newest first, inside the query on
-    every supported Home Assistant version.  Readings recorded after the run
-    began are left for the next run.
+    Also says whether that is all the history there is: the recorder returned
+    fewer than ``count``.  get_last_state_changes takes the newest ``count``
+    inside the query on every supported Home Assistant version, with no time
+    bound, so readings recorded after the run began are dropped here (left
+    for the next run) after that count is taken.
     """
     states = await instance.async_add_executor_job(
         functools.partial(
             recorder_history.get_last_state_changes, hass, count, entity_id
         )
     )
-    rows = [_Reading.of(row) for row in states.get(entity_id) or []]
-    return [row for row in rows if row.last_changed <= now]
+    fetched = states.get(entity_id) or []
+    rows = sorted(
+        (r for r in map(_Reading.of, fetched) if r.last_changed <= now),
+        key=lambda r: r.last_changed,
+    )
+    return rows, len(fetched) < count
 
 
 async def _since_checked(
@@ -212,8 +226,9 @@ async def _resolve_fresh(  # noqa: PLR0913
     "on at least since".
     """
     rows: list[_Reading] = []
+    walk = _Walk()
     for count in (_RECENT_ROWS, _MAX_ROWS):
-        rows = await _newest(hass, instance, entity_id, count, now)
+        rows, all_there_is = await _newest(hass, instance, entity_id, count, now)
         if len(rows) < 2:  # noqa: PLR2004
             return None  # too little history to say anything
         walk = _Walk()
@@ -223,17 +238,20 @@ async def _resolve_fresh(  # noqa: PLR0913
             return PowerOnSince(
                 walk.since, unknown=False, checked=checked, factor=factor
             )
-        if len(in_window) < len(rows):
-            # A reading from before the window shows the state at its start.
-            if walk.feed(rows[len(rows) - len(in_window) - 1], factor):
+        before = rows[: len(rows) - len(in_window)]
+        for row in reversed(before):
+            # The newest usable reading from before the window shows the
+            # state at its start.
+            if walk.feed(row, factor):
                 return PowerOnSince(
                     walk.since, unknown=False, checked=checked, factor=factor
                 )
-            return PowerOnSince(
-                start_time, unknown=True, checked=checked, factor=factor
-            )
-        if len(rows) < count:
-            break  # all the history there is, and no 'off' reading in it
+            if walk.prev is row:
+                return PowerOnSince(
+                    start_time, unknown=True, checked=checked, factor=factor
+                )
+        if before or all_there_is:
+            break  # no 'off' reading in all the history there is
     return PowerOnSince(
         walk.since, unknown=True, checked=rows[-1].last_changed, factor=factor
     )
@@ -247,6 +265,7 @@ async def _resolve(  # noqa: PLR0913
     start_time: datetime,
     now: datetime,
     cached: PowerOnSince | None,
+    mono: float,
 ) -> PowerOnSince | None:
     """
     Return the sensor's current 'on' episode, or None to leave it alone.
@@ -260,10 +279,11 @@ async def _resolve(  # noqa: PLR0913
         cached is not None
         and cached.factor == factor
         and start_time <= cached.checked <= now
+        and not _clock_went_back(cached, now, mono)
     ):
         rows = await _since_checked(hass, instance, entity_id, cached.checked, now)
         if rows is not None:
-            checked = rows[-1].last_changed if rows else cached.checked
+            checked = max((r.last_changed for r in rows), default=cached.checked)
             walk = _Walk()
             if walk.back(rows, factor) or (
                 # The episode began after the last run saw the sensor off.
@@ -279,6 +299,13 @@ async def _resolve(  # noqa: PLR0913
                 since, unknown=cached.unknown, checked=checked, factor=factor
             )
     return await _resolve_fresh(hass, instance, entity_id, factor, start_time, now)
+
+
+def _clock_went_back(cached: PowerOnSince, now: datetime, mono: float) -> bool:
+    if cached.ran_at is None:
+        return False
+    wall = now - cached.ran_at
+    return wall < timedelta(seconds=mono - cached.ran_mono) - _CLOCK_STEP
 
 
 async def async_enrich_power_last_changed(
@@ -322,12 +349,11 @@ async def async_enrich_power_last_changed(
         )
     ]
     keep: set[str] = set()
-    try:
-        if power_entities:
-            await _enrich(hass, power_entities, on_since, keep)
-    finally:
-        for entity_id in [k for k in on_since if k not in keep]:
-            del on_since[entity_id]
+    if power_entities:
+        await _enrich(hass, power_entities, on_since, keep)
+    # Only after a whole run: one cut short keeps what it did not reach.
+    for entity_id in [k for k in on_since if k not in keep]:
+        del on_since[entity_id]
 
 
 async def _enrich(
@@ -338,6 +364,7 @@ async def _enrich(
 ) -> None:
     instance = get_recorder_instance(hass)
     now = dt_util.utcnow()  # read nothing recorded after this run began
+    mono = time.monotonic()
     start_time = now - timedelta(days=_LOOKBACK_DAYS)
 
     for power_entity in power_entities:
@@ -370,6 +397,7 @@ async def _enrich(
                 start_time,
                 now,
                 on_since.get(entity_id),
+                mono,
             )
         except Exception:  # noqa: BLE001
             _LOGGER.debug(
@@ -379,6 +407,7 @@ async def _enrich(
         if result is None:
             on_since.pop(entity_id, None)
             continue
+        result.ran_at, result.ran_mono = now, mono
         on_since[entity_id] = result
         if result.unknown:
             # Only "on at least since" (Home Assistant's own value is one too

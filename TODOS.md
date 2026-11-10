@@ -1217,7 +1217,7 @@ Since step 6 this also covers `radio_new_device_joined`, and since step 7 `netwo
 
 ### A per-run row budget for the power-enrichment walk
 
-**What:** `sentinel/power_enrichment.py` caps the recorder read at `_MAX_ROWS` (20,000) readings per sensor per run, not per run. With nothing remembered yet (the first run after a restart, or after a unit change), every 'on' power sensor whose last off reading is far back reads its newest 20,000 readings, one sensor after another, in that run: 40 always-on sensors reporting every second read about 800,000 rows with attributes. Later runs read only new readings.
+**What:** `sentinel/power_enrichment.py` caps the recorder read at `_MAX_ROWS` (20,000) readings per sensor, with no budget shared across the sensors in a run. With nothing remembered yet (the first run after a restart, or after a unit change), every 'on' power sensor whose last off reading is far back reads its newest 1,000 and then its newest 20,000 readings, one sensor after another, in that run: 40 always-on sensors reporting every second read about 840,000 rows with attributes. Later runs read only new readings.
 
 **Why:** Performance specialist, PR review of the bounded walk (2026-11-10). Lindo chose to keep the per-sensor cap only and record this, since it is a one-run cost after a restart and only for homes with many dense always-on power sensors.
 

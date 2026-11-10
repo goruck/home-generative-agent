@@ -82,8 +82,18 @@ class _FakeRecorder:
     def __init__(self, rows: list[MagicMock]) -> None:
         self.rows = rows
         self.queries: list[dict[str, Any]] = []
+        # Enrichment swallows recorder errors, so a refused query must be
+        # seen here: every test checks this stays empty.
+        self.refused: list[str] = []
 
     def __call__(self, job: Any) -> dict[str, list[MagicMock]]:
+        try:
+            return self._serve(job)
+        except AssertionError as err:
+            self.refused.append(repr(err) or job.func.__name__)
+            raise
+
+    def _serve(self, job: Any) -> dict[str, list[MagicMock]]:
         name = job.func.__name__
         if name == "get_last_state_changes":
             _hass, count, entity_id = job.args
@@ -102,20 +112,15 @@ class _FakeRecorder:
         return {entity_id: page} if page else {}
 
 
-def _restamped(row: MagicMock, at: datetime) -> MagicMock:
-    s = MagicMock()
-    s.state = row.state
-    s.last_changed = at
-    s.attributes = row.attributes
-    return s
+_RECORDERS: list[_FakeRecorder] = []
 
 
 def _make_hass(recorder_states: list[MagicMock] | None = None) -> MagicMock:
     hass = MagicMock()
     instance = MagicMock()
-    instance.async_add_executor_job = AsyncMock(
-        side_effect=_FakeRecorder(recorder_states or [])
-    )
+    recorder = _FakeRecorder(recorder_states or [])
+    _RECORDERS.append(recorder)
+    instance.async_add_executor_job = AsyncMock(side_effect=recorder)
     hass.data = {DATA_INSTANCE: instance}
     return hass
 
@@ -127,11 +132,20 @@ def _recorder(hass: MagicMock) -> _FakeRecorder:
 _CLOCK = [_NOW]
 
 
+_MONO = [1000.0]
+
+
 @pytest.fixture(autouse=True)
 def freeze_utcnow():
     _CLOCK[0] = _NOW
-    with patch("homeassistant.util.dt.utcnow", side_effect=lambda: _CLOCK[0]):
+    _MONO[0] = 1000.0
+    _RECORDERS.clear()
+    with (
+        patch("homeassistant.util.dt.utcnow", side_effect=lambda: _CLOCK[0]),
+        patch(f"{_PE}.time.monotonic", side_effect=lambda: _MONO[0]),
+    ):
         yield
+    assert [r.refused for r in _RECORDERS if r.refused] == []
 
 
 @pytest.mark.asyncio
@@ -557,7 +571,9 @@ async def _run(
 
 
 def _advance(by: timedelta) -> datetime:
+    """Move the wall clock and, when time really passes, the monotonic one."""
     _CLOCK[0] += by
+    _MONO[0] += max(by.total_seconds(), 0.0)
     return _CLOCK[0]
 
 
@@ -971,4 +987,149 @@ async def test_never_asks_the_recorder_for_newest_first_with_a_limit() -> None:
     await _run(hass, cache)
     rows.append(_mock_state("1500", _advance(timedelta(minutes=1))))
     await _run(hass, cache)
-    assert all(q.get("descending", False) is False for q in _recorder(hass).queries)
+    assert _recorder(hass).refused == []
+    assert any("start" in q for q in _recorder(hass).queries)
+
+
+@pytest.mark.asyncio
+async def test_a_reading_after_the_run_began_does_not_skip_the_wider_read() -> None:
+    """
+    Readings newer than the run's start are dropped after the count is taken.
+
+    A full page that loses one of them is still a full page: the newest
+    _MAX_ROWS are read, not the oldest of a short read taken as all history.
+    """
+    true_on = _NOW - timedelta(minutes=10)
+    rows = [
+        _mock_state("0.5", true_on - timedelta(minutes=1)),
+        *_on_rows(_NOW, 11, timedelta(minutes=1)),
+        _mock_state("1500", _NOW + timedelta(seconds=1)),
+    ]
+    hass = _make_hass(rows)
+    with patch(f"{_PE}._RECENT_ROWS", 4), patch(f"{_PE}._MAX_ROWS", 50):
+        assert await _run(hass, {}) == true_on.isoformat()
+    assert _newest_queries(hass) == [4, 50]
+
+
+@pytest.mark.asyncio
+async def test_an_unusable_reading_before_the_window_proves_nothing() -> None:
+    """Unavailable 40 days ago and on for 2 days is not on for 30 days."""
+    two_days = _NOW - timedelta(days=2)
+    rows = [
+        _mock_state("unavailable", _NOW - timedelta(days=40)),
+        _mock_state("1500", two_days),
+        _mock_state("1500", _NOW),
+    ]
+    hass = _make_hass(rows)
+    cache: dict[str, Any] = {}
+    assert await _run(hass, cache) == two_days.isoformat()
+    assert cache["sensor.dishwasher_power"].unknown
+
+
+@pytest.mark.asyncio
+async def test_an_off_reading_before_the_window_dates_the_start() -> None:
+    """Off just before the window and on ever since: the start is found."""
+    first_on = _NOW - timedelta(days=29)
+    rows = [
+        _mock_state("0.5", _NOW - timedelta(days=31)),
+        _mock_state("1500", first_on),
+        _mock_state("1500", _NOW),
+    ]
+    hass = _make_hass(rows)
+    cache: dict[str, Any] = {}
+    assert await _run(hass, cache) == first_on.isoformat()
+    assert not cache["sensor.dishwasher_power"].unknown
+
+
+@pytest.mark.asyncio
+async def test_a_small_clock_step_back_reads_the_newest_back_again() -> None:
+    """
+    A clock set back, then caught up past the remembered position.
+
+    Readings stamped in the repeated stretch sit below that position, so an
+    off and on there would be missed; comparing with the monotonic clock
+    shows the step and the remembered start is not used.
+    """
+    true_on = _NOW - timedelta(hours=2)
+    rows = [
+        _mock_state("0.5", true_on - timedelta(minutes=1)),
+        _mock_state("1500", true_on),
+        _mock_state("1500", _NOW),
+    ]
+    hass = _make_hass(rows)
+    cache: dict[str, Any] = {}
+    assert await _run(hass, cache) == true_on.isoformat()
+
+    # 10 minutes pass, but the wall clock was stepped back 5 of them.
+    _MONO[0] += 600
+    _CLOCK[0] += timedelta(minutes=5)
+    restarted = _NOW - timedelta(seconds=30)
+    rows += [
+        _mock_state("0.2", _NOW - timedelta(minutes=1)),
+        _mock_state("1500", restarted),
+        _mock_state("1500", _CLOCK[0]),
+    ]
+    _recorder(hass).queries.clear()
+    assert await _run(hass, cache) == restarted.isoformat()
+    assert _newest_queries(hass) == [1000]
+
+
+@pytest.mark.asyncio
+async def test_seen_off_then_off_and_on_again_is_dated_by_the_last_off() -> None:
+    """No episode at the last run; new readings hold an off, then on."""
+    rows = [
+        _mock_state("1500", _NOW - timedelta(hours=1)),
+        _mock_state("0.5", _NOW),
+    ]
+    hass = _make_hass(rows)
+    cache: dict[str, Any] = {}
+    await _run(hass, cache)
+    assert cache["sensor.dishwasher_power"].since is None
+
+    started = _NOW + timedelta(minutes=3)
+    rows += [
+        _mock_state("1500", _NOW + timedelta(minutes=1)),
+        _mock_state("0.3", _NOW + timedelta(minutes=2)),
+        _mock_state("1500", started),
+        _mock_state("1500", _advance(timedelta(minutes=4))),
+    ]
+    assert await _run(hass, cache) == started.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_an_unbounded_start_takes_the_first_reading_seen() -> None:
+    """Unknown with nothing usable read, then on readings: they bound it."""
+    rows = [
+        _mock_state("unavailable", _NOW - timedelta(minutes=2)),
+        _mock_state("unknown", _NOW),
+    ]
+    hass = _make_hass(rows)
+    cache: dict[str, Any] = {}
+    await _run(hass, cache)
+    entry = cache["sensor.dishwasher_power"]
+    assert entry.unknown
+    assert entry.since is None
+
+    first = _NOW + timedelta(minutes=1)
+    rows += [
+        _mock_state("1500", first),
+        _mock_state("1500", _advance(timedelta(minutes=2))),
+    ]
+    assert await _run(hass, cache) == first.isoformat()
+    assert cache["sensor.dishwasher_power"].unknown
+
+
+@pytest.mark.asyncio
+async def test_a_bounded_start_over_the_cap_reads_the_newest_back_again() -> None:
+    """A lower bound, then more new readings than the cap: read the newest back."""
+    rows = _on_rows(_NOW, 30, timedelta(seconds=20))
+    hass = _make_hass(rows)
+    cache: dict[str, Any] = {}
+    with patch(f"{_PE}._RECENT_ROWS", 4), patch(f"{_PE}._MAX_ROWS", 10):
+        await _run(hass, cache)
+        assert cache["sensor.dishwasher_power"].unknown
+        _recorder(hass).queries.clear()
+        rows += _on_rows(_advance(timedelta(minutes=10)), 30, timedelta(seconds=10))
+        await _run(hass, cache)
+    assert _newest_queries(hass) == [4, 10]
+    assert cache["sensor.dishwasher_power"].since > _NOW
