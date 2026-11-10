@@ -2480,3 +2480,59 @@ def test_the_change_alert_rules_are_the_ones_the_notifier_never_batches() -> Non
     )
 
     assert engine_module._CHANGE_ALERT_RULES == network_common.CHANGE_ALERT_RULE_TYPES
+
+
+@pytest.mark.asyncio
+async def test_power_enrichment_gets_the_same_memory_every_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Every run hands power enrichment the engine's one PowerOnSince map.
+
+    A fresh map per run would make every run walk each 'on' power sensor's
+    history back from scratch, up to the row cap, with nothing logged.
+    """
+    snapshot: FullStateSnapshot = validate_snapshot(
+        {
+            "schema_version": 1,
+            "generated_at": "2025-01-01T00:00:00+00:00",
+            "entities": [],
+            "camera_activity": [],
+            "derived": {
+                "now": "2025-01-01T00:00:00+00:00",
+                "timezone": "UTC",
+                "is_night": False,
+                "anyone_home": True,
+                "people_home": [],
+                "people_away": [],
+                "last_motion_by_area": {},
+            },
+        }
+    )
+
+    async def _fake_build(_hass: HomeAssistant, **_kwargs: Any) -> FullStateSnapshot:
+        return snapshot
+
+    seen: list[Any] = []
+
+    async def _fake_enrich(_hass: Any, _snapshot: Any, on_since: Any = None) -> None:
+        seen.append(on_since)
+
+    monkeypatch.setattr(engine_module, "async_build_full_state_snapshot", _fake_build)
+    monkeypatch.setattr(engine_module, "async_enrich_power_last_changed", _fake_enrich)
+
+    engine = SentinelEngine(
+        hass=cast("HomeAssistant", object()),
+        options={"sentinel_interval_seconds": 60, "explain_enabled": False},
+        suppression=DummySuppression(),
+        notifier=cast("SentinelNotifier", DummyNotifier()),
+        audit_store=cast("AuditStore", DummyAudit()),
+        explainer=None,
+    )
+
+    await engine._run_once()
+    await engine._run_once()
+
+    assert len(seen) == 2
+    assert isinstance(seen[0], dict)
+    assert seen[0] is seen[1]

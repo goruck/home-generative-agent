@@ -27,6 +27,9 @@ class SnapshotEntity(TypedDict):
     # "fritz" or "eero". Network rules match on this fact instead of name
     # heuristics. None for entities with no registry entry.
     platform: NotRequired[str | None]
+    # Set by Sentinel's power enrichment when last_changed is only "on at
+    # least since": the start of the current run was not found.
+    last_changed_is_lower_bound: NotRequired[bool]
 
 
 class CameraActivity(TypedDict):
@@ -277,6 +280,7 @@ SNAPSHOT_SCHEMA = vol.Schema(
                 vol.Required("last_changed"): str,
                 vol.Required("last_updated"): str,
                 vol.Optional("platform"): vol.Any(str, None),
+                vol.Optional("last_changed_is_lower_bound"): bool,
             }
         ],
         vol.Required("camera_activity"): [

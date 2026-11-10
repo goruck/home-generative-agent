@@ -127,7 +127,7 @@ from .notifier import (
     is_security_copy,
     related_findings_line,
 )
-from .power_enrichment import async_enrich_power_last_changed
+from .power_enrichment import PowerOnSince, async_enrich_power_last_changed
 from .rules.alarm_disarmed_external_threat import AlarmDisarmedDuringExternalThreatRule
 from .rules.appliance_power_duration import AppliancePowerDurationRule
 from .rules.camera_entry_unsecured import CameraEntryUnsecuredRule
@@ -438,6 +438,9 @@ class SentinelEngine:
         # (triage_memo_key) -> when to ask it again. Not saved: a restart costs
         # one more model call per finding.
         self._triage_suppressed: dict[tuple[str, str], datetime] = {}
+        # Each 'on' power sensor's episode start, so a run reads only the
+        # readings since the last one. Not saved: a restart walks back again.
+        self._power_on_since: dict[str, PowerOnSince] = {}
         # Owed replays: when each kind last skipped its type cooldown, and the
         # ones delivered this run.
         self._replay_cooldown_skipped: dict[str, datetime] = {}
@@ -1967,7 +1970,9 @@ class SentinelEngine:
         try:
             await async_enrich_alarm_last_changed(self._hass, snapshot)
             await async_enrich_lock_last_changed(self._hass, snapshot)
-            await async_enrich_power_last_changed(self._hass, snapshot)
+            await async_enrich_power_last_changed(
+                self._hass, snapshot, self._power_on_since
+            )
         except (ValueError, TypeError, KeyError):
             # Enrichment only corrects last_changed context; a bug here must
             # degrade to un-enriched snapshots, not kill the run loop (an
