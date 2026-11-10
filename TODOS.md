@@ -771,6 +771,48 @@ v3.41.1 rather than deferred; see the TODO above.
 
 ---
 
+### The triage-suppression hold ignores the learned cooldown multiplier
+
+**What:** PR #979 holds a triage-suppressed low or medium finding for `max(cooldown_type, cooldown_entity)` (`sentinel/engine.py` `_dispatch_item`, the window passed to `_triage_finding`). Normal suppression scales the entity cooldown by the learned False Alarm multiplier (`suppression.py` `_check_entity_cooldown`, capped at `MAX_COOLDOWN_MULTIPLIER`). With type 30 min, entity 15 min and a multiplier of 8, the hold ends at 30 min, not 120, so an unchanged finding is asked again early and takes a slot from the per-run budget.
+
+**Why:** Codex adversarial pass of the PR #979 review (2026-11-09). Left as is: the cost is extra model calls, never a missed alert.
+
+**How to apply:** Compute the window with the same capped multiplier, the largest across `finding.triggering_entities`, ideally through a small helper in `suppression.py` that `_check_entity_cooldown` also uses. Add a test that a finding with a learned multiplier stays held for the scaled cooldown.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
+### Expired triage-suppression entries are only pruned on the next suppression
+
+**What:** `_remember_triage_suppression` (`sentinel/engine.py`) drops expired entries from `_triage_suppressed` only when it stores a new one. If findings resolve, or later answers are all notify, timeout or deferred, the expired keys stay in memory. Each key holds the full triage prompt, so a burst of distinct suppressed findings stays resident until the next suppression or a restart. Growth is bounded because every insert prunes.
+
+**Why:** Codex adversarial pass of the PR #979 review (2026-11-09). Low impact, left as is.
+
+**How to apply:** Sweep expired entries once per run (at the start of `_run_once`), and drop a key on lookup in `_triage_still_suppressed` when it has expired.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
+### A suppressed `ha_failed_logins` burst holds later bursts for up to a day
+
+**What:** `ha_failed_logins` has a constant `anomaly_id` and a 24 h posture floor, so when triage suppresses one burst, the PR #979 memory holds a later burst with an identical prompt for up to 24 h with no new triage call and no audit row. Home Assistant's own failed-login notification still shows.
+
+**Why:** Claude adversarial pass of the PR #979 review (2026-11-09). Left as is, since the model would see the same prompt and answer the same way. Lindo has not decided whether it should always be asked.
+
+**How to apply:** If it should always be asked, add `ha_failed_logins` to the never-remembered check in `_remember_triage_suppression` (next to `_CHANGE_ALERT_RULES`), with a test. If the attempt count or source should count as a change, put it in the triage prompt so the memo key changes with it.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ## Sentinel Rules
 
 ### Unknown-person rules are inert on installs without face recognition
