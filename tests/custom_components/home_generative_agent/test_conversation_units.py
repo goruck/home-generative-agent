@@ -3800,7 +3800,28 @@ def test_number_from_another_voice_joins_the_waiting_prompt() -> None:
     assert HGAConversationEntity._pin_owner(None, None) is None
 
 
-@pytest.mark.parametrize("text", ["1234", "one two three four"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "1234",
+        "one two three four",
+        # Labels, fillers and confirmations around the PIN (#981 review).
+        "PIN number 1234",
+        "это 1234",
+        "1234 please",
+        "yes 1234",
+        "okay, 1234",
+        "confirm 1234",
+        "my password is 1234",
+        "ano, 1234",
+        "heslo 1234",
+        "prosím, PIN 1234",
+        "да, 1234",
+        "мой пароль 1234",
+        "код подтверждения 1234",
+        "хорошо, пожалуйста, пин-код 1234",
+    ],
+)
 def test_pin_from_another_voice_still_reaches_the_prompt(text: str) -> None:
     """A real PIN joins the prompt, and keeps the speaker's memories."""
     action = _waiting_action("conv:Пётр")
@@ -3824,6 +3845,32 @@ def test_sentence_with_a_short_number_stays_with_its_speaker(text: str) -> None:
     entity = _turn_entity(action)
     guest = Speaker(name="Мария", user="Mary")
     assert entity._turn_thread("conv", guest, text) == ("conv:Мария", None)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # "Number" alone is not a PIN label: this is a phone number.
+        "my number is 5551234",
+        "number 1234",
+        # A symbol gives the number another meaning.
+        "It's $1234",
+        "1234 €",
+        "code #1234",
+        "+1234",
+        # A wake word cannot be listed, so this fails closed.
+        "Алиса, пин-код 1234",
+    ],
+)
+def test_statement_with_a_pin_length_number_stays_with_its_speaker(
+    text: str,
+) -> None:
+    """Not a PIN reply: the owner's prompt and its attempts are left alone."""
+    action = _waiting_action("conv:Пётр")
+    entity = _turn_entity(action)
+    guest = Speaker(name="Мария", user="Mary")
+    assert entity._turn_thread("conv", guest, text) == ("conv:Мария", None)
+    assert action.get("reply_turn") is None
 
 
 def test_sentence_with_a_pin_length_number_stays_with_its_speaker() -> None:

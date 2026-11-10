@@ -1709,11 +1709,12 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         """
         Return the thread for this turn, and the PIN prompt it answers, if any.
 
-        A message holding one number of PIN length may be the PIN for a prompt
-        another voice was asked, so it joins the thread that holds the prompt. Any
-        other message stays on its speaker's thread; from another voice, that
-        leaves the prompt waiting, while the owner's own message still answers
-        or abandons it.
+        A message that is only a PIN, bare or labelled ("my PIN is 1234"), may be
+        the PIN for a prompt another voice was asked, so it joins the thread that
+        holds the prompt (`waiting_pin_prompt`). Any other message, including a
+        sentence that holds a number of PIN length, stays on its speaker's
+        thread; from another voice, that leaves the prompt waiting, while the
+        owner's own message still answers or abandons it.
         """
         thread_id = self._thread_id(conversation_id, speaker)
         if speaker is None:

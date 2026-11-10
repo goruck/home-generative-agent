@@ -616,16 +616,18 @@ _SPOKEN_ZERO = "oh"
 # Russian "и").
 _DIGIT_JOINERS = frozenset({"and", "a", "и"})
 # Words that may stand around a PIN said in reply to another voice's prompt
-# ("my PIN is 1234", "the code is 1234"; Czech "můj PIN je 1234", "PIN kód
-# 1234"; Russian "мой пин-код 1234", "код 1234"), casefolded. Anything else
-# makes the message a request of its own.
+# ("my PIN is 1234", "yes, the code is 1234"; Czech "ano, můj PIN je 1234",
+# "heslo 1234"; Russian "да, мой пин-код 1234", "пароль 1234"), casefolded.
+# Anything else makes the message a request of its own. English, Czech and
+# Russian only: in another language a PIN said with words stays with its
+# speaker.
 _PIN_LABEL_WORDS = frozenset(
     {
         "my",
         "pin",
         "code",
         "passcode",
-        "number",
+        "password",
         "is",
         "the",
         "it",
@@ -640,8 +642,33 @@ _PIN_LABEL_WORDS = frozenset(
         "пинкод",
         "код",
         "это",
+        # Fillers and confirmations said around the PIN (#981 review).
+        "yes",
+        "ok",
+        "okay",
+        "please",
+        "confirm",
+        "confirmed",
+        "um",
+        "uh",
+        "ano",
+        "prosím",
+        "prosim",
+        "heslo",
+        "да",
+        "хорошо",
+        "пожалуйста",
+        "пароль",
+        "подтверждаю",
+        "подтверждения",
     }
 )
+# "Number" is a label only right after one of these ("PIN number 1234"):
+# alone, "my number is 5551234" is a phone number, not a PIN reply.
+_PIN_NUMBER_AFTER = frozenset({"pin", "code"})
+# Symbols that make a number something other than a PIN ("$1234", "50%",
+# "#1234"). Other punctuation, such as ": , . -", is skipped.
+_NOT_PIN_SYMBOLS = frozenset("%\u2030\u2031#@\u2116\u00b0")
 # A token of the message: a word or number, a run of whitespace, or one other
 # character.
 _TOKEN_RE = re.compile(r"\w+|\s+|.", re.DOTALL)
@@ -1170,10 +1197,18 @@ def _only_a_pin_reply(text: str) -> bool:
     Return True when every word of the text is a digit, a joiner or a PIN label.
 
     Punctuation and spacing do not count, so "PIN-code: 1, 2, 3, 4." qualifies;
-    whether the digits make one number is pin_digits' call.
+    whether the digits make one number is pin_digits' call. A currency, math or
+    other symbol that gives a number another meaning ("It's $1234", "50%") does,
+    and so does "number" unless it follows "PIN" or "code".
     """
+    previous = ""
     for token in _TOKEN_RE.findall(_ascii_digits(text)):
         if not re.match(r"\w", token):
+            if token in _NOT_PIN_SYMBOLS or unicodedata.category(token) in {
+                "Sc",
+                "Sm",
+            }:
+                return False
             continue
         lowered = token.casefold()
         if not (
@@ -1182,8 +1217,10 @@ def _only_a_pin_reply(text: str) -> bool:
             or lowered in _DIGIT_JOINERS
             or lowered == _SPOKEN_ZERO
             or lowered in _PIN_LABEL_WORDS
+            or (lowered == "number" and previous in _PIN_NUMBER_AFTER)
         ):
             return False
+        previous = lowered
     return True
 
 
