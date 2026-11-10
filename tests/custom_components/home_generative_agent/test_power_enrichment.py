@@ -1287,6 +1287,7 @@ async def test_enrichment_keeps_when_the_sensor_last_reported() -> None:
     rows += _on_rows(_NOW, 2, timedelta(days=1))
     hass = _make_hass(rows)
     reported = MagicMock()
+    reported.state = "1498.5"  # still the snapshot's reading
     reported.last_reported = _NOW - timedelta(seconds=1)
     hass.states.get.return_value = reported
 
@@ -1320,6 +1321,7 @@ async def test_an_always_on_sensor_reporting_every_second_is_not_stale() -> None
     rows += _on_rows(_NOW, 3, timedelta(days=1))
     hass = _make_hass(rows)
     reported = MagicMock()
+    reported.state = "1498.5"
     reported.last_reported = _NOW
     hass.states.get.return_value = reported
 
@@ -1343,3 +1345,49 @@ async def test_an_always_on_sensor_reporting_every_second_is_not_stale() -> None
         < (_NOW - timedelta(hours=24)).isoformat()
     )
     assert evaluate_dynamic_rule(snapshot, rule) == []
+
+
+@pytest.mark.asyncio
+async def test_a_sensor_that_changed_during_the_queries_keeps_the_snapshots_time() -> (
+    None
+):
+    """
+    A live state that no longer holds the snapshot's reading is not used (#982).
+
+    A sensor that went unavailable while the history was read must not make
+    the snapshot's old reading look fresh to auto-execute's data-quality gate.
+    """
+    true_on = _NOW - timedelta(days=1)
+    rows = [_mock_state("0.5", true_on - timedelta(minutes=1))]
+    rows += _on_rows(_NOW, 2, timedelta(days=1))
+    hass = _make_hass(rows)
+    live = MagicMock()
+    live.state = "unavailable"
+    live.last_reported = _NOW + timedelta(seconds=5)
+    hass.states.get.return_value = live
+
+    snapshot = _base_snapshot()
+    entity = _power_entity(last_changed=_NOW.isoformat())
+    entity["last_updated"] = (_NOW - timedelta(days=2)).isoformat()
+    snapshot["entities"] = [entity]
+    await async_enrich_power_last_changed(hass, snapshot, {})
+
+    assert snapshot["entities"][0]["last_reported"] == entity["last_updated"]
+
+
+@pytest.mark.asyncio
+async def test_an_on_at_least_since_start_still_keeps_last_reported() -> None:
+    """The lower-bound case (no off reading found) gets last_reported too."""
+    hass = _make_hass(_on_rows(_NOW, 3, timedelta(days=1)))
+    reported = MagicMock()
+    reported.state = "1498.5"
+    reported.last_reported = _NOW
+    hass.states.get.return_value = reported
+
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [_power_entity(last_changed=_NOW.isoformat())]
+    await async_enrich_power_last_changed(hass, snapshot, {})
+
+    entity = snapshot["entities"][0]
+    assert entity.get("last_changed_is_lower_bound") is True
+    assert entity["last_reported"] == _NOW.isoformat()

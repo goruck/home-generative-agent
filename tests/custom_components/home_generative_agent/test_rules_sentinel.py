@@ -3653,3 +3653,37 @@ def test_dynamic_entity_staleness_reads_when_a_power_sensor_last_reported(
     )
 
     assert bool(evaluate_dynamic_rule(snapshot, rule)) is fires
+
+
+def test_each_reporting_outage_of_a_power_sensor_is_its_own_staleness_finding() -> None:
+    """
+    Two outages in one appliance run get different finding ids (#982).
+
+    The run start (last_changed) does not change between them; when the sensor
+    last reported does. Within one outage the id stays stable.
+    """
+    rule = _dyn_rule(
+        "entity_staleness",
+        "ups_stale",
+        {"entity_id": "sensor.ups_power", "max_stale_hours": 1.0},
+    )
+
+    def _finding(now: str, last_reported: str) -> Any:
+        snapshot = _base_snapshot()
+        snapshot["derived"]["now"] = now
+        entity = _entity(
+            "sensor.ups_power", "52.0", last_changed="2025-01-01T00:00:00+00:00"
+        )
+        entity["last_reported"] = last_reported
+        snapshot["entities"] = [entity]
+        (finding,) = evaluate_dynamic_rule(snapshot, rule)
+        return finding
+
+    first = _finding("2025-01-02T03:00:00+00:00", "2025-01-02T01:00:00+00:00")
+    same = _finding("2025-01-02T03:30:00+00:00", "2025-01-02T01:00:00+00:00")
+    second = _finding("2025-01-02T08:00:00+00:00", "2025-01-02T06:00:00+00:00")
+
+    assert first.anomaly_id == same.anomaly_id
+    assert first.anomaly_id != second.anomaly_id
+    assert "last_changed" not in first.evidence
+    assert first.evidence["last_heard"] == "2025-01-02T01:00:00+00:00"

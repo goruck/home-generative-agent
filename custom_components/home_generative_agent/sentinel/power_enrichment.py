@@ -443,11 +443,20 @@ async def _enrich(
         result.ran_at, result.ran_mono = now, mono
         on_since[entity_id] = result
         # last_changed may move back to the run start below; keep when the
-        # sensor last reported for the checks that ask that (#982).
+        # sensor last reported for the checks that ask that (#982). Only from
+        # the live state while it still holds the snapshot's reading: one that
+        # went unavailable or changed during the queries above must not make
+        # the snapshot's reading look fresh. Otherwise the snapshot's own
+        # last_updated, which is never later than that reading.
         state = hass.states.get(entity_id)
         last_reported = getattr(state, "last_reported", None)
-        if isinstance(last_reported, datetime):
+        if (
+            isinstance(last_reported, datetime)
+            and getattr(state, "state", None) == power_entity["state"]
+        ):
             power_entity["last_reported"] = dt_util.as_utc(last_reported).isoformat()
+        else:
+            power_entity["last_reported"] = power_entity["last_updated"]
         if result.unknown:
             # Only "on at least since" (Home Assistant's own value is one too
             # when nothing was walked): the baseline completion check must not

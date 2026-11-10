@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any, cast
 
+import pytest
 from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.const import (
@@ -419,21 +420,31 @@ def test_fresh_entity_yields_fresh_quality() -> None:
     assert details["stale_entities"] == []
 
 
-def test_data_quality_reads_when_a_power_sensor_last_reported() -> None:
+@pytest.mark.parametrize(
+    ("last_reported", "fresh"),
+    [("2025-01-01T00:59:59+00:00", True), ("2024-12-31T01:00:00+00:00", False)],
+)
+def test_data_quality_reads_when_a_power_sensor_last_reported(
+    last_reported: str,
+    fresh: bool,  # noqa: FBT001
+) -> None:
     """
-    An always-on power sensor that keeps reporting is fresh (#982).
+    A power sensor is fresh while it keeps reporting, stale once it stops (#982).
 
     Its last_changed is the start of its current run (a day back here), set by
     power enrichment, which also stores last_reported.
     """
     svc = SentinelExecutionService(_FULL_OPTIONS)
     snapshot = _make_snapshot(last_changed="2024-12-31T01:00:00+00:00")
-    cast("Any", snapshot["entities"][0])["last_reported"] = "2025-01-01T00:59:59+00:00"
+    cast("Any", snapshot["entities"][0])["last_reported"] = last_reported
 
     dq, details = svc._compute_data_quality(_make_finding(), snapshot, _NOW)
 
-    assert dq == DATA_QUALITY_FRESH
-    assert details["stale_entities"] == []
+    if fresh:
+        assert dq == DATA_QUALITY_FRESH
+        assert details["stale_entities"] == []
+    else:
+        assert details["stale_entities"] == ["binary_sensor.front_door"]
 
 
 # ---------------------------------------------------------------------------

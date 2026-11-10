@@ -1019,8 +1019,14 @@ def _eval_entity_staleness(
         "max_stale_hours": max_stale_hours,
         # Grows every cycle; DISPLAY_ONLY_EVIDENCE_KEYS keeps it out of the id.
         "age_hours": age_hours,
-        "last_changed": entity.get("last_changed"),
     }
+    if entity.get("last_reported"):
+        # An enriched power sensor's last_changed is when its run started, not
+        # when it went quiet: the last report marks this outage, so a second
+        # one in the same run is a new finding (#982).
+        evidence["last_heard"] = entity_last_heard(entity)
+    else:
+        evidence["last_changed"] = entity.get("last_changed")
     return [_build_finding(rule, [entity_id], evidence)]
 
 

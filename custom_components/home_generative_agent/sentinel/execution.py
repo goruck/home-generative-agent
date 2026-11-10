@@ -527,10 +527,7 @@ class SentinelExecutionService:
                 continue
             # When it last reported: an always-on power sensor's last_changed
             # is when its current run started (#982).
-            last_heard_raw = entity_last_heard(entity)
-            last_heard = (
-                dt_util.parse_datetime(last_heard_raw) if last_heard_raw else None
-            )
+            last_heard = dt_util.parse_datetime(entity_last_heard(entity) or "")
             if last_heard is None:
                 stale_entities.append(entity_id)
                 continue
