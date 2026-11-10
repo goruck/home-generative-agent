@@ -475,6 +475,39 @@ async def test_run_sentinel_llm_call_keeps_a_cancel_the_provider_swallowed(
 
 
 @pytest.mark.asyncio
+async def test_a_kept_cancel_never_chains_an_error_that_may_echo_a_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The re-raised cancel drops a provider error that may carry an API key."""
+    started = asyncio.Event()
+
+    async def _provider() -> str:
+        started.set()
+        try:
+            await asyncio.sleep(9999)
+        except asyncio.CancelledError:
+            msg = "Authorization: secret"
+            raise httpx.ConnectError(msg) from None
+        return "done"
+
+    monkeypatch.setattr(utils_mod, "echoes_request_headers", lambda _err: True)
+    caller = asyncio.create_task(
+        utils_mod.run_sentinel_llm_call(
+            _provider,
+            deployment="cloud",
+            category="triage",
+            admission_timeout_s=0.1,
+            call_timeout_s=60.0,
+        )
+    )
+    await started.wait()
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError) as stop:
+        await asyncio.wait_for(caller, timeout=1)
+    assert stop.value.__cause__ is None
+
+
+@pytest.mark.asyncio
 async def test_run_sentinel_model_call_uses_sync_invoke_off_event_loop() -> None:
     """Models with sync invoke should run in an executor, not on the event loop."""
     loop_thread_id = threading.get_ident()

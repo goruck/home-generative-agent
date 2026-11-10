@@ -941,6 +941,23 @@ def _probe_model(wrapper: FallbackChatModel | FallbackVLM, index: int) -> Any:
     return wrapper.chain[index][0]
 
 
+def _raise_if_stopped(err: BaseException | None) -> None:
+    """
+    Re-raise a stop that the provider client reported as an ordinary error.
+
+    Cancelling the caller mid-call can come back from the provider client as
+    a timeout or connection error. Taking that for a failed provider tried the
+    next one, carried a stopping Sentinel run (or a cancelled chat turn) on
+    into another call, and counted the stop against the provider's breaker
+    (#985). The chain's own member timeout calls ``uncancel()`` before its
+    TimeoutError gets here, so it is not mistaken for a stop.
+    """
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        # Never chain an error that may carry an echoed API key (h11).
+        raise asyncio.CancelledError from (None if echoes_request_headers(err) else err)
+
+
 def _handle_member_failure(  # noqa: PLR0913
     wrapper: FallbackChatModel | FallbackVLM,
     kind: str,
@@ -1217,6 +1234,7 @@ class FallbackChatModel:
                     )
                 _raise_for_retryable_empty_response(result)
             except Exception as err:
+                _raise_if_stopped(err)
                 failure: Exception = err
                 try:
                     async with asyncio.timeout_at(deadline):
@@ -1224,6 +1242,7 @@ class FallbackChatModel:
                             i, err, input_data, config, **kwargs
                         )
                 except Exception as retry_err:  # noqa: BLE001
+                    _raise_if_stopped(retry_err)
                     # The rebound request's own failure, not the rejection
                     # that prompted it (#828).
                     rebind_result = None
@@ -1357,6 +1376,7 @@ class FallbackVLM:
                         model, input_data, config, **kwargs
                     )
             except Exception as err:
+                _raise_if_stopped(err)
                 last_err = err
                 if not _is_retryable(err):
                     _raise_if_header_echo(err, "VLM call")
@@ -1602,6 +1622,9 @@ class FallbackEmbeddings:
             try:
                 admitted = await self._verifier(provider_id)
             except Exception as err:  # noqa: BLE001 - held, never let in blind
+                # A stop the database driver turned into an error is not a
+                # failed check: no warning, no later retry time (#985).
+                _raise_if_stopped(err)
                 LOGGER.warning(
                     "Could not check the build of embedding provider %s (%s); it "
                     "stays held.",
@@ -1609,6 +1632,10 @@ class FallbackEmbeddings:
                     _safe_err_summary(err),
                 )
                 admitted = False
+            if not admitted:
+                # The real check catches a driver's converted cancel itself
+                # and answers "not verified": a stop, not a result (#985).
+                _raise_if_stopped(None)
             if admitted and self._is_member(provider_id):
                 self.verify_provider(provider_id)
                 return True
@@ -1876,6 +1903,7 @@ class FallbackEmbeddings:
             try:
                 result = await call(model)
             except Exception as err:
+                _raise_if_stopped(err)
                 last_err = err
                 if not _is_retryable(err):
                     _raise_if_header_echo(err, "Embedding call")

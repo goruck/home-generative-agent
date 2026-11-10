@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import suppress
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -2171,3 +2172,245 @@ async def test_missing_model_opens_the_circuit_breaker() -> None:
         await model.ainvoke(["hello"])
 
     assert primary.ainvoke.await_count == 3
+
+
+# ---------------------------------------------------------------------------
+# A stop the provider client turned into an error is not a provider failure
+# ---------------------------------------------------------------------------
+
+
+def _converts_cancel_to_timeout(started: asyncio.Event) -> Any:
+    """Return a provider call that reports its cancel as a TimeoutError (#985)."""
+
+    async def _call(*_args: Any, **_kwargs: Any) -> Any:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise TimeoutError from None
+        return FakeAIMessage("never")
+
+    return _call
+
+
+async def _cancel_mid_call(coro: Any, started: asyncio.Event) -> None:
+    caller = asyncio.ensure_future(coro)
+    await asyncio.wait_for(started.wait(), timeout=1)
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(caller, timeout=1)
+
+
+@pytest.mark.parametrize("wrapper", [FallbackChatModel, FallbackVLM])
+@pytest.mark.asyncio
+async def test_a_stopped_call_does_not_try_the_next_provider(wrapper: Any) -> None:
+    """A cancel of the caller ends the call; no fallback, no breaker failure."""
+    started = asyncio.Event()
+    breaker = CircuitBreaker(threshold=1)
+    primary = MagicMock()
+    primary.ainvoke = _converts_cancel_to_timeout(started)
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("fallback")
+    model = wrapper(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        circuit_breaker=breaker,
+    )
+
+    await _cancel_mid_call(model.ainvoke(["hello"]), started)
+
+    assert fallback.ainvoke.await_count == 0, "a stop was retried on the fallback"
+    assert breaker.is_available("p1"), "a stop counted as a provider failure"
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_embedding_call_does_not_try_the_next_provider() -> None:
+    """The embedding chain treats a converted cancel as a stop too."""
+    started = asyncio.Event()
+    primary, fallback = MagicMock(), AsyncMock()
+    primary.aembed_query = _converts_cancel_to_timeout(started)
+    fallback.aembed_query.return_value = [0.3]
+    emb = FallbackEmbeddings(
+        chain=[(primary, "cloud", "p1"), (fallback, "cloud", "p2")]
+    )
+
+    await _cancel_mid_call(emb.aembed_query("hello"), started)
+
+    assert fallback.aembed_query.await_count == 0
+
+
+@pytest.mark.parametrize("converts", [False, True])
+@pytest.mark.asyncio
+async def test_a_member_timeout_still_moves_to_the_next_provider(
+    converts: bool,  # noqa: FBT001
+) -> None:
+    """The chain's own per-member timeout is not mistaken for a stop."""
+    primary = MagicMock()
+
+    async def _slow(*_args: Any, **_kwargs: Any) -> Any:
+        await asyncio.sleep(9999)
+
+    # A client that reports the deadline's cancel as its own TimeoutError
+    # (the #985 shape) must still fall over: timeout_at uncancels first.
+    primary.ainvoke = (
+        _converts_cancel_to_timeout(asyncio.Event()) if converts else _slow
+    )
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("fallback")
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")],
+        config={"configurable": {}},
+    )
+    with patch(
+        "custom_components.home_generative_agent.core.fallback._deadline",
+        side_effect=lambda _t: asyncio.get_running_loop().time() + 0.05,
+    ):
+        result = await asyncio.wait_for(model.ainvoke(["hello"]), timeout=2)
+    assert result.content == "fallback"
+
+
+@pytest.mark.asyncio
+async def test_a_stop_during_the_sampling_rebind_does_not_try_the_next_provider() -> (
+    None
+):
+    """A stop that lands in the default-sampling retry ends the call too."""
+    started = asyncio.Event()
+    bound_p1 = AsyncMock()
+    bound_p1.ainvoke.side_effect = [_bad_request_error(), _bad_request_error()]
+    rebound_p1 = MagicMock()
+    rebound_p1.ainvoke = _converts_cancel_to_timeout(started)
+    stripped_p1 = MagicMock()
+    stripped_p1.bind_tools.return_value = rebound_p1
+    src_p1 = MagicMock()
+    src_p1.bind_tools.return_value = bound_p1
+    src_p1.with_config.return_value = stripped_p1
+    bound_p2 = AsyncMock()
+    bound_p2.ainvoke.return_value = FakeAIMessage("fallback")
+    src_p2 = MagicMock()
+    src_p2.bind_tools.return_value = bound_p2
+    breaker = CircuitBreaker(threshold=1)
+    model = FallbackChatModel(
+        chain=[(src_p1, "cloud", "p1"), (src_p2, "cloud", "p2")],
+        circuit_breaker=breaker,
+    )
+    bound = model.bind_tools([{"name": "t"}])
+
+    await _cancel_mid_call(bound.ainvoke(["hello"]), started)
+
+    bound_p2.ainvoke.assert_not_awaited()
+    assert breaker.is_available("p1")
+
+
+@pytest.mark.asyncio
+async def test_a_stop_during_a_held_providers_build_check_is_not_a_failed_check(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The build check of a held provider treats a converted stop as a stop."""
+    started = asyncio.Event()
+
+    async def _verifier(_provider_id: str) -> bool:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise TimeoutError from None
+        return True
+
+    primary, fallback = AsyncMock(), AsyncMock()
+    primary.aembed_query.return_value = [0.1]
+    fallback.aembed_query.return_value = [0.3]
+    emb = FallbackEmbeddings(
+        chain=[(primary, "cloud", "p1"), (fallback, "cloud", "p2")]
+    )
+    emb.hold_until_verified(["p1"], _verifier)
+
+    with caplog.at_level(logging.WARNING):
+        await _cancel_mid_call(emb.aembed_query("hello"), started)
+
+    assert fallback.aembed_query.await_count == 0
+    assert "Could not check the build" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_callers_timeout_during_a_converted_stop_stays_a_timeout() -> None:
+    """The caller's own timeout firing mid-call still reaches it as TimeoutError."""
+    started = asyncio.Event()
+    primary = MagicMock()
+    primary.ainvoke = _converts_cancel_to_timeout(started)
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("fallback")
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")]
+    )
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.05):
+            await model.ainvoke(["hello"])
+    assert fallback.ainvoke.await_count == 0
+
+
+@pytest.mark.parametrize("echoes", [True, False])
+def test_a_stop_never_chains_an_error_that_may_echo_a_key(
+    echoes: bool,  # noqa: FBT001
+) -> None:
+    """The re-raised stop drops an error that may carry an echoed API key."""
+    from custom_components.home_generative_agent.core import (  # noqa: PLC0415
+        fallback as fallback_mod,
+    )
+
+    original = RuntimeError("Authorization: secret")
+
+    async def _run() -> BaseException:
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel()
+        # Swallowed: cancelling() stays 1, as after a converted cancel.
+        with suppress(asyncio.CancelledError):
+            await asyncio.sleep(0)
+        try:
+            with patch.object(
+                fallback_mod, "echoes_request_headers", return_value=echoes
+            ):
+                fallback_mod._raise_if_stopped(original)
+        except asyncio.CancelledError as stop:
+            return stop
+        msg = "not raised"
+        raise AssertionError(msg)
+
+    stop = asyncio.run(_run())
+    if echoes:
+        assert stop.__cause__ is None
+        assert stop.__suppress_context__
+    else:  # kept for debugging when it cannot carry a key
+        assert stop.__cause__ is original
+
+
+@pytest.mark.asyncio
+async def test_a_build_check_that_reports_a_stop_as_not_verified_still_stops() -> None:
+    """
+    The real build check catches a converted cancel itself and says "no".
+
+    Its Ollama and database reads return None on a timeout or driver error,
+    so a stop comes back as "not verified"; that must end the call, not try
+    the next provider or push the held provider's next check back (#985).
+    """
+    started = asyncio.Event()
+
+    async def _verifier(_provider_id: str) -> bool:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return False  # as _ollama_json / _async_recorded_build do
+        return True
+
+    primary, fallback = AsyncMock(), AsyncMock()
+    fallback.aembed_query.return_value = [0.3]
+    emb = FallbackEmbeddings(
+        chain=[(primary, "cloud", "p1"), (fallback, "cloud", "p2")]
+    )
+    emb.hold_until_verified(["p1"], _verifier)
+
+    await _cancel_mid_call(emb.aembed_query("hello"), started)
+
+    assert fallback.aembed_query.await_count == 0
+    assert "p1" not in emb._verify_after
