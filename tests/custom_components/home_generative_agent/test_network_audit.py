@@ -1096,6 +1096,40 @@ async def test_a_slow_or_failing_baseline_read_leaves_the_rule_not_run(
 
 
 @pytest.mark.asyncio
+async def test_a_baseline_read_that_turns_a_cancel_into_an_error_still_stops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A cancel the database driver turns into an ordinary error must not be lost.
+
+    The fetch's broad except used to log it as a failed read and let the run
+    go on, so a Sentinel stopping for shutdown kept running (#985).
+    """
+    started = asyncio.Event()
+
+    class _DriverEatsCancel(_FakeUpdater):
+        async def async_fetch_counter_baselines(self, metrics: Any) -> Any:
+            started.set()
+            try:
+                await asyncio.sleep(9999)
+            except asyncio.CancelledError:
+                msg = "connection lost"
+                raise RuntimeError(msg) from None
+            return {}
+
+    engine, _, _, _ = _engine(
+        monkeypatch, _usage_snapshot(), baseline_updater=_DriverEatsCancel({})
+    )
+    task = asyncio.create_task(
+        engine._attach_counter_baselines(_usage_snapshot(), record=False)
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
 async def test_usage_findings_cool_down_per_device_not_per_rule(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

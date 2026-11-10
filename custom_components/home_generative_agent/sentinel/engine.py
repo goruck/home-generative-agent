@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import fnmatch
 import logging
 import re
@@ -77,6 +76,8 @@ from custom_components.home_generative_agent.const import (
 )
 from custom_components.home_generative_agent.core.utils import (
     EXCLUSION_ENTRY_MAX_LEN,
+    cancel_and_wait,
+    cancel_requested,
     sentinel_calls_gated,
     valid_exclusion_entry,
     verify_pin,
@@ -1379,9 +1380,11 @@ class SentinelEngine:
         if self._task is None:
             return
         self._stop_event.set()
-        self._task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await self._task
+        # Bounded and repeated: a run that caught the first cancel and kept
+        # working held HA's shutdown for minutes (#985). It also lets a
+        # cancel of this caller through, and a loop that died with an error
+        # does not skip the cleanup below.
+        await cancel_and_wait(self._task, "Sentinel run loop")
         self._task = None
 
         # Stop baseline updater.
@@ -1505,7 +1508,12 @@ class SentinelEngine:
             # returns normally; without this check the loop would then wait
             # out the full interval and hold up HA's shutdown (#985).
             if self._stop_event.is_set():
-                LOGGER.debug("Sentinel stop requested during a run; leaving the loop.")
+                if cancel_requested():
+                    LOGGER.warning(
+                        "A Sentinel run caught the stop request instead of "
+                        "ending; it was stopped after the run finished. Please "
+                        "report this with a debug log (issue #985)."
+                    )
                 break
             try:
                 # Wait for a new trigger or the polling interval — whichever
@@ -1817,7 +1825,11 @@ class SentinelEngine:
                 self._baseline_updater.async_fetch_counter_baselines(hour_metrics(now)),
                 timeout=COUNTER_BASELINE_FETCH_TIMEOUT_S,
             )
-        except (TimeoutError, Exception):  # noqa: BLE001 - the pool, the store
+        except (TimeoutError, Exception) as err:  # broad: the pool, the store
+            # A database driver can turn our cancel into an ordinary error;
+            # it must still stop the run (#985).
+            if cancel_requested():
+                raise asyncio.CancelledError from err
             self._log_limiter.warning(
                 "counter_baselines_fetch",
                 "Sentinel could not read the network counter baselines.",

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, cast
@@ -367,7 +368,9 @@ async def test_stop_unsubscribes_event_listener() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stop_returns_when_a_run_swallows_the_cancel() -> None:
+async def test_stop_returns_when_a_run_swallows_the_cancel(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """A run that catches stop()'s cancel must not hold the loop for an interval (#985)."""
     engine = _make_engine(MagicMock())
     run_started = asyncio.Event()
@@ -390,10 +393,14 @@ async def test_stop_returns_when_a_run_swallows_the_cancel() -> None:
     # itself: stop() suppresses CancelledError around its await, so a timeout
     # on stop() would be swallowed too and prove nothing.
     stopping = asyncio.create_task(engine.stop())
-    done, _ = await asyncio.wait({loop_task}, timeout=2)
+    with caplog.at_level(logging.WARNING):
+        # Under the stop()'s 2 s re-cancel, so only the post-run check passes.
+        done, _ = await asyncio.wait({loop_task}, timeout=1)
     try:
         assert loop_task in done, "the run loop kept waiting after stop()"
         assert runs == 1
+        # The swallowed cancel is reported, so the culprit can be found.
+        assert "caught the stop request" in caplog.text
     finally:
         loop_task.cancel()
         with suppress(asyncio.CancelledError):
