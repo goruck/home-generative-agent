@@ -432,6 +432,8 @@ To turn it on, open **Settings → Devices & Services → Home Generative Agent 
 
 Only the sensor on the device that sent the request counts, so a request typed in the browser never picks up the last name a satellite heard. A template sensor must be attached to the satellite's device in its settings to be used; a picked sensor that does not exist or has no device is logged once as a warning. The sensor must update before the request reaches the agent and report `unknown` when it heard no known voice, since a value left over from an earlier utterance is taken as the current speaker. History from before upgrading stays under the satellite's shared conversation and is not split by voice.
 
+A satellite conversation holds one Critical Action PIN prompt across its voices. A new protected request from any voice replaces a PIN prompt another voice is still waiting on, so the PIN said next can only confirm the newest request, whichever voice it is attributed to ([#974](https://github.com/goruck/home-generative-agent/issues/974)). Wrong PINs carry over: the request gets the most failed attempts of the prompts it replaced, so asking from another voice does not reset the limit.
+
 Voice recognition can be wrong. When a voice is linked to a person, a misrecognized voice can hear that person's memories, so link only the people whose memories are fine to share with the household.
 
 ---

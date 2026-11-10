@@ -963,6 +963,7 @@ def _maybe_require_pin_for_automation(
         "install_note": install_note,
         "user": cfg.get("user_id"),
         "thread_id": cfg.get("thread_id"),
+        "voice_conversation": cfg.get("voice_conversation"),
         "turn_id": _turn_id(cfg),
     }
     action_id = register_pending_action(

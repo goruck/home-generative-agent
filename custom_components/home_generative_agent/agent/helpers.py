@@ -470,6 +470,8 @@ class ConfigurableData(TypedDict, total=False):
     user_id: str
     ha_llm_api: Any
     thread_id: str
+    # The satellite conversation of a voice's turn, else None (#974).
+    voice_conversation: str | None
     # The user a reply that follows a voice's PIN prompt is checked as.
     pin_owner: str | None
     # The user's message for this turn. A PIN confirmation is accepted only
@@ -1057,6 +1059,24 @@ def _reissued_for_owner(
     )
 
 
+def _other_voices_prompt(
+    existing: Mapping[str, Any], action: Mapping[str, Any]
+) -> bool:
+    """
+    Return True for another voice's prompt in the action's satellite conversation.
+
+    The conversation is the one the handler names for a voice's turn
+    (``voice_conversation``), not read from the thread: an automation may give
+    `conversation.process` an id of its own, colons included.
+    """
+    conversation = action.get("voice_conversation")
+    return (
+        conversation is not None
+        and existing.get("voice_conversation") == conversation
+        and existing.get("thread_id") != action.get("thread_id")
+    )
+
+
 def register_pending_action(
     pending_actions: dict[str, dict[str, Any]],
     action: dict[str, Any],
@@ -1085,12 +1105,24 @@ def register_pending_action(
     `pin_owner` is the prompt's owner on a turn that followed another voice's
     PIN prompt: the same request re-issued there stays the owner's, so the PIN
     still confirms it and its failed attempts are kept.
+
+    On a satellite that recognizes voices, the conversation has at most one
+    prompt across its voices too (#974): a PIN said next is followed to the
+    newest prompt in the conversation (`waiting_pin_prompt`), so with two from
+    overlapping turns it could confirm the one its speaker did not mean. A
+    voice's new request drops another voice's prompt, and the most failed
+    attempts among the dropped carry over, so a request from another voice
+    does not reset the limit.
     """
     now = dt_util.utcnow()
     thread_id = action.get("thread_id")
     carried: dict[str, Any] = {}
+    other_attempts = 0
     for key, existing in list(pending_actions.items()):
         if pending_action_expired(existing, now):
+            pending_actions.pop(key, None)
+        elif _other_voices_prompt(existing, action):
+            other_attempts = max(other_attempts, int(existing.get("attempts", 0) or 0))
             pending_actions.pop(key, None)
         elif (
             thread_id
@@ -1139,12 +1171,9 @@ def register_pending_action(
         pending_actions.pop(next(iter(pending_actions)), None)
 
     action_id = ulid.ulid_now()
-    pending_actions[action_id] = {
-        **action,
-        "attempts": 0,
-        **carried,
-        "created_at": now.isoformat(),
-    }
+    entry = {**action, "attempts": 0, **carried, "created_at": now.isoformat()}
+    entry["attempts"] = max(int(entry["attempts"] or 0), other_attempts)
+    pending_actions[action_id] = entry
     return action_id
 
 

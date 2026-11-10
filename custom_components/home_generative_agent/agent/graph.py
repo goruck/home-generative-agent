@@ -558,6 +558,7 @@ def _critical_action_guard(  # noqa: PLR0913
         "tool_args": tool_args,
         "user": configurable.get("user_id"),
         "thread_id": configurable.get("thread_id"),
+        "voice_conversation": configurable.get("voice_conversation"),
         "turn_id": pin_reply.turn_id if pin_reply is not None else None,
         # The automations the change would start, for the PIN line (#814).
         "starts": list(started),

@@ -2391,6 +2391,9 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         app_config: RunnableConfig = {
             "configurable": {
                 "thread_id": thread_id,
+                # The satellite conversation a voice's thread belongs to: it
+                # holds one PIN prompt across its voices (#974).
+                "voice_conversation": conversation_id if speaker else None,
                 "user_id": clean_user_name,
                 "pin_owner": self._pin_owner(user_name, waiting_prompt),
                 "pin_reply": pin_reply,
