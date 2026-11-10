@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, NotRequired, TypedDict, cast
+from typing import TYPE_CHECKING, Any, NotRequired, TypedDict, cast
 
 import voluptuous as vol
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 # Version 2 adds the optional per-entity ``platform`` field and the optional
 # top-level ``network`` section. Both are NotRequired so that snapshots
@@ -30,6 +33,10 @@ class SnapshotEntity(TypedDict):
     # Set by Sentinel's power enrichment when last_changed is only "on at
     # least since": the start of the current run was not found.
     last_changed_is_lower_bound: NotRequired[bool]
+    # Set by Sentinel's power enrichment, which moves last_changed back to the
+    # start of the current run: when Home Assistant last heard from the sensor,
+    # even with an unchanged value. Read it through entity_last_heard (#982).
+    last_reported: NotRequired[str]
 
 
 class CameraActivity(TypedDict):
@@ -281,6 +288,7 @@ SNAPSHOT_SCHEMA = vol.Schema(
                 vol.Required("last_updated"): str,
                 vol.Optional("platform"): vol.Any(str, None),
                 vol.Optional("last_changed_is_lower_bound"): bool,
+                vol.Optional("last_reported"): str,
             }
         ],
         vol.Required("camera_activity"): [
@@ -325,3 +333,17 @@ def validate_snapshot(snapshot: dict[str, Any]) -> FullStateSnapshot:
     """Validate and return a snapshot using the canonical schema."""
     validated = SNAPSHOT_SCHEMA(snapshot)
     return cast("FullStateSnapshot", validated)
+
+
+def entity_last_heard(entity: Mapping[str, Any]) -> str | None:
+    """
+    Return when Home Assistant last heard from the entity, as stored.
+
+    For a power sensor Sentinel's enrichment moves ``last_changed`` back to
+    when its current run started, so a meter that reports every second reads
+    as a day old; the enrichment stores ``last_reported`` for it, and checks
+    that mean "is this sensor still reporting" (staleness, data quality) read
+    that (#982). Every other entity keeps ``last_changed``, as before.
+    """
+    value = entity.get("last_reported") or entity.get("last_changed")
+    return str(value) if value else None

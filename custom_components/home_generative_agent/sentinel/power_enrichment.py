@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
     from custom_components.home_generative_agent.snapshot.schema import (
         FullStateSnapshot,
+        SnapshotEntity,
     )
 
 _LOGGER = logging.getLogger(__name__)
@@ -341,6 +342,28 @@ def _still_recorded(instance: Any, checked: datetime) -> bool:
     return checked.timestamp() >= oldest
 
 
+def _last_reported(hass: HomeAssistant, power_entity: SnapshotEntity) -> str:
+    """
+    Return when Home Assistant last heard from the sensor, for this reading.
+
+    The live state's last_reported only while it is still the snapshot's
+    reading: an unchanged report keeps last_updated, any change (even one away
+    and back to the same value, or to unavailable) moves it. Otherwise the
+    snapshot's own last_updated, which is never later than that reading, so
+    a changed sensor never makes the snapshot's reading look fresh (#982).
+    """
+    state = hass.states.get(power_entity["entity_id"])
+    last_reported = getattr(state, "last_reported", None)
+    last_updated = getattr(state, "last_updated", None)
+    if (
+        isinstance(last_reported, datetime)
+        and isinstance(last_updated, datetime)
+        and dt_util.as_utc(last_updated).isoformat() == power_entity["last_updated"]
+    ):
+        return dt_util.as_utc(last_reported).isoformat()
+    return power_entity["last_updated"]
+
+
 async def async_enrich_power_last_changed(
     hass: HomeAssistant,
     snapshot: FullStateSnapshot,
@@ -356,6 +379,11 @@ async def async_enrich_power_last_changed(
     (it measures duration by direct observation); the enriched value informs
     advisory context only — dynamic rules, triage, and the baseline
     cycle-completion recency check.
+
+    Each power sensor that is on also gets ``last_reported``, when Home
+    Assistant last heard from it (see ``_last_reported``): the staleness rule
+    and auto-execute's data-quality check read that through
+    ``entity_last_heard``, not the moved-back last_changed (#982).
 
     When the start cannot be found, last_changed becomes the oldest reading
     read (the appliance has been on at least that long) and the entity is
@@ -420,6 +448,10 @@ async def _enrich(
         if not math.isfinite(current_w) or current_w <= _POWER_OFF_W:
             continue  # off, or garbage that overflowed to inf in watts
         keep.add(entity_id)
+        # last_changed may move back to the run start below; keep when the
+        # sensor last reported, for the checks that ask that (#982). Before
+        # the history read, so a failed read does not leave it unset.
+        power_entity["last_reported"] = _last_reported(hass, power_entity)
 
         try:
             result = await _resolve(

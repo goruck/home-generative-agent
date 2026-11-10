@@ -167,11 +167,12 @@ DISPLAY_ONLY_EVIDENCE_KEYS: frozenset[str] = frozenset(
     # attach for the notifier; its figures (days idle, minutes offline)
     # change every cycle and must not churn the anomaly id.  "duration_hours"
     # (entity_state_duration) and "age_hours" (entity_staleness) are elapsed
-    # times that grow every cycle of one episode (last_changed already marks
-    # the episode); hashing them minted a new id per cycle, so the pending
-    # prompt never matched and a standing condition re-alerted every type
-    # cooldown (issue #723).  "hvac_context" (#922) is added after the id
-    # is minted and carries live temperatures.
+    # times that grow every cycle of one episode (last_changed, or last_heard
+    # for an enriched power sensor, already marks the episode); hashing them
+    # minted a new id per cycle, so the pending prompt never matched and a
+    # standing condition re-alerted every type cooldown (issue #723).
+    # "hvac_context" (#922) is added after the id is minted and carries live
+    # temperatures.
     {
         "friendly_name",
         "unit_of_measurement",

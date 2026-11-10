@@ -1272,3 +1272,172 @@ async def test_no_value_change_moves_the_position_up_to_the_slack() -> None:
     later = _advance(timedelta(hours=3))
     assert await _run(hass, cache) == true_on.isoformat()
     assert cache["sensor.dishwasher_power"].checked == later - timedelta(minutes=10)
+
+
+@pytest.mark.asyncio
+async def test_enrichment_keeps_when_the_sensor_last_reported() -> None:
+    """
+    Moving last_changed back to the run start keeps when it last reported (#982).
+
+    Staleness and data quality read last_reported, so an always-on sensor that
+    reports every second does not read as a day old.
+    """
+    true_on = _NOW - timedelta(days=1)
+    rows = [_mock_state("0.5", true_on - timedelta(minutes=1))]
+    rows += _on_rows(_NOW, 2, timedelta(days=1))
+    hass = _make_hass(rows)
+    reported = MagicMock()
+    reported.last_updated = _NOW  # still the snapshot's reading
+    reported.last_reported = _NOW - timedelta(seconds=1)
+    hass.states.get.return_value = reported
+
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [_power_entity(last_changed=_NOW.isoformat())]
+    await async_enrich_power_last_changed(hass, snapshot, {})
+
+    entity = snapshot["entities"][0]
+    assert entity["last_changed"] == true_on.isoformat()
+    assert entity["last_reported"] == (_NOW - timedelta(seconds=1)).isoformat()
+    hass.states.get.assert_called_with("sensor.dishwasher_power")
+
+
+@pytest.mark.asyncio
+async def test_an_always_on_sensor_reporting_every_second_is_not_stale() -> None:
+    """
+    End to end (#982): enrichment output, validated, through a staleness rule.
+
+    A UPS drawing power for two days and reporting every second: its
+    last_changed moves back two days, and a 24-hour staleness rule must not
+    fire while it keeps reporting.
+    """
+    from custom_components.home_generative_agent.sentinel.dynamic_rules import (  # noqa: PLC0415
+        evaluate_dynamic_rule,
+    )
+    from custom_components.home_generative_agent.snapshot.schema import (  # noqa: PLC0415
+        validate_snapshot,
+    )
+
+    rows = [_mock_state("0.5", _NOW - timedelta(days=2, minutes=1))]
+    rows += _on_rows(_NOW, 3, timedelta(days=1))
+    hass = _make_hass(rows)
+    reported = MagicMock()
+    reported.last_updated = _NOW
+    reported.last_reported = _NOW
+    hass.states.get.return_value = reported
+
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [_power_entity(last_changed=_NOW.isoformat())]
+    await async_enrich_power_last_changed(hass, snapshot, {})
+    snapshot = validate_snapshot(snapshot)
+    entity_id = snapshot["entities"][0]["entity_id"]
+    rule = {
+        "rule_id": "ups_stale",
+        "template_id": "entity_staleness",
+        "params": {"entity_id": entity_id, "max_stale_hours": 24.0},
+        "severity": "low",
+        "confidence": 0.6,
+        "is_sensitive": False,
+        "suggested_actions": [],
+    }
+
+    assert (
+        snapshot["entities"][0]["last_changed"]
+        < (_NOW - timedelta(hours=24)).isoformat()
+    )
+    assert evaluate_dynamic_rule(snapshot, rule) == []
+
+
+@pytest.mark.asyncio
+async def test_a_sensor_that_changed_during_the_queries_keeps_the_snapshots_time() -> (
+    None
+):
+    """
+    A live state that no longer holds the snapshot's reading is not used (#982).
+
+    A sensor that went unavailable while the history was read must not make
+    the snapshot's old reading look fresh to auto-execute's data-quality gate.
+    """
+    true_on = _NOW - timedelta(days=1)
+    rows = [_mock_state("0.5", true_on - timedelta(minutes=1))]
+    rows += _on_rows(_NOW, 2, timedelta(days=1))
+    hass = _make_hass(rows)
+    live = MagicMock()
+    live.state = "unavailable"
+    live.last_updated = _NOW + timedelta(seconds=5)
+    live.last_reported = _NOW + timedelta(seconds=5)
+    hass.states.get.return_value = live
+
+    snapshot = _base_snapshot()
+    entity = _power_entity(last_changed=_NOW.isoformat())
+    entity["last_updated"] = (_NOW - timedelta(days=2)).isoformat()
+    snapshot["entities"] = [entity]
+    await async_enrich_power_last_changed(hass, snapshot, {})
+
+    assert snapshot["entities"][0]["last_reported"] == entity["last_updated"]
+
+
+@pytest.mark.asyncio
+async def test_an_on_at_least_since_start_still_keeps_last_reported() -> None:
+    """The lower-bound case (no off reading found) gets last_reported too."""
+    hass = _make_hass(_on_rows(_NOW, 3, timedelta(days=1)))
+    reported = MagicMock()
+    reported.last_updated = _NOW
+    reported.last_reported = _NOW
+    hass.states.get.return_value = reported
+
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [_power_entity(last_changed=_NOW.isoformat())]
+    await async_enrich_power_last_changed(hass, snapshot, {})
+
+    entity = snapshot["entities"][0]
+    assert entity.get("last_changed_is_lower_bound") is True
+    assert entity["last_reported"] == _NOW.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_a_reading_that_went_away_and_back_keeps_the_snapshots_time() -> None:
+    """
+    1498.5 -> 0 -> 1498.5 during the queries is not the snapshot's reading (#982).
+
+    The state string matches again, but its last_updated moved: the fresh
+    report belongs to a new run, so it must not refresh the old one.
+    """
+    true_on = _NOW - timedelta(days=2)
+    rows = [_mock_state("0.5", true_on - timedelta(minutes=1))]
+    rows += _on_rows(_NOW, 3, timedelta(days=1))
+    hass = _make_hass(rows)
+    live = MagicMock()
+    live.state = "1498.5"
+    live.last_updated = _NOW + timedelta(seconds=4)
+    live.last_reported = _NOW + timedelta(seconds=4)
+    hass.states.get.return_value = live
+
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [_power_entity(last_changed=_NOW.isoformat())]
+    await async_enrich_power_last_changed(hass, snapshot, {})
+
+    assert snapshot["entities"][0]["last_reported"] == _NOW.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_history_read_still_keeps_last_reported() -> None:
+    """
+    last_reported does not depend on the history read (#982).
+
+    Without it a staleness finding would switch from last_heard to
+    last_changed for that run, change id and alert again.
+    """
+    hass = _make_hass([])
+    hass.data[DATA_INSTANCE].async_add_executor_job.side_effect = OSError
+    reported = MagicMock()
+    reported.last_updated = _NOW
+    reported.last_reported = _NOW + timedelta(seconds=1)
+    hass.states.get.return_value = reported
+
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [_power_entity(last_changed=_NOW.isoformat())]
+    await async_enrich_power_last_changed(hass, snapshot, {})
+
+    entity = snapshot["entities"][0]
+    assert entity["last_changed"] == _NOW.isoformat()
+    assert entity["last_reported"] == (_NOW + timedelta(seconds=1)).isoformat()

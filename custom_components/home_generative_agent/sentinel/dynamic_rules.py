@@ -13,6 +13,7 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
     SENTINEL_OCCUPANCY_ARMED_STATES,
 )
+from custom_components.home_generative_agent.snapshot.schema import entity_last_heard
 
 from .baseline import evaluate_baseline_deviation, evaluate_time_of_day_anomaly
 from .models import (
@@ -1001,10 +1002,12 @@ def _eval_entity_staleness(
     if not entity:
         return []
     now = dt_util.parse_datetime(snapshot["derived"]["now"]) or dt_util.utcnow()
-    last_changed = dt_util.parse_datetime(str(entity.get("last_changed") or ""))
-    if last_changed is None:
+    # When it last reported, not when its value last changed: an always-on
+    # power sensor's last_changed is when its current run started (#982).
+    last_heard = dt_util.parse_datetime(entity_last_heard(entity) or "")
+    if last_heard is None:
         return []
-    age_hours = (now - last_changed).total_seconds() / 3600
+    age_hours = (now - last_heard).total_seconds() / 3600
     if age_hours <= max_stale_hours:
         return []
     evidence = {
@@ -1016,8 +1019,14 @@ def _eval_entity_staleness(
         "max_stale_hours": max_stale_hours,
         # Grows every cycle; DISPLAY_ONLY_EVIDENCE_KEYS keeps it out of the id.
         "age_hours": age_hours,
-        "last_changed": entity.get("last_changed"),
     }
+    if entity.get("last_reported"):
+        # An enriched power sensor's last_changed is when its run started, not
+        # when it went quiet: the last report marks this outage, so a second
+        # one in the same run is a new finding (#982).
+        evidence["last_heard"] = entity_last_heard(entity)
+    else:
+        evidence["last_changed"] = entity.get("last_changed")
     return [_build_finding(rule, [entity_id], evidence)]
 
 
