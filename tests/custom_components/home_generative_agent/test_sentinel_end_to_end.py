@@ -46,6 +46,7 @@ from custom_components.home_generative_agent.sentinel.suppression import (
     resolve_prompt,
 )
 from custom_components.home_generative_agent.sentinel.triage import (
+    TRIAGE_NOTIFY,
     TRIAGE_SUPPRESS,
     TriageDecision,
 )
@@ -891,6 +892,313 @@ async def test_triage_suppressed_finding_audit_reason(
     )
     assert audit.calls[0]["triage_decision"] == TRIAGE_SUPPRESS
     assert audit.calls[0]["triage_reason_code"] == "routine_state"
+
+
+_TRIAGE_WINDOW = timedelta(minutes=30)
+
+
+def _triage_answering(decision: str = TRIAGE_SUPPRESS) -> MagicMock:
+    service = MagicMock()
+    service.triage = AsyncMock(
+        return_value=TriageDecision(
+            decision=decision,
+            reason_code="routine_state",
+            triage_confidence=0.9,
+            summary="routine",
+        )
+    )
+    return service
+
+
+def _triaged_engine(
+    monkeypatch: pytest.MonkeyPatch, decision: str = TRIAGE_SUPPRESS
+) -> tuple[Any, Any, MagicMock]:
+    engine, _notifier, audit = _make_engine(
+        monkeypatch, _make_snapshot(), cooldown_minutes=0
+    )
+    service = _triage_answering(decision)
+    cast("Any", engine)._triage_service = service
+    return engine, audit, service
+
+
+async def _dispatch_triaged(
+    engine: Any,
+    finding: AnomalyFinding,
+    now: datetime,
+    *,
+    snapshot: FullStateSnapshot | None = None,
+    window: timedelta = _TRIAGE_WINDOW,
+) -> bool:
+    return await engine._dispatch_item(
+        finding,
+        snapshot or _make_snapshot(),
+        now,
+        window,
+        timedelta(0),
+        explain_enabled=False,
+    )
+
+
+async def test_an_unchanged_suppressed_finding_is_triaged_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A standing condition costs one model call and one audit per cooldown."""
+    engine, audit, service = _triaged_engine(monkeypatch)
+    finding = _standing_finding("battery", "phone_battery_low_at_night")
+    now = datetime.now(UTC)
+
+    first = await _dispatch_triaged(engine, finding, now)
+    second = await _dispatch_triaged(engine, finding, now + timedelta(minutes=5))
+
+    assert (first, second) == (False, False)
+    assert service.triage.await_count == 1
+    assert len(audit.calls) == 1
+    # Callers read this to tell triage's stop from one that settles the alert.
+    assert engine._last_dispatch_reason == SUPPRESSION_REASON_TRIAGE_SUPPRESSED
+
+
+async def test_a_suppressed_finding_is_triaged_again_once_its_cooldown_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The answer holds only as long as the cooldown would have."""
+    engine, audit, service = _triaged_engine(monkeypatch)
+    finding = _standing_finding("battery", "phone_battery_low_at_night")
+    now = datetime.now(UTC)
+
+    await _dispatch_triaged(engine, finding, now)
+    await _dispatch_triaged(engine, finding, now + _TRIAGE_WINDOW)
+
+    assert service.triage.await_count == 2
+    assert len(audit.calls) == 2
+
+
+async def test_the_longer_cooldown_sets_how_long_the_answer_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The entity cooldown counts when it is the longer of the two."""
+    engine, _audit, service = _triaged_engine(monkeypatch)
+    finding = _standing_finding("battery", "phone_battery_low_at_night")
+    now = datetime.now(UTC)
+
+    for minutes in (0, 45):
+        await engine._dispatch_item(
+            finding,
+            _make_snapshot(),
+            now + timedelta(minutes=minutes),
+            timedelta(minutes=30),
+            timedelta(minutes=60),
+            explain_enabled=False,
+        )
+
+    assert service.triage.await_count == 1
+
+
+async def test_a_high_severity_finding_is_triaged_every_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One wrong answer on a serious alert is corrected by the next run."""
+    engine, audit, service = _triaged_engine(monkeypatch)
+    finding = _standing_finding("lock", "unlocked_lock_at_night", severity="high")
+    now = datetime.now(UTC)
+
+    await _dispatch_triaged(engine, finding, now)
+    await _dispatch_triaged(engine, finding, now + timedelta(minutes=5))
+
+    assert service.triage.await_count == 2
+    assert len(audit.calls) == 2
+
+
+async def test_a_changed_finding_is_triaged_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Changed details give the finding another id, and another question."""
+    engine, _audit, service = _triaged_engine(monkeypatch)
+    now = datetime.now(UTC)
+
+    await _dispatch_triaged(
+        engine, _standing_finding("battery-15", "phone_battery_low_at_night"), now
+    )
+    await _dispatch_triaged(
+        engine,
+        _standing_finding("battery-5", "phone_battery_low_at_night"),
+        now + timedelta(minutes=5),
+    )
+
+    assert service.triage.await_count == 2
+
+
+@pytest.mark.parametrize("changed", ["is_night", "anyone_home"])
+async def test_a_change_the_model_can_see_is_triaged_at_once(
+    monkeypatch: pytest.MonkeyPatch, changed: str
+) -> None:
+    """Night and occupancy are in the prompt but not always in the finding."""
+    engine, _audit, service = _triaged_engine(monkeypatch)
+    finding = _standing_finding("door", "open_entry_while_away")
+    now = datetime.now(UTC)
+    later = _make_snapshot()
+    cast("Any", later)["derived"][changed] = True
+
+    await _dispatch_triaged(engine, finding, now)
+    await _dispatch_triaged(engine, finding, now + timedelta(minutes=5), snapshot=later)
+
+    assert service.triage.await_count == 2
+
+
+async def test_a_suppression_does_not_hold_back_another_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The model cannot silence a device it never saw, unlike a type cooldown."""
+    engine, _audit, service = _triaged_engine(monkeypatch)
+    now = datetime.now(UTC)
+
+    await _dispatch_triaged(
+        engine,
+        _standing_finding(
+            "a", "open_entry_while_away", entities=["binary_sensor.door_a"]
+        ),
+        now,
+    )
+    await _dispatch_triaged(
+        engine,
+        _standing_finding(
+            "b", "open_entry_while_away", entities=["binary_sensor.door_b"]
+        ),
+        now,
+    )
+
+    assert service.triage.await_count == 2
+
+
+async def test_a_notify_answer_is_not_remembered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a suppression is held; a delivered finding uses its cooldown."""
+    engine, _audit, _service = _triaged_engine(monkeypatch, TRIAGE_NOTIFY)
+    finding = _standing_finding("door", "open_entry_while_away")
+
+    assert await _dispatch_triaged(engine, finding, datetime.now(UTC)) is True
+    assert engine._triage_suppressed == {}
+
+
+async def test_no_cooldown_leaves_nothing_remembered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With both cooldowns at zero every run still asks, as configured."""
+    engine, _audit, service = _triaged_engine(monkeypatch)
+    finding = _standing_finding("door", "open_entry_while_away")
+    now = datetime.now(UTC)
+
+    for _ in range(2):
+        await _dispatch_triaged(engine, finding, now, window=timedelta(0))
+
+    assert service.triage.await_count == 2
+    assert engine._triage_suppressed == {}
+
+
+async def test_expired_suppressions_are_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The memory does not grow with every finding ever suppressed."""
+    engine, _audit, _service = _triaged_engine(monkeypatch)
+    now = datetime.now(UTC)
+
+    await _dispatch_triaged(
+        engine, _standing_finding("old", "open_entry_while_away"), now
+    )
+    await _dispatch_triaged(
+        engine,
+        _standing_finding("new", "open_entry_while_away"),
+        now + _TRIAGE_WINDOW,
+    )
+
+    assert [key[0] for key in engine._triage_suppressed] == ["new"]
+
+
+_HEATING = {"hvac_context": {"explained_by": "heating"}}
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        pytest.param({"severity": "low"}, {"severity": "high"}, id="raised_to_high"),
+        pytest.param({"confidence": 0.9}, {"confidence": 0.5}, id="confidence"),
+        pytest.param(
+            {"evidence": {**_HEATING, "power_w": 1000}},
+            {"evidence": {**_HEATING, "power_w": 10000}},
+            id="power_draw_grew",
+        ),
+        pytest.param(
+            {"evidence": _HEATING},
+            {"evidence": {"hvac_context": {"explained_by": "none"}}},
+            id="heating_stopped_explaining_it",
+        ),
+        pytest.param(
+            {"evidence": {"recognized_people": ["Indeterminate"]}},
+            {"evidence": {"recognized_people": ["Unknown Person"]}},
+            id="became_a_stranger",
+        ),
+    ],
+)
+async def test_anything_the_model_is_shown_changing_is_triaged_at_once(
+    monkeypatch: pytest.MonkeyPatch, before: dict[str, Any], after: dict[str, Any]
+) -> None:
+    """The id can stay the same while what the model weighed does not."""
+    engine, _audit, service = _triaged_engine(monkeypatch)
+    finding = _standing_finding("same-id", "appliance_power_duration")
+    now = datetime.now(UTC)
+
+    await _dispatch_triaged(engine, dataclasses.replace(finding, **before), now)
+    await _dispatch_triaged(
+        engine, dataclasses.replace(finding, **after), now + timedelta(minutes=5)
+    )
+
+    assert service.triage.await_count == 2
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "radio_new_device_joined",
+        "network_unknown_device_joined",
+        "network_public_ip_changed",
+        "network_upnp_port_mapping_added",
+    ],
+)
+async def test_a_change_alert_is_never_remembered(
+    monkeypatch: pytest.MonkeyPatch, rule: str
+) -> None:
+    """A new change can repeat an old one's id: it is a new event to judge."""
+    engine, audit, service = _triaged_engine(monkeypatch)
+    finding = _standing_finding("two-to-three", rule, severity="low")
+    now = datetime.now(UTC)
+
+    await _dispatch_triaged(engine, finding, now)
+    await _dispatch_triaged(engine, finding, now + timedelta(minutes=5))
+
+    assert service.triage.await_count == 2
+    assert len(audit.calls) == 2
+    assert engine._triage_suppressed == {}
+
+
+async def test_a_finding_with_no_device_ignores_the_entity_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The entity cooldown never applies to it, so it must not set the wait."""
+    engine, _audit, service = _triaged_engine(monkeypatch)
+    finding = _standing_finding("posture", "network_router_posture", entities=[])
+    now = datetime.now(UTC)
+
+    for minutes in (0, 5):
+        await engine._dispatch_item(
+            finding,
+            _make_snapshot(),
+            now + timedelta(minutes=minutes),
+            timedelta(0),
+            timedelta(minutes=15),
+            explain_enabled=False,
+        )
+
+    assert service.triage.await_count == 2
 
 
 @pytest.mark.asyncio

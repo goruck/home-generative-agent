@@ -1059,20 +1059,6 @@ Since step 6 this also covers `radio_new_device_joined`, and since step 7 `netwo
 
 ---
 
-### Triage-suppressed findings never register a cooldown
-
-**What:** `_dispatch_item` returns at `sentinel/engine.py:1703` on a `TRIAGE_SUPPRESS` decision, before the `register_finding(self._suppression.state, finding, now)` call at line 1743 that updates both the per-type and per-entity cooldown maps. A standing condition -- a phone battery that stays low, a door that stays open -- is therefore re-triaged on every poll *and* every event-driven evaluation for as long as it persists, each one a paid model call plus an audit write, none of which reduce future work. Triage is also sequential in the dispatch loop, so the wasted calls delay every later finding in the cycle.
-
-**Why:** Found by the Codex adversarial pass on the triage-exposure branch (2026-09-22) and confirmed by reading the two line numbers. Latent since #262 because triage was unreachable; it became live the moment the UI switch shipped. Left out of that branch deliberately: where the cooldown should be registered is a behavior decision (a suppressed finding arguably *should* start a cooldown, but "suppressed" and "delivered" have different natural cooldown lengths), and it changes suppression semantics enough to want its own field validation.
-
-**How to apply:** Either call `register_finding` before the suppress-branch return, or give triage its own retry cooldown keyed on the finding's anomaly id so a suppressed finding is not re-triaged until the existing cooldown would have let it through. Prefer the second if a suppressed finding should still alert promptly once its condition *changes*. Pin it with a test that dispatches the same unchanged finding twice and asserts one triage call.
-
-**Effort:** S
-**Priority:** P2
-**Depends on:** None
-
----
-
 ### Level-increase PIN checks run PBKDF2 on the event loop with no attempt limit
 
 **What:** `SentinelEngine.set_autonomy_level` calls `verify_pin` (`core/utils.py`, PBKDF2-HMAC-SHA256, 120,000 iterations) synchronously from the async `sentinel_set_autonomy_level` handler, so every attempt blocks Home Assistant's event loop for the length of one hash. There is no failed-attempt counter or backoff, so the 4-digit minimum PIN can be enumerated by repeated calls.

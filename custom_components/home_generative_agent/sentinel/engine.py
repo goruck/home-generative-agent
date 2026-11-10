@@ -207,6 +207,8 @@ from .triage import (
     TRIAGE_REASON_DEFERRED,
     TRIAGE_SUPPRESS,
     SentinelTriageService,
+    TriageDecision,
+    triage_memo_key,
 )
 from .trigger_scheduler import SentinelTriggerScheduler, TriggerRecord
 
@@ -432,6 +434,10 @@ class SentinelEngine:
         # Findings held (at level 0, or a change alert held back at any level,
         # #801): anomaly_id -> when last audited.
         self._passive_recorded: dict[str, datetime] = {}
+        # Findings triage suppressed, by what the model was shown
+        # (triage_memo_key) -> when to ask it again. Not saved: a restart costs
+        # one more model call per finding.
+        self._triage_suppressed: dict[tuple[str, str], datetime] = {}
         # Owed replays: when each kind last skipped its type cooldown, and the
         # ones delivered this run.
         self._replay_cooldown_skipped: dict[str, datetime] = {}
@@ -2528,6 +2534,75 @@ class SentinelEngine:
             return None
         return self._explainer
 
+    def _triage_still_suppressed(
+        self, finding: AnomalyFinding, snapshot: FullStateSnapshot, now: datetime
+    ) -> bool:
+        """Return True while triage's answer on this unchanged finding holds."""
+        until = self._triage_suppressed.get(triage_memo_key(finding, snapshot))
+        return until is not None and now < until
+
+    def _remember_triage_suppression(
+        self,
+        finding: AnomalyFinding,
+        snapshot: FullStateSnapshot,
+        now: datetime,
+        window: timedelta,
+    ) -> None:
+        """
+        Keep triage's suppression of a finding for its cooldown window.
+
+        Only this exact finding, unlike a cooldown, so the model cannot silence
+        another device it never saw. High severity is asked again every time, so
+        one wrong answer on a serious alert is corrected by the next run. A
+        change alert is too: a new change can repeat an old one's id, and these
+        rules do not re-fire every run once triage has stopped them.
+        """
+        self._triage_suppressed = {
+            key: until for key, until in self._triage_suppressed.items() if until > now
+        }
+        if (
+            finding.severity != "high"
+            and finding.type not in _CHANGE_ALERT_RULES
+            and window > timedelta(0)
+        ):
+            self._triage_suppressed[triage_memo_key(finding, snapshot)] = now + window
+
+    async def _triage_finding(  # noqa: PLR0913
+        self,
+        service: SentinelTriageService,
+        finding: AnomalyFinding,
+        snapshot: FullStateSnapshot,
+        now: datetime,
+        window: timedelta,
+        *,
+        autonomy: int,
+        trigger_source: str,
+    ) -> TriageDecision | None:
+        """Return triage's decision on a finding, or None when it stopped it."""
+        if self._triage_still_suppressed(finding, snapshot, now):
+            # Audited when the model answered; every repeat of a standing
+            # condition would crowd out the audit trail.
+            self._last_dispatch_reason = SUPPRESSION_REASON_TRIAGE_SUPPRESSED
+            return None
+        result = await service.triage(finding, snapshot)
+        if result.decision != TRIAGE_SUPPRESS:
+            return result
+        await _append_finding_audit(
+            self._audit_store,
+            snapshot,
+            finding,
+            None,
+            SUPPRESSION_REASON_TRIAGE_SUPPRESSED,
+            triage_decision=result.decision,
+            triage_reason_code=result.reason_code,
+            triage_confidence=result.triage_confidence,
+            autonomy_level_at_decision=autonomy,
+            trigger_source=trigger_source,
+        )
+        self._remember_triage_suppression(finding, snapshot, now, window)
+        self._last_dispatch_reason = SUPPRESSION_REASON_TRIAGE_SUPPRESSED
+        return None
+
     async def _dispatch_item(  # noqa: PLR0913
         self,
         item: AnomalyFinding | CompoundFinding,
@@ -2626,30 +2701,28 @@ class SentinelEngine:
         )
 
         # LLM triage pass (Level 1+): may suppress the finding.
-        triage_decision_value: str | None = None
-        triage_reason_code_value: str | None = None
-        triage_confidence_value: float | None = None
+        triage_result: TriageDecision | None = None
         # Not a replay: what was owed is not the model's to drop.
         if effective_autonomy >= 1 and self._triage_service is not None and not replay:
-            triage_result = await self._triage_service.triage(finding, snapshot)
-            triage_decision_value = triage_result.decision
-            triage_reason_code_value = triage_result.reason_code
-            triage_confidence_value = triage_result.triage_confidence
-            if triage_result.decision == TRIAGE_SUPPRESS:
-                await _append_finding_audit(
-                    self._audit_store,
-                    snapshot,
-                    finding,
-                    None,
-                    SUPPRESSION_REASON_TRIAGE_SUPPRESSED,
-                    triage_decision=triage_decision_value,
-                    triage_reason_code=triage_reason_code_value,
-                    triage_confidence=triage_confidence_value,
-                    autonomy_level_at_decision=effective_autonomy,
-                    trigger_source=trigger_source,
-                )
-                self._last_dispatch_reason = SUPPRESSION_REASON_TRIAGE_SUPPRESSED
+            triage_result = await self._triage_finding(
+                self._triage_service,
+                finding,
+                snapshot,
+                now,
+                # An entity cooldown never applies to a finding with no device.
+                max(cooldown_type, cooldown_entity)
+                if finding.triggering_entities
+                else cooldown_type,
+                autonomy=effective_autonomy,
+                trigger_source=trigger_source,
+            )
+            if triage_result is None:
                 return False
+        triage_decision_value = triage_result.decision if triage_result else None
+        triage_reason_code_value = triage_result.reason_code if triage_result else None
+        triage_confidence_value = (
+            triage_result.triage_confidence if triage_result else None
+        )
 
         # Execution policy evaluation.
         canary_mode = bool(
