@@ -1377,15 +1377,19 @@ class SentinelEngine:
                     self._entry_id,
                 )
 
-        task, self._task = self._task, None
+        task = self._task
         try:
             if task is not None:
                 self._stop_event.set()
                 # Bounded and repeated: a run that caught the first cancel
                 # and kept working held HA's shutdown for minutes (#985). A
-                # cancel of this caller gets through. A run still going when
-                # this gives up writes nothing more (_refuses_writes).
+                # cancel of this caller gets through. The task is kept until
+                # this returns, so a concurrent stop() (removing Sentinel
+                # stops it twice) waits on it too instead of returning early,
+                # and a stop() whose caller was cancelled can be retried.
                 await cancel_and_wait(task, "Sentinel run loop")
+                if self._task is task:
+                    self._task = None
         finally:
             # Always, even when this caller is cancelled or the loop died
             # with an error; a second stop() redoes whatever is left.
@@ -1394,20 +1398,6 @@ class SentinelEngine:
             self._event_unsubscribers.clear()
             if self._baseline_updater is not None:
                 await self._baseline_updater.stop()
-
-    def _refuses_writes(self, what: str) -> bool:
-        """
-        Return True once stop() has begun: this run must not write or notify.
-
-        stop() gives up on a run that keeps catching its cancel (#985). That
-        run must not outlive the engine: removing Sentinel deletes the
-        network and auth inventories right after stop() returns, and a
-        reload starts a new engine beside it.
-        """
-        if self._stopped:
-            LOGGER.debug("Sentinel stopped; skipping %s from an unfinished run.", what)
-            return True
-        return False
 
     # ---------------------------------------------------------------------- #
     # Event-driven triggering
@@ -1611,8 +1601,6 @@ class SentinelEngine:
         device inventory store when it changed; a failed write keeps the
         in-process copy and is retried on the next run.
         """
-        if self._refuses_writes("the posture memory"):
-            return
         posture = (snapshot.get("network") or {}).get("posture") or {}
         held_keys = {key for rule_id in held for key in _POSTURE_MEMORY_RULES[rule_id]}
         for key in POSTURE_MEMORY_KEYS:
@@ -1647,8 +1635,6 @@ class SentinelEngine:
         """
         inventory = self._auth_inventory
         if inventory is None or context.auth_observation is None:
-            return
-        if self._refuses_writes("the auth inventory"):
             return
         fingerprint = (
             self._pseudonymizer.fingerprint if self._pseudonymizer is not None else None
@@ -1729,7 +1715,7 @@ class SentinelEngine:
         loop.
         """
         inventory = self._network_inventory
-        if inventory is None or self._refuses_writes("the device inventory"):
+        if inventory is None:
             return
         network = snapshot.get("network") or {}
         capabilities = set(network.get("capabilities", []))
@@ -2647,7 +2633,7 @@ class SentinelEngine:
         self._last_dispatch_reason = SUPPRESSION_REASON_TRIAGE_SUPPRESSED
         return None
 
-    async def _dispatch_item(  # noqa: PLR0911, PLR0913
+    async def _dispatch_item(  # noqa: PLR0913
         self,
         item: AnomalyFinding | CompoundFinding,
         snapshot: FullStateSnapshot,
@@ -2669,8 +2655,6 @@ class SentinelEngine:
         anomaly reached the user within its cooldown. Only the audit label
         (``notifier_duplicate``) says this finding's own push was not sent.
         """
-        if self._refuses_writes("a finding's dispatch"):
-            return False
         if isinstance(item, CompoundFinding):
             return await self._dispatch_compound(
                 item,

@@ -267,6 +267,8 @@ async def test_a_cancelled_stop_still_removes_the_listeners() -> None:
         assert stopping in done
         unsub.assert_called_once()
         assert engine._event_unsubscribers == []
+        # Kept, so a later stop() can still end it.
+        assert engine._task is task
     finally:
         release.set()
         await task
@@ -347,3 +349,45 @@ async def test_discovery_loop_treats_a_converted_cancel_as_a_stop(
         loop_task.cancel()
         with suppress(asyncio.CancelledError, RuntimeError):
             await loop_task
+
+
+@pytest.mark.asyncio
+async def test_a_second_concurrent_stop_waits_for_the_run_to_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Removing Sentinel calls stop() twice; the second must not return early.
+
+    The removal deletes the device and sign-in inventories once its stop()
+    returns, so that stop() must not return while the run is still going.
+    """
+    monkeypatch.setattr(utils_mod, "CANCEL_WAIT_S", 0.05)
+    engine = _engine()
+    cancels = 0
+
+    async def _ends_on_third_cancel() -> None:
+        nonlocal cancels
+        while True:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancels += 1
+                if cancels >= 3:
+                    raise
+
+    task = asyncio.create_task(_ends_on_third_cancel())
+    await asyncio.sleep(0)
+    engine._task = task
+
+    first = asyncio.create_task(engine.stop())
+    await asyncio.sleep(0)
+    second = asyncio.create_task(engine.stop())
+    try:
+        await asyncio.wait_for(second, timeout=2)
+        assert task.done(), "the second stop() returned while the run went on"
+        await asyncio.wait_for(first, timeout=2)
+        assert engine._task is None
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task

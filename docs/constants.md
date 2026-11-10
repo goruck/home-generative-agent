@@ -336,7 +336,7 @@ The model Sentinel's triage, discovery and explanation calls run on when a **Sen
 | `_SENTINEL_STARVATION_WARN_S` | `core/utils.py` | `300.0` (s) | Consecutive deferral duration that triggers a `degraded` sentinel health state and a WARNING log. |
 | `_SENTINEL_CANCEL_WAIT_S` | `core/utils.py` | `2.0` (s) | Grace period given to a Sentinel task to cancel cleanly when a chat turn begins. |
 | `CANCEL_WAIT_S` | `core/utils.py` | `2.0` (s) | How long one cancel gets to end a task when Sentinel, its discovery or its baseline updater stops, or an entry unloads, before it is cancelled again (#985). The unload reads it through `_CANCEL_WAIT_S` in `__init__.py`, which takes this value. |
-| `CANCEL_ATTEMPTS` | `core/utils.py` | `5` | How many cancels are sent before the stop or unload logs the task and moves on without it, so a task that keeps catching its cancel holds a shutdown for about 10 s at most. The unload reads it through `_CANCEL_ATTEMPTS` in `__init__.py`. A Sentinel run left going this way writes and sends nothing more. |
+| `CANCEL_ATTEMPTS` | `core/utils.py` | `5` | How many cancels are sent before the stop or unload logs the task and moves on without it, so a task that keeps catching its cancel holds a shutdown for about 10 s at most. The unload reads it through `_CANCEL_ATTEMPTS` in `__init__.py`. |
 
 ---
 
