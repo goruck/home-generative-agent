@@ -22,6 +22,7 @@ from custom_components.home_generative_agent.core.utils import (
     SENTINEL_ADMISSION_TIMEOUT_S,
     SentinelLLMDeferredError,
     cancel_and_wait,
+    cancel_requested,
     extract_final,
     run_sentinel_model_call,
     wait_sentinel_call_gap,
@@ -364,7 +365,11 @@ class SentinelDiscoveryEngine:
         while not self._stop_event.is_set():
             try:
                 await self._run_once_guarded()
-            except Exception:  # noqa: BLE001
+            except Exception as err:
+                # A cancel the model library turned into an error is a stop,
+                # not a failed cycle (#985).
+                if cancel_requested():
+                    raise asyncio.CancelledError from err
                 # A dead loop silently disables discovery until the
                 # integration reloads (issue #465); drop the cycle and
                 # keep the loop alive.

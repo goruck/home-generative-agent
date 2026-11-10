@@ -596,6 +596,20 @@ CANCEL_WAIT_S = 2.0
 CANCEL_ATTEMPTS = 5
 
 
+def _note_task_error(task: asyncio.Task[Any], what: str) -> None:
+    """
+    Log the error a finished task ended with, if any, and mark it read.
+
+    ``asyncio.wait`` does not read it, so a loop that died would otherwise
+    print "Task exception was never retrieved" during the restart.
+    """
+    if task.cancelled():
+        return
+    err = task.exception()
+    if err is not None:
+        LOGGER.warning("The %s had stopped with an error.", what, exc_info=err)
+
+
 async def cancel_and_wait(
     task: object,
     what: str,
@@ -629,7 +643,10 @@ async def cancel_and_wait(
     hence several attempts. A task that outlives them all is logged and left
     behind rather than allowed to block the caller.
     """
-    if not isinstance(task, asyncio.Task) or task.done():
+    if not isinstance(task, asyncio.Task):
+        return
+    if task.done():
+        _note_task_error(task, what)
         return
     wait_s = CANCEL_WAIT_S if wait_s is None else wait_s
     attempts = CANCEL_ATTEMPTS if attempts is None else attempts
@@ -637,6 +654,7 @@ async def cancel_and_wait(
         task.cancel()
         done, _pending = await asyncio.wait([task], timeout=wait_s)
         if done:
+            _note_task_error(task, what)
             return
     LOGGER.warning(
         "The %s (%s) did not stop after %d cancellations; continuing without "

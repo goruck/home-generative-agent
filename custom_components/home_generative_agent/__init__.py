@@ -360,6 +360,8 @@ from .core.subentry_resolver import (
     with_implied_capabilities,
 )
 from .core.utils import (
+    CANCEL_ATTEMPTS,
+    CANCEL_WAIT_S,
     anthropic_healthy,
     builds_differ,
     cancel_and_wait,
@@ -5297,10 +5299,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     return True
 
 
-# How long one cancellation gets to land, and how many are sent, before the
-# unload stops waiting on a task (see _cancel_and_wait).
-_CANCEL_WAIT_S = 2.0
-_CANCEL_ATTEMPTS = 5
+# The unload's cancel budget (see _cancel_and_wait): core.utils's values,
+# kept as module names so tests can shorten the unload's wait alone.
+_CANCEL_WAIT_S = CANCEL_WAIT_S
+_CANCEL_ATTEMPTS = CANCEL_ATTEMPTS
 
 
 async def _cancel_and_wait(task: object, what: str) -> None:

@@ -11,9 +11,10 @@ behind each interval.
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import suppress
-from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock
+from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -208,3 +209,141 @@ async def test_baseline_wait_leaves_no_waiter_behind_each_interval(
     finally:
         updater._stop_event.set()
         await asyncio.wait_for(loop_task, timeout=1)
+
+
+def test_the_stop_budget_is_finite_and_short() -> None:
+    """Each stop waits about 10 s at most; the unload uses the same values."""
+    import custom_components.home_generative_agent as hga_component  # noqa: PLC0415
+
+    assert 0 < utils_mod.CANCEL_WAIT_S * utils_mod.CANCEL_ATTEMPTS <= 10
+    assert cast("Any", hga_component)._CANCEL_WAIT_S == utils_mod.CANCEL_WAIT_S
+    assert cast("Any", hga_component)._CANCEL_ATTEMPTS == utils_mod.CANCEL_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_stop_cleans_up_after_a_loop_that_died_with_an_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A dead loop is logged once and the listeners still come off."""
+
+    async def _boom() -> None:
+        msg = "loop died"
+        raise RuntimeError(msg)
+
+    engine = _engine()
+    engine._task = asyncio.create_task(_boom())
+    await asyncio.sleep(0)
+    unsub = MagicMock()
+    engine._event_unsubscribers.append(unsub)
+    baseline = MagicMock()
+    baseline.stop = AsyncMock()
+    engine._baseline_updater = baseline
+
+    with caplog.at_level(logging.WARNING):
+        await engine.stop()
+
+    unsub.assert_called_once()
+    baseline.stop.assert_awaited_once()
+    assert engine._task is None
+    assert "Sentinel run loop had stopped with an error" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_stop_still_removes_the_listeners() -> None:
+    """A cancel of stop()'s caller must not leave the engine subscribed."""
+    engine = _engine()
+    release = asyncio.Event()
+    task = asyncio.create_task(_stubborn(release))
+    await asyncio.sleep(0)
+    engine._task = task
+    unsub = MagicMock()
+    engine._event_unsubscribers.append(unsub)
+
+    stopping = asyncio.create_task(engine.stop())
+    await asyncio.sleep(0)
+    stopping.cancel()
+    try:
+        done, _ = await asyncio.wait({stopping}, timeout=1)
+        assert stopping in done
+        unsub.assert_called_once()
+        assert engine._event_unsubscribers == []
+    finally:
+        release.set()
+        await task
+        with suppress(asyncio.CancelledError):
+            await stopping
+
+
+async def _converts_cancel() -> None:
+    """Stand in for a driver that turns a cancel into an ordinary error."""
+    try:
+        await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        msg = "connection lost"
+        raise RuntimeError(msg) from None
+
+
+@pytest.mark.asyncio
+async def test_baseline_loop_treats_a_converted_cancel_as_a_stop(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No false 'update failed' traceback, and no new interval wait (#985)."""
+    updater = _baseline()
+    started = asyncio.Event()
+
+    async def _snapshot(_hass: Any) -> dict[str, Any]:
+        return {}
+
+    async def _update(_snapshot: Any) -> None:
+        started.set()
+        await _converts_cancel()
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.snapshot.builder."
+        "async_build_full_state_snapshot",
+        _snapshot,
+    )
+    updater._update_baselines = _update  # type: ignore[method-assign]
+    loop_task = asyncio.create_task(updater._run_loop())
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    with caplog.at_level(logging.WARNING):
+        loop_task.cancel()  # the stop event stays clear
+        done, _ = await asyncio.wait({loop_task}, timeout=1)
+    try:
+        assert loop_task in done, "the baseline loop went back to its wait"
+        assert "Baseline update failed" not in caplog.text
+    finally:
+        updater._stop_event.set()
+        loop_task.cancel()
+        with suppress(asyncio.CancelledError, RuntimeError):
+            await loop_task
+
+
+@pytest.mark.asyncio
+async def test_discovery_loop_treats_a_converted_cancel_as_a_stop(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A model library that turns the cancel into an error is a stop (#985)."""
+    engine = _discovery()
+    started = asyncio.Event()
+
+    async def _cycle() -> None:
+        started.set()
+        await _converts_cancel()
+
+    engine._run_once_guarded = _cycle  # type: ignore[method-assign]
+    loop_task = asyncio.create_task(engine._run_loop())
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    with caplog.at_level(logging.WARNING):
+        loop_task.cancel()
+        done, _ = await asyncio.wait({loop_task}, timeout=1)
+    try:
+        assert loop_task in done, "the discovery loop went back to its wait"
+        assert "Discovery cycle failed" not in caplog.text
+    finally:
+        engine._stop_event.set()
+        loop_task.cancel()
+        with suppress(asyncio.CancelledError, RuntimeError):
+            await loop_task

@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import custom_components.home_generative_agent.core.utils as utils_mod
 from custom_components.home_generative_agent.sentinel.engine import (
     SentinelEngine,
     _anomaly_type_for_state,
@@ -369,9 +370,12 @@ async def test_stop_unsubscribes_event_listener() -> None:
 
 @pytest.mark.asyncio
 async def test_stop_returns_when_a_run_swallows_the_cancel(
-    caplog: pytest.LogCaptureFixture,
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A run that catches stop()'s cancel must not hold the loop for an interval (#985)."""
+    # Far past the 1 s window below, so only the loop's own post-run check
+    # can end it, not stop()'s repeated cancel.
+    monkeypatch.setattr(utils_mod, "CANCEL_WAIT_S", 30.0)
     engine = _make_engine(MagicMock())
     run_started = asyncio.Event()
     runs = 0
@@ -390,11 +394,9 @@ async def test_stop_returns_when_a_run_swallows_the_cancel(
     await asyncio.wait_for(run_started.wait(), timeout=1)
 
     # The interval is 60 s; stop() must not wait it out. Watch the loop task
-    # itself: stop() suppresses CancelledError around its await, so a timeout
-    # on stop() would be swallowed too and prove nothing.
+    # itself, not stop(), whose bounded wait would end either way.
     stopping = asyncio.create_task(engine.stop())
     with caplog.at_level(logging.WARNING):
-        # Under the stop()'s 2 s re-cancel, so only the post-run check passes.
         done, _ = await asyncio.wait({loop_task}, timeout=1)
     try:
         assert loop_task in done, "the run loop kept waiting after stop()"
@@ -406,6 +408,32 @@ async def test_stop_returns_when_a_run_swallows_the_cancel(
         with suppress(asyncio.CancelledError):
             await loop_task
         await stopping
+
+
+@pytest.mark.asyncio
+async def test_the_loop_ends_when_its_own_cancel_was_swallowed() -> None:
+    """A cancel of the loop task a run caught ends the loop, stop event or not."""
+    engine = _make_engine(MagicMock())
+    run_started = asyncio.Event()
+
+    async def _swallowing_run(_source: str = "poll") -> None:
+        run_started.set()
+        with suppress(asyncio.CancelledError):
+            await asyncio.Event().wait()
+
+    engine._timed_run = _swallowing_run  # type: ignore[method-assign]
+    loop_task = asyncio.create_task(engine._run_loop())
+    await asyncio.wait_for(run_started.wait(), timeout=1)
+
+    loop_task.cancel()  # not through stop(): the stop event stays clear
+    done, _ = await asyncio.wait({loop_task}, timeout=1)
+    try:
+        assert loop_task in done, "the loop went back to its interval wait"
+        assert loop_task.cancelled()
+    finally:
+        loop_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await loop_task
 
 
 # ---------------------------------------------------------------------------
@@ -627,7 +655,6 @@ async def test_the_explanation_limit_comes_from_the_option() -> None:
 async def test_an_explanation_waits_out_the_gap_after_the_last_sentinel_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import custom_components.home_generative_agent.core.utils as utils_mod  # noqa: PLC0415
     import custom_components.home_generative_agent.sentinel.engine as engine_module  # noqa: PLC0415
 
     monkeypatch.setattr(engine_module, "SENTINEL_TRIAGE_CALL_GAP_S", 0.2)

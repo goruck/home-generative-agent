@@ -2536,3 +2536,65 @@ async def test_power_enrichment_gets_the_same_memory_every_run(
     assert len(seen) == 2
     assert isinstance(seen[0], dict)
     assert seen[0] is seen[1]
+
+
+# ---------------------------------------------------------------------------
+# A run stop() gave up on writes and sends nothing (#985)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("stopped", [False, True])
+async def test_a_run_left_going_after_stop_sends_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    stopped: bool,  # noqa: FBT001
+) -> None:
+    """Once stop() began, a still-running cycle must not notify or audit."""
+    engine, notifier, audit = _make_engine(
+        monkeypatch, _make_snapshot(), cooldown_minutes=0
+    )
+    engine._stopped = stopped
+    finding = _standing_finding("garage_unlocked", "unlocked_lock_at_night")
+
+    delivered = await engine._dispatch_item(
+        finding,
+        _make_snapshot(),
+        datetime.now(UTC),
+        timedelta(0),
+        timedelta(0),
+        explain_enabled=False,
+    )
+
+    if stopped:
+        assert delivered is False
+        assert notifier.calls == []
+        assert audit.calls == []
+    else:  # the control: the same finding goes out on a running engine
+        assert delivered is True
+        assert len(notifier.calls) == 1
+
+
+async def test_a_run_left_going_after_stop_writes_no_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Removing Sentinel deletes the inventories; a leftover run can't rewrite them."""
+    engine, _notifier, _audit = _make_engine(monkeypatch, _make_snapshot())
+    auth = MagicMock()
+    auth.async_commit = AsyncMock(return_value=False)
+    network = MagicMock()
+    network.async_commit = AsyncMock(return_value=[])
+    network.async_set_posture_memory = AsyncMock()
+    cast("Any", engine)._auth_inventory = auth
+    cast("Any", engine)._network_inventory = network
+    engine._stopped = True
+    context = MagicMock()
+    context.auth_observation = object()
+    snapshot = cast("Any", _make_snapshot())
+    snapshot["network"] = {"posture": {}, "clients": [{"key": "a"}]}
+
+    await engine._commit_auth_inventory(context, datetime.now(UTC))
+    await engine._commit_network_inventory(snapshot, datetime.now(UTC))
+    await engine._commit_posture_memory(snapshot)
+
+    auth.async_commit.assert_not_awaited()
+    network.async_commit.assert_not_awaited()
+    network.async_set_posture_memory.assert_not_awaited()

@@ -51,7 +51,10 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
     RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS,
 )
-from custom_components.home_generative_agent.core.utils import cancel_and_wait
+from custom_components.home_generative_agent.core.utils import (
+    cancel_and_wait,
+    cancel_requested,
+)
 from custom_components.home_generative_agent.snapshot.network import (
     ROUTER_PLATFORMS,
 )
@@ -561,7 +564,11 @@ class SentinelBaselineUpdater:
                 await self._write_offered_counters()
             except (ValueError, TypeError, KeyError, asyncio.CancelledError):
                 raise
-            except Exception:
+            except Exception as err:
+                # A cancel the database driver turned into an error is a
+                # stop, not a failed update (#985).
+                if cancel_requested():
+                    raise asyncio.CancelledError from err
                 LOGGER.exception("Baseline update failed; will retry next cycle.")
             try:
                 # No shield: a shielded wait left one waiter task behind at
