@@ -424,6 +424,19 @@ def _power_magnitude(evidence: dict[str, Any]) -> list[str]:
     return lines
 
 
+def triage_memo_key(
+    finding: AnomalyFinding, snapshot: FullStateSnapshot
+) -> tuple[str, str]:
+    """
+    Return what must stay the same for a triage answer to still apply.
+
+    The finding, and the whole prompt the model answered: the id leaves out
+    things the model weighs (severity, a power draw's size, a stranger label),
+    and the prompt names no device. A new prompt field is covered as it lands.
+    """
+    return finding.anomaly_id, _build_prompt(finding, snapshot)
+
+
 def _build_prompt(
     finding: AnomalyFinding,
     snapshot: FullStateSnapshot,
