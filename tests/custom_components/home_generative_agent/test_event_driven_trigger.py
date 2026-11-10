@@ -366,6 +366,41 @@ async def test_stop_unsubscribes_event_listener() -> None:
     assert len(engine._event_unsubscribers) == 0
 
 
+@pytest.mark.asyncio
+async def test_stop_returns_when_a_run_swallows_the_cancel() -> None:
+    """A run that catches stop()'s cancel must not hold the loop for an interval (#985)."""
+    engine = _make_engine(MagicMock())
+    run_started = asyncio.Event()
+    runs = 0
+
+    async def _swallowing_run(_source: str = "poll") -> None:
+        nonlocal runs
+        runs += 1
+        run_started.set()
+        # Stands in for a library that catches CancelledError mid-call.
+        with suppress(asyncio.CancelledError):
+            await asyncio.Event().wait()
+
+    engine._timed_run = _swallowing_run  # type: ignore[method-assign]
+    loop_task = asyncio.create_task(engine._run_loop())
+    engine._task = loop_task
+    await asyncio.wait_for(run_started.wait(), timeout=1)
+
+    # The interval is 60 s; stop() must not wait it out. Watch the loop task
+    # itself: stop() suppresses CancelledError around its await, so a timeout
+    # on stop() would be swallowed too and prove nothing.
+    stopping = asyncio.create_task(engine.stop())
+    done, _ = await asyncio.wait({loop_task}, timeout=2)
+    try:
+        assert loop_task in done, "the run loop kept waiting after stop()"
+        assert runs == 1
+    finally:
+        loop_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await loop_task
+        await stopping
+
+
 # ---------------------------------------------------------------------------
 # Polling still runs when no events queued
 # ---------------------------------------------------------------------------

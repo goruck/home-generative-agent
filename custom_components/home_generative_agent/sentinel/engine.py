@@ -1500,6 +1500,13 @@ class SentinelEngine:
                 await self._trigger_scheduler.run_polling(
                     lambda: self._timed_run("poll")
                 )
+            # stop() sets the event before it cancels this task. A run that
+            # catches that cancel somewhere (a library mid-LLM-call, say)
+            # returns normally; without this check the loop would then wait
+            # out the full interval and hold up HA's shutdown (#985).
+            if self._stop_event.is_set():
+                LOGGER.debug("Sentinel stop requested during a run; leaving the loop.")
+                break
             try:
                 # Wait for a new trigger or the polling interval — whichever
                 # comes first.  Using wait_for_trigger() means the loop wakes
