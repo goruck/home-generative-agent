@@ -856,7 +856,10 @@ async def _await_sentinel_call(
         ) from err
     except Exception as err:
         if cancel_requested():
-            raise asyncio.CancelledError from err
+            # Never chain an error that may carry an echoed API key (h11).
+            raise asyncio.CancelledError from (
+                None if echoes_request_headers(err) else err
+            )
         raise
     finally:
         _sentinel_llm_tasks.discard(task)

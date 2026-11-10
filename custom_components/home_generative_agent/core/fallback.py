@@ -941,7 +941,7 @@ def _probe_model(wrapper: FallbackChatModel | FallbackVLM, index: int) -> Any:
     return wrapper.chain[index][0]
 
 
-def _raise_if_stopped(err: BaseException) -> None:
+def _raise_if_stopped(err: BaseException | None) -> None:
     """
     Re-raise a stop that the provider client reported as an ordinary error.
 
@@ -1632,6 +1632,10 @@ class FallbackEmbeddings:
                     _safe_err_summary(err),
                 )
                 admitted = False
+            if not admitted:
+                # The real check catches a driver's converted cancel itself
+                # and answers "not verified": a stop, not a result (#985).
+                _raise_if_stopped(None)
             if admitted and self._is_member(provider_id):
                 self.verify_provider(provider_id)
                 return True

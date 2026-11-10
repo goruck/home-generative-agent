@@ -2238,15 +2238,22 @@ async def test_a_stopped_embedding_call_does_not_try_the_next_provider() -> None
     assert fallback.aembed_query.await_count == 0
 
 
+@pytest.mark.parametrize("converts", [False, True])
 @pytest.mark.asyncio
-async def test_a_member_timeout_still_moves_to_the_next_provider() -> None:
+async def test_a_member_timeout_still_moves_to_the_next_provider(
+    converts: bool,  # noqa: FBT001
+) -> None:
     """The chain's own per-member timeout is not mistaken for a stop."""
     primary = MagicMock()
 
     async def _slow(*_args: Any, **_kwargs: Any) -> Any:
         await asyncio.sleep(9999)
 
-    primary.ainvoke = _slow
+    # A client that reports the deadline's cancel as its own TimeoutError
+    # (the #985 shape) must still fall over: timeout_at uncancels first.
+    primary.ainvoke = (
+        _converts_cancel_to_timeout(asyncio.Event()) if converts else _slow
+    )
     fallback = AsyncMock()
     fallback.ainvoke.return_value = FakeAIMessage("fallback")
     model = FallbackChatModel(
@@ -2341,11 +2348,16 @@ async def test_a_callers_timeout_during_a_converted_stop_stays_a_timeout() -> No
     assert fallback.ainvoke.await_count == 0
 
 
-def test_a_stop_never_chains_an_error_that_may_echo_a_key() -> None:
+@pytest.mark.parametrize("echoes", [True, False])
+def test_a_stop_never_chains_an_error_that_may_echo_a_key(
+    echoes: bool,  # noqa: FBT001
+) -> None:
     """The re-raised stop drops an error that may carry an echoed API key."""
     from custom_components.home_generative_agent.core import (  # noqa: PLC0415
         fallback as fallback_mod,
     )
+
+    original = RuntimeError("Authorization: secret")
 
     async def _run() -> BaseException:
         task = asyncio.current_task()
@@ -2356,14 +2368,49 @@ def test_a_stop_never_chains_an_error_that_may_echo_a_key() -> None:
             await asyncio.sleep(0)
         try:
             with patch.object(
-                fallback_mod, "echoes_request_headers", return_value=True
+                fallback_mod, "echoes_request_headers", return_value=echoes
             ):
-                fallback_mod._raise_if_stopped(RuntimeError("Authorization: secret"))
+                fallback_mod._raise_if_stopped(original)
         except asyncio.CancelledError as stop:
             return stop
         msg = "not raised"
         raise AssertionError(msg)
 
     stop = asyncio.run(_run())
-    assert stop.__cause__ is None
-    assert stop.__suppress_context__
+    if echoes:
+        assert stop.__cause__ is None
+        assert stop.__suppress_context__
+    else:  # kept for debugging when it cannot carry a key
+        assert stop.__cause__ is original
+
+
+@pytest.mark.asyncio
+async def test_a_build_check_that_reports_a_stop_as_not_verified_still_stops() -> None:
+    """
+    The real build check catches a converted cancel itself and says "no".
+
+    Its Ollama and database reads return None on a timeout or driver error,
+    so a stop comes back as "not verified"; that must end the call, not try
+    the next provider or push the held provider's next check back (#985).
+    """
+    started = asyncio.Event()
+
+    async def _verifier(_provider_id: str) -> bool:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return False  # as _ollama_json / _async_recorded_build do
+        return True
+
+    primary, fallback = AsyncMock(), AsyncMock()
+    fallback.aembed_query.return_value = [0.3]
+    emb = FallbackEmbeddings(
+        chain=[(primary, "cloud", "p1"), (fallback, "cloud", "p2")]
+    )
+    emb.hold_until_verified(["p1"], _verifier)
+
+    await _cancel_mid_call(emb.aembed_query("hello"), started)
+
+    assert fallback.aembed_query.await_count == 0
+    assert "p1" not in emb._verify_after
