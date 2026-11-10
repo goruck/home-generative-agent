@@ -1252,22 +1252,23 @@ async def test_a_position_older_than_the_kept_history_reads_the_newest_back() ->
 
 
 @pytest.mark.asyncio
-async def test_home_assistants_older_last_changed_beats_a_newer_bound() -> None:
+async def test_no_value_change_moves_the_position_up_to_the_slack() -> None:
     """
-    A sensor whose attributes churn while its value holds.
+    A value that holds while attributes churn shows no new value changes.
 
-    Its newest readings are all attribute updates, so the read finds no start;
-    Home Assistant's own last_changed is older and is a valid bound too.
+    The position still moves up to _COMMIT_SLACK before now, so the next
+    query does not step through every attribute-only update since then.
     """
-    own = _NOW - timedelta(days=4)
-    rows = _on_rows(_NOW, 30, timedelta(seconds=10))
+    true_on = _NOW - timedelta(hours=2)
+    rows = [
+        _mock_state("0.5", true_on - timedelta(minutes=1)),
+        _mock_state("1500", true_on),
+        _mock_state("1500", _NOW - timedelta(hours=1)),
+    ]
     hass = _make_hass(rows)
-    snapshot = _base_snapshot()
-    snapshot["entities"] = [_power_entity(state="1500", last_changed=own.isoformat())]
     cache: dict[str, Any] = {}
-    with patch(f"{_PE}._RECENT_ROWS", 4), patch(f"{_PE}._MAX_ROWS", 10):
-        await async_enrich_power_last_changed(hass, snapshot, cache)
-    entity = snapshot["entities"][0]
-    assert entity["last_changed"] == own.isoformat()
-    assert entity.get("last_changed_is_lower_bound") is True
-    assert cache["sensor.dishwasher_power"].since == own
+    assert await _run(hass, cache) == true_on.isoformat()
+
+    later = _advance(timedelta(hours=3))
+    assert await _run(hass, cache) == true_on.isoformat()
+    assert cache["sensor.dishwasher_power"].checked == later - timedelta(minutes=10)

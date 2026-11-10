@@ -40,6 +40,11 @@ _TICK = timedelta(microseconds=1)
 # runs was set back: readings stamped in that stretch may sit below the
 # remembered position, so it is not used.
 _CLOCK_STEP = timedelta(minutes=1)
+# With no value change since the remembered position, it moves up to this
+# long before now: a value that has not changed cannot hide an off reading,
+# and the next query would otherwise step through every attribute-only update
+# since then.  A reading committed later than this is missed.
+_COMMIT_SLACK = timedelta(minutes=10)
 # Below this wattage the appliance is effectively off.  Used when walking
 # recorder history to locate the last off→on transition.
 _POWER_OFF_W = 10.0
@@ -289,7 +294,10 @@ async def _resolve(  # noqa: PLR0913
     ):
         rows = await _since_checked(hass, instance, entity_id, cached.checked, now)
         if rows is not None:
-            checked = max((r.last_changed for r in rows), default=cached.checked)
+            checked = max(
+                max((r.last_changed for r in rows), default=cached.checked),
+                now - _COMMIT_SLACK,
+            )
             walk = _Walk()
             if walk.back(rows, factor) or (
                 # The episode began after the last run saw the sensor off.
@@ -433,12 +441,6 @@ async def _enrich(
             on_since.pop(entity_id, None)
             continue
         result.ran_at, result.ran_mono = now, mono
-        if result.unknown and result.since is not None:
-            # Home Assistant's own last_changed is a bound too: the reading has
-            # stayed above the off level since then.  Keep the older of the two.
-            own = dt_util.parse_datetime(str(power_entity["last_changed"]))
-            if own is not None and dt_util.as_utc(own) < result.since:
-                result.since = dt_util.as_utc(own)
         on_since[entity_id] = result
         if result.unknown:
             # Only "on at least since" (Home Assistant's own value is one too
