@@ -954,7 +954,8 @@ def _raise_if_stopped(err: BaseException) -> None:
     """
     task = asyncio.current_task()
     if task is not None and task.cancelling():
-        raise asyncio.CancelledError from err
+        # Never chain an error that may carry an echoed API key (h11).
+        raise asyncio.CancelledError from (None if echoes_request_headers(err) else err)
 
 
 def _handle_member_failure(  # noqa: PLR0913
@@ -1621,6 +1622,9 @@ class FallbackEmbeddings:
             try:
                 admitted = await self._verifier(provider_id)
             except Exception as err:  # noqa: BLE001 - held, never let in blind
+                # A stop the database driver turned into an error is not a
+                # failed check: no warning, no later retry time (#985).
+                _raise_if_stopped(err)
                 LOGGER.warning(
                     "Could not check the build of embedding provider %s (%s); it "
                     "stays held.",

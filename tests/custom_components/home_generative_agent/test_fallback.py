@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import suppress
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -2258,3 +2259,111 @@ async def test_a_member_timeout_still_moves_to_the_next_provider() -> None:
     ):
         result = await asyncio.wait_for(model.ainvoke(["hello"]), timeout=2)
     assert result.content == "fallback"
+
+
+@pytest.mark.asyncio
+async def test_a_stop_during_the_sampling_rebind_does_not_try_the_next_provider() -> (
+    None
+):
+    """A stop that lands in the default-sampling retry ends the call too."""
+    started = asyncio.Event()
+    bound_p1 = AsyncMock()
+    bound_p1.ainvoke.side_effect = [_bad_request_error(), _bad_request_error()]
+    rebound_p1 = MagicMock()
+    rebound_p1.ainvoke = _converts_cancel_to_timeout(started)
+    stripped_p1 = MagicMock()
+    stripped_p1.bind_tools.return_value = rebound_p1
+    src_p1 = MagicMock()
+    src_p1.bind_tools.return_value = bound_p1
+    src_p1.with_config.return_value = stripped_p1
+    bound_p2 = AsyncMock()
+    bound_p2.ainvoke.return_value = FakeAIMessage("fallback")
+    src_p2 = MagicMock()
+    src_p2.bind_tools.return_value = bound_p2
+    breaker = CircuitBreaker(threshold=1)
+    model = FallbackChatModel(
+        chain=[(src_p1, "cloud", "p1"), (src_p2, "cloud", "p2")],
+        circuit_breaker=breaker,
+    )
+    bound = model.bind_tools([{"name": "t"}])
+
+    await _cancel_mid_call(bound.ainvoke(["hello"]), started)
+
+    bound_p2.ainvoke.assert_not_awaited()
+    assert breaker.is_available("p1")
+
+
+@pytest.mark.asyncio
+async def test_a_stop_during_a_held_providers_build_check_is_not_a_failed_check(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The build check of a held provider treats a converted stop as a stop."""
+    started = asyncio.Event()
+
+    async def _verifier(_provider_id: str) -> bool:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise TimeoutError from None
+        return True
+
+    primary, fallback = AsyncMock(), AsyncMock()
+    primary.aembed_query.return_value = [0.1]
+    fallback.aembed_query.return_value = [0.3]
+    emb = FallbackEmbeddings(
+        chain=[(primary, "cloud", "p1"), (fallback, "cloud", "p2")]
+    )
+    emb.hold_until_verified(["p1"], _verifier)
+
+    with caplog.at_level(logging.WARNING):
+        await _cancel_mid_call(emb.aembed_query("hello"), started)
+
+    assert fallback.aembed_query.await_count == 0
+    assert "Could not check the build" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_callers_timeout_during_a_converted_stop_stays_a_timeout() -> None:
+    """The caller's own timeout firing mid-call still reaches it as TimeoutError."""
+    started = asyncio.Event()
+    primary = MagicMock()
+    primary.ainvoke = _converts_cancel_to_timeout(started)
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("fallback")
+    model = FallbackChatModel(
+        chain=[(primary, "edge", "p1"), (fallback, "cloud", "p2")]
+    )
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.05):
+            await model.ainvoke(["hello"])
+    assert fallback.ainvoke.await_count == 0
+
+
+def test_a_stop_never_chains_an_error_that_may_echo_a_key() -> None:
+    """The re-raised stop drops an error that may carry an echoed API key."""
+    from custom_components.home_generative_agent.core import (  # noqa: PLC0415
+        fallback as fallback_mod,
+    )
+
+    async def _run() -> BaseException:
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel()
+        # Swallowed: cancelling() stays 1, as after a converted cancel.
+        with suppress(asyncio.CancelledError):
+            await asyncio.sleep(0)
+        try:
+            with patch.object(
+                fallback_mod, "echoes_request_headers", return_value=True
+            ):
+                fallback_mod._raise_if_stopped(RuntimeError("Authorization: secret"))
+        except asyncio.CancelledError as stop:
+            return stop
+        msg = "not raised"
+        raise AssertionError(msg)
+
+    stop = asyncio.run(_run())
+    assert stop.__cause__ is None
+    assert stop.__suppress_context__
