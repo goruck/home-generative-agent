@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import fnmatch
 import logging
 import re
@@ -77,6 +76,8 @@ from custom_components.home_generative_agent.const import (
 )
 from custom_components.home_generative_agent.core.utils import (
     EXCLUSION_ENTRY_MAX_LEN,
+    cancel_and_wait,
+    cancel_requested,
     sentinel_calls_gated,
     valid_exclusion_entry,
     verify_pin,
@@ -1376,22 +1377,27 @@ class SentinelEngine:
                     self._entry_id,
                 )
 
-        if self._task is None:
-            return
-        self._stop_event.set()
-        self._task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await self._task
-        self._task = None
-
-        # Stop baseline updater.
-        if self._baseline_updater is not None:
-            await self._baseline_updater.stop()
-
-        # Unsubscribe event listeners.
-        for unsub in self._event_unsubscribers:
-            unsub()
-        self._event_unsubscribers.clear()
+        task = self._task
+        try:
+            if task is not None:
+                self._stop_event.set()
+                # Bounded and repeated: a run that caught the first cancel
+                # and kept working held HA's shutdown for minutes (#985). A
+                # cancel of this caller gets through. The task is kept until
+                # this returns, so a concurrent stop() (removing Sentinel
+                # stops it twice) waits on it too instead of returning early,
+                # and a stop() whose caller was cancelled can be retried.
+                await cancel_and_wait(task, "Sentinel run loop")
+                if self._task is task:
+                    self._task = None
+        finally:
+            # Always, even when this caller is cancelled or the loop died
+            # with an error; a second stop() redoes whatever is left.
+            for unsub in self._event_unsubscribers:
+                unsub()
+            self._event_unsubscribers.clear()
+            if self._baseline_updater is not None:
+                await self._baseline_updater.stop()
 
     # ---------------------------------------------------------------------- #
     # Event-driven triggering
@@ -1500,6 +1506,19 @@ class SentinelEngine:
                 await self._trigger_scheduler.run_polling(
                     lambda: self._timed_run("poll")
                 )
+            # A run that catches this task's cancel somewhere (a library
+            # mid-LLM-call, say) returns normally; without these checks the
+            # loop would then wait out the full interval and hold up HA's
+            # shutdown (#985).
+            if cancel_requested():
+                LOGGER.warning(
+                    "A Sentinel run caught the stop request instead of "
+                    "ending; it was stopped after the run finished. Please "
+                    "report this with a debug log (issue #985)."
+                )
+                raise asyncio.CancelledError
+            if self._stop_event.is_set():
+                break
             try:
                 # Wait for a new trigger or the polling interval — whichever
                 # comes first.  Using wait_for_trigger() means the loop wakes
@@ -1810,12 +1829,18 @@ class SentinelEngine:
                 self._baseline_updater.async_fetch_counter_baselines(hour_metrics(now)),
                 timeout=COUNTER_BASELINE_FETCH_TIMEOUT_S,
             )
-        except (TimeoutError, Exception):  # noqa: BLE001 - the pool, the store
+        except (TimeoutError, Exception) as err:  # broad: the pool, the store
+            # A database driver can turn our cancel into an ordinary error;
+            # it must still stop the run (#985).
+            if cancel_requested():
+                raise asyncio.CancelledError from err
             self._log_limiter.warning(
                 "counter_baselines_fetch",
                 "Sentinel could not read the network counter baselines.",
             )
             return
+        if cancel_requested():  # a driver that ate the cancel and returned
+            raise asyncio.CancelledError
         covered, reporting = usage_coverage(section, baselines, now)
         if reporting and covered < reporting:
             section.setdefault("notes", []).append(

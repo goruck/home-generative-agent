@@ -571,16 +571,98 @@ async def _cancel_active_sentinel_llm_tasks(category: str) -> None:
         )
 
 
-def _own_cancellation() -> bool:
+def cancel_requested() -> bool:
     """
     Return True when the calling task itself is being cancelled.
 
     Only a chat turn cancelling the Sentinel call is a deferral: a reload or
     shutdown cancelling the caller must reach it as a cancellation, or the
     engine's stop() sees a deferral and returns before it unsubscribes.
+
+    It also catches a cancel that never arrived as one. Cancelling a task
+    that awaits another task cancels the inner one; if that inner work (a
+    provider SDK, a database driver) turns the cancel into an ordinary error
+    or returns anyway, the caller gets that result, but this stays True. A
+    broad ``except Exception`` on such a path must re-raise when it is True,
+    or a Sentinel run carries on through a shutdown (#985).
     """
     current = asyncio.current_task()
     return current is not None and current.cancelling() > 0
+
+
+# How long one cancellation gets to land, and how many are sent, before a
+# stop or an unload stops waiting on a task (see cancel_and_wait).
+CANCEL_WAIT_S = 2.0
+CANCEL_ATTEMPTS = 5
+
+
+def _note_task_error(task: asyncio.Task[Any], what: str) -> None:
+    """
+    Log the error a finished task ended with, if any, and mark it read.
+
+    ``asyncio.wait`` does not read it, so a loop that died would otherwise
+    print "Task exception was never retrieved" during the restart.
+    """
+    if task.cancelled():
+        return
+    err = task.exception()
+    if err is not None:
+        LOGGER.warning("The %s had stopped with an error.", what, exc_info=err)
+
+
+async def cancel_and_wait(
+    task: object,
+    what: str,
+    *,
+    wait_s: float | None = None,
+    attempts: int | None = None,
+) -> None:
+    """
+    Cancel *task* and wait for it to finish; a no-op for None or a done task.
+
+    *what* names the task in the give-up warning: a task we do not own (the
+    store worker) carries only an auto-generated name. *wait_s* and
+    *attempts* default to ``CANCEL_WAIT_S`` and ``CANCEL_ATTEMPTS``, read at
+    call time.
+
+    ``asyncio.wait`` rather than ``await task``: the latter would raise the
+    task's CancelledError here, and suppressing it would also swallow a
+    cancellation of the caller itself (Home Assistant shutdown, a reload
+    cancelled), which must keep propagating. A task that failed with an
+    error is not re-raised here either, so the caller's cleanup still runs.
+
+    The wait is bounded and the cancel repeated, because one cancel is not
+    guaranteed to end a task we do not own: langgraph's batch worker catches
+    any ordinary exception out of the in-flight batch (handing it to callers
+    still waiting, if any) and goes back to its queue, so a cancel that the
+    database driver turns into such an exception leaves the worker alive.
+    Waiting on it without a timeout held the entry in UNLOAD_IN_PROGRESS for
+    good, taking every entity with it. A Sentinel run that caught its cancel
+    held Home Assistant's shutdown the same way (#985). A repeated cancel
+    ends a task at its next await; one that is absorbed again gets another,
+    hence several attempts. A task that outlives them all is logged and left
+    behind rather than allowed to block the caller.
+    """
+    if not isinstance(task, asyncio.Task):
+        return
+    if task.done():
+        _note_task_error(task, what)
+        return
+    wait_s = CANCEL_WAIT_S if wait_s is None else wait_s
+    attempts = CANCEL_ATTEMPTS if attempts is None else attempts
+    for _ in range(attempts):
+        task.cancel()
+        done, _pending = await asyncio.wait([task], timeout=wait_s)
+        if done:
+            _note_task_error(task, what)
+            return
+    LOGGER.warning(
+        "The %s (%s) did not stop after %d cancellations; continuing without "
+        "it. It may keep a database connection or a model call open.",
+        what,
+        task.get_name(),
+        attempts,
+    )
 
 
 def _record_admission(health_stats: MutableMapping[str, Any] | None) -> None:
@@ -750,17 +832,38 @@ async def run_sentinel_llm_call(  # noqa: PLR0913
     # model beside a local chat model is not in its way (#866).
     if sentinel_calls_gated(deployment):
         _sentinel_llm_tasks.add(task)
+    return await _await_sentinel_call(task, category, call_timeout_s)
+
+
+async def _await_sentinel_call(
+    task: asyncio.Task[Any], category: str, call_timeout_s: float
+) -> Any:
+    """
+    Await a Sentinel model-call task; a cancel of the caller always wins.
+
+    Cancelling the caller cancels *task*. If the provider library inside it
+    turns that cancel into an ordinary error, or returns anyway, the caller
+    must still see a cancellation (#985): triage would otherwise fail open
+    on the error and the Sentinel run go on through a shutdown.
+    """
     try:
-        return await asyncio.wait_for(task, timeout=call_timeout_s)
+        result = await asyncio.wait_for(task, timeout=call_timeout_s)
     except asyncio.CancelledError as err:
-        if _own_cancellation():
+        if cancel_requested():
             raise
         raise SentinelLLMDeferredError(
             category, "interrupted by foreground chat", started=True
         ) from err
+    except Exception as err:
+        if cancel_requested():
+            raise asyncio.CancelledError from err
+        raise
     finally:
         _sentinel_llm_tasks.discard(task)
         _note_sentinel_call_end()
+    if cancel_requested():
+        raise asyncio.CancelledError
+    return result
 
 
 async def run_sentinel_llm_call_in_executor(  # noqa: PLR0913
@@ -786,17 +889,7 @@ async def run_sentinel_llm_call_in_executor(  # noqa: PLR0913
     task = asyncio.create_task(asyncio.to_thread(call_factory))
     if sentinel_calls_gated(deployment):
         _sentinel_llm_tasks.add(task)
-    try:
-        return await asyncio.wait_for(task, timeout=call_timeout_s)
-    except asyncio.CancelledError as err:
-        if _own_cancellation():
-            raise
-        raise SentinelLLMDeferredError(
-            category, "interrupted by foreground chat", started=True
-        ) from err
-    finally:
-        _sentinel_llm_tasks.discard(task)
-        _note_sentinel_call_end()
+    return await _await_sentinel_call(task, category, call_timeout_s)
 
 
 async def run_sentinel_model_call(  # noqa: PLR0913

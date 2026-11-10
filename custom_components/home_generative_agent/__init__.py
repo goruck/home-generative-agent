@@ -360,8 +360,11 @@ from .core.subentry_resolver import (
     with_implied_capabilities,
 )
 from .core.utils import (
+    CANCEL_ATTEMPTS,
+    CANCEL_WAIT_S,
     anthropic_healthy,
     builds_differ,
+    cancel_and_wait,
     configured_ollama_urls,
     dispatch_on_loop,
     ensure_http_url,
@@ -5296,49 +5299,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     return True
 
 
-# How long one cancellation gets to land, and how many are sent, before the
-# unload stops waiting on a task (see _cancel_and_wait).
-_CANCEL_WAIT_S = 2.0
-_CANCEL_ATTEMPTS = 5
+# The unload's cancel budget (see _cancel_and_wait): core.utils's values,
+# kept as module names so tests can shorten the unload's wait alone.
+_CANCEL_WAIT_S = CANCEL_WAIT_S
+_CANCEL_ATTEMPTS = CANCEL_ATTEMPTS
 
 
 async def _cancel_and_wait(task: object, what: str) -> None:
-    """
-    Cancel *task* and wait for it to finish; a no-op for None or a done task.
-
-    *what* names the task in the give-up warning: a task we do not own (the
-    store worker) carries only an auto-generated name.
-
-    ``asyncio.wait`` rather than ``await task``: the latter would raise the
-    task's CancelledError here, and suppressing it would also swallow a
-    cancellation of the unload itself (Home Assistant shutdown, a reload
-    cancelled), which must keep propagating.
-
-    The wait is bounded and the cancel repeated, because one cancel is not
-    guaranteed to end a task we do not own: langgraph's batch worker catches
-    any ordinary exception out of the in-flight batch (handing it to callers
-    still waiting, if any) and goes back to its queue, so a cancel that the
-    database driver turns into such an exception leaves the worker alive.
-    Waiting on it without a timeout held the entry in UNLOAD_IN_PROGRESS for
-    good, taking every entity with it. A repeated cancel ends a worker that
-    is back on its queue; one that lands in another batch can be absorbed
-    again, hence several attempts. A task that outlives them all is logged
-    and left behind rather than allowed to block the unload.
-    """
-    if not isinstance(task, asyncio.Task) or task.done():
-        return
-    for _ in range(_CANCEL_ATTEMPTS):
-        task.cancel()
-        done, _pending = await asyncio.wait([task], timeout=_CANCEL_WAIT_S)
-        if done:
-            return
-    LOGGER.warning(
-        "The %s (%s) did not stop after %d cancellations; continuing the "
-        "unload without it. It may keep a database connection open.",
-        what,
-        task.get_name(),
-        _CANCEL_ATTEMPTS,
-    )
+    """Cancel *task* and wait, bounded; see ``core.utils.cancel_and_wait``."""
+    await cancel_and_wait(task, what, wait_s=_CANCEL_WAIT_S, attempts=_CANCEL_ATTEMPTS)
 
 
 async def _cancel_build_watch(rd: HGAData) -> None:

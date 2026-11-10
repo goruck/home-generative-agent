@@ -27,7 +27,6 @@ most-recent update row in PostgreSQL.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import math
 from dataclasses import dataclass, field
@@ -51,6 +50,10 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES,
     RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
     RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS,
+)
+from custom_components.home_generative_agent.core.utils import (
+    cancel_and_wait,
+    cancel_requested,
 )
 from custom_components.home_generative_agent.snapshot.network import (
     ROUTER_PLATFORMS,
@@ -536,9 +539,8 @@ class SentinelBaselineUpdater:
         if self._task is None:
             return
         self._stop_event.set()
-        self._task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await self._task
+        # Bounded, and a cancel of this caller gets through (#985).
+        await cancel_and_wait(self._task, "Sentinel baseline updater")
         self._task = None
 
     # ---------------------------------------------------------------------- #
@@ -562,12 +564,17 @@ class SentinelBaselineUpdater:
                 await self._write_offered_counters()
             except (ValueError, TypeError, KeyError, asyncio.CancelledError):
                 raise
-            except Exception:
+            except Exception as err:
+                # A cancel the database driver turned into an error is a
+                # stop, not a failed update (#985).
+                if cancel_requested():
+                    raise asyncio.CancelledError from err
                 LOGGER.exception("Baseline update failed; will retry next cycle.")
             try:
+                # No shield: a shielded wait left one waiter task behind at
+                # every interval timeout until the stop.
                 await asyncio.wait_for(
-                    asyncio.shield(self._stop_event.wait()),
-                    timeout=interval_seconds,
+                    self._stop_event.wait(), timeout=interval_seconds
                 )
                 break  # stop_event was set
             except TimeoutError:

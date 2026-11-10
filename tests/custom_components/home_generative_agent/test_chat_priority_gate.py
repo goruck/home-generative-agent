@@ -434,6 +434,47 @@ async def test_run_sentinel_llm_call_timeout_raises_timeout_error() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("swallow", ["error", "return"])
+async def test_run_sentinel_llm_call_keeps_a_cancel_the_provider_swallowed(
+    swallow: str,
+) -> None:
+    """
+    A cancel of the caller must reach it even if the provider call ate it (#985).
+
+    The call runs as its own task, so cancelling the caller cancels that task.
+    A provider library that turns the cancel into an ordinary error, or
+    returns anyway, used to hand that to the caller as if nothing was asked:
+    triage failed open and the Sentinel run went on through shutdown.
+    """
+    started = asyncio.Event()
+
+    async def _provider() -> str:
+        started.set()
+        try:
+            await asyncio.sleep(9999)
+        except asyncio.CancelledError:
+            if swallow == "error":
+                msg = "connection closed"
+                raise httpx.ConnectError(msg) from None
+            return "late answer"
+        return "done"
+
+    caller = asyncio.create_task(
+        utils_mod.run_sentinel_llm_call(
+            _provider,
+            deployment="cloud",
+            category="triage",
+            admission_timeout_s=0.1,
+            call_timeout_s=60.0,
+        )
+    )
+    await started.wait()
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(caller, timeout=1)
+
+
+@pytest.mark.asyncio
 async def test_run_sentinel_model_call_uses_sync_invoke_off_event_loop() -> None:
     """Models with sync invoke should run in an executor, not on the event loop."""
     loop_thread_id = threading.get_ident()
