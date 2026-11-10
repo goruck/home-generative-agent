@@ -1403,7 +1403,9 @@ def evaluate_baseline_deviation(  # noqa: PLR0911, PLR0912, PLR0915
         # the rolling average baseline hasn't converged yet.
         last_changed_raw = entity.get("last_changed")
         recently_changed = False
-        if last_changed_raw:
+        # A lower bound ("on at least since", power enrichment could not find
+        # the run's start) does not show a recent change.
+        if last_changed_raw and not entity.get("last_changed_is_lower_bound"):
             try:
                 last_changed_dt = dt_util.parse_datetime(str(last_changed_raw))
                 if last_changed_dt is not None:

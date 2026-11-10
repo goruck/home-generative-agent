@@ -1457,6 +1457,28 @@ def test_baseline_deviation_near_zero_power_is_completion() -> None:
     assert f.suggested_actions == []  # no action needed for a completed cycle
 
 
+def test_baseline_deviation_lower_bound_last_changed_is_not_completion() -> None:
+    """
+    A low reading whose last_changed is only "on at least since" stays a fault.
+
+    Power enrichment marks last_changed as a lower bound when it could not
+    find when the run started; a recent lower bound does not show that a
+    cycle just ended, so the finding keeps its severity and actions.
+    """
+    entity = _power_entity("sensor.washer_power", "20", device_class="power", unit="W")
+    entity["last_changed_is_lower_bound"] = True
+    snapshot = _snapshot([entity])
+    baselines = {"sensor.washer_power": {METRIC_ROLLING_AVG: 800.0}}
+    rule = _rule(entity_id="sensor.washer_power", threshold_pct=50.0, severity="medium")
+
+    findings = evaluate_baseline_deviation(snapshot, rule, baselines)
+
+    assert len(findings) == 1
+    f = findings[0]
+    assert not f.evidence.get("is_completion")
+    assert f.severity == "medium"
+
+
 def test_baseline_deviation_standby_baseline_not_completion() -> None:
     """
     Appliance with low standby baseline dropping to 0 W → finding suppressed entirely.

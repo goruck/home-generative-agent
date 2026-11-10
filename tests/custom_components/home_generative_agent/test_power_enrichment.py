@@ -70,12 +70,13 @@ def _mock_state(
 
 class _FakeRecorder:
     """
-    Serve one sensor's rows the way state_changes_during_period does.
+    Serve one sensor's rows the way the recorder history API does.
 
-    Rows are given oldest first.  A query returns rows after ``start`` and
-    before ``end``; with ``descending`` and ``limit`` the newest ``limit``
-    of them, newest first; and with ``include_start_time_state`` the newest
-    row at or before ``start`` last.
+    Rows are given oldest first.  get_last_state_changes returns the newest
+    ``number_of_states`` rows, oldest first.  state_changes_during_period
+    returns the rows after ``start`` and before ``end``, oldest first, the
+    oldest ``limit`` of them; descending queries are refused, since with a
+    limit Home Assistant before 2026.11 returns the oldest rows for them.
     """
 
     def __init__(self, rows: list[MagicMock]) -> None:
@@ -83,21 +84,30 @@ class _FakeRecorder:
         self.queries: list[dict[str, Any]] = []
 
     def __call__(self, job: Any) -> dict[str, list[MagicMock]]:
+        name = job.func.__name__
+        if name == "get_last_state_changes":
+            _hass, count, entity_id = job.args
+            ordered = sorted(self.rows, key=lambda r: r.last_changed)
+            page = ordered[-count:]
+            self.queries.append({"newest": count, "returned": len(page)})
+            return {entity_id: page} if page else {}
+        assert name == "state_changes_during_period"
         _hass, start, end, entity_id = job.args
         kw = job.keywords
-        self.queries.append({"start": start, "end": end, **kw})
-        assert kw["descending"] is True
-        window = [
-            r
-            for r in self.rows
-            if r.last_changed > start and (end is None or r.last_changed < end)
-        ]
-        page = list(reversed(window))[: kw["limit"]]
-        if kw["include_start_time_state"]:
-            before = [r for r in self.rows if r.last_changed <= start]
-            if before:
-                page.append(before[-1])
+        assert kw["descending"] is False
+        assert kw["limit"]
+        assert kw["include_start_time_state"] is False
+        page = [r for r in self.rows if start < r.last_changed < end][: kw["limit"]]
+        self.queries.append({"start": start, "end": end, **kw, "returned": len(page)})
         return {entity_id: page} if page else {}
+
+
+def _restamped(row: MagicMock, at: datetime) -> MagicMock:
+    s = MagicMock()
+    s.state = row.state
+    s.last_changed = at
+    s.attributes = row.attributes
+    return s
 
 
 def _make_hass(recorder_states: list[MagicMock] | None = None) -> MagicMock:
@@ -114,9 +124,13 @@ def _recorder(hass: MagicMock) -> _FakeRecorder:
     return hass.data[DATA_INSTANCE].async_add_executor_job.side_effect
 
 
+_CLOCK = [_NOW]
+
+
 @pytest.fixture(autouse=True)
 def freeze_utcnow():
-    with patch("homeassistant.util.dt.utcnow", return_value=_NOW):
+    _CLOCK[0] = _NOW
+    with patch("homeassistant.util.dt.utcnow", side_effect=lambda: _CLOCK[0]):
         yield
 
 
@@ -440,22 +454,30 @@ async def test_all_on_within_window_uses_oldest() -> None:
 
 
 @pytest.mark.asyncio
-async def test_all_on_beyond_window_leaves_unchanged() -> None:
-    """Synthetic anchor also on (appliance on > lookback): last_changed left unchanged."""
+async def test_on_since_before_the_window_is_on_at_least_since_its_start() -> None:
+    """
+    On at the window's start: last_changed becomes the window's start.
+
+    The appliance has been on at least 30 days, so a long run never reads as
+    one that just changed (the baseline cycle-completion check would read a
+    fresh last_changed as a cycle that just ended).
+    """
     recorder_states = [
         _mock_state("1498.5", _NOW - timedelta(days=52)),  # before 30-day window
         _mock_state("1500.0", _NOW - timedelta(days=3, hours=21, minutes=16)),
         _mock_state("1499.8", _NOW),
     ]
     hass = _make_hass(recorder_states)
+    cache: dict[str, Any] = {}
 
     snapshot = _base_snapshot()
     snapshot["entities"] = [_power_entity(last_changed="2026-06-22T05:16:00+00:00")]
 
-    await async_enrich_power_last_changed(hass, snapshot)
+    await async_enrich_power_last_changed(hass, snapshot, cache)
 
-    # Cannot determine true on-since beyond lookback window; leave unchanged
-    assert snapshot["entities"][0]["last_changed"] == "2026-06-22T05:16:00+00:00"
+    window_start = _NOW - timedelta(days=30)
+    assert snapshot["entities"][0]["last_changed"] == window_start.isoformat()
+    assert cache["sensor.dishwasher_power"].unknown
 
 
 @pytest.mark.asyncio
@@ -528,98 +550,31 @@ async def _run(
 ) -> str:
     snapshot = _base_snapshot()
     snapshot["entities"] = [
-        _power_entity(state=state, unit=unit, last_changed=_NOW.isoformat())
+        _power_entity(state=state, unit=unit, last_changed=_CLOCK[0].isoformat())
     ]
     await async_enrich_power_last_changed(hass, snapshot, cache)
     return snapshot["entities"][0]["last_changed"]
 
 
-@pytest.mark.asyncio
-async def test_walks_back_a_page_at_a_time() -> None:
-    """The off reading several pages back is found, one page per query."""
-    true_on = _NOW - timedelta(minutes=10)
-    rows = [
-        _mock_state("0.5", true_on - timedelta(minutes=1)),
-        *_on_rows(_NOW, 11, timedelta(minutes=1)),
-    ]
-    hass = _make_hass(rows)
-
-    with patch(f"{_PE}._PAGE_ROWS", 3):
-        assert await _run(hass, {}) == true_on.isoformat()
-
-    queries = _recorder(hass).queries
-    assert [q["limit"] for q in queries] == [3, 3, 3, 3]
-    assert queries[0]["end"] is None
-    # Each page ends where the one before it stopped.
-    assert queries[1]["end"] == _NOW - timedelta(minutes=2)
+def _advance(by: timedelta) -> datetime:
+    _CLOCK[0] += by
+    return _CLOCK[0]
 
 
 @pytest.mark.asyncio
-async def test_stops_at_the_first_off_reading() -> None:
-    """Older history past the last off reading is never read."""
-    true_on = _NOW - timedelta(minutes=2)
-    rows = [
-        *_on_rows(_NOW - timedelta(hours=1), 50, timedelta(seconds=10)),
-        _mock_state("0.5", _NOW - timedelta(minutes=3)),
-        *_on_rows(_NOW, 3, timedelta(minutes=1)),
-    ]
-    hass = _make_hass(rows)
-
-    with patch(f"{_PE}._PAGE_ROWS", 10):
-        assert await _run(hass, {}) == true_on.isoformat()
-
-    assert len(_recorder(hass).queries) == 1
-
-
-@pytest.mark.asyncio
-async def test_row_cap_leaves_the_start_unknown_and_is_remembered() -> None:
-    """
-    Past the cap the start is unknown, and later runs do not walk back again.
-
-    A sensor that reports every second and has been on for hours would
-    otherwise be read back to its last off reading every run.
-    """
-    rows = [
-        _mock_state("0.5", _NOW - timedelta(hours=3)),
-        *_on_rows(_NOW, 10, timedelta(minutes=1)),
-    ]
-    hass = _make_hass(rows)
-    cache: dict[str, Any] = {}
-
-    with patch(f"{_PE}._PAGE_ROWS", 2), patch(f"{_PE}._MAX_ROWS", 4):
-        assert await _run(hass, cache) == _NOW.isoformat()
-        assert sum(q["limit"] for q in _recorder(hass).queries) == 4
-        assert cache["sensor.dishwasher_power"].unknown
-
-        _recorder(hass).queries.clear()
-        rows.append(_mock_state("1500", _NOW + timedelta(minutes=1)))
-        assert await _run(hass, cache) == _NOW.isoformat()
-
-    (query,) = _recorder(hass).queries
-    assert query["start"] == _NOW
-    assert query["include_start_time_state"] is False
-
-
-@pytest.mark.asyncio
-async def test_next_run_reads_only_newer_readings() -> None:
-    """The episode start found once is reused; only new readings are read."""
+async def test_readings_after_the_run_began_are_not_read() -> None:
+    """An off and on recorded while the walk runs belongs to the next run."""
     true_on = _NOW - timedelta(hours=2)
     rows = [
         _mock_state("0.5", true_on - timedelta(minutes=1)),
         _mock_state("1500", true_on),
         _mock_state("1500", _NOW),
+        _mock_state("0.5", _NOW + timedelta(seconds=3)),
+        _mock_state("1500", _NOW + timedelta(seconds=6)),
     ]
     hass = _make_hass(rows)
-    cache: dict[str, Any] = {}
 
-    assert await _run(hass, cache) == true_on.isoformat()
-    _recorder(hass).queries.clear()
-    rows.append(_mock_state("1490", _NOW + timedelta(minutes=5)))
-
-    assert await _run(hass, cache) == true_on.isoformat()
-    (query,) = _recorder(hass).queries
-    assert query["start"] == _NOW
-    assert query["end"] is None
+    assert await _run(hass, {}) == true_on.isoformat()
 
 
 @pytest.mark.asyncio
@@ -639,7 +594,7 @@ async def test_off_and_on_again_between_runs_starts_a_new_episode() -> None:
     rows += [
         _mock_state("0.2", _NOW + timedelta(minutes=1)),
         _mock_state("1500", restarted),
-        _mock_state("1500", _NOW + timedelta(minutes=4)),
+        _mock_state("1500", _advance(timedelta(minutes=4))),
     ]
     assert await _run(hass, cache) == restarted.isoformat()
 
@@ -660,7 +615,7 @@ async def test_episode_beginning_after_an_off_run_is_found() -> None:
     started = _NOW + timedelta(minutes=1)
     rows += [
         _mock_state("1500", started),
-        _mock_state("1500", _NOW + timedelta(minutes=2)),
+        _mock_state("1500", _advance(timedelta(minutes=2))),
     ]
     assert await _run(hass, cache) == started.isoformat()
 
@@ -687,8 +642,276 @@ async def test_off_or_missing_sensor_is_forgotten() -> None:
     assert cache == {}
 
 
+@pytest.mark.parametrize("state", ["unavailable", "unknown", "garbage"])
 @pytest.mark.asyncio
-async def test_unit_change_walks_back_again() -> None:
+async def test_a_brief_drop_out_keeps_the_remembered_start(state: str) -> None:
+    """One unavailable reading must not cost the start and a walk from scratch."""
+    true_on = _NOW - timedelta(hours=8)
+    rows = [
+        _mock_state("0.5", true_on - timedelta(minutes=1)),
+        _mock_state("1500", true_on),
+        _mock_state("1500", _NOW),
+    ]
+    hass = _make_hass(rows)
+    cache: dict[str, Any] = {}
+    assert await _run(hass, cache) == true_on.isoformat()
+
+    _recorder(hass).queries.clear()
+    _advance(timedelta(minutes=5))
+    await _run(hass, cache, state=state)
+    assert "sensor.dishwasher_power" in cache
+    assert _recorder(hass).queries == []
+
+    rows.append(_mock_state("1500", _advance(timedelta(minutes=5))))
+    assert await _run(hass, cache) == true_on.isoformat()
+    assert all(not q["include_start_time_state"] for q in _recorder(hass).queries)
+
+
+@pytest.mark.asyncio
+async def test_recorder_error_keeps_the_remembered_start() -> None:
+    """A failed query leaves the snapshot and the remembered entry alone."""
+    true_on = _NOW - timedelta(hours=2)
+    rows = [
+        _mock_state("0.5", true_on - timedelta(minutes=1)),
+        _mock_state("1500", true_on),
+        _mock_state("1500", _NOW),
+    ]
+    hass = _make_hass(rows)
+    cache: dict[str, Any] = {}
+    await _run(hass, cache)
+    before = cache["sensor.dishwasher_power"]
+
+    hass.data[DATA_INSTANCE].async_add_executor_job.side_effect = RuntimeError("db")
+    _advance(timedelta(minutes=5))
+    assert await _run(hass, cache) == _CLOCK[0].isoformat()
+    assert cache["sensor.dishwasher_power"] is before
+
+
+@pytest.mark.asyncio
+async def test_clock_set_back_walks_back_again() -> None:
+    """A remembered position later than now would hide every new reading."""
+    true_on = _NOW - timedelta(hours=2)
+    rows = [
+        _mock_state("0.5", true_on - timedelta(minutes=1)),
+        _mock_state("1500", true_on),
+        _mock_state("1500", _NOW),
+    ]
+    hass = _make_hass(rows)
+    cache: dict[str, Any] = {}
+    assert await _run(hass, cache) == true_on.isoformat()
+
+    restarted = _NOW - timedelta(minutes=30)
+    rows[-1:] = [
+        _mock_state("0.2", restarted - timedelta(minutes=1)),
+        _mock_state("1500", restarted),
+    ]
+    _advance(timedelta(minutes=-20))  # NTP pulled the clock back
+    assert await _run(hass, cache) == restarted.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_a_found_start_is_not_marked_a_lower_bound() -> None:
+    true_on = _NOW - timedelta(hours=2)
+    rows = [
+        _mock_state("0.5", true_on - timedelta(minutes=1)),
+        _mock_state("1500", true_on),
+        _mock_state("1500", _NOW),
+    ]
+    hass = _make_hass(rows)
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [_power_entity(state="1500", last_changed=_NOW.isoformat())]
+    await async_enrich_power_last_changed(hass, snapshot, {})
+    assert "last_changed_is_lower_bound" not in snapshot["entities"][0]
+
+
+def _newest_queries(hass: MagicMock) -> list[int]:
+    return [q["newest"] for q in _recorder(hass).queries if "newest" in q]
+
+
+@pytest.mark.asyncio
+async def test_stops_at_the_newest_off_reading() -> None:
+    """One read of the newest readings; older history is never read."""
+    true_on = _NOW - timedelta(minutes=2)
+    rows = [
+        *_on_rows(_NOW - timedelta(hours=1), 50, timedelta(seconds=10)),
+        _mock_state("0.5", _NOW - timedelta(minutes=3)),
+        *_on_rows(_NOW, 3, timedelta(minutes=1)),
+    ]
+    hass = _make_hass(rows)
+
+    assert await _run(hass, {}) == true_on.isoformat()
+    assert _newest_queries(hass) == [1000]
+
+
+@pytest.mark.asyncio
+async def test_reads_further_back_when_the_newest_hold_no_off_reading() -> None:
+    """No 'off' among the newest readings: read up to the cap and find it."""
+    true_on = _NOW - timedelta(minutes=10)
+    rows = [
+        _mock_state("0.5", true_on - timedelta(minutes=1)),
+        *_on_rows(_NOW, 11, timedelta(minutes=1)),
+    ]
+    hass = _make_hass(rows)
+
+    with patch(f"{_PE}._RECENT_ROWS", 4), patch(f"{_PE}._MAX_ROWS", 50):
+        assert await _run(hass, {}) == true_on.isoformat()
+    assert _newest_queries(hass) == [4, 50]
+
+
+@pytest.mark.asyncio
+async def test_row_cap_gives_on_at_least_since_and_is_remembered() -> None:
+    """
+    Past the cap, last_changed is the oldest reading read, marked and kept.
+
+    A sensor that reports every second and has been on for hours would
+    otherwise have its raw last_changed (seconds old) read as a cycle that
+    just ended.
+    """
+    rows = [
+        _mock_state("0.5", _NOW - timedelta(hours=3)),
+        *_on_rows(_NOW, 30, timedelta(seconds=20)),
+    ]
+    hass = _make_hass(rows)
+    cache: dict[str, Any] = {}
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [_power_entity(state="1500", last_changed=_NOW.isoformat())]
+
+    with patch(f"{_PE}._RECENT_ROWS", 4), patch(f"{_PE}._MAX_ROWS", 10):
+        await async_enrich_power_last_changed(hass, snapshot, cache)
+        entity = snapshot["entities"][0]
+        oldest_read = _NOW - timedelta(seconds=20 * 9)
+        assert entity["last_changed"] == oldest_read.isoformat()
+        assert entity.get("last_changed_is_lower_bound") is True
+        assert cache["sensor.dishwasher_power"].unknown
+
+        _recorder(hass).queries.clear()
+        rows.append(_mock_state("1500", _advance(timedelta(minutes=1))))
+        assert await _run(hass, cache) == oldest_read.isoformat()
+
+    # Only readings since the newest one read last time.
+    (query,) = _recorder(hass).queries
+    assert query["start"] == _NOW - timedelta(microseconds=1)
+
+
+@pytest.mark.asyncio
+async def test_history_with_no_off_reading_is_a_lower_bound() -> None:
+    """All the history there is shows the sensor on: its start was not seen."""
+    rows = [
+        _mock_state("20", _NOW - timedelta(minutes=5)),
+        _mock_state("21", _NOW),
+    ]
+    hass = _make_hass(rows)
+    snapshot = _base_snapshot()
+    snapshot["entities"] = [_power_entity(state="21", last_changed=_NOW.isoformat())]
+
+    await async_enrich_power_last_changed(hass, snapshot, {})
+
+    entity = snapshot["entities"][0]
+    assert entity["last_changed"] == (_NOW - timedelta(minutes=5)).isoformat()
+    assert entity.get("last_changed_is_lower_bound") is True
+
+
+@pytest.mark.asyncio
+async def test_next_run_reads_only_newer_readings() -> None:
+    """The episode start found once is reused; only new readings are read."""
+    true_on = _NOW - timedelta(hours=2)
+    rows = [
+        _mock_state("0.5", true_on - timedelta(minutes=1)),
+        _mock_state("1500", true_on),
+        _mock_state("1500", _NOW),
+    ]
+    hass = _make_hass(rows)
+    cache: dict[str, Any] = {}
+
+    assert await _run(hass, cache) == true_on.isoformat()
+    _recorder(hass).queries.clear()
+    rows.append(_mock_state("1490", _advance(timedelta(minutes=5))))
+
+    assert await _run(hass, cache) == true_on.isoformat()
+    (query,) = _recorder(hass).queries
+    assert query["start"] == _NOW - timedelta(microseconds=1)
+    assert query["descending"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_reading_committed_late_is_read_on_the_next_run() -> None:
+    """
+    The next run reads from the newest reading read, not from when it ran.
+
+    The recorder commits a sensor's readings in order, so a reading not yet
+    committed at the last run is newer than every reading that run read,
+    however late it was committed.
+    """
+    true_on = _NOW - timedelta(hours=2)
+    rows = [
+        _mock_state("0.5", true_on - timedelta(minutes=1)),
+        _mock_state("1500", true_on),
+        _mock_state("1500", _NOW - timedelta(minutes=20)),  # newest committed
+    ]
+    hass = _make_hass(rows)
+    cache: dict[str, Any] = {}
+    assert await _run(hass, cache) == true_on.isoformat()
+    # A quiet run reads nothing new: the position stays at the newest reading.
+    last_run = _advance(timedelta(minutes=5))
+    assert await _run(hass, cache) == true_on.isoformat()
+
+    # Stamped 10 minutes before that run, committed after it.
+    restarted = last_run - timedelta(minutes=9)
+    rows += [
+        _mock_state("0.2", last_run - timedelta(minutes=10)),
+        _mock_state("1500", restarted),
+        _mock_state("1500", _advance(timedelta(minutes=5))),
+    ]
+    assert await _run(hass, cache) == restarted.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_unknown_start_becomes_known_once_an_off_reading_is_read() -> None:
+    """After the cap, the next off-then-on among new readings gives a real start."""
+    rows = _on_rows(_NOW, 30, timedelta(seconds=20))
+    hass = _make_hass(rows)
+    cache: dict[str, Any] = {}
+    with patch(f"{_PE}._RECENT_ROWS", 4), patch(f"{_PE}._MAX_ROWS", 10):
+        await _run(hass, cache)
+        assert cache["sensor.dishwasher_power"].unknown
+
+        restarted = _NOW + timedelta(minutes=2)
+        rows += [
+            _mock_state("0.2", _NOW + timedelta(minutes=1)),
+            _mock_state("1500", restarted),
+            _mock_state("1500", _advance(timedelta(minutes=3))),
+        ]
+        assert await _run(hass, cache) == restarted.isoformat()
+    assert not cache["sensor.dishwasher_power"].unknown
+
+
+@pytest.mark.asyncio
+async def test_too_many_new_readings_reads_the_newest_back_again() -> None:
+    """More new readings than the cap: the remembered start may be stale."""
+    true_on = _NOW - timedelta(hours=2)
+    rows = [
+        _mock_state("0.5", true_on - timedelta(minutes=1)),
+        _mock_state("1500", true_on),
+        _mock_state("1500", _NOW),
+    ]
+    hass = _make_hass(rows)
+    cache: dict[str, Any] = {}
+    with patch(f"{_PE}._RECENT_ROWS", 4), patch(f"{_PE}._MAX_ROWS", 10):
+        assert await _run(hass, cache) == true_on.isoformat()
+        _recorder(hass).queries.clear()
+        rows += _on_rows(_advance(timedelta(minutes=10)), 30, timedelta(seconds=10))
+        result = await _run(hass, cache)
+
+    assert _newest_queries(hass) == [4, 10]
+    entry = cache["sensor.dishwasher_power"]
+    assert entry.unknown
+    assert entry.since is not None
+    assert entry.since > true_on
+    assert result == entry.since.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_unit_change_reads_the_newest_back_again() -> None:
     """A remembered start read in one unit is not reused after a unit change."""
     true_on = _NOW - timedelta(hours=2)
     rows = [
@@ -701,6 +924,51 @@ async def test_unit_change_walks_back_again() -> None:
     assert await _run(hass, cache) == true_on.isoformat()
 
     _recorder(hass).queries.clear()
-    rows.append(_mock_state("1.5", _NOW + timedelta(minutes=1), unit="kW"))
+    rows.append(_mock_state("1.5", _advance(timedelta(minutes=1)), unit="kW"))
     assert await _run(hass, cache, state="1.5", unit="kW") == true_on.isoformat()
-    assert _recorder(hass).queries[0]["include_start_time_state"] is True
+    assert _newest_queries(hass) == [1000]
+
+
+@pytest.mark.asyncio
+async def test_memory_older_than_the_window_reads_the_newest_back_again() -> None:
+    """After a long gap between runs, what was read has left the window."""
+    true_on = _NOW - timedelta(hours=2)
+    rows = [
+        _mock_state("0.5", true_on - timedelta(minutes=1)),
+        _mock_state("1500", true_on),
+        _mock_state("1500", _NOW),
+    ]
+    hass = _make_hass(rows)
+    cache: dict[str, Any] = {}
+    assert await _run(hass, cache) == true_on.isoformat()
+
+    restarted = _NOW + timedelta(days=2)
+    rows += [
+        _mock_state("0.2", restarted - timedelta(minutes=1)),
+        _mock_state("1500", restarted),
+        _mock_state("1500", _advance(timedelta(days=31))),
+    ]
+    _recorder(hass).queries.clear()
+    assert await _run(hass, cache) == restarted.isoformat()
+    assert _newest_queries(hass) == [1000]
+
+
+@pytest.mark.asyncio
+async def test_never_asks_the_recorder_for_newest_first_with_a_limit() -> None:
+    """
+    No query relies on descending order with a limit.
+
+    Before Home Assistant 2026.11, state_changes_during_period applied the
+    limit before the order, so it returned the oldest readings; the fake
+    refuses such a query.
+    """
+    rows = [
+        _mock_state("0.5", _NOW - timedelta(hours=3)),
+        *_on_rows(_NOW, 30, timedelta(minutes=1)),
+    ]
+    hass = _make_hass(rows)
+    cache: dict[str, Any] = {}
+    await _run(hass, cache)
+    rows.append(_mock_state("1500", _advance(timedelta(minutes=1))))
+    await _run(hass, cache)
+    assert all(q.get("descending", False) is False for q in _recorder(hass).queries)

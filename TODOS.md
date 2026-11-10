@@ -1215,6 +1215,20 @@ Since step 6 this also covers `radio_new_device_joined`, and since step 7 `netwo
 
 ---
 
+### A per-run row budget for the power-enrichment walk
+
+**What:** `sentinel/power_enrichment.py` caps the recorder read at `_MAX_ROWS` (20,000) readings per sensor per run, not per run. With nothing remembered yet (the first run after a restart, or after a unit change), every 'on' power sensor whose last off reading is far back reads its newest 20,000 readings, one sensor after another, in that run: 40 always-on sensors reporting every second read about 800,000 rows with attributes. Later runs read only new readings.
+
+**Why:** Performance specialist, PR review of the bounded walk (2026-11-10). Lindo chose to keep the per-sensor cap only and record this, since it is a one-run cost after a restart and only for homes with many dense always-on power sensors.
+
+**How to apply:** Share a run budget (about 100,000 rows) across sensors in `_enrich` and stop reading newest readings back (`_resolve_fresh`) once it is spent. A sensor past the budget gets no walk and no entry in `on_since`, so the next run picks it up; its `last_changed` stays Home Assistant's own for one more run. Test that the rows read in one run stay within the budget with many dense sensors.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ### Incident lifecycle control for repeated deviation notifications
 
 **What:** Replace per-entity-run notification tracking with a stable incident abstraction: key per `entity_id + template_id`, hold incident open until entity returns below threshold, notify once per incident. Suppresses repeated alerts for any entity, not just named cyclers. Clear incident when the entity is absent from findings for one full run.
