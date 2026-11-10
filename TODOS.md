@@ -1215,18 +1215,6 @@ Since step 6 this also covers `radio_new_device_joined`, and since step 7 `netwo
 
 ---
 
-### Bound the power-enrichment recorder walk
-
-**What:** `async_enrich_power_last_changed` fetches up to 30 days of `state_changes_during_period` rows with `limit=None` and `no_attributes=False` for every on-state power sensor, every Sentinel cycle. A high-frequency (~1 Hz) power sensor materializes millions of rows per cycle; several such sensors can exhaust memory or monopolize recorder executor workers. Pre-existing for `device_class: power` sensors; v3.21.3 marginally broadened admission (unit-only sensors). Surfaced by Codex adversarial review.
-
-**How to apply:** Walk history in capped descending pages (e.g. `limit=` batches, newest first) and stop at the first off-boundary; or cache the resolved on-since per entity and only re-query when the sensor drops below the off level.
-
-**Effort:** M
-**Priority:** P2
-**Depends on:** None
-
----
-
 ### Incident lifecycle control for repeated deviation notifications
 
 **What:** Replace per-entity-run notification tracking with a stable incident abstraction: key per `entity_id + template_id`, hold incident open until entity returns below threshold, notify once per incident. Suppresses repeated alerts for any entity, not just named cyclers. Clear incident when the entity is absent from findings for one full run.

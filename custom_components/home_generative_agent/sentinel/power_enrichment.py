@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import logging
 import math
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -25,6 +26,13 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 _LOOKBACK_DAYS = 30
+# Readings per recorder query, newest first.  The walk usually stops in the
+# first page, at the reading where the appliance was last off.
+_PAGE_ROWS = 1000
+# Most readings read for one sensor in one run: about 5.5 h of a sensor that
+# reports every second.  Past it the start is left unknown, as for a sensor on
+# since before the window.
+_MAX_ROWS = 20_000
 # Below this wattage the appliance is effectively off.  Used when walking
 # recorder history to locate the last off→on transition.
 _POWER_OFF_W = 10.0
@@ -68,54 +76,175 @@ def _row_watts(state: Any, current_factor: float) -> float | None:
     return val_w if math.isfinite(val_w) else None
 
 
-def _find_true_on_since(
-    state_list: list[Any],
-    current_factor: float,
-    start_time: datetime,
-) -> Any | None:
-    """
-    Return the state when the sensor last transitioned from off to on.
+@dataclass(slots=True)
+class _Walk:
+    """A newest-to-oldest walk through one sensor's readings."""
 
-    Walk newest-to-oldest, skip transients.  The first reading at or below
-    the off level (compared in watts, honoring each row's own unit) marks the
-    boundary of the current 'on' episode; the state immediately after it
-    (newer) is the true start.
+    # Oldest usable 'on' reading so far: the episode's start once an 'off'
+    # reading is found below it.
+    prev: Any | None = None
+    rows: int = 0
 
-    If no 'off' reading exists in the window, the oldest within-window record
-    is returned as the best available approximation (the sensor has been on
-    since before the window, but it is still more accurate than a restart-reset
-    last_changed).  Returns None when nothing useful can be determined.
-    """
-    prev = None
-    for state in reversed(state_list):
+    def feed(self, state: Any, factor: float) -> bool:
+        """Take the next older reading; True when it is an 'off' reading."""
+        self.rows += 1
         if state.state in _TRANSIENT_STATES:
-            continue
-        val_w = _row_watts(state, current_factor)
+            return False
+        val_w = _row_watts(state, factor)
         if val_w is None:
-            continue
+            return False
         if val_w <= _POWER_OFF_W:
-            # 'Off' reading found — prev is the true on-start (may be None if
-            # the first non-transient record is already below threshold).
-            return prev
-        prev = state
+            return True
+        self.prev = state
+        return False
 
-    # No 'off' reading in window.  Use oldest within-window 'on' record.
-    first = next(
-        (
-            s
-            for s in state_list
-            if s.state not in _TRANSIENT_STATES
-            and _row_watts(s, current_factor) is not None
-        ),
-        None,
+
+# How a walk ended: at an 'off' reading, at the start of what it was asked to
+# read, or at _MAX_ROWS.
+_OFF = "off"
+_START = "start"
+_CAP = "cap"
+
+
+@dataclass(slots=True)
+class PowerOnSince:
+    """
+    What is known about one power sensor's current 'on' episode.
+
+    ``since`` is when it started; None with ``unknown`` means it started
+    before anything that was read, and None without it means no episode was
+    seen.  ``checked`` is the newest reading read, so the next run reads only
+    newer ones.  Held by the engine between runs and not saved.
+    """
+
+    since: datetime | None
+    unknown: bool
+    checked: datetime | None
+    factor: float
+
+
+async def _walk_back(  # noqa: PLR0913
+    hass: HomeAssistant,
+    instance: Any,
+    entity_id: str,
+    factor: float,
+    start: datetime,
+    *,
+    include_start: bool,
+) -> tuple[_Walk, str, datetime | None]:
+    """
+    Walk readings newer than ``start``, newest first, a page at a time.
+
+    Returns the walk, how it ended, and the newest reading's time.  Pages
+    are cut by an exclusive end at the oldest reading so far; two readings of
+    one sensor at the same instant across a page boundary would lose one.
+    """
+    walk = _Walk()
+    newest: datetime | None = None
+    end: datetime | None = None  # first page: no upper bound
+    while walk.rows < _MAX_ROWS:
+        limit = min(_PAGE_ROWS, _MAX_ROWS - walk.rows)
+        states = await instance.async_add_executor_job(
+            functools.partial(
+                recorder_history.state_changes_during_period,
+                hass,
+                start,
+                end,
+                entity_id,
+                no_attributes=False,
+                descending=True,
+                limit=limit,
+                include_start_time_state=include_start,
+            )
+        )
+        rows = states.get(entity_id) or []
+        # Newest first; the state at ``start``, when asked for, comes last.
+        page = [s for s in rows if dt_util.as_utc(s.last_changed) > start]
+        if page and newest is None:
+            newest = dt_util.as_utc(page[0].last_changed)
+        for state in page:
+            if walk.feed(state, factor):
+                return walk, _OFF, newest
+        if len(page) < limit:
+            for state in rows[len(page) :]:
+                if walk.feed(state, factor):
+                    return walk, _OFF, newest
+            return walk, _START, newest
+        end = dt_util.as_utc(page[-1].last_changed)
+    return walk, _CAP, newest
+
+
+def _since(walk: _Walk) -> datetime | None:
+    return None if walk.prev is None else dt_util.as_utc(walk.prev.last_changed)
+
+
+async def _resolve_newer(
+    hass: HomeAssistant,
+    instance: Any,
+    entity_id: str,
+    start_time: datetime,
+    cached: PowerOnSince,
+) -> PowerOnSince:
+    """Update a remembered episode from the readings newer than it."""
+    factor = cached.factor
+    walk, how, newest = await _walk_back(
+        hass,
+        instance,
+        entity_id,
+        factor,
+        max(cached.checked or start_time, start_time),
+        include_start=False,
     )
-    if first is not None and dt_util.as_utc(first.last_changed) > start_time:
-        return first
-    return None
+    checked = newest or cached.checked
+    if how == _CAP:
+        return PowerOnSince(None, unknown=True, checked=checked, factor=factor)
+    if how == _OFF or (
+        # The episode began after the last run saw the sensor off.
+        walk.prev is not None and cached.since is None and not cached.unknown
+    ):
+        return PowerOnSince(_since(walk), unknown=False, checked=checked, factor=factor)
+    return PowerOnSince(
+        cached.since, unknown=cached.unknown, checked=checked, factor=factor
+    )
+
+
+async def _resolve(  # noqa: PLR0913
+    hass: HomeAssistant,
+    instance: Any,
+    entity_id: str,
+    factor: float,
+    start_time: datetime,
+    cached: PowerOnSince | None,
+) -> PowerOnSince | None:
+    """
+    Return the sensor's current 'on' episode, or None to leave it alone.
+
+    The first 'off' reading below the newest readings ends the walk; the
+    reading just newer than it is the start.  With no 'off' reading in the
+    window, the oldest reading in it is the best estimate, unless the sensor
+    was already on at the window's start.
+    """
+    if cached is not None and cached.factor == factor:
+        return await _resolve_newer(hass, instance, entity_id, start_time, cached)
+
+    walk, how, newest = await _walk_back(
+        hass, instance, entity_id, factor, start_time, include_start=True
+    )
+    if how == _START and walk.rows < 2:  # noqa: PLR2004
+        return None  # too little history to say anything
+    if how == _CAP:
+        return PowerOnSince(None, unknown=True, checked=newest, factor=factor)
+    since = _since(walk)
+    if how == _START and since is not None and since <= start_time:
+        # On at the window's start: started before anything here.
+        return PowerOnSince(None, unknown=True, checked=newest, factor=factor)
+    return PowerOnSince(since, unknown=False, checked=newest, factor=factor)
 
 
 async def async_enrich_power_last_changed(
-    hass: HomeAssistant, snapshot: FullStateSnapshot
+    hass: HomeAssistant,
+    snapshot: FullStateSnapshot,
+    on_since: dict[str, PowerOnSince] | None = None,
 ) -> None:
     """
     Correct last_changed for power sensors reset by HA startup.
@@ -127,7 +256,13 @@ async def async_enrich_power_last_changed(
     (it measures duration by direct observation); the enriched value informs
     advisory context only — dynamic rules, triage, and the baseline
     cycle-completion recency check.
+
+    ``on_since`` carries each sensor's result to the next run, so that run
+    reads only newer readings.  A sensor that is off or gone is dropped from
+    it.  Without it every run walks from the newest reading back.
     """
+    if on_since is None:
+        on_since = {}
     if DATA_INSTANCE not in getattr(hass, "data", {}):
         return
 
@@ -140,12 +275,23 @@ async def async_enrich_power_last_changed(
             or is_power_unit(e["attributes"].get("unit_of_measurement"))
         )
     ]
-    if not power_entities:
-        return
+    on_ids: set[str] = set()
+    try:
+        if power_entities:
+            await _enrich(hass, power_entities, on_since, on_ids)
+    finally:
+        for entity_id in [k for k in on_since if k not in on_ids]:
+            del on_since[entity_id]
 
+
+async def _enrich(
+    hass: HomeAssistant,
+    power_entities: list[Any],
+    on_since: dict[str, PowerOnSince],
+    on_ids: set[str],
+) -> None:
     instance = get_recorder_instance(hass)
-    now = dt_util.utcnow()
-    start_time = now - timedelta(days=_LOOKBACK_DAYS)
+    start_time = dt_util.utcnow() - timedelta(days=_LOOKBACK_DAYS)
 
     for power_entity in power_entities:
         entity_id = power_entity["entity_id"]
@@ -162,46 +308,37 @@ async def async_enrich_power_last_changed(
         current_w = current_val * unit_factor
         if not math.isfinite(current_w) or current_w <= _POWER_OFF_W:
             continue  # off, or garbage that overflowed to inf in watts
+        on_ids.add(entity_id)
 
         try:
-            states = await instance.async_add_executor_job(
-                functools.partial(
-                    recorder_history.state_changes_during_period,
-                    hass,
-                    start_time,
-                    now,
-                    entity_id,
-                    no_attributes=False,
-                    descending=False,
-                    limit=None,
-                    include_start_time_state=True,
-                )
+            result = await _resolve(
+                hass,
+                instance,
+                entity_id,
+                unit_factor,
+                start_time,
+                on_since.get(entity_id),
             )
         except Exception:  # noqa: BLE001
             _LOGGER.debug(
                 "Could not query recorder history for power entity %s", entity_id
             )
             continue
-
-        state_list = states.get(entity_id) or []
-
-        if len(state_list) < 2:  # noqa: PLR2004
+        if result is None:
+            on_since.pop(entity_id, None)
+            continue
+        on_since[entity_id] = result
+        if result.since is None:
             continue
 
-        true_on_state = _find_true_on_since(state_list, unit_factor, start_time)
-        if true_on_state is None:
-            continue
-
-        true_last_changed = dt_util.as_utc(true_on_state.last_changed).isoformat()
+        true_last_changed = result.since.isoformat()
         if true_last_changed != power_entity["last_changed"]:
             _LOGGER.debug(
                 "Power sensor %s: corrected last_changed %s → %s "
-                "(true on-since; %s at %.1f %s)",
+                "(true on-since; now %.1f W)",
                 entity_id,
                 power_entity["last_changed"],
                 true_last_changed,
-                true_on_state.state,
                 current_w,
-                "W",
             )
             power_entity["last_changed"] = true_last_changed
