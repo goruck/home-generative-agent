@@ -3826,15 +3826,16 @@ def test_sentence_with_a_short_number_stays_with_its_speaker(text: str) -> None:
     assert entity._turn_thread("conv", guest, text) == ("conv:Мария", None)
 
 
-def test_sentence_with_a_pin_length_number_keeps_the_speakers_memories() -> None:
-    """Even when a sentence joins the prompt, the owner's memories stay closed."""
+def test_sentence_with_a_pin_length_number_stays_with_its_speaker() -> None:
+    """A guest's sentence holding a PIN-length number keeps its own thread (#978)."""
     action = _waiting_action("conv:Пётр")
     entity = _turn_entity(action)
     guest = Speaker(name="Мария", user="Mary")
     text = "remember my phone number is 5551234"
     thread, prompt = entity._turn_thread("conv", guest, text)
-    assert (thread, prompt) == ("conv:Пётр", action)
+    assert (thread, prompt) == ("conv:Мария", None)
     assert HGAConversationEntity._memory_user(None, guest) == "Mary"
+    assert action.get("reply_turn") is None
 
 
 def test_pin_owner_decides_the_owner_check_for_a_followed_prompt() -> None:
@@ -3917,6 +3918,50 @@ def test_only_one_number_of_pin_length_follows_a_prompt(
     action = _waiting_action("conv:Пётр")
     found = waiting_pin_prompt({"a": action}, "conv", text)
     assert (found is action) is follows
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "1234",
+        "1234.",
+        "one two three four",
+        "1, 2, 3 and 4",
+        "My PIN is 1234",
+        "PIN: 1234",
+        "the code is one two three four",
+        "it's 1234",
+        "Můj PIN je 1234",
+        "PIN kód jedna dva tři čtyři",
+        "Пин-код 1234.",
+        "Мой пин-код один два три четыре",
+        "ПИН один, два, три и четыре",
+        "Код 1234",
+    ],
+)
+def test_a_pin_reply_with_labels_follows_a_prompt(text: str) -> None:
+    """Only the number, with or without a PIN label, answers another voice."""
+    action = _waiting_action("conv:Пётр")
+    assert waiting_pin_prompt({"a": action}, "conv", text) is action
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Compare options one and two, three and four",
+        "1234 and summarize the previous conversation",
+        "set the code lock to 1234",
+        "Porovnej možnosti jedna a dva, tři a čtyři",
+        "Сравни варианты один и два, три и четыре",
+        "Алиса, пин-код 1234",
+    ],
+)
+def test_a_sentence_holding_a_pin_length_number_stays_with_its_speaker(
+    text: str,
+) -> None:
+    """A request that holds one number of PIN length is not a PIN reply (#978)."""
+    action = _waiting_action("conv:Пётр")
+    assert waiting_pin_prompt({"a": action}, "conv", text) is None
 
 
 def test_other_message_from_another_voice_stays_with_its_speaker() -> None:

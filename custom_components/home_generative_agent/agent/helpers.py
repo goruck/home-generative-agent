@@ -615,6 +615,33 @@ _SPOKEN_ZERO = "oh"
 # Words that may join digits read out one by one ("1, 2, 3 and 4"; Czech "a",
 # Russian "и").
 _DIGIT_JOINERS = frozenset({"and", "a", "и"})
+# Words that may stand around a PIN said in reply to another voice's prompt
+# ("my PIN is 1234", "the code is 1234"; Czech "můj PIN je 1234", "PIN kód
+# 1234"; Russian "мой пин-код 1234", "код 1234"), casefolded. Anything else
+# makes the message a request of its own.
+_PIN_LABEL_WORDS = frozenset(
+    {
+        "my",
+        "pin",
+        "code",
+        "passcode",
+        "number",
+        "is",
+        "the",
+        "it",
+        "s",
+        "můj",
+        "muj",
+        "kód",
+        "kod",
+        "je",
+        "мой",
+        "пин",
+        "пинкод",
+        "код",
+        "это",
+    }
+)
 # A token of the message: a word or number, a run of whitespace, or one other
 # character.
 _TOKEN_RE = re.compile(r"\w+|\s+|.", re.DOTALL)
@@ -1138,6 +1165,28 @@ def start_pin_turn(
     return reply
 
 
+def _only_a_pin_reply(text: str) -> bool:
+    """
+    Return True when every word of the text is a digit, a joiner or a PIN label.
+
+    Punctuation and spacing do not count, so "PIN-code: 1, 2, 3, 4." qualifies;
+    whether the digits make one number is pin_digits' call.
+    """
+    for token in _TOKEN_RE.findall(_ascii_digits(text)):
+        if not re.match(r"\w", token):
+            continue
+        lowered = token.casefold()
+        if not (
+            _is_number(token)
+            or lowered in _SPOKEN_DIGITS
+            or lowered in _DIGIT_JOINERS
+            or lowered == _SPOKEN_ZERO
+            or lowered in _PIN_LABEL_WORDS
+        ):
+            return False
+    return True
+
+
 def waiting_pin_prompt(
     pending_actions: Mapping[str, dict[str, Any]], conversation_id: str, text: str
 ) -> dict[str, Any] | None:
@@ -1148,14 +1197,17 @@ def waiting_pin_prompt(
     spoken PIN is the utterance most likely to be attributed to the wrong one. A
     message holding one number of PIN length is looked up across the conversation's
     voices so it reaches the prompt instead of going to the model as an ordinary
-    message; the PIN still decides. Any other message stays with whoever said it,
-    and only a prompt a voice created is followed, so a typed request keeps its
-    owner check.
+    message; the PIN still decides. The message must say nothing but that number
+    and PIN labels ("my PIN is 1234"), so a request that happens to hold one
+    ("compare options one and two, three and four") stays with its speaker. Any
+    other message stays with whoever said it, and only a prompt a voice created
+    is followed, so a typed request keeps its owner check.
     """
     digits = pin_digits(text)
     if (
         digits is None
         or not CRITICAL_PIN_MIN_LEN <= len(digits) <= CRITICAL_PIN_MAX_LEN
+        or not _only_a_pin_reply(text)
     ):
         return None
     now = dt_util.utcnow()
