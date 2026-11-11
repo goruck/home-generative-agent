@@ -178,6 +178,7 @@ from custom_components.home_generative_agent.agent.helpers import (  # noqa: E40
     waiting_pin_prompt,
 )
 from custom_components.home_generative_agent.agent.tools import (  # noqa: E402
+    MAX_PIN_ATTEMPTS,
     _is_wrong_user,
 )
 from custom_components.home_generative_agent.conversation import (  # noqa: E402
@@ -4255,7 +4256,7 @@ async def test_sentence_checks_are_capped_per_prompt() -> None:
     action = _waiting_action("conv:Пётр")
     entity = _hashed_turn_entity(action)
     guest = Speaker(name="Мария", user="Mary")
-    for _ in range(5):
+    for _ in range(MAX_PIN_ATTEMPTS):
         turn = await entity._async_turn_thread("conv", guest, "sure, 4321")
         assert turn == ("conv:Мария", None)
     # The real PIN in a sentence is no longer checked for this prompt; a bare
@@ -4264,8 +4265,73 @@ async def test_sentence_checks_are_capped_per_prompt() -> None:
         "conv:Мария",
         None,
     )
-    assert entity.hass.async_add_executor_job.await_count == 5
+    assert entity.hass.async_add_executor_job.await_count == MAX_PIN_ATTEMPTS
     assert await entity._async_turn_thread("conv", guest, "1234") == (
         "conv:Пётр",
         action,
     )
+
+
+@pytest.mark.parametrize(
+    ("reissued", "pin_owner"),
+    [
+        # The owner says the same request again.
+        ({}, None),
+        # The owner replaces it with another request in the conversation.
+        ({"tool_args": {"name": "Garage"}}, None),
+        # A followed PIN reply from another voice repeats the owner's request.
+        ({"user": "Mary"}, "ivan"),
+    ],
+)
+async def test_repeating_the_request_keeps_the_sentence_checks(
+    reissued: dict[str, Any], pin_owner: str | None
+) -> None:
+    """A repeated request must not give another voice a fresh set of guesses."""
+    pending: dict[str, dict[str, Any]] = {
+        "a": _held_request(
+            user="ivan",
+            thread_id="conv:Пётр",
+            turn_id="t0",
+            disclosed=True,
+            sentence_checks=MAX_PIN_ATTEMPTS,
+        )
+    }
+    action_id = register_pending_action(
+        pending,
+        _held_request(
+            **{"user": "ivan", **reissued}, thread_id="conv:Пётр", turn_id="t1"
+        ),
+        pin_owner=pin_owner,
+    )
+    assert action_id is not None
+    assert pending[action_id]["sentence_checks"] == MAX_PIN_ATTEMPTS
+
+    pending[action_id]["disclosed"] = True
+    entity = _hashed_turn_entity(pending[action_id])
+    guest = Speaker(name="Мария", user="Mary")
+    turn = await entity._async_turn_thread("conv", guest, "sure, 1234")
+    assert turn == ("conv:Мария", None)
+    entity.hass.async_add_executor_job.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("attempts", "checks_left"), [(0, MAX_PIN_ATTEMPTS), (3, 2), (MAX_PIN_ATTEMPTS, 0)]
+)
+async def test_wrong_pins_count_against_the_sentence_checks(
+    attempts: int, checks_left: int
+) -> None:
+    """No sentence is checked once the prompt's wrong PINs used the limit up."""
+    action = _waiting_action("conv:Пётр", attempts=attempts)
+    entity = _hashed_turn_entity(action)
+    guest = Speaker(name="Мария", user="Mary")
+    for _ in range(MAX_PIN_ATTEMPTS):
+        await entity._async_turn_thread("conv", guest, "sure, 4321")
+    assert entity.hass.async_add_executor_job.await_count == checks_left
+    # Locked out: the real PIN in a sentence is not checked either, so the
+    # turn tells the speaker nothing about the number.
+    if checks_left == 0:
+        assert await entity._async_turn_thread("conv", guest, "sure, 1234") == (
+            "conv:Мария",
+            None,
+        )
+        entity.hass.async_add_executor_job.assert_not_called()

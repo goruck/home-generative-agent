@@ -1129,6 +1129,10 @@ def register_pending_action(
             elif existing.get("turn_id") == action.get("turn_id"):
                 return None
             carried["attempts"] = int(existing.get("attempts", 0) or 0)
+            # The PIN checks another voice's sentences took (see the
+            # conversation agent's _async_turn_thread) are kept the same way,
+            # so repeating the request does not give them a fresh budget.
+            carried["sentence_checks"] = int(existing.get("sentence_checks", 0) or 0)
             pending_actions.pop(key, None)
 
     while len(pending_actions) >= MAX_PENDING_ACTIONS:

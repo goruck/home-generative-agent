@@ -1743,8 +1743,10 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         waiting, the number is checked against the PIN hash: only the real PIN
         follows the prompt, so a sentence that holds some other number still
         stays with its speaker and costs the prompt none of its attempts. Such
-        checks are capped at MAX_PIN_ATTEMPTS per prompt, so wrapping guesses in
-        sentences is no way around the attempt limit.
+        checks and the prompt's wrong PINs together are capped at
+        MAX_PIN_ATTEMPTS, and repeating the request while it waits keeps the
+        count (register_pending_action), so none run once the PIN is locked
+        out and a waiting request takes at most MAX_PIN_ATTEMPTS of them.
         """
         thread_id, prompt = self._turn_thread(conversation_id, speaker, text)
         if speaker is None or prompt is not None:
@@ -1757,15 +1759,13 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         options = self.entry.runtime_data.options
         pin_hash = options.get(CONF_CRITICAL_ACTION_PIN_HASH, "")
         salt = options.get(CONF_CRITICAL_ACTION_PIN_SALT, "")
-        if (
-            prompt is None
-            or prompt.get("thread_id") == thread_id
-            or not pin_hash
-            or not salt
-            or int(prompt.get("sentence_checks", 0) or 0) >= MAX_PIN_ATTEMPTS
-        ):
+        if prompt is None or prompt.get("thread_id") == thread_id:
             return thread_id, None
-        prompt["sentence_checks"] = int(prompt.get("sentence_checks", 0) or 0) + 1
+        checks = int(prompt.get("sentence_checks", 0) or 0)
+        wrong_pins = int(prompt.get("attempts", 0) or 0)
+        if not pin_hash or not salt or checks + wrong_pins >= MAX_PIN_ATTEMPTS:
+            return thread_id, None
+        prompt["sentence_checks"] = checks + 1
         # PBKDF2: off the event loop. It runs only while another voice's
         # prompt waits and the labels rejected a PIN-length number.
         matched = await self.hass.async_add_executor_job(
