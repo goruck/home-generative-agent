@@ -356,12 +356,18 @@ _REASONING_CHOICES: dict[str, list[tuple[str, str]]] = {
         ("On", "true"),
         ("GPT-OSS effort", "low"),
     ],
+    # Off, xhigh and max are GPT-6 settings (_thinking_openai): Off is "none"
+    # where the model takes it and its lowest level otherwise. Earlier models
+    # keep their default for them.
     "openai": [
         ("Provider default", "default"),
+        ("Off (GPT-6)", "false"),
         ("Minimal effort", "minimal"),
         ("Low effort", "low"),
         ("Medium effort", "medium"),
         ("High effort", "high"),
+        ("Extra-high effort (GPT-6)", "xhigh"),
+        ("Max effort (GPT-6)", "max"),
     ],
     "openai_compatible": [
         ("Provider default", "default"),
