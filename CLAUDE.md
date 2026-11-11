@@ -55,6 +55,9 @@ After changing `manifest.json`: run `make runtimedeps` (or `python scripts/gen_m
 The test: *if this waits for the next bundle, does something broken stay broken, or does a user
 just not get a new thing yet?*
 
+Features: one or two headline features per bundle, picked when the cycle starts, and a feature
+cutoff about two weeks before the cut (fixes keep landing until the cut).
+
 Every PR with user-visible behavior adds its entry to the `## [Unreleased]` section of
 `CHANGELOG.md` — that is what the next release's notes are built from, so a PR without one is not
 finished. Use a GitHub **pre-release** when a reporter needs to field-validate on hardware or a
