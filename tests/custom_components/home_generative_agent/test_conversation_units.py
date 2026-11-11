@@ -35,6 +35,8 @@ if TYPE_CHECKING:
 
 from custom_components.home_generative_agent.const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
+    CONF_CRITICAL_ACTION_PIN_HASH,
+    CONF_CRITICAL_ACTION_PIN_SALT,
     CONF_NOTIFY_SERVICE,
     CONF_SPEAKER_SENSORS,
     CONF_TOOL_EXCLUSIONS,
@@ -43,6 +45,7 @@ from custom_components.home_generative_agent.const import (
 )
 from custom_components.home_generative_agent.core.utils import (
     gather_store_puts_in_chunks,
+    hash_pin,
 )
 
 
@@ -3812,13 +3815,9 @@ def test_number_from_another_voice_joins_the_waiting_prompt() -> None:
         "yes 1234",
         "okay, 1234",
         "confirm 1234",
-        "my password is 1234",
         "ano, 1234",
-        "heslo 1234",
         "prosím, PIN 1234",
         "да, 1234",
-        "мой пароль 1234",
-        "код подтверждения 1234",
         "хорошо, пожалуйста, пин-код 1234",
     ],
 )
@@ -3976,14 +3975,12 @@ def test_only_one_number_of_pin_length_follows_a_prompt(
         "1, 2, 3 and 4",
         "My PIN is 1234",
         "PIN: 1234",
-        "the code is one two three four",
         "it's 1234",
         "Můj PIN je 1234",
         "PIN kód jedna dva tři čtyři",
         "Пин-код 1234.",
         "Мой пин-код один два три четыре",
         "ПИН один, два, три и четыре",
-        "Код 1234",
     ],
 )
 def test_a_pin_reply_with_labels_follows_a_prompt(text: str) -> None:
@@ -4120,3 +4117,155 @@ async def test_sensor_on_another_device_is_not_logged(
     entity = _speaker_entity(monkeypatch, "Пётр")
     assert await entity._async_speaker("other") is None
     assert "sensor.voice" not in caplog.text
+
+
+def _hashed_turn_entity(*actions: dict[str, Any]) -> Any:
+    """Return a turn entity with the PIN 1234 set and a hash that runs inline."""
+    entity = _turn_entity(*actions)
+    digest, salt = hash_pin("1234")
+    entity.entry.runtime_data.options = {
+        CONF_CRITICAL_ACTION_PIN_HASH: digest,
+        CONF_CRITICAL_ACTION_PIN_SALT: salt,
+    }
+    entity.hass.async_add_executor_job = AsyncMock(side_effect=lambda job: job())
+    return entity
+
+
+_UNLISTED_WORDS = [
+    "yeah 1234",
+    "sure, 1234",
+    "1234 thanks",
+    "My PIN is 1234, thanks",
+    "Here is my PIN: 1234",
+    "Hey Jarvis, 1234",
+    "\u5bc6\u7801 1234",  # Chinese "password 1234"
+    "my password is 1234",
+    "the code is 1234",
+    "Код 1234",
+    "код подтверждения 1234",
+]
+
+
+@pytest.mark.parametrize("text", _UNLISTED_WORDS)
+async def test_the_pin_with_unlisted_words_follows_by_its_hash(text: str) -> None:
+    """A misattributed PIN must not stay in the other voice's history (#981)."""
+    action = _waiting_action("conv:Пётр")
+    entity = _hashed_turn_entity(action)
+    guest = Speaker(name="Мария", user="Mary")
+    assert entity._turn_thread("conv", guest, text) == ("conv:Мария", None)
+    turn = await entity._async_turn_thread("conv", guest, text)
+    assert turn == ("conv:Пётр", action)
+
+
+@pytest.mark.parametrize("text", [t.replace("1234", "4321") for t in _UNLISTED_WORDS])
+async def test_another_number_with_unlisted_words_stays(text: str) -> None:
+    """Not the PIN: the sentence stays with its speaker and costs nothing."""
+    action = _waiting_action("conv:Пётр")
+    entity = _hashed_turn_entity(action)
+    guest = Speaker(name="Мария", user="Mary")
+    turn = await entity._async_turn_thread("conv", guest, text)
+    assert turn == ("conv:Мария", None)
+    assert action.get("reply_turn") is None
+    assert "attempts" not in action
+
+
+async def test_the_hash_runs_only_for_another_voices_waiting_prompt() -> None:
+    guest = Speaker(name="Мария", user="Mary")
+    # Nothing waits.
+    entity = _hashed_turn_entity()
+    assert await entity._async_turn_thread("conv", guest, "sure, 1234") == (
+        "conv:Мария",
+        None,
+    )
+    # The speaker's own prompt: the message is on its thread already.
+    own = _waiting_action("conv:Мария")
+    entity_own = _hashed_turn_entity(own)
+    assert await entity_own._async_turn_thread("conv", guest, "sure, 1234") == (
+        "conv:Мария",
+        None,
+    )
+    # No number of PIN length.
+    entity_short = _hashed_turn_entity(_waiting_action("conv:Пётр"))
+    assert await entity_short._async_turn_thread("conv", guest, "turn on 2 lamps") == (
+        "conv:Мария",
+        None,
+    )
+    for checked in (entity, entity_own, entity_short):
+        checked.hass.async_add_executor_job.assert_not_called()
+
+
+async def test_no_pin_set_means_no_hash_check() -> None:
+    action = _waiting_action("conv:Пётр")
+    entity = _turn_entity(action)
+    entity.entry.runtime_data.options = {}
+    entity.hass.async_add_executor_job = AsyncMock()
+    guest = Speaker(name="Мария", user="Mary")
+    turn = await entity._async_turn_thread("conv", guest, "sure, 1234")
+    assert turn == ("conv:Мария", None)
+    entity.hass.async_add_executor_job.assert_not_called()
+
+
+async def test_a_prompt_replaced_during_the_hash_is_not_followed() -> None:
+    action = _waiting_action("conv:Пётр")
+    entity = _hashed_turn_entity(action)
+    pending = entity.entry.runtime_data.pending_actions
+
+    def _hash_while_replaced(job: Any) -> Any:
+        pending.clear()
+        return job()
+
+    entity.hass.async_add_executor_job = AsyncMock(side_effect=_hash_while_replaced)
+    guest = Speaker(name="Мария", user="Mary")
+    turn = await entity._async_turn_thread("conv", guest, "sure, 1234")
+    assert turn == ("conv:Мария", None)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["my PIN is  1234", "1234  please", "PIN:\t\t1234", "1234\r\n"],
+)
+@pytest.mark.parametrize("waiting", [True, False])
+async def test_a_whitespace_run_does_not_fail_the_turn(
+    text: str, *, waiting: bool
+) -> None:
+    """A run of whitespace is one token; category() takes one character."""
+    action = _waiting_action("conv:Пётр")
+    entity = _hashed_turn_entity(*([action] if waiting else []))
+    guest = Speaker(name="Мария", user="Mary")
+    expected = ("conv:Пётр", action) if waiting else ("conv:Мария", None)
+    assert entity._turn_thread("conv", guest, text) == expected
+    assert await entity._async_turn_thread("conv", guest, text) == expected
+
+
+def test_a_whitespace_run_with_nothing_pending_reads_safely() -> None:
+    assert waiting_pin_prompt({}, "conv", "  2026 is the year") is None
+
+
+@pytest.mark.parametrize(
+    "text", ["the code is 4321", "the password is 12345678", "is the code 1234?"]
+)
+def test_other_codes_do_not_take_the_prompt_by_their_words(text: str) -> None:
+    """Only "PIN" makes "code" a label; the hash still lets the real PIN through."""
+    action = _waiting_action("conv:Пётр")
+    assert waiting_pin_prompt({"a": action}, "conv", text) is None
+
+
+async def test_sentence_checks_are_capped_per_prompt() -> None:
+    """Guesses wrapped in sentences cannot get around the attempt limit."""
+    action = _waiting_action("conv:Пётр")
+    entity = _hashed_turn_entity(action)
+    guest = Speaker(name="Мария", user="Mary")
+    for _ in range(5):
+        turn = await entity._async_turn_thread("conv", guest, "sure, 4321")
+        assert turn == ("conv:Мария", None)
+    # The real PIN in a sentence is no longer checked for this prompt; a bare
+    # PIN still answers it, and that path counts its attempts as before.
+    assert await entity._async_turn_thread("conv", guest, "sure, 1234") == (
+        "conv:Мария",
+        None,
+    )
+    assert entity.hass.async_add_executor_job.await_count == 5
+    assert await entity._async_turn_thread("conv", guest, "1234") == (
+        "conv:Пётр",
+        action,
+    )

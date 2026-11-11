@@ -616,31 +616,25 @@ _SPOKEN_ZERO = "oh"
 # Russian "и").
 _DIGIT_JOINERS = frozenset({"and", "a", "и"})
 # Words that may stand around a PIN said in reply to another voice's prompt
-# ("my PIN is 1234", "yes, the code is 1234"; Czech "ano, můj PIN je 1234",
-# "heslo 1234"; Russian "да, мой пин-код 1234", "пароль 1234"), casefolded.
-# Anything else makes the message a request of its own. English, Czech and
-# Russian only: in another language a PIN said with words stays with its
-# speaker.
+# ("my PIN is 1234", "yes, the PIN code is 1234"; Czech "ano, můj PIN je
+# 1234"; Russian "да, мой пин-код 1234"), casefolded. Anything else makes the
+# message a request of its own, which still follows the prompt when its number
+# is the PIN (the conversation agent checks the hash). English, Czech and
+# Russian only.
 _PIN_LABEL_WORDS = frozenset(
     {
         "my",
         "pin",
-        "code",
-        "passcode",
-        "password",
         "is",
         "the",
         "it",
         "s",
         "můj",
         "muj",
-        "kód",
-        "kod",
         "je",
         "мой",
         "пин",
         "пинкод",
-        "код",
         "это",
         # Fillers and confirmations said around the PIN (#981 review).
         "yes",
@@ -654,18 +648,18 @@ _PIN_LABEL_WORDS = frozenset(
         "ano",
         "prosím",
         "prosim",
-        "heslo",
         "да",
         "хорошо",
         "пожалуйста",
-        "пароль",
         "подтверждаю",
         "подтверждения",
     }
 )
-# "Number" is a label only right after one of these ("PIN number 1234"):
-# alone, "my number is 5551234" is a phone number, not a PIN reply.
-_PIN_NUMBER_AFTER = frozenset({"pin", "code"})
+# Labels only right after "PIN" ("PIN number 1234", "PIN code 1234", Czech
+# "PIN kód", Russian "пин-код"): alone, "my number is 5551234" is a phone
+# number and "the code is 4321" another code, not a PIN reply.
+_PIN_NUMBER_AFTER = frozenset({"pin", "пин"})
+_AFTER_PIN_WORDS = frozenset({"number", "code", "kód", "kod", "код"})
 # Symbols that make a number something other than a PIN ("$1234", "50%",
 # "#1234"). Other punctuation, such as ": , . -", is skipped.
 _NOT_PIN_SYMBOLS = frozenset("%\u2030\u2031#@\u2116\u00b0")
@@ -1199,11 +1193,15 @@ def _only_a_pin_reply(text: str) -> bool:
     Punctuation and spacing do not count, so "PIN-code: 1, 2, 3, 4." qualifies;
     whether the digits make one number is pin_digits' call. A currency, math or
     other symbol that gives a number another meaning ("It's $1234", "50%") does,
-    and so does "number" unless it follows "PIN" or "code".
+    and so does "number" or "code" unless it follows "PIN".
     """
     previous = ""
     for token in _TOKEN_RE.findall(_ascii_digits(text)):
         if not re.match(r"\w", token):
+            # A run of whitespace is one token, and category() takes one
+            # character.
+            if token.isspace():
+                continue
             if token in _NOT_PIN_SYMBOLS or unicodedata.category(token) in {
                 "Sc",
                 "Sm",
@@ -1217,7 +1215,7 @@ def _only_a_pin_reply(text: str) -> bool:
             or lowered in _DIGIT_JOINERS
             or lowered == _SPOKEN_ZERO
             or lowered in _PIN_LABEL_WORDS
-            or (lowered == "number" and previous in _PIN_NUMBER_AFTER)
+            or (lowered in _AFTER_PIN_WORDS and previous in _PIN_NUMBER_AFTER)
         ):
             return False
         previous = lowered
@@ -1234,19 +1232,33 @@ def waiting_pin_prompt(
     spoken PIN is the utterance most likely to be attributed to the wrong one. A
     message holding one number of PIN length is looked up across the conversation's
     voices so it reaches the prompt instead of going to the model as an ordinary
-    message; the PIN still decides. The message must say nothing but that number
-    and PIN labels ("my PIN is 1234"), so a request that happens to hold one
-    ("compare options one and two, three and four") stays with its speaker. Any
-    other message stays with whoever said it, and only a prompt a voice created
-    is followed, so a typed request keeps its owner check.
+    message; the PIN still decides. The message must say nothing but that number,
+    PIN labels and fillers ("my PIN is 1234", "yes, 1234"), so a request that
+    happens to hold one ("compare options one and two, three and four") stays
+    with its speaker; the conversation agent follows such a message only when its
+    number is the PIN (`pin_length_number`, `newest_pin_prompt`). Only a prompt a
+    voice created is followed, so a typed request keeps its owner check.
     """
+    if pin_length_number(text) is None or not _only_a_pin_reply(text):
+        return None
+    return newest_pin_prompt(pending_actions, conversation_id)
+
+
+def pin_length_number(text: str) -> str | None:
+    """Return the digits of the one number in the text when it is PIN length."""
     digits = pin_digits(text)
     if (
         digits is None
         or not CRITICAL_PIN_MIN_LEN <= len(digits) <= CRITICAL_PIN_MAX_LEN
-        or not _only_a_pin_reply(text)
     ):
         return None
+    return digits
+
+
+def newest_pin_prompt(
+    pending_actions: Mapping[str, dict[str, Any]], conversation_id: str
+) -> dict[str, Any] | None:
+    """Return the newest prompt a voice of the conversation is waiting on."""
     now = dt_util.utcnow()
     prefix = f"{conversation_id}:"
     for action in reversed(list(pending_actions.values())):
