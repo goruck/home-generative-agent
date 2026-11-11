@@ -82,6 +82,22 @@ def test_the_higher_attempts_win() -> None:
     assert pending[third]["attempts"] == 3
 
 
+def test_another_voices_request_does_not_reset_the_sentence_checks() -> None:
+    """Another voice's request in between gives no fresh hash-checked guesses."""
+    pending: dict[str, Any] = {}
+    first = _hold(pending, ANNA, "anna", "Front Door")
+    assert first is not None
+    pending[first]["sentence_checks"] = 4
+
+    second = _hold(pending, BORIS, "boris", "Garage Door")
+    assert second is not None
+    assert pending[second]["sentence_checks"] == 4
+
+    third = _hold(pending, ANNA, "anna", "Front Door")
+    assert third is not None
+    assert pending[third]["sentence_checks"] == 4
+
+
 def test_other_conversations_keep_their_prompts() -> None:
     pending: dict[str, Any] = {}
     other_room = _hold(pending, "conv2:anna", "anna", "Back Door")

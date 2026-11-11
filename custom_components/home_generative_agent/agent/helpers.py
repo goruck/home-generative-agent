@@ -1111,18 +1111,22 @@ def register_pending_action(
     newest prompt in the conversation (`waiting_pin_prompt`), so with two from
     overlapping turns it could confirm the one its speaker did not mean. A
     voice's new request drops another voice's prompt, and the most failed
-    attempts among the dropped carry over, so a request from another voice
-    does not reset the limit.
+    attempts and sentence checks among the dropped carry over, so a request
+    from another voice does not reset either limit.
     """
     now = dt_util.utcnow()
     thread_id = action.get("thread_id")
     carried: dict[str, Any] = {}
     other_attempts = 0
+    other_checks = 0
     for key, existing in list(pending_actions.items()):
         if pending_action_expired(existing, now):
             pending_actions.pop(key, None)
         elif _other_voices_prompt(existing, action):
             other_attempts = max(other_attempts, int(existing.get("attempts", 0) or 0))
+            other_checks = max(
+                other_checks, int(existing.get("sentence_checks", 0) or 0)
+            )
             pending_actions.pop(key, None)
         elif (
             thread_id
@@ -1173,6 +1177,9 @@ def register_pending_action(
     action_id = ulid.ulid_now()
     entry = {**action, "attempts": 0, **carried, "created_at": now.isoformat()}
     entry["attempts"] = max(int(entry["attempts"] or 0), other_attempts)
+    checks = max(int(entry.get("sentence_checks", 0) or 0), other_checks)
+    if checks:
+        entry["sentence_checks"] = checks
     pending_actions[action_id] = entry
     return action_id
 
