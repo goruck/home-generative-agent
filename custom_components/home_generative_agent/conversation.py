@@ -60,6 +60,8 @@ from .agent.helpers import (
     keep_pin_prompts,
     langchain_tool_parameters_json,
     llm_api_is_supported,
+    newest_pin_prompt,
+    pin_length_number,
     prompts_awaiting_reply,
     remote_house_words,
     resolve_critical_action_policy,
@@ -82,6 +84,7 @@ from .agent.rag_embedding_text import (
     truncate_for_embedding_index,
 )
 from .agent.tools import (
+    MAX_PIN_ATTEMPTS,
     add_automation,
     alarm_control,
     audit_home_security,
@@ -96,6 +99,8 @@ from .agent.tools import (
 from .const import (
     AUTOMATION_PUSH_SERVICE_PROMPT,
     CONF_CRITICAL_ACTION_PIN_ENABLED,
+    CONF_CRITICAL_ACTION_PIN_HASH,
+    CONF_CRITICAL_ACTION_PIN_SALT,
     CONF_NOTIFY_SERVICE,
     CONF_PROMPT,
     CONF_SCHEMA_FIRST_YAML,
@@ -138,6 +143,7 @@ from .core.utils import (
     extract_final,
     gather_store_puts_in_chunks,
     local_chat_session,
+    verify_pin,
 )
 
 if TYPE_CHECKING:
@@ -1709,11 +1715,12 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         """
         Return the thread for this turn, and the PIN prompt it answers, if any.
 
-        A message holding one number of PIN length may be the PIN for a prompt
-        another voice was asked, so it joins the thread that holds the prompt. Any
-        other message stays on its speaker's thread; from another voice, that
-        leaves the prompt waiting, while the owner's own message still answers
-        or abandons it.
+        A message that is only a PIN, bare or labelled ("my PIN is 1234"), may be
+        the PIN for a prompt another voice was asked, so it joins the thread that
+        holds the prompt (`waiting_pin_prompt`). Any other message, including a
+        sentence that holds a number of PIN length, stays on its speaker's
+        thread; from another voice, that leaves the prompt waiting, while the
+        owner's own message still answers or abandons it.
         """
         thread_id = self._thread_id(conversation_id, speaker)
         if speaker is None:
@@ -1722,6 +1729,52 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             self.entry.runtime_data.pending_actions, conversation_id, text
         )
         return (prompt["thread_id"], prompt) if prompt else (thread_id, None)
+
+    async def _async_turn_thread(
+        self, conversation_id: str, speaker: Speaker | None, text: str
+    ) -> tuple[str, dict[str, Any] | None]:
+        """
+        Return `_turn_thread`, or the prompt this sentence's PIN answers.
+
+        A misattributed PIN said with a word the labels do not know ("sure,
+        1234", "Hey Jarvis, 1234", a reply in another language) would stay on
+        the speaker's thread and be saved in that voice's history. When such a
+        message holds one number of PIN length and another voice's prompt is
+        waiting, the number is checked against the PIN hash: only the real PIN
+        follows the prompt, so a sentence that holds some other number still
+        stays with its speaker and costs the prompt none of its attempts. Such
+        checks and the prompt's wrong PINs together are capped at
+        MAX_PIN_ATTEMPTS, and repeating the request while it waits keeps the
+        count (register_pending_action), so none run once the PIN is locked
+        out and a waiting request takes at most MAX_PIN_ATTEMPTS of them.
+        """
+        thread_id, prompt = self._turn_thread(conversation_id, speaker, text)
+        if speaker is None or prompt is not None:
+            return thread_id, prompt
+        digits = pin_length_number(text)
+        if digits is None:
+            return thread_id, None
+        pending = self.entry.runtime_data.pending_actions
+        prompt = newest_pin_prompt(pending, conversation_id)
+        options = self.entry.runtime_data.options
+        pin_hash = options.get(CONF_CRITICAL_ACTION_PIN_HASH, "")
+        salt = options.get(CONF_CRITICAL_ACTION_PIN_SALT, "")
+        if prompt is None or prompt.get("thread_id") == thread_id:
+            return thread_id, None
+        checks = int(prompt.get("sentence_checks", 0) or 0)
+        wrong_pins = int(prompt.get("attempts", 0) or 0)
+        if not pin_hash or not salt or checks + wrong_pins >= MAX_PIN_ATTEMPTS:
+            return thread_id, None
+        prompt["sentence_checks"] = checks + 1
+        # PBKDF2: off the event loop. It runs only while another voice's
+        # prompt waits and the labels rejected a PIN-length number.
+        matched = await self.hass.async_add_executor_job(
+            functools.partial(verify_pin, digits, hashed=pin_hash, salt=salt)
+        )
+        # The prompt may have been answered or replaced during the hash.
+        if not matched or newest_pin_prompt(pending, conversation_id) is not prompt:
+            return thread_id, None
+        return prompt["thread_id"], prompt
 
     async def _async_run_ainvoke(
         self,
@@ -2223,7 +2276,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             )
 
         speaker = await self._async_speaker(llm_context.device_id)
-        thread_id, waiting_prompt = self._turn_thread(
+        thread_id, waiting_prompt = await self._async_turn_thread(
             conversation_id, speaker, user_input.text
         )
         # A chat_log is shared by the room, so another agent's turn cannot be
