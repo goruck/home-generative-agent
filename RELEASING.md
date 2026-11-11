@@ -68,6 +68,20 @@ box, so the bundle is tested against the HA users are moving to. `scripts/deploy
 box and the tests run different HA versions. Install HA patch releases on the box within a few
 days; keep betas off it. The workflow's daily run covers betas.
 
+### Features: pick them early, land them two weeks before the cut
+
+Fixes keep landing until the cut. Features follow two extra rules:
+
+- **One or two headline features per bundle**, chosen when the cycle starts, from what users are
+  waiting on (a blocked provider or model, a request in an issue or discussion) before the
+  internal roadmap. Anything else can still merge, but it is not what the release is planned
+  around.
+- **A feature cutoff about two weeks before the cut.** A feature merged after it waits for the
+  next bundle. The two weeks are for running it on the field-test box, and for a pre-release when
+  it needs hardware or a service the maintainer cannot reach. A feature on a safety path (the
+  Critical Action PIN, Sentinel actuation) gets the full review and its field test before the
+  cutoff, not after.
+
 Skip a month if little accumulated — don't pad a release to keep a schedule. Don't let a bundle
 run past about six weeks; long gaps make regression triage harder and leave reporters waiting.
 
