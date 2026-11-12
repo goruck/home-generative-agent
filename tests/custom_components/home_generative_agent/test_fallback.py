@@ -14,6 +14,7 @@ import httpx2
 import openai
 import pytest
 from homeassistant.exceptions import HomeAssistantError
+from openai.types.responses import ResponseError
 
 from custom_components.home_generative_agent.const import EMBEDDING_MODEL_DIMS
 from custom_components.home_generative_agent.core.fallback import (
@@ -2414,3 +2415,91 @@ async def test_a_build_check_that_reports_a_stop_as_not_verified_still_stops() -
 
     assert fallback.aembed_query.await_count == 0
     assert "p1" not in emb._verify_after
+
+
+def test_unsupported_sampling_param_detects_responses_effort() -> None:
+    """
+    The Responses API names a rejected effort reasoning.effort (seen live).
+
+    The retry nulls the configurable field, which is still reasoning_effort.
+    """
+    err = _bad_request_error(param="reasoning.effort")
+    assert unsupported_sampling_param(err) == "reasoning_effort"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        # langchain-openai raises these for a Responses stream's error and
+        # response.failed events, without the SDK's typed status errors.
+        "rate_limit_exceeded: Please try again later.",
+        "server_error: An error occurred while processing your request.",
+        # str() of the SDK's ResponseError, as response.failed raises it
+        # (built from the class, so a format change shows up here).
+        str(ResponseError(code="server_error", message="An error occurred.")),
+        str(ResponseError(code="rate_limit_exceeded", message="Slow down.")),
+    ],
+)
+def test_is_retryable_responses_stream_failure(message: str) -> None:
+    assert _is_retryable(ValueError(message)) is True
+
+
+@pytest.mark.asyncio
+async def test_fallback_chat_primary_empty_incomplete_responses_reply() -> None:
+    """A Responses reply cut off at its output limit falls back like length."""
+    primary = AsyncMock()
+    primary.ainvoke.return_value = FakeAIMessage(
+        "",
+        response_metadata={
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "model_name": "gpt-6-luna",
+        },
+    )
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("fallback")
+    model = FallbackChatModel(
+        chain=[(primary, "cloud", "p1"), (fallback, "edge", "p2")]
+    )
+
+    result = await model.ainvoke(["hello"])
+
+    assert result.content == "fallback"
+    assert fallback.ainvoke.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_fallback_chat_incomplete_for_another_reason_does_not_fallback() -> None:
+    """Only an exhausted output budget reads as length-limited."""
+    primary = AsyncMock()
+    primary.ainvoke.return_value = FakeAIMessage(
+        "",
+        response_metadata={
+            "status": "incomplete",
+            "incomplete_details": {"reason": "content_filter"},
+        },
+    )
+    fallback = AsyncMock()
+    fallback.ainvoke.return_value = FakeAIMessage("fallback")
+    model = FallbackChatModel(
+        chain=[(primary, "cloud", "p1"), (fallback, "edge", "p2")]
+    )
+
+    result = await model.ainvoke(["hello"])
+
+    assert result.content == ""
+    assert fallback.ainvoke.await_count == 0
+
+
+@pytest.mark.parametrize(
+    "err",
+    [
+        # A refusal or 400 whose free text happens to quote a code is not a
+        # transient stream failure: it must not move to another provider.
+        ValueError("misalignment_policy_violation: the request mentions server_error"),
+        RuntimeError("rate_limit_exceeded"),
+        _bad_request_error(param="server_error"),
+    ],
+)
+def test_is_retryable_ignores_a_quoted_stream_code(err: Exception) -> None:
+    assert _is_retryable(err) is False

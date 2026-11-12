@@ -126,8 +126,16 @@ def test_preload_against_the_installed_sdk() -> None:
 
 def test_setup_preloads_in_the_executor_before_building_providers() -> None:
     """Pin the wiring: off the loop, and before the first OpenAI model."""
-    src = inspect.getsource(hga_init)
+    full = inspect.getsource(hga_init)
+    # Setup builds every provider; build_openai_chat is defined above it and
+    # only called from it.
+    src = full[full.index("async def async_setup_entry(") :]
     preload = src.index("async_add_executor_job(preload_openai_resources)")
+    assert preload < src.index("build_openai_chat(")
     assert preload < src.index("ChatOpenAI(")
     assert preload < src.index("OpenAIEmbeddings(")
     assert preload < src.index("async_forward_entry_setups(")
+    builder = full.index("def build_openai_chat(")
+    assert full.count("build_openai_chat(") == full[builder:].count(
+        "build_openai_chat("
+    ), "build_openai_chat is called only from setup"

@@ -336,6 +336,7 @@ from .core.lifecycle import (
     defer_start_until_hass_started,
 )
 from .core.migrations import migrate_person_gallery
+from .core.openai_client import StatelessReasoningChatOpenAI
 from .core.openai_preload import preload_openai_resources
 from .core.person_gallery import PersonGalleryDAO
 from .core.pipeline_guard import async_clear_pin_pipeline_issue
@@ -381,6 +382,7 @@ from .core.utils import (
     ollama_model_digests,
     ollama_provider_settings_url,
     ollama_url_for_category,
+    openai_api_configurable,
     openai_compatible_healthy,
     openai_healthy,
     reasoning_field,
@@ -2154,6 +2156,48 @@ async def _log_ollama_server_info(
             )
 
 
+def build_openai_chat(
+    api_key: Any,
+    *,
+    http_client: Any,
+    http_async_client: Any,
+) -> RunnableSerializable[LanguageModelInput, BaseMessage]:
+    """
+    Build the cloud OpenAI chat model every OpenAI category shares.
+
+    The API is picked per call with the model (core.utils.openai_api_configurable):
+    Chat Completions unless the model needs the Responses API (GPT-6, GPT-5.4 and
+    later, the *-pro and codex models).
+
+    On the Responses API, ``output_version="v0"`` keeps a reply's content to text
+    blocks and carries its reasoning items in ``additional_kwargs``: a history
+    checkpointed on OpenAI then still converts for an Ollama, Anthropic or Gemini
+    fallback (the default content blocks fail Ollama's converter), and the next
+    OpenAI turn still parses. ``store=False`` keeps nothing at OpenAI: the
+    checkpointer owns the history. Reasoning items are not sent back
+    (core.openai_client): the v0 format cannot hold the several a GPT-6 reply
+    returns.
+    """
+    return StatelessReasoningChatOpenAI(
+        api_key=api_key,
+        timeout=120,
+        http_client=http_client,
+        http_async_client=http_async_client,
+        streaming=True,
+        stream_usage=True,
+        use_responses_api=False,
+        output_version="v0",
+        store=False,
+    ).configurable_fields(
+        model_name=ConfigurableField(id="model_name"),
+        use_responses_api=ConfigurableField(id="use_responses_api"),
+        temperature=ConfigurableField(id="temperature"),
+        top_p=ConfigurableField(id="top_p"),
+        max_tokens=ConfigurableField(id="max_tokens"),
+        reasoning_effort=ConfigurableField(id="reasoning_effort"),
+    )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:  # noqa: C901, PLR0912, PLR0915
     """Set up Home Generative Agent from a config entry."""
     hass.data.setdefault(DOMAIN, {})
@@ -2701,23 +2745,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     openai_provider: RunnableSerializable[LanguageModelInput, BaseMessage] | None = None
     if openai_ok:
         try:
-            openai_provider = ChatOpenAI(
-                api_key=openai_secret,
-                timeout=120,
+            openai_provider = build_openai_chat(
+                openai_secret,
                 http_client=openai_http_client,
                 http_async_client=http_async_client,
-                streaming=True,
-                stream_usage=True,
-                # langchain-openai 1.6 routes some model names (gpt-6 with
-                # tools, *codex*, *-pro) to the Responses API on its own; this
-                # integration is built and tested on Chat Completions.
-                use_responses_api=False,
-            ).configurable_fields(
-                model_name=ConfigurableField(id="model_name"),
-                temperature=ConfigurableField(id="temperature"),
-                top_p=ConfigurableField(id="top_p"),
-                max_tokens=ConfigurableField(id="max_tokens"),
-                reasoning_effort=ConfigurableField(id="reasoning_effort"),
             )
         except Exception:
             LOGGER.exception("OpenAI provider init failed; continuing without it.")
@@ -3439,6 +3470,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "model_name": openai_chat_model,
                     "temperature": chat_temp,
                     "top_p": CHAT_MODEL_TOP_P,
+                    **openai_api_configurable(openai_chat_model),
                     **_chat_thinking_for_model("openai", openai_chat_model),
                 }
             }
@@ -3516,12 +3548,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     vlm_provider = options.get(CONF_VLM_PROVIDER, RECOMMENDED_VLM_PROVIDER)
     vlm_temp = options.get(CONF_VLM_TEMPERATURE, RECOMMENDED_VLM_TEMPERATURE)
     if vlm_provider == "openai":
+        openai_vlm = options.get(CONF_OPENAI_VLM, RECOMMENDED_OPENAI_VLM)
         vision_model = (openai_provider or NullChat()).with_config(
             config={
                 "configurable": {
-                    "model_name": options.get(CONF_OPENAI_VLM, RECOMMENDED_OPENAI_VLM),
+                    "model_name": openai_vlm,
                     "temperature": vlm_temp,
                     "top_p": VLM_TOP_P,
+                    **openai_api_configurable(openai_vlm),
                 }
             }
         )
@@ -3593,15 +3627,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     )
     if sum_provider == "openai":
+        openai_sum_model = options.get(
+            CONF_OPENAI_SUMMARIZATION_MODEL, RECOMMENDED_OPENAI_SUMMARIZATION_MODEL
+        )
         summarization_model = (openai_provider or NullChat()).with_config(
             config={
                 "configurable": {
-                    "model_name": options.get(
-                        CONF_OPENAI_SUMMARIZATION_MODEL,
-                        RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
-                    ),
+                    "model_name": openai_sum_model,
                     "temperature": sum_temp,
                     "top_p": SUMMARIZATION_MODEL_TOP_P,
+                    **openai_api_configurable(openai_sum_model),
                 }
             }
         )
@@ -3689,14 +3724,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         CONF_SENTINEL_MODEL_TEMPERATURE, RECOMMENDED_SENTINEL_MODEL_TEMPERATURE
     )
     if sentinel_provider == "openai":
+        openai_sentinel_model = options.get(
+            CONF_OPENAI_SENTINEL_MODEL, RECOMMENDED_OPENAI_SENTINEL_MODEL
+        )
         sentinel_model = (openai_provider or NullChat()).with_config(
             config={
                 "configurable": {
-                    "model_name": options.get(
-                        CONF_OPENAI_SENTINEL_MODEL, RECOMMENDED_OPENAI_SENTINEL_MODEL
-                    ),
+                    "model_name": openai_sentinel_model,
                     "temperature": sentinel_temp,
                     "top_p": SENTINEL_MODEL_TOP_P,
+                    **openai_api_configurable(openai_sentinel_model),
                 }
             }
         )
@@ -3806,6 +3843,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         config = {model_key: model_name, "temperature": temperature}
         if (top_p := _category_top_p(category)) is not None:
             config["top_p"] = top_p
+        if provider.provider_type == "openai":
+            config.update(openai_api_configurable(model_name))
         if provider.provider_type == "gemini":
             spec = MODEL_CATEGORY_SPECS.get(category, {})
             config.update(

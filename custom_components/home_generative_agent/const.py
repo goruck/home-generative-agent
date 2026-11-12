@@ -647,8 +647,18 @@ TTS_STREAM_RESPONSE_FORMAT = "wav"
 CHAT_MODEL_TOP_P = 1.0
 # *SUPPORTED are used as defaults and fallbacks for Ollama in the UI.
 CHAT_MODEL_OLLAMA_SUPPORTED = Literal["gpt-oss", "qwen2.5:32b", "qwen3:32b", "qwen3:8b"]
+# GPT-6 models run on the Responses API (core/utils.openai_uses_responses_api).
 CHAT_MODEL_OPENAI_SUPPORTED = Literal[
-    "gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4o", "gpt-4.1", "o4-mini"
+    "gpt-5",
+    "gpt-5-mini",
+    "gpt-5-nano",
+    "gpt-6-astra",
+    "gpt-6.1-sol",
+    "gpt-6.1-terra",
+    "gpt-6-luna",
+    "gpt-4o",
+    "gpt-4.1",
+    "o4-mini",
 ]
 CHAT_MODEL_GEMINI_SUPPORTED = Literal[
     "gemini-3.7-flash",
@@ -716,7 +726,9 @@ RECOMMENDED_MAX_MESSAGES_IN_CONTEXT = 60
 # ---------------- VLM (vision) ----------------
 VLM_TOP_P = 1.0
 VLM_OLLAMA_SUPPORTED = Literal["qwen2.5vl:7b", "qwen3-vl:8b", "gemma3:4b"]
-VLM_OPENAI_SUPPORTED = Literal["gpt-5-nano", "gpt-4.1", "gpt-4.1-nano"]
+VLM_OPENAI_SUPPORTED = Literal[
+    "gpt-5-nano", "gpt-6.1-terra", "gpt-6-luna", "gpt-4.1", "gpt-4.1-nano"
+]
 VLM_GEMINI_SUPPORTED = Literal[
     "gemini-3.7-flash",
     "gemini-3.5-flash",
@@ -842,7 +854,9 @@ VLM_IMAGE_HEIGHT = 1080
 # ---------------- Summarization ----------------
 SUMMARIZATION_MODEL_TOP_P = 1.0
 SUMMARIZATION_MODEL_OLLAMA_SUPPORTED = Literal["qwen3:1.7b", "qwen3:8b"]
-SUMMARIZATION_MODEL_OPENAI_SUPPORTED = Literal["gpt-5-nano", "gpt-4.1", "gpt-4.1-nano"]
+SUMMARIZATION_MODEL_OPENAI_SUPPORTED = Literal[
+    "gpt-5-nano", "gpt-6-luna", "gpt-4.1", "gpt-4.1-nano"
+]
 SUMMARIZATION_MODEL_GEMINI_SUPPORTED = Literal[
     "gemini-3.7-flash",
     "gemini-3.5-flash",

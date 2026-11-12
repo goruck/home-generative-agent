@@ -1843,12 +1843,62 @@ def reasoning_field(
 
 _EFFORT_LEVELS = frozenset({"minimal", "low", "medium", "high"})
 
+# GPT-6 effort values (OpenAI model pages, 2026-11): none, minimal and the
+# rest are model-dependent. GPT-6 Astra and GPT-6.1 Sol reject none (HTTP 400)
+# and minimal; the other GPT-6 models accept none and no minimal.
+_GPT6_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
+_GPT6_NO_NONE_PREFIXES = ("gpt-6-astra", "gpt-6-sol", "gpt-6.1-sol")
+_GPT5_MINOR_RE = re.compile(r"gpt-5\.(\d+)")
+# OpenAI: "Starting with GPT-5.4, Chat Completions does not support tool calling
+# with reasoning_effort values other than none."
+_FIRST_GPT5_MINOR_ON_RESPONSES = 4
+
+
+def openai_uses_responses_api(model: Any) -> bool:
+    """
+    Return True for a cloud OpenAI model that must use the Responses API.
+
+    GPT-6 and GPT-5.4 and later reject tool calls with reasoning on Chat
+    Completions, and the *-pro and codex models are Responses-only. Every other
+    model stays on Chat Completions, which the integration was built on.
+    """
+    name = str(model or "").lower()
+    if name.startswith("gpt-6") or "codex" in name or name.endswith("-pro"):
+        return True
+    if "-pro-" in name:
+        return True
+    match = _GPT5_MINOR_RE.match(name)
+    return bool(match and int(match.group(1)) >= _FIRST_GPT5_MINOR_ON_RESPONSES)
+
+
+def openai_api_configurable(model: Any) -> dict[str, Any]:
+    """
+    Return the per-call configurable entries that pick the OpenAI API for a model.
+
+    A Responses model also gets no temperature or top_p: OpenAI's reasoning
+    models accept only the default, and langchain-openai drops them for GPT-5
+    only. A model on Chat Completions keeps the caller's sampling values.
+    """
+    if not openai_uses_responses_api(model):
+        return {"use_responses_api": False}
+    return {"use_responses_api": True, "temperature": None, "top_p": None}
+
 
 def _thinking_openai(
-    _reasoning: Any, effort: str | None, _budget: int | None, _model: str
+    reasoning: Any, effort: str | None, _budget: int | None, model: str
 ) -> dict[str, Any]:
-    # Cloud OpenAI reasoning models cannot disable thinking; only known effort
-    # levels are meaningful. On/Off and free-form strings are not sent.
+    name = str(model or "").lower()
+    if name.startswith("gpt-6"):
+        accepts_none = not name.startswith(_GPT6_NO_NONE_PREFIXES)
+        if reasoning is False or effort == "none":
+            # Off: the lowest effort the model takes.
+            return {"reasoning_effort": "none" if accepts_none else "low"}
+        if effort == "minimal":
+            return {"reasoning_effort": "low"}
+        return {"reasoning_effort": effort} if effort in _GPT6_EFFORT_LEVELS else {}
+    # Earlier cloud OpenAI models: only known effort levels are meaningful.
+    # On/Off are not sent (a non-reasoning model such as gpt-4o rejects any
+    # effort), and neither are free-form strings or GPT-6 levels.
     return {"reasoning_effort": effort} if effort in _EFFORT_LEVELS else {}
 
 
