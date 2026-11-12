@@ -156,10 +156,11 @@ def active_llm_api_ids(options: Mapping[str, Any]) -> list[str]:
     """
     Return the LLM API ids to expose, defaulting to Assist when unset.
 
-    Single definition on purpose.  The options flow stores ``[]`` when no API
-    is selected, and the v6 -> v7 migration writes the Assist default where an
-    older options flow had deleted the key (issue #949), so after setup the key
-    is always present.  An absent key still means "the recommended default",
+    Single definition on purpose.  The options flow refuses an empty
+    selection, and the v6.2 migration writes the Assist default where an older
+    flow had deleted the key or stored ``[]`` (issue #949), so after setup the
+    key is present and non-empty unless a programmatic options update wrote
+    otherwise.  An absent key still means "the recommended default",
     not "no APIs at all", and every reader must apply that same default,
     because they are not independent: ``conversation.py`` derives
     ``ConversationEntityFeature.CONTROL`` from this, and Home Assistant reads

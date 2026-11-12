@@ -4,7 +4,7 @@ Regression tests for the CONF_LLM_HASS_API default.
 
 Before issue #949 the options flow *deleted* ``CONF_LLM_HASS_API`` when no API
 was selected, so an absent key was a normal, reachable state that means "the
-recommended default", not "no APIs". The v7 migration now writes that default
+recommended default", not "no APIs". The v6.2 migration now writes that default
 out and the form refuses an empty selection, but an absent key keeps the same
 meaning for every reader.
 
@@ -21,6 +21,7 @@ agent never saw the turn, so the critical-action PIN never ran.
 from __future__ import annotations
 
 from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
 from homeassistant.const import CONF_LLM_HASS_API
@@ -36,7 +37,19 @@ from custom_components.home_generative_agent.agent.helpers import (
 from custom_components.home_generative_agent.config_flow import (
     HomeGenerativeAgentOptionsFlow,
 )
-from custom_components.home_generative_agent.const import DOMAIN
+from custom_components.home_generative_agent.const import (
+    CONF_CRITICAL_ACTION_PIN,
+    CONF_CRITICAL_ACTION_PIN_ENABLED,
+    CONF_CRITICAL_ACTION_PIN_HASH,
+    CONF_CRITICAL_ACTION_PIN_SALT,
+    CONF_FACE_API_URL,
+    DOMAIN,
+)
+from custom_components.home_generative_agent.core.utils import (
+    CannotConnectError,
+    hash_pin,
+    verify_pin,
+)
 
 
 def test_absent_key_defaults_to_assist() -> None:
@@ -60,7 +73,7 @@ def test_stored_empty_list_stays_empty() -> None:
     A stored empty list is preserved rather than re-defaulted.
 
     The options flow never stores this: it refuses an empty selection, and the
-    v7 migration rewrites a stored [] to the Assist default (issue #949),
+    v6.2 migration rewrites a stored [] to the Assist default (issue #949),
     because no API at all fails every conversation. Do not read this test as
     proof that a user can turn every API off.
     """
@@ -166,3 +179,125 @@ async def test_options_flow_stores_the_selection(hass: Any) -> None:
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_LLM_HASS_API] == ["mcp-abc"]
+
+
+@pytest.mark.asyncio
+async def test_pin_set_with_a_refused_save_survives_the_retry(hass: Any) -> None:
+    """
+    A new PIN typed into a refused save is kept for the corrected save.
+
+    The PIN field re-renders blank, so the user saves again without retyping
+    it. Before the fix the PIN was hashed, the save refused, and the hash
+    dropped: the corrected save kept the old PIN with no error.
+    """
+    old_hash, old_salt = hash_pin("1111")
+    flow = _options_flow(
+        hass,
+        {
+            CONF_LLM_HASS_API: [llm.LLM_API_ASSIST],
+            CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+            CONF_CRITICAL_ACTION_PIN_HASH: old_hash,
+            CONF_CRITICAL_ACTION_PIN_SALT: old_salt,
+        },
+    )
+
+    refused = cast(
+        "dict[str, Any]",
+        await flow.async_step_init(
+            {
+                CONF_LLM_HASS_API: [],
+                CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+                CONF_CRITICAL_ACTION_PIN: "4321",
+            }
+        ),
+    )
+    assert refused["errors"] == {"base": "llm_api_required"}
+
+    saved = cast(
+        "dict[str, Any]",
+        await flow.async_step_init(
+            {
+                CONF_LLM_HASS_API: [llm.LLM_API_ASSIST],
+                CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+            }
+        ),
+    )
+
+    assert saved["type"] == FlowResultType.CREATE_ENTRY
+    data = saved["data"]
+    assert verify_pin(
+        "4321",
+        hashed=data[CONF_CRITICAL_ACTION_PIN_HASH],
+        salt=data[CONF_CRITICAL_ACTION_PIN_SALT],
+    )
+    assert CONF_CRITICAL_ACTION_PIN not in data
+
+
+@pytest.mark.asyncio
+async def test_pin_set_with_an_unreachable_face_url_survives_the_retry(
+    hass: Any,
+) -> None:
+    """A face-service error refuses the save too; the PIN still carries over."""
+    flow = _options_flow(hass, {CONF_LLM_HASS_API: [llm.LLM_API_ASSIST]})
+
+    with patch(
+        "custom_components.home_generative_agent.config_flow.validate_face_api_url",
+        side_effect=CannotConnectError,
+    ):
+        refused = cast(
+            "dict[str, Any]",
+            await flow.async_step_init(
+                {
+                    CONF_LLM_HASS_API: [llm.LLM_API_ASSIST],
+                    CONF_FACE_API_URL: "http://face.invalid",
+                    CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+                    CONF_CRITICAL_ACTION_PIN: "2468",
+                }
+            ),
+        )
+    assert refused["errors"] == {"base": "cannot_connect"}
+
+    saved = cast(
+        "dict[str, Any]",
+        await flow.async_step_init(
+            {
+                CONF_LLM_HASS_API: [llm.LLM_API_ASSIST],
+                CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+            }
+        ),
+    )
+
+    data = saved["data"]
+    assert verify_pin(
+        "2468",
+        hashed=data[CONF_CRITICAL_ACTION_PIN_HASH],
+        salt=data[CONF_CRITICAL_ACTION_PIN_SALT],
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_carried_pin_is_dropped_when_the_pin_is_turned_off(
+    hass: Any,
+) -> None:
+    """Turning the PIN off on the retry clears the carried PIN as well."""
+    flow = _options_flow(hass, {CONF_LLM_HASS_API: [llm.LLM_API_ASSIST]})
+    await flow.async_step_init(
+        {
+            CONF_LLM_HASS_API: [],
+            CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+            CONF_CRITICAL_ACTION_PIN: "4321",
+        }
+    )
+
+    saved = cast(
+        "dict[str, Any]",
+        await flow.async_step_init(
+            {
+                CONF_LLM_HASS_API: [llm.LLM_API_ASSIST],
+                CONF_CRITICAL_ACTION_PIN_ENABLED: False,
+            }
+        ),
+    )
+
+    assert CONF_CRITICAL_ACTION_PIN_HASH not in saved["data"]
+    assert CONF_CRITICAL_ACTION_PIN_SALT not in saved["data"]

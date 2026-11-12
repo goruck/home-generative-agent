@@ -1236,7 +1236,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         # is the repair issue raised in async_added_to_hass, not this line.
         #
         # An absent key means "use Assist" to every other reader (entries
-        # migrated to v7 always carry it); active_llm_api_ids is the single
+        # migrated to v6.2 always carry it); active_llm_api_ids is the single
         # definition of that.
         if active_llm_api_ids(self.entry.runtime_data.options):
             self._attr_supported_features = (

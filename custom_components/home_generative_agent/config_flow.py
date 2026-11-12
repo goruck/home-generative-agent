@@ -79,6 +79,7 @@ from .const import (
     CONF_VLM_RESPONSE_LANGUAGE,
     CONF_VOICE_TOOL_ACK,
     CONF_VOICE_TOOL_ACK_TIMING,
+    CONFIG_ENTRY_MINOR_VERSION,
     CONFIG_ENTRY_VERSION,
     CRITICAL_PIN_MAX_LEN,
     CRITICAL_PIN_MIN_LEN,
@@ -860,6 +861,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Home Generative Agent."""
 
     VERSION = CONFIG_ENTRY_VERSION
+    MINOR_VERSION = CONFIG_ENTRY_MINOR_VERSION
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -903,6 +905,11 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
 
 class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
     """Handle options flow for Home Generative Agent."""
+
+    # The (hash, salt) of a PIN a refused save already accepted. The PIN field
+    # re-renders blank, so the corrected save arrives without it; this keeps
+    # that save from quietly leaving the old PIN in force.
+    _pending_pin: tuple[str, str] | None = None
 
     # ---- helpers ----
 
@@ -970,13 +977,20 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         options[CONF_CRITICAL_ACTION_PIN_ENABLED] = pin_enabled
 
         if not pin_enabled:
+            self._pending_pin = None
             options.pop(CONF_CRITICAL_ACTION_PIN, None)
             options.pop(CONF_CRITICAL_ACTION_PIN_HASH, None)
             options.pop(CONF_CRITICAL_ACTION_PIN_SALT, None)
             return None
 
         if CONF_CRITICAL_ACTION_PIN not in user_input:
+            if self._pending_pin is not None:
+                hashed, salt = self._pending_pin
+                options[CONF_CRITICAL_ACTION_PIN_HASH] = hashed
+                options[CONF_CRITICAL_ACTION_PIN_SALT] = salt
             return None
+
+        self._pending_pin = None
 
         # Stored as ASCII digits, the form confirmations compare: a PIN typed
         # in full-width or Arabic-Indic digits is the same PIN.
@@ -999,6 +1013,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         hashed, salt = hash_pin(raw)
         options[CONF_CRITICAL_ACTION_PIN_HASH] = hashed
         options[CONF_CRITICAL_ACTION_PIN_SALT] = salt
+        self._pending_pin = (hashed, salt)
         return None
 
     def _drop_empty_fields(self, final_options: dict[str, Any]) -> None:
@@ -1130,9 +1145,11 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         errors: dict[str, str] = {}
 
         # Field-specific edits with validation/normalization
-        err = await self._maybe_edit_face_recognition_url(options, user_input)
+        # The PIN goes first: once it passes, it is kept for the next save
+        # even when a later check refuses this one (_pending_pin).
+        err = self._maybe_edit_pin(options, user_input)
         if not err:
-            err = self._maybe_edit_pin(options, user_input)
+            err = await self._maybe_edit_face_recognition_url(options, user_input)
         if not err:
             err = self._tool_picker_overlap_error(user_input)
         if not err and not normalize_llm_api_value(options.get(CONF_LLM_HASS_API)):

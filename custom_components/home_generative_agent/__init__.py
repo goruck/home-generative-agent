@@ -69,6 +69,7 @@ from psycopg.rows import DictRow, dict_row
 from psycopg_pool import AsyncConnectionPool
 from pydantic import SecretStr
 
+from .agent.helpers import normalize_llm_api_value
 from .agent.tools import VLMPromptOverrides, analyze_image
 from .audit.store import AuditStore
 from .const import (
@@ -165,6 +166,7 @@ from .const import (
     CONF_VLM_PROVIDER,
     CONF_VLM_RESPONSE_LANGUAGE,
     CONF_VLM_TEMPERATURE,
+    CONFIG_ENTRY_MINOR_VERSION,
     CONFIG_ENTRY_VERSION,
     DEFAULT_FEATURE_TYPES,
     DOMAIN,
@@ -5503,9 +5505,10 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
     - v3 -> v4: move model settings into feature subentries and trim options.
     - v4 -> v5: move sentinel settings into a sentinel subentry.
     - v5 -> v6: store CONF_LLM_HASS_API as a list.
-    - v6 -> v7: write the Assist default where CONF_LLM_HASS_API is unset.
+    - v6.1 -> v6.2: write the Assist default where CONF_LLM_HASS_API is unset.
     """
     current_version = config_entry.version or 1
+    current_minor = config_entry.minor_version or 1
     new_data = dict(config_entry.data)
     new_options = dict(config_entry.options)
     merged_options = {**new_data, **new_options}
@@ -5848,34 +5851,49 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
 
         current_version = 5
 
-        if current_version < 6:  # noqa: PLR2004
-            # v5 -> v6: normalize CONF_LLM_HASS_API from a string to a list.
-            # "none" sentinel and absent key both become [] (no APIs).
-            api_val = new_options.get(CONF_LLM_HASS_API)
-            if isinstance(api_val, str):
-                new_options[CONF_LLM_HASS_API] = [] if api_val == "none" else [api_val]
-            elif api_val is None:
-                new_options[CONF_LLM_HASS_API] = []
-            current_version = 6
+        # v5 -> v6: normalize CONF_LLM_HASS_API from a string to a list.
+        # "none" sentinel and absent key both become [] (no APIs).
+        api_val = new_options.get(CONF_LLM_HASS_API)
+        if isinstance(api_val, str):
+            new_options[CONF_LLM_HASS_API] = [] if api_val == "none" else [api_val]
+        elif api_val is None:
+            new_options[CONF_LLM_HASS_API] = []
+        current_version = 6
 
-    if current_version < 7:  # noqa: PLR2004
-        # v6 -> v7: an absent CONF_LLM_HASS_API meant "the Assist default",
-        # because the options flow deleted the key when the user deselected
-        # every API, and a stored [] failed every conversation with "No LLM
-        # APIs could be loaded" (issue #949). Both become the Assist default
-        # that the absent key was already running, and the form now refuses
-        # an empty selection, so the key always names what runs.
-        if not new_options.get(CONF_LLM_HASS_API):
-            new_options[CONF_LLM_HASS_API] = [llm.LLM_API_ASSIST]
-        current_version = 7
+    # v6.1 -> v6.2: an absent CONF_LLM_HASS_API meant "the Assist default",
+    # because the options flow deleted the key when the user deselected every
+    # API, and a stored [] failed every conversation with "No LLM APIs could
+    # be loaded" (issue #949). Both become the Assist default that the absent
+    # key was already running, and the form now refuses an empty selection,
+    # so the key always names what runs. A minor bump, so an older release
+    # still loads the entry.
+    if (current_version, current_minor) < (
+        CONFIG_ENTRY_VERSION,
+        CONFIG_ENTRY_MINOR_VERSION,
+    ) and not normalize_llm_api_value(new_options.get(CONF_LLM_HASS_API)):
+        if CONF_LLM_HASS_API in new_options:
+            # A stored empty choice, including a pre-v6 "No control": the
+            # user turned control off, so say it is back on.
+            LOGGER.warning(
+                "Home Assistant control (LLM API) was turned off for %s, "
+                "which failed every conversation; it is now set to Assist. "
+                "Choose the LLM APIs the agent may use under Control Home "
+                "Assistant in the options (issue #949)",
+                config_entry.title,
+            )
+        new_options[CONF_LLM_HASS_API] = [llm.LLM_API_ASSIST]
 
-    if config_entry.version < CONFIG_ENTRY_VERSION:
+    if (config_entry.version, config_entry.minor_version) < (
+        CONFIG_ENTRY_VERSION,
+        CONFIG_ENTRY_MINOR_VERSION,
+    ):
         try:
             hass.config_entries.async_update_entry(
                 config_entry,
                 data=new_data,
                 options=new_options,
                 version=CONFIG_ENTRY_VERSION,
+                minor_version=CONFIG_ENTRY_MINOR_VERSION,
             )
         except Exception:
             LOGGER.exception(
