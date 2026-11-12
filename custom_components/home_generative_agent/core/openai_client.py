@@ -20,7 +20,7 @@ It also drops them from the reply: unused, they would only grow every
 checkpoint, which rewrites the whole message list, by 10-40 KB a turn.
 Replaying reasoning needs langchain's ``responses/v1`` format, which keeps
 the items apart, plus a step that strips them before the history reaches a
-non-OpenAI provider (TODOS.md).
+non-OpenAI provider (TODOS.md; upstream langchain-ai/langchain#41807).
 """
 
 from __future__ import annotations
