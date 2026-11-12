@@ -413,6 +413,9 @@ class SentinelBaselineUpdater:
         self._stopped = False
         # Closed once stop() has stopped waiting (#988); see _check_open.
         self._latch = StopLatch("Sentinel baseline updater")
+        # Bumped by every reset: a write that a reset overtook during its
+        # commit establishes nothing (see _write_samples).
+        self._reset_generation = 0
         # entity_ids that crossed MIN_SAMPLES (no re-notification on restart).
         self._established: set[str] = set()
         # In-memory Welford state for DOW slots: key = "entity_id:dow:hour",
@@ -722,7 +725,7 @@ class SentinelBaselineUpdater:
             return
         self._router_rows_pruned = True
 
-    async def _write_samples(
+    async def _write_samples(  # noqa: PLR0912, PLR0915
         self,
         entity_values: dict[str, float],
         snapshot: FullStateSnapshot | None,
@@ -765,6 +768,7 @@ class SentinelBaselineUpdater:
         # sums it advanced in memory go back too, or the next write would
         # store a sample the database never kept (#988 review).
         dow_before = dict(self._dow_state)
+        generation = self._reset_generation
         try:
             async with (
                 self._pool.connection() as conn,
@@ -848,11 +852,18 @@ class SentinelBaselineUpdater:
         except _UpdaterStoppedError:
             self._dow_state = dow_before
             return
+        except asyncio.CancelledError:
+            self._dow_state = dow_before
+            raise
         except Exception:
             self._dow_state = dow_before
             LOGGER.exception("Baseline DB write failed.")
             return
-        # Only once committed: a write that rolled back establishes nothing.
+        # Only once committed: a write that rolled back establishes nothing,
+        # and nor does one a reset overtook while it committed (the reset
+        # deleted what it wrote).
+        if self._reset_generation != generation:
+            established = []
         self._established.update(established)
 
         # Notices go out after the commit, outside the connection. The network
@@ -1245,6 +1256,7 @@ class SentinelBaselineUpdater:
                     await cur.execute(_DELETE_ALL_SQL)
                 deleted = cur.rowcount if cur.rowcount is not None else 0
                 await conn.commit()
+                self._reset_generation += 1
                 # Update in-memory state only after the DB commit succeeds.
                 if entity_id is not None:
                     self._established.discard(entity_id)

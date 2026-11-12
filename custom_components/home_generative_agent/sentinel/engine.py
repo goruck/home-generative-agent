@@ -1386,6 +1386,11 @@ class SentinelEngine:
                 )
 
         task = self._task
+        run_now = self._run_now_task
+        if run_now is not None:
+            # At once, beside the loop's cancel: an on-demand run left to
+            # finish during the loop's wait would act on old options.
+            run_now.cancel()
         try:
             if task is not None:
                 self._stop_event.set()
@@ -1425,13 +1430,15 @@ class SentinelEngine:
         """
         Refuse this engine's later actions and writes (#988).
 
-        The notifier is stopped first: its button presses (snooze, dismiss,
-        execute) write to the stores closed here, so they are no longer
-        taken rather than half-saved, and its batch and digest timers end.
-        A left-behind run's own pushes still go out. Its dispatch saved the
-        cooldown before the explanation it was most likely stuck in, so a
-        push refused now would be an alert nobody gets that the reloaded
-        engine thinks was sent; a duplicate is the lesser failure.
+        The stores are closed first, then the notifier is stopped (nothing
+        awaits in between, so no button press lands between the two): its
+        button presses (snooze, dismiss, execute) write to the stores closed
+        here, so they are no longer taken rather than half-saved; its held
+        batch is sent and its digest timer ends. A left-behind run's own
+        pushes still go out: its dispatch saved the cooldown before the
+        explanation it was most likely stuck in, so a push refused now would
+        be an alert nobody gets that the reloaded engine thinks was sent; a
+        duplicate is the lesser failure.
         """
         # The latch first: nothing below may be skipped by a failing step.
         self._latch.close()
@@ -1449,10 +1456,20 @@ class SentinelEngine:
     async def _auto_execute(
         self, finding: AnomalyFinding, execution_id: str | None
     ) -> dict[str, Any]:
-        """Run the finding's actions, each only while the engine runs (#988)."""
-        return await _auto_execute_finding(
+        """
+        Run the finding's actions, each only while the engine runs (#988).
+
+        When the stop refused every one of them, the run ends here, before
+        the finding's cooldown and audit are saved: the reloaded engine then
+        sees the finding as new and runs the actions. Once one has run, the
+        outcome is kept, so nothing is actuated twice.
+        """
+        outcome = await _auto_execute_finding(
             self._hass, finding, execution_id, refuses=self._action_refused
         )
+        if outcome["status"] == "stopped":
+            raise asyncio.CancelledError
+        return outcome
 
     def _action_refused(self, effect: str) -> bool:
         """
@@ -1615,6 +1632,10 @@ class SentinelEngine:
         """
         if self._stopped:
             LOGGER.debug("SentinelEngine stopped; not running on demand.")
+            return False
+        if self._run_now_task is not None:
+            # A run whose caller was cancelled may still be going: one at a
+            # time, so stop() can end it.
             return False
         ran = False
 
@@ -3093,15 +3114,9 @@ class SentinelEngine:
             )
             return False
 
-        register_prompt(self._suppression.state, best, now)
-        await self._suppression.async_save()
-
-        canary_would_execute: bool | None = None
-        if canary_mode:
-            canary_would_execute = (
-                exec_result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
-            )
-
+        # Before the cooldown and prompt are saved, as for a single finding:
+        # a stop that refused every action ends the run here, so the reloaded
+        # engine runs them (#988).
         action_outcome: dict[str, Any] | None = None
         if (
             exec_result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
@@ -3115,6 +3130,15 @@ class SentinelEngine:
                 self._execution_service.commit_auto_execute(
                     exec_result.execution_id, now
                 )
+
+        register_prompt(self._suppression.state, best, now)
+        await self._suppression.async_save()
+
+        canary_would_execute: bool | None = None
+        if canary_mode:
+            canary_would_execute = (
+                exec_result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+            )
 
         explanation = None
         if (explainer := self._explainer_for(explain_enabled, best)) is not None:
@@ -3276,10 +3300,11 @@ async def _auto_execute_finding(
         }
 
     results: list[dict[str, Any]] = []
+    stopping = False
     for action in service_actions:
         # Before each call, not once: the engine can stop while an earlier
         # action's blocking call runs (#988).
-        if refuses is not None and refuses("auto-execute action"):
+        if stopping or (refuses is not None and refuses("auto-execute action")):
             results.append({"service": action, "status": "stopped", "error": None})
             continue
         domain, _, service = action.partition(".")
@@ -3304,10 +3329,10 @@ async def _auto_execute_finding(
                 finding.anomaly_id,
                 execution_id,
             )
-        except Exception as exc:
-            if cancel_requested():
-                # A stop the service turned into an error: no more actions.
-                raise asyncio.CancelledError from exc
+        except Exception as exc:  # noqa: BLE001
+            # A stop the service turned into an error: the call may have
+            # acted, so it is recorded as attempted, and no more run (#988).
+            stopping = cancel_requested()
             results.append({"service": action, "status": "error", "error": str(exc)})
             LOGGER.warning(
                 "Auto-execute service %s failed for finding %s: %s.",

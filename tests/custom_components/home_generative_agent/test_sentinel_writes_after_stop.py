@@ -16,7 +16,7 @@ import logging
 from contextlib import suppress
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self, cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -123,14 +123,17 @@ async def test_a_run_left_behind_by_stop_writes_and_acts_no_more(
 
     async def _effects() -> None:
         await parts.suppression.async_save()
-        results["outcome"] = await parts.engine._auto_execute(
-            cast("Any", _finding(["lock.lock"])), "exec-1"
-        )
         await parts.audit.async_append_finding(
             cast("Any", {}), MagicMock(), None, suppression_reason_code="x"
         )
         results["auth_saved"] = await parts.auth.async_save()
         results["network_saved"] = await parts.network.async_save()
+        try:
+            await parts.engine._auto_execute(
+                cast("Any", _finding(["lock.lock"])), "exec-1"
+            )
+        except asyncio.CancelledError:
+            results["ended"] = True
 
     release = asyncio.Event()
     task = asyncio.create_task(_left_behind(release, _effects))
@@ -143,7 +146,7 @@ async def test_a_run_left_behind_by_stop_writes_and_acts_no_more(
         release.set()
         await task
 
-    assert results["outcome"]["status"] == "stopped"
+    assert results["ended"] is True  # no action ran: the run ends there
     assert results["auth_saved"] is False
     assert results["network_saved"] is False
     parts.hass.services.async_call.assert_not_awaited()
@@ -186,17 +189,17 @@ async def test_actions_are_refused_from_the_start_of_the_stop() -> None:
     parts = _Parts()
     parts.engine._stopped = True  # stop() has begun; its wait is not over
 
-    outcome = await parts.engine._auto_execute(
-        cast("Any", _finding(["lock.lock"])), "exec-1"
-    )
+    # Every action refused: the run ends before the finding's cooldown is
+    # saved, so the reloaded engine runs the action.
+    with pytest.raises(asyncio.CancelledError):
+        await parts.engine._auto_execute(cast("Any", _finding(["lock.lock"])), "exec-1")
 
-    assert outcome["status"] == "stopped"
     parts.hass.services.async_call.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_a_stop_the_service_turned_into_an_error_ends_the_actions() -> None:
-    """A cancel a service call converted to an error is not swallowed."""
+async def test_a_stop_the_service_turned_into_an_error_runs_no_more_actions() -> None:
+    """A cancel a service call converted to an error stops the next action."""
     hass = MagicMock()
 
     async def _call(*_args: Any, **_kwargs: Any) -> None:
@@ -210,11 +213,15 @@ async def test_a_stop_the_service_turned_into_an_error_ends_the_actions() -> Non
 
     hass.services.async_call = AsyncMock(side_effect=_call)
 
-    with pytest.raises(asyncio.CancelledError):
-        await _auto_execute_finding(
-            hass, cast("Any", _finding(["lock.lock", "switch.turn_off"])), "exec-1"
-        )
+    outcome = await _auto_execute_finding(
+        hass, cast("Any", _finding(["lock.lock", "switch.turn_off"])), "exec-1"
+    )
+
+    # The call may have acted: it is recorded as attempted, so the run keeps
+    # its cooldown and audit; the next action does not run.
     assert hass.services.async_call.await_count == 1
+    assert [a["status"] for a in outcome["actions"]] == ["error", "stopped"]
+    assert outcome["status"] == "error"
 
 
 @pytest.mark.asyncio
@@ -361,6 +368,54 @@ async def test_an_on_demand_error_still_reaches_the_caller() -> None:
         await parts.engine.async_run_now()
 
 
+@pytest.mark.asyncio
+async def test_run_now_is_busy_while_a_run_is_still_tracked() -> None:
+    """A run whose caller was cancelled may still be going: one at a time."""
+    parts = _Parts()
+    timed_run = AsyncMock()
+    parts.engine._timed_run = timed_run  # type: ignore[method-assign]
+    parts.engine._run_now_task = cast("Any", MagicMock())
+
+    assert await parts.engine.async_run_now() is False
+    timed_run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_an_on_demand_run_before_waiting_for_the_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The on-demand run does not act on old options during the loop's wait."""
+    monkeypatch.setattr(utils_mod, "CANCEL_WAIT_S", 0.5)
+    parts = _Parts()
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def _slow(_source: str) -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    parts.engine._timed_run = _slow  # type: ignore[method-assign]
+    run = asyncio.create_task(parts.engine.async_run_now())
+    await asyncio.wait_for(started.wait(), timeout=1)
+    release = asyncio.Event()
+    loop = asyncio.create_task(_left_behind(release, AsyncMock()))
+    await asyncio.sleep(0)
+    parts.engine._task = loop
+
+    stopping = asyncio.create_task(parts.engine.stop())
+    await asyncio.wait_for(cancelled.wait(), timeout=0.3)  # before the loop wait
+
+    assert not stopping.done()
+    release.set()
+    await stopping
+    await loop
+    assert await run is False
+
+
 def _discovery() -> tuple[SentinelDiscoveryEngine, DiscoveryStore, ProposalStore]:
     hass = cast("HomeAssistant", MagicMock())
     store = _with_mock_store(DiscoveryStore(hass, max_records=10))
@@ -476,6 +531,41 @@ async def test_a_stopped_discovery_engine_reports_unavailable_not_busy() -> None
     result = await hga_component._trigger_sentinel_discovery(cast("Any", entry))
 
     assert result == {"status": "unavailable"}
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_caller_leaves_a_stubborn_manual_run_to_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discovery keeps tracking a manual run that caught its cancel."""
+    monkeypatch.setattr(utils_mod, "CANCEL_WAIT_S", 0.01)
+    engine, _store, _proposals = _discovery()
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def _stubborn() -> bool:
+        started.set()
+        while not release.is_set():
+            with suppress(asyncio.CancelledError):
+                await release.wait()
+        return True
+
+    engine._run_once_guarded = _stubborn  # type: ignore[method-assign]
+    caller = asyncio.create_task(engine.async_run_now())
+    await asyncio.wait_for(started.wait(), timeout=1)
+    run_task = engine._run_now_task
+
+    caller.cancel()
+    with suppress(asyncio.CancelledError):
+        await caller
+
+    assert run_task is not None
+    assert engine._run_now_task is run_task  # still tracked: busy
+    assert await engine.async_run_now() is False
+    release.set()
+    await run_task
+    await asyncio.sleep(0)
+    assert engine._run_now_task is None
 
 
 class _Transaction:
@@ -706,6 +796,46 @@ async def test_a_counter_prune_after_the_stop_is_rolled_back() -> None:
     await updater._write_offered_counters()
 
     assert transaction.outcome == "rolled back"
+
+
+@pytest.mark.asyncio
+async def test_a_reset_during_the_commit_is_not_undone() -> None:
+    """An entity a reset overtook while the write committed is not established."""
+    pool, transaction = _pool()
+    updater = SentinelBaselineUpdater(
+        MagicMock(), pool, {"sentinel_baseline_min_samples": 1}
+    )
+    real_exit = _Transaction.__aexit__
+
+    async def _reset_meanwhile(self: _Transaction, *args: Any) -> bool:
+        updater._reset_generation += 1  # async_reset_baseline committed
+        return await real_exit(self, *args)
+
+    with patch.object(_Transaction, "__aexit__", _reset_meanwhile):
+        await updater._write_samples({"sensor.a": 21.0}, None)
+
+    assert transaction.outcome == "committed"
+    assert "sensor.a" not in updater._established
+
+
+@pytest.mark.asyncio
+async def test_stopping_the_notifier_sends_its_held_batch() -> None:
+    """Held alerts were counted as sent: stop() pushes them, never drops them."""
+    from custom_components.home_generative_agent.sentinel.notifier import (  # noqa: PLC0415
+        SentinelNotifier,
+    )
+
+    notifier = SentinelNotifier(
+        cast("HomeAssistant", MagicMock()), {}, MagicMock(), MagicMock()
+    )
+    notifier._held_batch.append((MagicMock(), None, None))
+    flush = MagicMock()
+    notifier._async_flush_batch = flush  # type: ignore[method-assign]
+
+    notifier.stop()
+
+    flush.assert_called_once()
+    assert notifier._stopped
 
 
 def test_the_latch_warns_once(caplog: pytest.LogCaptureFixture) -> None:

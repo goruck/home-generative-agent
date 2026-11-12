@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -586,11 +587,16 @@ async def test_a_stopped_engine_auto_executes_nothing(
 ) -> None:
     """A run left behind by the stop runs no action through dispatch (#988)."""
     engine, hass = _make_ae_engine(monkeypatch)
+    audit = cast("DummyAudit", cast("Any", engine)._audit_store)
     engine._latch.close()  # what stop() does once its wait is over
 
-    await engine._run_once()
+    # Every action refused: the run ends before the cooldown and audit, so
+    # the reloaded engine sees the finding as new and acts on it.
+    with pytest.raises(asyncio.CancelledError):
+        await engine._run_once()
 
     hass.services.async_call.assert_not_called()
+    assert audit.calls == []
 
 
 @pytest.mark.asyncio

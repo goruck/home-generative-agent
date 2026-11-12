@@ -632,19 +632,6 @@ v3.41.1 rather than deferred; see the TODO above.
 
 ---
 
-### A Sentinel batch held at unload is never sent but is audited as delivered
-
-**What:** `SentinelNotifier.async_notify` (`sentinel/notifier.py`) holds non-high findings past the rate limit in `_held_batch` and returns True, so the engine audits them `not_suppressed`. `stop()` cancels the batch timer without flushing, so findings held when the entry unloads or reloads are never pushed, yet they stay counted in the daily digest and the health sensor's notification KPIs, and are protected from eviction. A batch summary that does go out also carries no per-finding action buttons.
-
-**Why:** Pre-existing; found in the review of the audit store fix (Claude adversarial and Codex both flagged it). Rare: it needs a reload inside the 30-second batch window after a rate-limit burst. The engine also persists the finding's pending prompt before the push, so the lost finding stays held for the prompt TTL (4 h) instead of retrying after its cooldown; since #723 made `entity_state_duration` / `entity_staleness` ids stable within an episode, those standing conditions are held this way too (Codex, #723 review).
-
-**How to apply:** Either flush `_held_batch` from `stop()` (schedule `_async_flush_batch` before clearing the handle), or return a third state for held findings and audit them under a distinct reason code that the batch flush settles; either way, resolve the pending prompt of a finding whose push never left. Pin it with a test that reloads with a held batch.
-
-**Effort:** S
-**Priority:** P3
-
----
-
 ### A grouped push that fails to deliver still holds every finding it named
 
 **What:** `_dispatch_compound` (`sentinel/engine.py`) registers the shown finding and every finding the "Also: ..." line named as pending prompts once `SentinelNotifier.async_notify` returns. The notifier calls the notify service with `blocking=False` and returns True once the call is scheduled, and the mobile_app notify service swallows push errors, so a push that never reached the phone still holds all of them for the prompt TTL (4 h) with nothing logged.

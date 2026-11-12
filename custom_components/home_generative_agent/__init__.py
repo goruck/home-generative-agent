@@ -4514,8 +4514,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     # ConfigEntries._async_shutdown only calls entry.async_shutdown(), which
     # cancels retry setup — so this stays the only stop path for a still-loaded
     # entry. Note it is deliberately NARROWER than async_unload_entry: the
-    # video analyzer, the notifier, and the DB pool are not torn down here,
-    # because the process is exiting anyway.
+    # video analyzer and the DB pool are not torn down here, because the
+    # process is exiting anyway (sentinel.stop() does stop the notifier, #988).
     #
     # Wrapped in async_on_unload because it was previously registered
     # unconditionally on every setup and never removed: each reload added

@@ -290,6 +290,10 @@ class SentinelNotifier:
         if self._batch_cancel is not None:
             self._batch_cancel()
             self._batch_cancel = None
+        if self._held_batch:
+            # Sent now, not dropped: async_notify counted these as sent, so
+            # the audit and the saved cooldowns say they reached the user.
+            self._async_flush_batch()
         if self._digest_unsub is not None:
             self._digest_unsub()
             self._digest_unsub = None
@@ -327,8 +331,7 @@ class SentinelNotifier:
         Returns False when the push was dropped as a repeat of the same
         anomaly within the per-finding cooldown, so the audit does not count
         it as reaching the user. True when it was sent or held for the next
-        batch; a batch still held when ``stop`` runs is not sent (see
-        TODOS.md).
+        batch; a batch still held when ``stop`` runs is sent then.
         """
         # Register finding with the action handler so execute/handoff work.
         self._action_handler.register_finding(finding)
