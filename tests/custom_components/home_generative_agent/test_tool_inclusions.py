@@ -508,7 +508,7 @@ async def test_retrieve_tools_appends_an_included_tool_rag_missed() -> None:
 
 
 def _memory_config(options: dict[str, Any]) -> RunnableConfig:
-    config = _config(options=options, live={"assist": ["HassBroadcast"]})
+    config: Any = _config(options=options, live={"assist": ["HassBroadcast"]})
     config["configurable"]["langchain_tools"] = {"upsert_memory": MagicMock()}
     return config
 
