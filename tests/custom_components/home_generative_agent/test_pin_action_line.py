@@ -34,6 +34,7 @@ from custom_components.home_generative_agent.agent.helpers import (
     PIN_OUTCOME_UNKNOWN,
     PinReply,
     disclose_pin_prompts,
+    end_pin_turn,
     keep_pin_prompts,
     parse_tool_response,
     pin_lines_follow,
@@ -507,7 +508,11 @@ def test_a_prompt_whose_line_was_never_delivered_cannot_be_answered() -> None:
     reply = start_pin_turn(pending, "conv1", "unlock the playroom door")
     action_id = _register(pending, reply)
 
+    # While its turn is still running, the next message cannot answer it.
     start_pin_turn(pending, "conv1", PIN)
+    assert pending[action_id].get("reply_turn") is None
+    # The turn ends without delivering its line, which drops it.
+    end_pin_turn(pending, reply.turn_id)
 
     assert action_id not in pending
 

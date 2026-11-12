@@ -3236,24 +3236,35 @@ async def test_a_confirmed_action_is_named_after_it_runs(
 async def test_a_request_refused_for_another_voice_says_so_in_fixed_words(
     frozen_assistant_content: None,  # noqa: ARG001
 ) -> None:
-    """The model's own words could still ask for a PIN (#974 review)."""
+    """
+    The model's own words could still ask for a PIN (#974 review).
+
+    The line names the waiting request and ends the reply, so a satellite
+    stops listening even when the model's text ends with a question, and the
+    PIN said next is not spent on a request never named (#1001).
+    """
     pending: dict[str, Any] = {}
     from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+        PIN_REFUSED_OTHER_VOICE,
         start_pin_turn,
     )
 
     reply = start_pin_turn(pending, "conv1:boris", "unlock the garage door")
-    reply.other_voice_waiting = True
-    chat_log = _DeltaChatLog([_assistant_reply("Someone else is confirming first.")])
+    reply.refusal = PIN_REFUSED_OTHER_VOICE
+    reply.waiting_action = {
+        "tool_name": "HassTurnOff",
+        "tool_args": {"domain": ["lock"], "name": "Front Door"},
+    }
+    chat_log = _DeltaChatLog([_assistant_reply("Shall I try again later?")])
 
     await HGAConversationEntity._async_add_pin_lines(
         _pin_entity(), cast("Any", chat_log), pending, reply, streamed=True
     )
 
-    assert chat_log.content[-1].content == (
-        "Another request is waiting for a PIN. Ask again after it is answered."
-        "\n\nSomeone else is confirming first."
-    )
+    content = chat_log.content[-1].content
+    assert content.startswith("Shall I try again later?\n\nA request to ")
+    assert "Front Door" in content
+    assert content.endswith("is waiting for a PIN. Ask again after it is answered.")
 
 
 async def test_a_turn_without_a_prompt_or_confirmation_is_left_alone(

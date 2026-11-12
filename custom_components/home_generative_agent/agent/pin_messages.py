@@ -48,10 +48,11 @@ from homeassistant.helpers.service import async_get_cached_service_description
 from .automation_pin import DATA_CONTAINER_KEYS
 from .helpers import (
     INTENT_NAME_ALL,
+    PIN_REFUSED_LOCKED,
+    PIN_REFUSED_OTHER_VOICE,
     SET_POSITION_INTENT,
     STOP_MOVING_INTENT,
     TOOL_NAMESPACE_SEP,
-    another_voice_waiting,
     base_tool_name,
     intent_service_calls,
     is_actuating_intent,
@@ -172,11 +173,12 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "pin_done_line": "PIN accepted: {action}.",
         "pin_failed_line": "PIN accepted, but {action} failed.",
         "pin_unknown_line": "PIN accepted; {action} may have run. Check the device.",
+        "pin_other_voice_waiting_line": (
+            "A request to {action} is waiting for a PIN. Ask again after it is "
+            "answered."
+        ),
         # Ends a reply that is only the fixed line, so a satellite keeps
         # listening for the answer.
-        "pin_other_voice_waiting_line": (
-            "Another request is waiting for a PIN. Ask again after it is answered."
-        ),
         "pin_ask_line": "What is your PIN?",
         "action_lock": "lock {target}",
         "action_unlock": "unlock {target}",
@@ -324,7 +326,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "PIN přijat; {action} možná proběhlo. Zkontrolujte zařízení."
         ),
         "pin_other_voice_waiting_line": (
-            "Na PIN čeká jiný požadavek. Zopakujte ten svůj, až bude vyřízen."
+            "Na PIN čeká požadavek: {action}. Zopakujte ten svůj, až bude vyřízen."
         ),
         "pin_ask_line": "Jaký je váš PIN?",
         "action_lock": "zamknout {target}",
@@ -437,7 +439,9 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "pin_done_line": "PIN 已接受：{action}。",
         "pin_failed_line": "PIN 已接受，但{action}失败了。",
         "pin_unknown_line": "PIN 已接受；{action}可能已经执行。请检查设备。",
-        "pin_other_voice_waiting_line": "另一个请求正在等待 PIN。请在它处理完后再试。",
+        "pin_other_voice_waiting_line": (
+            "“{action}”的请求正在等待 PIN。请在它处理完后再试。"
+        ),
         "pin_ask_line": "你的 PIN 是多少？",
         "action_lock": "锁上{target}",
         "action_unlock": "解锁{target}",
@@ -516,26 +520,20 @@ def pin_msg(hass: HomeAssistant | None, key: str, /, **kwargs: Any) -> str:
     return template.format(**kwargs) if kwargs else template
 
 
-def refused_pin_request(
-    hass: HomeAssistant | None,
-    pending_actions: Mapping[str, Mapping[str, Any]],
-    action: Mapping[str, Any],
-    configurable: Mapping[str, Any],
-) -> str:
+def refused_pin_request(hass: HomeAssistant | None, pin_reply: Any) -> str:
     """
     Return why a protected request was not held, for the model.
 
-    Another voice's prompt that is still live refuses it (#974), and the
-    turn's reply then says so in fixed words (`PinReply.other_voice_waiting`).
-    Otherwise this turn already holds another request.
+    The reason is the one `register_pending_action` recorded on the turn's
+    `PinReply` when it refused: another voice's live prompt (#974), which the
+    reply then names in fixed words; a locked-out prompt; or a request this
+    turn, or another turn's PIN reply, already holds (#1001).
     """
-    if another_voice_waiting(
-        pending_actions, action, pin_owner=configurable.get("pin_owner")
-    ):
-        pin_reply = configurable.get("pin_reply")
-        if pin_reply is not None:
-            pin_reply.other_voice_waiting = True
+    refusal = getattr(pin_reply, "refusal", "")
+    if refusal == PIN_REFUSED_OTHER_VOICE:
         return pin_msg(hass, "pin_other_voice_waiting")
+    if refusal == PIN_REFUSED_LOCKED:
+        return pin_msg(hass, "pin_too_many_attempts")
     return pin_msg(hass, "pin_one_action_at_a_time")
 
 
