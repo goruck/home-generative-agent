@@ -455,6 +455,7 @@
       "cannot_connect": "Servise ulaşılamıyor. Anahtarları/URL'leri kontrol edip tekrar deneyin.",
       "invalid_pin": "PIN 4-10 rakam olmalıdır.",
       "llm_api_required": "En az bir API seçin. Ajanın yanıt verebilmesi için bir LLM API'si gerekir.",
+      "pin_required": "Bir PIN girin veya kritik işlem PIN'ini kapatın.",
       "tool_excluded_and_included": "Bir araç aynı anda hem hariç tutulan hem de her zaman dahil edilen olamaz. Aracı iki listeden birinden kaldırın.",
       "unknown": "Beklenmeyen hata."
     }

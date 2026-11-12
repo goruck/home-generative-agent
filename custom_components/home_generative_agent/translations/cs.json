@@ -538,6 +538,7 @@
       "cannot_connect": "Ke službě se nelze připojit. Zkontrolujte klíče/URL a zkuste to znovu.",
       "invalid_pin": "PIN musí mít 4-10 číslic.",
       "llm_api_required": "Vyberte alespoň jedno API. Agent potřebuje LLM API, aby mohl odpovídat.",
+      "pin_required": "Zadejte PIN, nebo vypněte PIN pro kritické akce.",
       "tool_excluded_and_included": "Nástroj nemůže být zároveň vyloučený a vždy zahrnutý. Odeberte jej z jednoho ze dvou seznamů.",
       "unknown": "Neočekávaná chyba."
     }

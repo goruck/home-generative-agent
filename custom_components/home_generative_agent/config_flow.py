@@ -979,8 +979,10 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         options[CONF_CRITICAL_ACTION_PIN_ENABLED] = pin_enabled
 
         if not pin_enabled:
+            # Turning the PIN off removes it, so turning it back on later in
+            # this form needs a new one rather than reviving the stored one.
             self._pending_pin = None
-            self._pending_pin_cleared = False
+            self._pending_pin_cleared = True
             options.pop(CONF_CRITICAL_ACTION_PIN, None)
             options.pop(CONF_CRITICAL_ACTION_PIN_HASH, None)
             options.pop(CONF_CRITICAL_ACTION_PIN_SALT, None)
@@ -1156,6 +1158,15 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         # The PIN goes first: once it passes, it is kept for the next save
         # even when a later check refuses this one (_pending_pin).
         err = self._maybe_edit_pin(options, user_input)
+        if (
+            not err
+            and options.get(CONF_CRITICAL_ACTION_PIN_ENABLED)
+            and not options.get(CONF_CRITICAL_ACTION_PIN_HASH)
+        ):
+            # With no PIN stored the agent lets critical actions through
+            # without asking, so the switch alone would look on and do
+            # nothing; ask for the PIN instead of saving that.
+            err = "pin_required"
         if not err:
             err = await self._maybe_edit_face_recognition_url(options, user_input)
         if not err:

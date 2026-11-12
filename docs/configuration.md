@@ -455,7 +455,7 @@ Example: *"Save this YAML to a file called garage-light."*
 
 Protects sensitive actions (unlocking doors, opening covers) behind a second verification step.
 
-**Setup:** Go to **Settings → Devices & Services → Home Generative Agent → Configure** and toggle **Require critical action PIN**. Enter a 4–10 digit PIN. The value is stored as a salted hash. Leaving the field blank while the toggle is on clears the stored PIN; turning the toggle off removes the guard entirely.
+**Setup:** Go to **Settings → Devices & Services → Home Generative Agent → Configure** and toggle **Require critical action PIN**. Enter a 4–10 digit PIN. The value is stored as a salted hash. Leaving the field blank keeps the stored PIN. The form will not save the toggle on with no PIN set, because the agent then lets critical actions through without asking; turning the toggle off removes the PIN and the guard entirely.
 
 > **You must turn off "Prefer handling commands locally"** in your voice assistant pipeline for this PIN to protect anything.
 >

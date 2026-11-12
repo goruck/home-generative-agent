@@ -328,9 +328,9 @@ async def test_a_pin_cleared_with_a_refused_save_stays_cleared(hass: Any) -> Non
             }
         ),
     )
-    assert refused["errors"] == {"base": "llm_api_required"}
+    assert refused["errors"] == {"base": "pin_required"}
 
-    saved = cast(
+    retry = cast(
         "dict[str, Any]",
         await flow.async_step_init(
             {
@@ -340,8 +340,9 @@ async def test_a_pin_cleared_with_a_refused_save_stays_cleared(hass: Any) -> Non
         ),
     )
 
-    assert CONF_CRITICAL_ACTION_PIN_HASH not in saved["data"]
-    assert CONF_CRITICAL_ACTION_PIN_SALT not in saved["data"]
+    # The clear carried over, so the old PIN does not come back; with the
+    # PIN still on and none set, the save asks for one.
+    assert retry["errors"] == {"base": "pin_required"}
 
 
 @pytest.mark.asyncio
@@ -433,3 +434,137 @@ async def test_pin_set_with_a_tool_overlap_survives_the_retry(hass: Any) -> None
         hashed=data[CONF_CRITICAL_ACTION_PIN_HASH],
         salt=data[CONF_CRITICAL_ACTION_PIN_SALT],
     )
+
+
+@pytest.mark.asyncio
+async def test_the_pin_cannot_be_on_with_no_pin_set(hass: Any) -> None:
+    """
+    Turning the PIN on without setting one is refused.
+
+    With no hash stored, the agent lets critical actions through without
+    asking (agent/graph.py), so the switch alone would look on and do nothing.
+    """
+    flow = _options_flow(hass, {CONF_LLM_HASS_API: [llm.LLM_API_ASSIST]})
+
+    result = cast(
+        "dict[str, Any]",
+        await flow.async_step_init(
+            {
+                CONF_LLM_HASS_API: [llm.LLM_API_ASSIST],
+                CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+            }
+        ),
+    )
+
+    assert result["errors"] == {"base": "pin_required"}
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_retype_with_no_stored_pin_is_not_saved_off(
+    hass: Any,
+) -> None:
+    """
+    A carried PIN dropped by an invalid retype cannot leave the gate open.
+
+    Accepted PIN, refused save; invalid retype; blank save. With no PIN
+    stored, that last save used to store the switch on and no PIN.
+    """
+    flow = _options_flow(hass, {CONF_LLM_HASS_API: [llm.LLM_API_ASSIST]})
+    await flow.async_step_init(
+        {
+            CONF_LLM_HASS_API: [],
+            CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+            CONF_CRITICAL_ACTION_PIN: "4321",
+        }
+    )
+    await flow.async_step_init(
+        {
+            CONF_LLM_HASS_API: [llm.LLM_API_ASSIST],
+            CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+            CONF_CRITICAL_ACTION_PIN: "12",
+        }
+    )
+
+    result = cast(
+        "dict[str, Any]",
+        await flow.async_step_init(
+            {
+                CONF_LLM_HASS_API: [llm.LLM_API_ASSIST],
+                CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+            }
+        ),
+    )
+
+    assert result["errors"] == {"base": "pin_required"}
+
+
+@pytest.mark.asyncio
+async def test_a_refused_disable_does_not_bring_a_cleared_pin_back(
+    hass: Any,
+) -> None:
+    """
+    Clear (refused), turn off (refused), turn back on: the old PIN stays gone.
+
+    Turning the PIN off removes it, so turning it back on in the same form
+    needs a new PIN rather than reviving the stored one.
+    """
+    old_hash, old_salt = hash_pin("1111")
+    flow = _options_flow(
+        hass,
+        {
+            CONF_LLM_HASS_API: [llm.LLM_API_ASSIST],
+            CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+            CONF_CRITICAL_ACTION_PIN_HASH: old_hash,
+            CONF_CRITICAL_ACTION_PIN_SALT: old_salt,
+        },
+    )
+    await flow.async_step_init(
+        {
+            CONF_LLM_HASS_API: [],
+            CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+            CONF_CRITICAL_ACTION_PIN: "",
+        }
+    )
+    await flow.async_step_init(
+        {CONF_LLM_HASS_API: [], CONF_CRITICAL_ACTION_PIN_ENABLED: False}
+    )
+
+    result = cast(
+        "dict[str, Any]",
+        await flow.async_step_init(
+            {
+                CONF_LLM_HASS_API: [llm.LLM_API_ASSIST],
+                CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+            }
+        ),
+    )
+
+    assert result["errors"] == {"base": "pin_required"}
+
+
+@pytest.mark.asyncio
+async def test_a_stored_pin_still_saves_without_retyping(hass: Any) -> None:
+    """An unrelated save with the PIN on and already set is not refused."""
+    old_hash, old_salt = hash_pin("1111")
+    flow = _options_flow(
+        hass,
+        {
+            CONF_LLM_HASS_API: [llm.LLM_API_ASSIST],
+            CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+            CONF_CRITICAL_ACTION_PIN_HASH: old_hash,
+            CONF_CRITICAL_ACTION_PIN_SALT: old_salt,
+        },
+    )
+
+    result = cast(
+        "dict[str, Any]",
+        await flow.async_step_init(
+            {
+                CONF_LLM_HASS_API: [llm.LLM_API_ASSIST],
+                CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+            }
+        ),
+    )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_CRITICAL_ACTION_PIN_HASH] == old_hash
