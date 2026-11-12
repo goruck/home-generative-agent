@@ -42,6 +42,7 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant, SupportsResponse, callback
 from homeassistant.exceptions import ConfigEntryError, HomeAssistantError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import llm
 from homeassistant.helpers.dispatcher import (
     async_dispatcher_connect,
     async_dispatcher_send,
@@ -5501,6 +5502,8 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
     - v2 -> v3: create model provider + feature subentries from legacy options.
     - v3 -> v4: move model settings into feature subentries and trim options.
     - v4 -> v5: move sentinel settings into a sentinel subentry.
+    - v5 -> v6: store CONF_LLM_HASS_API as a list.
+    - v6 -> v7: write the Assist default where CONF_LLM_HASS_API is unset.
     """
     current_version = config_entry.version or 1
     new_data = dict(config_entry.data)
@@ -5654,6 +5657,7 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
             CONFIG_ENTRY_VERSION,
         )
 
+    if current_version < 6:  # noqa: PLR2004
         provider_settings: dict[str, dict[str, Any]] = {}
         provider_types: dict[str, str] = {}
         for subentry in config_entry.subentries.values():
@@ -5854,6 +5858,18 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
                 new_options[CONF_LLM_HASS_API] = []
             current_version = 6
 
+    if current_version < 7:  # noqa: PLR2004
+        # v6 -> v7: an absent CONF_LLM_HASS_API meant "the Assist default",
+        # because the options flow deleted the key when the user deselected
+        # every API, and a stored [] failed every conversation with "No LLM
+        # APIs could be loaded" (issue #949). Both become the Assist default
+        # that the absent key was already running, and the form now refuses
+        # an empty selection, so the key always names what runs.
+        if not new_options.get(CONF_LLM_HASS_API):
+            new_options[CONF_LLM_HASS_API] = [llm.LLM_API_ASSIST]
+        current_version = 7
+
+    if config_entry.version < CONFIG_ENTRY_VERSION:
         try:
             hass.config_entries.async_update_entry(
                 config_entry,

@@ -2,9 +2,11 @@
 """
 Regression tests for the CONF_LLM_HASS_API default.
 
-The options flow *deletes* ``CONF_LLM_HASS_API`` when no API is selected
-(``_cleanup_none_llm_api`` in config_flow.py), so an absent key is a normal,
-reachable state that means "the recommended default", not "no APIs".
+Before issue #949 the options flow *deleted* ``CONF_LLM_HASS_API`` when no API
+was selected, so an absent key was a normal, reachable state that means "the
+recommended default", not "no APIs". The v7 migration now writes that default
+out and the form refuses an empty selection, but an absent key keeps the same
+meaning for every reader.
 
 Before the fix, three readers disagreed about that: two defaulted to
 ``[LLM_API_ASSIST]`` while ``HGAConversationEntity.__init__`` treated the
@@ -18,14 +20,23 @@ agent never saw the turn, so the critical-action PIN never ran.
 
 from __future__ import annotations
 
+from typing import Any, cast
+
+import pytest
 from homeassistant.const import CONF_LLM_HASS_API
+from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import llm
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.home_generative_agent.agent.graph import _get_allowed_api_ids
 from custom_components.home_generative_agent.agent.helpers import (
     active_llm_api_ids,
     normalize_llm_api_value,
 )
+from custom_components.home_generative_agent.config_flow import (
+    HomeGenerativeAgentOptionsFlow,
+)
+from custom_components.home_generative_agent.const import DOMAIN
 
 
 def test_absent_key_defaults_to_assist() -> None:
@@ -48,12 +59,10 @@ def test_stored_empty_list_stays_empty() -> None:
     """
     A stored empty list is preserved rather than re-defaulted.
 
-    Note this is NOT how the options flow records "no APIs" — config_flow.py's
-    _cleanup_none_llm_api pops the key whenever it is falsy, so a user who
-    deselects everything ends up with an ABSENT key and therefore the Assist
-    default. An empty list only reaches here from a YAML import or a future
-    flow that stores the choice instead of erasing it. The distinction matters:
-    do not read this test as proof that a user can turn every API off.
+    The options flow never stores this: it refuses an empty selection, and the
+    v7 migration rewrites a stored [] to the Assist default (issue #949),
+    because no API at all fails every conversation. Do not read this test as
+    proof that a user can turn every API off.
     """
     assert active_llm_api_ids({CONF_LLM_HASS_API: []}) == []
     assert not active_llm_api_ids({CONF_LLM_HASS_API: []})
@@ -115,3 +124,45 @@ def test_graph_allowed_api_ids_respects_explicit_empty() -> None:
         {"configurable": {"options": {CONF_LLM_HASS_API: []}}}
     )
     assert allowed == {"hga_local"}
+
+
+def _options_flow(hass: Any, options: dict[str, Any]) -> Any:
+    """Build an options flow bound to a stored config entry."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, title="Home Generative Agent", options=options
+    )
+    entry.add_to_hass(hass)
+    flow = HomeGenerativeAgentOptionsFlow()
+    flow.hass = hass
+    flow.handler = entry.entry_id
+    return flow
+
+
+@pytest.mark.asyncio
+async def test_options_flow_refuses_an_empty_selection(hass: Any) -> None:
+    """
+    Deselecting every API is refused, not saved as the Assist default.
+
+    Before issue #949 the flow deleted the key, so the save quietly kept
+    running Assist; storing [] instead would fail every conversation.
+    """
+    flow = _options_flow(hass, {CONF_LLM_HASS_API: [llm.LLM_API_ASSIST]})
+
+    result = cast("dict[str, Any]", await flow.async_step_init({CONF_LLM_HASS_API: []}))
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"base": "llm_api_required"}
+
+
+@pytest.mark.asyncio
+async def test_options_flow_stores_the_selection(hass: Any) -> None:
+    """A non-empty selection is stored as submitted."""
+    flow = _options_flow(hass, {CONF_LLM_HASS_API: [llm.LLM_API_ASSIST]})
+
+    result = cast(
+        "dict[str, Any]",
+        await flow.async_step_init({CONF_LLM_HASS_API: ["mcp-abc"]}),
+    )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_LLM_HASS_API] == ["mcp-abc"]

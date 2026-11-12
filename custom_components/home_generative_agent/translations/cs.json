@@ -533,6 +533,13 @@
           "video_analyzer_motion_camera_map": "Jedno přepsání na řádek: binary_sensor.X_motion: camera.Y — použijte, když automatické rozpoznávání vybere špatnou kameru. Ponechte prázdné pro spoléhání na rozpoznávání založené na zařízení a názvu."
         }
       }
+    },
+    "error": {
+      "cannot_connect": "Ke službě se nelze připojit. Zkontrolujte klíče/URL a zkuste to znovu.",
+      "invalid_pin": "PIN musí mít 4-10 číslic.",
+      "llm_api_required": "Vyberte alespoň jedno API. Agent potřebuje LLM API, aby mohl odpovídat.",
+      "tool_excluded_and_included": "Nástroj nemůže být zároveň vyloučený a vždy zahrnutý. Odeberte jej z jednoho ze dvou seznamů.",
+      "unknown": "Neočekávaná chyba."
     }
   },
   "issues": {

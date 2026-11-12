@@ -533,6 +533,13 @@
           "video_analyzer_motion_camera_map": "每行一条映射：binary_sensor.X_motion: camera.Y——当自动匹配选错摄像头时使用。留空则依靠基于设备和名称的自动匹配。"
         }
       }
+    },
+    "error": {
+      "cannot_connect": "无法连接到服务。请检查密钥和 URL 后重试。",
+      "invalid_pin": "PIN 必须是 4 到 10 位数字。",
+      "llm_api_required": "请至少选择一个 API。智能体需要 LLM API 才能回答。",
+      "tool_excluded_and_included": "同一个工具不能既被排除又被始终包含。请从其中一个列表中移除它。",
+      "unknown": "意外错误。"
     }
   },
   "issues": {

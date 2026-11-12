@@ -1013,11 +1013,6 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             if not _get_str(final_options, k):
                 final_options.pop(k, None)
 
-    def _cleanup_none_llm_api(self, options: dict[str, Any]) -> None:
-        """Remove the key when no APIs are selected so options stay clean."""
-        if not options.get(CONF_LLM_HASS_API):
-            options.pop(CONF_LLM_HASS_API, None)
-
     def _cleanup_ui_only_options(self, options: dict[str, Any]) -> None:
         """Remove schema-only fields before storing options."""
         options.pop(_CONF_STT_FILTERS_SECTION, None)
@@ -1140,6 +1135,11 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             err = self._maybe_edit_pin(options, user_input)
         if not err:
             err = self._tool_picker_overlap_error(user_input)
+        if not err and not normalize_llm_api_value(options.get(CONF_LLM_HASS_API)):
+            # The agent cannot answer with no LLM API ("No LLM APIs could be
+            # loaded"), and storing nothing used to quietly mean Assist; say
+            # so instead of saving either (issue #949).
+            err = "llm_api_required"
         if err:
             errors["base"] = err
 
@@ -1155,7 +1155,6 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
                 errors=errors,
             )
 
-        self._cleanup_none_llm_api(options)
         self._cleanup_ui_only_options(options)
         self._drop_empty_fields(options)
         self._parse_motion_camera_map(options)
