@@ -58,8 +58,12 @@ def test_a_responses_model_sends_no_sampling_values() -> None:
         "use_responses_api": True,
         "temperature": None,
         "top_p": None,
+        "include": ["reasoning.encrypted_content"],
     }
-    assert openai_api_configurable("gpt-5") == {"use_responses_api": False}
+    assert openai_api_configurable("gpt-5") == {
+        "use_responses_api": False,
+        "include": None,
+    }
 
 
 @pytest.mark.parametrize(
@@ -292,6 +296,8 @@ async def test_a_gpt6_tool_turn_streams_through_the_responses_api() -> None:
     body = json.loads(request.content)
     assert body["model"] == "gpt-6-luna"
     assert body["store"] is False
+    # store=False keeps nothing at OpenAI: the reasoning must come back encrypted.
+    assert body["include"] == ["reasoning.encrypted_content"]
     assert body["reasoning"]["effort"] == "none"
     assert "temperature" not in body
     assert "top_p" not in body
@@ -347,6 +353,7 @@ async def test_earlier_models_stay_on_chat_completions(
     body = json.loads(request.content)
     assert body["model"] == name
     assert body["store"] is False
+    assert "include" not in body
     for key, value in expected.items():
         assert body[key] == value
 

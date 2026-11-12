@@ -2174,7 +2174,7 @@ def build_openai_chat(
     fallback (the default content blocks fail Ollama's converter), and the next
     OpenAI turn still replays the reasoning. ``store=False`` keeps nothing at
     OpenAI: the checkpointer owns the history, and reasoning replays from its
-    encrypted items.
+    encrypted items, which a Responses call asks for through ``include``.
     """
     return ChatOpenAI(
         api_key=api_key,
@@ -2193,6 +2193,7 @@ def build_openai_chat(
         top_p=ConfigurableField(id="top_p"),
         max_tokens=ConfigurableField(id="max_tokens"),
         reasoning_effort=ConfigurableField(id="reasoning_effort"),
+        include=ConfigurableField(id="include"),
     )
 
 
