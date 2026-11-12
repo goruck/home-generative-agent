@@ -54,6 +54,7 @@ from .agent.helpers import (
     active_llm_api_ids,
     chat_log_tool_result,
     disclose_pin_prompts,
+    end_pin_turn,
     filter_excluded_tools,
     format_tool,
     is_actuation_tool,
@@ -2093,12 +2094,16 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             # of its own (the round-limit guard adds none when a PIN line
             # follows), and "What is your PIN?" alone would have the user
             # repeat the wrong one (red team, 2026-10-16). `pin_lines_follow`
-            # (helpers.py) mirrors these three cases.
+            # (helpers.py) mirrors these cases.
             lines.append(pin_msg(self.hass, "pin_incorrect_line"))
             if not prompts_awaiting_reply(pending_actions, pin_reply):
                 # The prompt took its last reply, or the request its last
                 # attempt: no question follows, so say what comes next.
                 lines.append(pin_msg(self.hass, "pin_request_again_line"))
+        if pin_reply.other_voice_waiting:
+            # This turn's request was refused for another voice's prompt
+            # (#974): say why in fixed words, not only the model's.
+            lines.append(pin_msg(self.hass, "pin_other_voice_waiting_line"))
         lines.extend(
             pin_msg(
                 self.hass,
@@ -2240,15 +2245,23 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         )
 
         deployment = runtime_data.model_deployments.get("chat", "edge")
-        async with local_chat_session(deployment, category="chat"):
-            return await self._async_handle_message_active(
-                user_input,
-                chat_log,
-                intent_response,
-                llm_context,
-                message_history,
-                conversation_id,
-            )
+        # The turn's PIN id is chosen here so the turn's end can drop the
+        # prompts it leaves unanswerable however it returns or fails: a
+        # stored prompt is then a live one (end_pin_turn, #974).
+        pin_turn_id = ulid.ulid_now()
+        try:
+            async with local_chat_session(deployment, category="chat"):
+                return await self._async_handle_message_active(
+                    user_input,
+                    chat_log,
+                    intent_response,
+                    llm_context,
+                    message_history,
+                    conversation_id,
+                    pin_turn_id=pin_turn_id,
+                )
+        finally:
+            end_pin_turn(runtime_data.pending_actions, pin_turn_id)
 
     async def _async_handle_message_active(  # noqa: PLR0913, PLR0915
         self,
@@ -2258,6 +2271,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         llm_context: llm.LLMContext,
         message_history: list[Any],
         conversation_id: str,
+        *,
+        pin_turn_id: str | None = None,
     ) -> conversation.ConversationResult:
         """Process user input while local chat activity is already marked."""
         hass = self.hass
@@ -2288,7 +2303,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         # so this runs before any other early return. A turn that fails keeps
         # the prompt for the user's next message (keep_pin_prompts).
         pin_reply = start_pin_turn(
-            runtime_data.pending_actions, thread_id, user_input.text
+            runtime_data.pending_actions, thread_id, user_input.text, pin_turn_id
         )
 
         # Multi-API initialization
@@ -2391,6 +2406,9 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         app_config: RunnableConfig = {
             "configurable": {
                 "thread_id": thread_id,
+                # The satellite conversation a voice's thread belongs to: it
+                # holds one PIN prompt across its voices (#974).
+                "voice_conversation": conversation_id if speaker else None,
                 "user_id": clean_user_name,
                 "pin_owner": self._pin_owner(user_name, waiting_prompt),
                 "pin_reply": pin_reply,

@@ -171,7 +171,7 @@ from .on_off_direction import (
     with_action_performed,
     wrong_direction_refusal,
 )
-from .pin_messages import describe_pending_action, pin_msg
+from .pin_messages import describe_pending_action, pin_msg, refused_pin_request
 from .rule_entities import expand_critical_rules
 from .template_actions import entities_of
 from .token_counter import count_tokens_cross_provider
@@ -558,6 +558,7 @@ def _critical_action_guard(  # noqa: PLR0913
         "tool_args": tool_args,
         "user": configurable.get("user_id"),
         "thread_id": configurable.get("thread_id"),
+        "voice_conversation": configurable.get("voice_conversation"),
         "turn_id": pin_reply.turn_id if pin_reply is not None else None,
         # The automations the change would start, for the PIN line (#814).
         "starts": list(started),
@@ -581,10 +582,12 @@ def _critical_action_guard(  # noqa: PLR0913
         ctx.pending_actions, action, pin_owner=configurable.get("pin_owner")
     )
     if action_id is None:
-        # Another protected request is already waiting for this turn's PIN
-        # prompt; the user asks for this one after answering it.
+        # Another protected request is already waiting: this turn's, or
+        # another voice's (#974). The user asks for this one afterwards.
         return ToolMessage(
-            content=pin_msg(ctx.hass, "pin_one_action_at_a_time"),
+            content=refused_pin_request(
+                ctx.hass, ctx.pending_actions, action, configurable
+            ),
             tool_call_id=tool_call.get("id"),
             name=tool_name,
             status="error",

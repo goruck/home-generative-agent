@@ -109,6 +109,7 @@ from .automation_targets import (
 from .camera_activity import get_camera_last_events_from_states
 from .critical_push import CriticalPushResult, apply_critical_push
 from .helpers import (
+    MAX_PIN_ATTEMPTS,
     PENDING_ACTION_TTL,
     PIN_AWAITING_USER_REPLY,
     PIN_OUTCOME_DONE,
@@ -140,7 +141,7 @@ from .indirect_pin import (
     tool_origin,
 )
 from .on_off_direction import with_action_performed
-from .pin_messages import describe_pending_action, pin_msg
+from .pin_messages import describe_pending_action, pin_msg, refused_pin_request
 from .rule_entities import expand_critical_rules
 
 if TYPE_CHECKING:
@@ -156,10 +157,6 @@ LOGGER = logging.getLogger(__name__)
 # the graph's per-tool timeout (graph.py, 30 s), so an action that is slow
 # after its claim is answered as "may have run" here.
 POST_CLAIM_TIMEOUT_S = 25
-
-# Wrong PINs allowed for one pending action, carried over to a request that
-# replaces it.
-MAX_PIN_ATTEMPTS = 5
 
 
 @tool(parse_docstring=True)
@@ -963,13 +960,14 @@ def _maybe_require_pin_for_automation(
         "install_note": install_note,
         "user": cfg.get("user_id"),
         "thread_id": cfg.get("thread_id"),
+        "voice_conversation": cfg.get("voice_conversation"),
         "turn_id": _turn_id(cfg),
     }
     action_id = register_pending_action(
         pending_actions, action, pin_owner=cfg.get("pin_owner")
     )
     if action_id is None:
-        return pin_msg(cfg.get("hass"), "pin_one_action_at_a_time")
+        return refused_pin_request(cfg.get("hass"), pending_actions, action, cfg)
     return json.dumps(
         {
             "status": "requires_pin",
