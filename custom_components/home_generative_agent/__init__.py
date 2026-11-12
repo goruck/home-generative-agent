@@ -5505,7 +5505,8 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
     - v3 -> v4: move model settings into feature subentries and trim options.
     - v4 -> v5: move sentinel settings into a sentinel subentry.
     - v5 -> v6: store CONF_LLM_HASS_API as a list.
-    - v6.1 -> v6.2: write the Assist default where CONF_LLM_HASS_API is unset.
+    - v6.1 -> v6.2: write the Assist default where CONF_LLM_HASS_API is absent
+      or empty, warning when it replaces a stored empty choice.
     """
     current_version = config_entry.version or 1
     current_minor = config_entry.minor_version or 1
@@ -5852,13 +5853,16 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
         current_version = 5
 
         # v5 -> v6: normalize CONF_LLM_HASS_API from a string to a list.
-        # "none" sentinel and absent key both become [] (no APIs).
+        # "none" sentinel and absent key both become [] (no APIs); the v6.2
+        # step below then replaces that [] with the Assist default (#949).
         api_val = new_options.get(CONF_LLM_HASS_API)
         if isinstance(api_val, str):
             new_options[CONF_LLM_HASS_API] = [] if api_val == "none" else [api_val]
         elif api_val is None:
             new_options[CONF_LLM_HASS_API] = []
         current_version = 6
+        # An older major's minor number says nothing about v6's steps.
+        current_minor = 1
 
     # v6.1 -> v6.2: an absent CONF_LLM_HASS_API meant "the Assist default",
     # because the options flow deleted the key when the user deselected every
@@ -5870,7 +5874,11 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
     if (current_version, current_minor) < (
         CONFIG_ENTRY_VERSION,
         CONFIG_ENTRY_MINOR_VERSION,
-    ) and not normalize_llm_api_value(new_options.get(CONF_LLM_HASS_API)):
+    ) and not normalize_llm_api_value(
+        # Runtime options lay entry.options over entry.data, so a selection
+        # still in data is the one that runs.
+        {**new_data, **new_options}.get(CONF_LLM_HASS_API)
+    ):
         if CONF_LLM_HASS_API in new_options:
             # A stored empty choice, including a pre-v6 "No control": the
             # user turned control off, so say it is back on.

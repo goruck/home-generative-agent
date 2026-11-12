@@ -43,6 +43,8 @@ from custom_components.home_generative_agent.const import (
     CONF_CRITICAL_ACTION_PIN_HASH,
     CONF_CRITICAL_ACTION_PIN_SALT,
     CONF_FACE_API_URL,
+    CONF_TOOL_EXCLUSIONS,
+    CONF_TOOL_INCLUSIONS,
     DOMAIN,
 )
 from custom_components.home_generative_agent.core.utils import (
@@ -301,3 +303,133 @@ async def test_a_carried_pin_is_dropped_when_the_pin_is_turned_off(
 
     assert CONF_CRITICAL_ACTION_PIN_HASH not in saved["data"]
     assert CONF_CRITICAL_ACTION_PIN_SALT not in saved["data"]
+
+
+@pytest.mark.asyncio
+async def test_a_pin_cleared_with_a_refused_save_stays_cleared(hass: Any) -> None:
+    """Clearing the PIN in a refused save is not undone by the corrected save."""
+    old_hash, old_salt = hash_pin("1111")
+    flow = _options_flow(
+        hass,
+        {
+            CONF_LLM_HASS_API: [llm.LLM_API_ASSIST],
+            CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+            CONF_CRITICAL_ACTION_PIN_HASH: old_hash,
+            CONF_CRITICAL_ACTION_PIN_SALT: old_salt,
+        },
+    )
+    refused = cast(
+        "dict[str, Any]",
+        await flow.async_step_init(
+            {
+                CONF_LLM_HASS_API: [],
+                CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+                CONF_CRITICAL_ACTION_PIN: "",
+            }
+        ),
+    )
+    assert refused["errors"] == {"base": "llm_api_required"}
+
+    saved = cast(
+        "dict[str, Any]",
+        await flow.async_step_init(
+            {
+                CONF_LLM_HASS_API: [llm.LLM_API_ASSIST],
+                CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+            }
+        ),
+    )
+
+    assert CONF_CRITICAL_ACTION_PIN_HASH not in saved["data"]
+    assert CONF_CRITICAL_ACTION_PIN_SALT not in saved["data"]
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_retype_drops_the_carried_pin(hass: Any) -> None:
+    """
+    An invalid retype drops the carried PIN.
+
+    After an accepted PIN, the invalid retype is the latest intent, so a blank
+    save keeps the stored PIN.
+    """
+    old_hash, old_salt = hash_pin("1111")
+    flow = _options_flow(
+        hass,
+        {
+            CONF_LLM_HASS_API: [llm.LLM_API_ASSIST],
+            CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+            CONF_CRITICAL_ACTION_PIN_HASH: old_hash,
+            CONF_CRITICAL_ACTION_PIN_SALT: old_salt,
+        },
+    )
+    await flow.async_step_init(
+        {
+            CONF_LLM_HASS_API: [],
+            CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+            CONF_CRITICAL_ACTION_PIN: "4321",
+        }
+    )
+    invalid = cast(
+        "dict[str, Any]",
+        await flow.async_step_init(
+            {
+                CONF_LLM_HASS_API: [llm.LLM_API_ASSIST],
+                CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+                CONF_CRITICAL_ACTION_PIN: "12",
+            }
+        ),
+    )
+    assert invalid["errors"] == {"base": "invalid_pin"}
+
+    saved = cast(
+        "dict[str, Any]",
+        await flow.async_step_init(
+            {
+                CONF_LLM_HASS_API: [llm.LLM_API_ASSIST],
+                CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+            }
+        ),
+    )
+
+    data = saved["data"]
+    assert verify_pin(
+        "1111",
+        hashed=data[CONF_CRITICAL_ACTION_PIN_HASH],
+        salt=data[CONF_CRITICAL_ACTION_PIN_SALT],
+    )
+
+
+@pytest.mark.asyncio
+async def test_pin_set_with_a_tool_overlap_survives_the_retry(hass: Any) -> None:
+    """The tool-overlap refusal carries the accepted PIN like the others."""
+    flow = _options_flow(hass, {CONF_LLM_HASS_API: ["mcp-abc"]})
+    refused = cast(
+        "dict[str, Any]",
+        await flow.async_step_init(
+            {
+                CONF_LLM_HASS_API: ["mcp-abc"],
+                CONF_TOOL_EXCLUSIONS: ["mcp-abc::web_search"],
+                CONF_TOOL_INCLUSIONS: ["mcp-abc::web_search"],
+                CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+                CONF_CRITICAL_ACTION_PIN: "2468",
+            }
+        ),
+    )
+    assert refused["errors"] == {"base": "tool_excluded_and_included"}
+
+    saved = cast(
+        "dict[str, Any]",
+        await flow.async_step_init(
+            {
+                CONF_LLM_HASS_API: ["mcp-abc"],
+                CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+            }
+        ),
+    )
+
+    data = saved["data"]
+    assert verify_pin(
+        "2468",
+        hashed=data[CONF_CRITICAL_ACTION_PIN_HASH],
+        salt=data[CONF_CRITICAL_ACTION_PIN_SALT],
+    )

@@ -906,10 +906,12 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
 class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
     """Handle options flow for Home Generative Agent."""
 
-    # The (hash, salt) of a PIN a refused save already accepted. The PIN field
-    # re-renders blank, so the corrected save arrives without it; this keeps
-    # that save from quietly leaving the old PIN in force.
+    # The (hash, salt) of a PIN a refused save already accepted, or whether it
+    # cleared the PIN. The PIN field re-renders blank, so the corrected save
+    # arrives without it; this keeps that save from quietly leaving the old
+    # PIN in force.
     _pending_pin: tuple[str, str] | None = None
+    _pending_pin_cleared: bool = False
 
     # ---- helpers ----
 
@@ -978,6 +980,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
 
         if not pin_enabled:
             self._pending_pin = None
+            self._pending_pin_cleared = False
             options.pop(CONF_CRITICAL_ACTION_PIN, None)
             options.pop(CONF_CRITICAL_ACTION_PIN_HASH, None)
             options.pop(CONF_CRITICAL_ACTION_PIN_SALT, None)
@@ -988,9 +991,13 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
                 hashed, salt = self._pending_pin
                 options[CONF_CRITICAL_ACTION_PIN_HASH] = hashed
                 options[CONF_CRITICAL_ACTION_PIN_SALT] = salt
+            elif self._pending_pin_cleared:
+                options.pop(CONF_CRITICAL_ACTION_PIN_HASH, None)
+                options.pop(CONF_CRITICAL_ACTION_PIN_SALT, None)
             return None
 
         self._pending_pin = None
+        self._pending_pin_cleared = False
 
         # Stored as ASCII digits, the form confirmations compare: a PIN typed
         # in full-width or Arabic-Indic digits is the same PIN.
@@ -999,6 +1006,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         if not raw:
             options.pop(CONF_CRITICAL_ACTION_PIN_HASH, None)
             options.pop(CONF_CRITICAL_ACTION_PIN_SALT, None)
+            self._pending_pin_cleared = True
             return None
 
         # ASCII digits once folded, the only form confirmation hashes: a

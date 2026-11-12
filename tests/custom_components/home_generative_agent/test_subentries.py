@@ -6301,3 +6301,45 @@ async def test_basic_setup_writes_nothing_if_the_dialog_closed_during_the_test(
     assert result.get("type") == "abort"
     assert _features(entry) == []
     assert _database(entry) is None
+
+
+@pytest.mark.asyncio
+async def test_migration_keeps_a_selection_stored_in_entry_data(
+    hass: HomeAssistant,
+) -> None:
+    """
+    A selection stored in entry.data is not overwritten.
+
+    Runtime options lay entry.options over entry.data, so a selection in data
+    is the one that runs and the repair must not write Assist over it.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Home Generative Agent",
+        version=6,
+        data={CONF_LLM_HASS_API: ["mcp-abc"]},
+        options={},
+    )
+    entry.add_to_hass(hass)
+    assert await async_migrate_entry(hass, entry)
+    effective = {**entry.data, **entry.options}
+    assert effective[CONF_LLM_HASS_API] == ["mcp-abc"]
+    assert entry.minor_version == CONFIG_ENTRY_MINOR_VERSION
+
+
+@pytest.mark.asyncio
+async def test_migration_from_an_older_minor_still_repairs(
+    hass: HomeAssistant,
+) -> None:
+    """A v5 entry's own minor version does not skip the 6.2 repair."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Home Generative Agent",
+        version=5,
+        minor_version=3,
+        data={},
+        options={},
+    )
+    entry.add_to_hass(hass)
+    assert await async_migrate_entry(hass, entry)
+    assert entry.options[CONF_LLM_HASS_API] == [llm.LLM_API_ASSIST]
