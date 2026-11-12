@@ -230,6 +230,8 @@ class SentinelNotifier:
         self._cooldown_times: dict[str, datetime] = {}
         # Daily digest time-change unsubscribe handle.
         self._digest_unsub: Callable[[], None] | None = None
+        # Set by stop(); see the batching branch of async_notify.
+        self._stopped = False
         # Task spawned by the daily digest callback; kept so stop() can cancel it.
         self._digest_task: asyncio.Task[None] | None = None
         # True while Sentinel is at autonomy level 0 (set by the engine).
@@ -281,6 +283,7 @@ class SentinelNotifier:
 
     def stop(self) -> None:
         """Unsubscribe from action events and cancel the daily digest timer."""
+        self._stopped = True
         if self._unsub is not None:
             self._unsub()
             self._unsub = None
@@ -387,6 +390,10 @@ class SentinelNotifier:
             ]
             if (
                 len(self._notification_times) >= _BATCH_RATE_LIMIT
+                # A stopped notifier holds nothing: a push from a run that
+                # outlived Sentinel's stop goes out now, never from a timer
+                # left on the old notifier (#988).
+                and not self._stopped
                 and not also_line
                 and not canary_line
                 and finding.type not in CHANGE_ALERT_RULE_TYPES

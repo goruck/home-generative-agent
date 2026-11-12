@@ -157,21 +157,64 @@ async def test_a_run_left_behind_by_stop_writes_and_acts_no_more(
 
 
 @pytest.mark.asyncio
-async def test_stop_unsubscribes_the_buttons_before_closing_the_stores() -> None:
+async def test_stop_unsubscribes_the_buttons_when_it_closes_the_stores() -> None:
     """A button press is no longer taken rather than half-saved (#988)."""
     parts = _Parts()
-    closed_at_stop: list[bool] = []
-
-    def _stop() -> None:
-        # Nothing is closed yet when the notifier stops.
-        closed_at_stop.append(parts.engine._latch._closed)
-
-    parts.notifier.stop.side_effect = _stop
 
     await parts.engine.stop()
 
-    assert closed_at_stop == [False]
+    parts.notifier.stop.assert_called_once()
     parts.notifier.close.assert_not_called()  # pushes are not latched
+
+
+@pytest.mark.asyncio
+async def test_a_failing_notifier_stop_still_closes_everything() -> None:
+    """The notifier is stopped last and contained: the latch is never skipped."""
+    parts = _Parts()
+    parts.notifier.stop.side_effect = RuntimeError("unsubscribed twice")
+
+    await parts.engine.stop()
+
+    assert await parts.auth.async_save() is False
+    await parts.suppression.async_save()
+    cast("Any", parts.suppression)._store.async_save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_actions_are_refused_from_the_start_of_the_stop() -> None:
+    """A run still acting while stop() waits acts on options being replaced."""
+    parts = _Parts()
+    parts.engine._stopped = True  # stop() has begun; its wait is not over
+
+    outcome = await parts.engine._auto_execute(
+        cast("Any", _finding(["lock.lock"])), "exec-1"
+    )
+
+    assert outcome["status"] == "stopped"
+    parts.hass.services.async_call.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_stop_the_service_turned_into_an_error_ends_the_actions() -> None:
+    """A cancel a service call converted to an error is not swallowed."""
+    hass = MagicMock()
+
+    async def _call(*_args: Any, **_kwargs: Any) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel()  # the stop's cancel lands during the call...
+        with suppress(asyncio.CancelledError):
+            await asyncio.sleep(0)  # ...and the integration catches it
+        msg = "service failed"
+        raise RuntimeError(msg)
+
+    hass.services.async_call = AsyncMock(side_effect=_call)
+
+    with pytest.raises(asyncio.CancelledError):
+        await _auto_execute_finding(
+            hass, cast("Any", _finding(["lock.lock", "switch.turn_off"])), "exec-1"
+        )
+    assert hass.services.async_call.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -438,21 +481,27 @@ async def test_a_stopped_discovery_engine_reports_unavailable_not_busy() -> None
 class _Transaction:
     """Stand in for psycopg's transaction(): it rolls back when its block raises."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, fail_commit: bool = False) -> None:
         self.outcome: str | None = None
+        self._fail_commit = fail_commit
 
     async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, exc_type: object, *_args: object) -> bool:
+        if exc_type is None and self._fail_commit:
+            self.outcome = "rolled back"
+            msg = "db down"
+            raise OSError(msg)
         self.outcome = "rolled back" if exc_type is not None else "committed"
         return False
 
 
-def _pool() -> tuple[MagicMock, _Transaction]:
-    transaction = _Transaction()
+def _pool(*, fail_commit: bool = False) -> tuple[MagicMock, _Transaction]:
+    transaction = _Transaction(fail_commit=fail_commit)
     cursor = MagicMock()
     cursor.execute = AsyncMock()
+    cursor.fetchone = AsyncMock(return_value={"sample_count": 1})
     cursor.__aenter__ = AsyncMock(return_value=cursor)
     cursor.__aexit__ = AsyncMock(return_value=False)
     conn = MagicMock()
@@ -506,6 +555,157 @@ async def test_a_closed_audit_store_keeps_late_changes_out_of_its_final_write() 
     await audit.async_update_response("a1", {"action": "dismiss"}, None)
 
     assert audit._records == before
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_caller_leaves_a_stubborn_run_to_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run that caught its cancel stays tracked, so stop() still ends it."""
+    monkeypatch.setattr(utils_mod, "CANCEL_WAIT_S", 0.01)
+    parts = _Parts()
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def _stubborn(_source: str) -> None:
+        started.set()
+        while not release.is_set():
+            with suppress(asyncio.CancelledError):
+                await release.wait()
+
+    parts.engine._timed_run = _stubborn  # type: ignore[method-assign]
+    caller = asyncio.create_task(parts.engine.async_run_now())
+    await asyncio.wait_for(started.wait(), timeout=1)
+    run_task = parts.engine._run_now_task
+
+    caller.cancel()
+    with suppress(asyncio.CancelledError):
+        await caller
+
+    assert run_task is not None
+    assert not run_task.done()
+    assert parts.engine._run_now_task is run_task  # still tracked
+    release.set()
+    await run_task
+    await asyncio.sleep(0)
+    assert parts.engine._run_now_task is None  # forgotten once it ended
+
+
+@pytest.mark.asyncio
+async def test_two_manual_discovery_runs_at_once_run_one_cycle() -> None:
+    """The second of two concurrent triggers is told discovery is busy."""
+    engine, _store, _proposals = _discovery()
+    cycle = AsyncMock()
+    engine._run_once = cycle  # type: ignore[method-assign]
+
+    results = await asyncio.gather(engine.async_run_now(), engine.async_run_now())
+
+    assert sorted(results) == [False, True]
+    cycle.assert_awaited_once()
+
+
+class _CycleStoppedError(Exception):
+    """Ends a discovery cycle in a test once it passed the proposal cleanup."""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stopped", [False, True], ids=["running", "stopped"])
+async def test_a_stopped_discovery_cycle_cleans_up_no_proposals(
+    monkeypatch: pytest.MonkeyPatch,
+    stopped: bool,  # noqa: FBT001
+) -> None:
+    """Proposal cleanup is a discovery write: refused once discovery stopped."""
+    engine, _store, proposals = _discovery()
+    cleanup = AsyncMock(return_value=0)
+    proposals.cleanup_unsupported_ttl = cleanup  # type: ignore[method-assign]
+    module = "custom_components.home_generative_agent.sentinel.discovery_engine"
+    monkeypatch.setattr(
+        f"{module}.async_build_full_state_snapshot", AsyncMock(return_value={})
+    )
+    monkeypatch.setattr(f"{module}.reduce_snapshot_for_discovery", lambda s: s)
+    monkeypatch.setattr(f"{module}.redact_network_identifiers", lambda s: s)
+    engine._existing_semantic_context = AsyncMock(  # type: ignore[method-assign]
+        side_effect=_CycleStoppedError
+    )
+    if stopped:
+        engine._latch.close()
+
+    with pytest.raises(_CycleStoppedError):
+        await engine._run_once()
+
+    assert cleanup.await_count == (0 if stopped else 1)
+
+
+def _snapshot(entity_id: str, value: str) -> Any:
+    return {
+        "entities": [
+            {
+                "entity_id": entity_id,
+                "state": value,
+                "domain": "sensor",
+                "attributes": {"device_class": "temperature"},
+            }
+        ],
+        "derived": {},
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_baseline_sample_after_the_stop_is_rolled_back() -> None:
+    """The main write rolls back, and memory keeps matching the database."""
+    pool, transaction = _pool()
+    updater = SentinelBaselineUpdater(
+        MagicMock(), pool, {"sentinel_baseline_min_samples": 1}
+    )
+    await updater._write_samples({"sensor.a": 21.0}, None)
+    assert transaction.outcome == "committed"
+    assert "sensor.a" in updater._established  # once committed
+
+    await updater.stop()
+    dow = dict(updater._dow_state)
+    await updater._write_samples({"sensor.b": 21.0}, None)
+
+    assert transaction.outcome == "rolled back"
+    assert "sensor.b" not in updater._established
+    assert updater._dow_state == dow
+
+
+@pytest.mark.asyncio
+async def test_a_failed_baseline_commit_restores_the_weekly_sums() -> None:
+    """A rolled-back write leaves no day-of-week sample in memory (#988 review)."""
+    pool, transaction = _pool()
+    updater = SentinelBaselineUpdater(
+        MagicMock(),
+        pool,
+        {
+            "sentinel_baseline_weekly_patterns": True,
+            "sentinel_baseline_min_samples": 1,
+        },
+    )
+    await updater._write_samples({"sensor.a": 20.0}, None)
+    assert transaction.outcome == "committed"
+    dow = dict(updater._dow_state)
+    assert dow, "the write should have advanced a day-of-week slot"
+
+    failing, failed = _pool(fail_commit=True)
+    updater._pool = failing
+    await updater._write_samples({"sensor.a": 30.0, "sensor.b": 5.0}, None)
+
+    assert failed.outcome == "rolled back"
+    assert updater._dow_state == dow
+    assert "sensor.b" not in updater._established  # never committed
+
+
+@pytest.mark.asyncio
+async def test_a_counter_prune_after_the_stop_is_rolled_back() -> None:
+    """The once-a-day counter prune is refused like the other writes."""
+    pool, transaction = _pool()
+    updater = SentinelBaselineUpdater(MagicMock(), pool, {})
+    await updater.stop()
+
+    await updater._write_offered_counters()
+
+    assert transaction.outcome == "rolled back"
 
 
 def test_the_latch_warns_once(caplog: pytest.LogCaptureFixture) -> None:

@@ -13,10 +13,13 @@ class StopLatch:
 
     ``cancel_and_wait`` gives up on a run that keeps catching its cancel, so a
     stop can return while that run is still going. Closed once the stop has
-    stopped waiting, a latch makes such a run's later writes, notifications
-    and actions no-ops: every write is refused, so nothing it changed in
+    stopped waiting, a latch makes such a run's later writes and actions
+    no-ops: every write is refused, so nothing it changed in
     memory reaches storage, and a reload's replacement starts from what was
     saved before the stop. A run that ends within the wait is not affected.
+
+    It is checked before a write starts: a save, commit or service call
+    already under way when it closes still finishes (TODOS.md).
     """
 
     def __init__(self, what: str) -> None:
@@ -44,8 +47,8 @@ class StopLatch:
         else:
             self._logged = True
             LOGGER.warning(
-                "%s has stopped, but a run that outlived the stop tried to "
-                "act; dropped its %s and any later write or action (issue #988).",
+                "%s has stopped; dropped a late %s, and will drop any later "
+                "write or action (issue #988).",
                 self._what,
                 effect,
             )

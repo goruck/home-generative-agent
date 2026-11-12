@@ -371,6 +371,10 @@ class SentinelDiscoveryEngine:
                 self._task = None
             await cancel_and_wait(self._run_now_task, "Sentinel discovery manual run")
         finally:
+            # A stop whose caller was cancelled before that wait still
+            # cancels the manual run.
+            if self._run_now_task is not None:
+                self._run_now_task.cancel()
             # A cycle left behind by the bounded wait saves nothing (#988).
             self._latch.close()
             self._store.close(self._latch)
@@ -416,24 +420,31 @@ class SentinelDiscoveryEngine:
         if self._stopped:
             LOGGER.debug("Discovery stopped; skipping manual trigger.")
             return False
-        if self._run_lock.locked():
+        if self._run_lock.locked() or self._run_now_task is not None:
+            # The task takes the lock only once it starts: a manual run
+            # already started counts as busy too.
             LOGGER.debug("Discovery run already in progress; skipping manual trigger.")
             return False
         # In a task of its own, so stop() cancels and waits for it like the
-        # loop's cycle (#988).
+        # loop's cycle (#988). Forgotten when it ends, not when the caller
+        # stops waiting: a run that caught its cancel is still one to end.
         task = asyncio.create_task(
             self._run_once_guarded(), name="Sentinel discovery manual run"
         )
         self._run_now_task = task
+        task.add_done_callback(self._forget_run_now)
         try:
             await asyncio.wait([task])
         except asyncio.CancelledError:
-            task.cancel()  # the caller was cancelled: so is the run
+            # The caller was cancelled: so is the run, bounded as a stop is.
+            await cancel_and_wait(task, "Sentinel discovery manual run")
             raise
-        finally:
-            if self._run_now_task is task:
-                self._run_now_task = None
         return False if task.cancelled() else task.result()
+
+    def _forget_run_now(self, task: asyncio.Task[bool]) -> None:
+        """Drop the finished manual run, once it has really ended."""
+        if self._run_now_task is task:
+            self._run_now_task = None
 
     async def _run_once_guarded(self) -> bool:
         """Run one cycle under the lock; False when discovery stopped meanwhile."""

@@ -627,8 +627,9 @@ class SentinelEngine:
         # again — see the note in start().
         self._stopped = False
         # Closed once stop() has stopped waiting for the run loop: a run that
-        # outlived the wait (#985) then runs no action (#988), and the
-        # collaborators closed with it refuse its writes and alerts.
+        # outlived the wait (#985) then saves nothing (#988), through the
+        # collaborators closed with it; its pushes still go out (see
+        # _close_side_effects). Actions are refused from the stop's start.
         self._latch = StopLatch("Sentinel")
         # The on-demand run in progress (async_run_now), stopped with the loop.
         self._run_now_task: asyncio.Task[None] | None = None
@@ -1402,6 +1403,10 @@ class SentinelEngine:
             # if it catches the cancel.
             await cancel_and_wait(self._run_now_task, "Sentinel on-demand run")
         finally:
+            # A stop whose caller was cancelled before reaching the wait
+            # above still cancels the on-demand run (it is not waited for).
+            if self._run_now_task is not None:
+                self._run_now_task.cancel()
             # Always, even when this caller is cancelled or the loop died
             # with an error; a second stop() redoes whatever is left.
             for unsub in self._event_unsubscribers:
@@ -1428,7 +1433,7 @@ class SentinelEngine:
         push refused now would be an alert nobody gets that the reloaded
         engine thinks was sent; a duplicate is the lesser failure.
         """
-        self._notifier.stop()
+        # The latch first: nothing below may be skipped by a failing step.
         self._latch.close()
         self._suppression.close(self._latch)
         self._audit_store.close()
@@ -1436,14 +1441,37 @@ class SentinelEngine:
             self._auth_inventory.close(self._latch)
         if self._network_inventory is not None:
             self._network_inventory.close(self._latch)
+        try:
+            self._notifier.stop()
+        except Exception:
+            LOGGER.exception("Stopping the Sentinel notifier failed.")
 
     async def _auto_execute(
         self, finding: AnomalyFinding, execution_id: str | None
     ) -> dict[str, Any]:
         """Run the finding's actions, each only while the engine runs (#988)."""
         return await _auto_execute_finding(
-            self._hass, finding, execution_id, refuses=self._latch.refuses
+            self._hass, finding, execution_id, refuses=self._action_refused
         )
+
+    def _action_refused(self, effect: str) -> bool:
+        """
+        Return True when an auto-execute action must not run (#988).
+
+        From the moment stop() begins, not only once the latch closes after
+        its wait: a run still acting then is one that caught its cancel, and
+        it would act on the options being replaced. A cancel that has not
+        landed yet counts the same.
+        """
+        if self._stopped or cancel_requested():
+            LOGGER.debug("Sentinel is stopping; not running a late %s.", effect)
+            return True
+        return self._latch.refuses(effect)
+
+    def _forget_run_now(self, task: asyncio.Task[None]) -> None:
+        """Drop the finished on-demand run, once it has really ended."""
+        if self._run_now_task is task:
+            self._run_now_task = None
 
     # ---------------------------------------------------------------------- #
     # Event-driven triggering
@@ -1599,15 +1627,18 @@ class SentinelEngine:
             task = asyncio.create_task(
                 self._timed_run("on_demand"), name="Sentinel on-demand run"
             )
+            # Forgotten when it ends, not when the caller stops waiting: a
+            # run that caught its cancel is still one stop() must end.
             self._run_now_task = task
+            task.add_done_callback(self._forget_run_now)
             try:
                 await asyncio.wait([task])
             except asyncio.CancelledError:
-                task.cancel()  # the caller was cancelled: so is the run
+                # The caller was cancelled: so is the run. Hold the scheduler
+                # lock until it ends (bounded), so a scheduled run cannot
+                # start beside one that caught the cancel.
+                await cancel_and_wait(task, "Sentinel on-demand run")
                 raise
-            finally:
-                if self._run_now_task is task:
-                    self._run_now_task = None
             if task.cancelled():
                 return  # stopped
             task.result()  # an error from the run reaches the caller
@@ -3225,8 +3256,12 @@ async def _auto_execute_finding(
     Only actions in ``domain.service`` format are dispatched.  Actions that
     are advisory strings (no ``.``) are silently skipped.
 
+    *refuses*, when given, is asked before each call; an action it refuses is
+    recorded as ``"stopped"`` and not run (#988).
+
     Returns an ``action_outcome`` dict with:
-    - ``status``: ``"success"`` | ``"partial"`` | ``"error"`` | ``"no_actions"``
+    - ``status``: ``"success"`` | ``"partial"`` (some ran, the rest failed or
+      were stopped) | ``"error"`` | ``"stopped"`` (none ran) | ``"no_actions"``
     - ``actions``: list of per-action result dicts
     - ``execution_id``: echoed from the caller
     """
@@ -3269,7 +3304,10 @@ async def _auto_execute_finding(
                 finding.anomaly_id,
                 execution_id,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
+            if cancel_requested():
+                # A stop the service turned into an error: no more actions.
+                raise asyncio.CancelledError from exc
             results.append({"service": action, "status": "error", "error": str(exc)})
             LOGGER.warning(
                 "Auto-execute service %s failed for finding %s: %s.",

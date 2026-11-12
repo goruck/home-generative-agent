@@ -2178,6 +2178,20 @@ label pair ("Server URL" vs "Base URL").
 
 ---
 
+### A Sentinel write already under way when its stop gives up still lands
+
+**What:** The #988 `StopLatch` (`core/stop_latch.py`) is checked before a write or action starts. A left-behind run's save, database commit or service call that was already in flight when the stop stopped waiting still finishes: a suppression, inventory or discovery `Store.async_save` can then overwrite the reloaded entry's file, or recreate an inventory removing Sentinel has just deleted; a baseline transaction already committing commits; an auto-execute call already running actuates, and its audit row and cooldown are then refused; a notification button handler already running when the notifier stops has its closing saves refused (the latch warning then names a write it did not start). Pushes from a left-behind run are deliberately not latched (a refused push loses an alert whose cooldown was saved earlier).
+
+**Why:** Codex adversarial pass, review cycle 2 of the #988 PR (2026-11-12); reproduced with controlled probes. Lindo chose to ship the latch and record this: a left-behind run is almost always stuck in an LLM call, so its writes start after the close and are refused, and the window is a write in flight at that exact moment.
+
+**How to apply:** Give each per-setup store (suppression, audit, auth and network inventory, discovery, proposal) a pending-write tracker and have `async_unload_entry` and the Sentinel-removal path (`_forget_network_audit`) drain it, bounded, after the engine stops and before the replacement setup or the inventory reset runs. For the baseline, hold the transaction's commit behind the same drain. Track `ActionHandler` tasks in the notifier and wait for them in `stop()`. Record an auto-execute intent before dispatch so a completed action is audited independently of the closed run.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** —
+
+---
+
 ### Services stay callable during the unload teardown window
 
 **What:** Service removal is an on-unload callback, and HA runs those only after `async_unload_entry` returns — so for the whole teardown sequence (platform unload, six engine stops, pool close) every `hga.*` service is still registered and callable against the half-torn-down generation. A call landing in that window reaches a stopped engine or a closing pool and fails with an opaque internal error rather than "service does not exist". Narrowed by v3.30.10 (before it, the window was *forever*), not closed.

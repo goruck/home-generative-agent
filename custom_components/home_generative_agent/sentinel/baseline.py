@@ -411,7 +411,7 @@ class SentinelBaselineUpdater:
         # config-entry setup, so once it has been stopped it must never run
         # again — see the note in start().
         self._stopped = False
-        # Closed once stop() has stopped waiting (#988); see _commit.
+        # Closed once stop() has stopped waiting (#988); see _check_open.
         self._latch = StopLatch("Sentinel baseline updater")
         # entity_ids that crossed MIN_SAMPLES (no re-notification on restart).
         self._established: set[str] = set()
@@ -761,6 +761,10 @@ class SentinelBaselineUpdater:
             )
         )
 
+        # The write is one transaction: if it rolls back, the day-of-week
+        # sums it advanced in memory go back too, or the next write would
+        # store a sample the database never kept (#988 review).
+        dow_before = dict(self._dow_state)
         try:
             async with (
                 self._pool.connection() as conn,
@@ -840,13 +844,16 @@ class SentinelBaselineUpdater:
                     if entity_id in self._established:
                         continue
                     if count >= min_samples:
-                        self._established.add(entity_id)
                         established.append(entity_id)
         except _UpdaterStoppedError:
+            self._dow_state = dow_before
             return
         except Exception:
+            self._dow_state = dow_before
             LOGGER.exception("Baseline DB write failed.")
             return
+        # Only once committed: a write that rolled back establishes nothing.
+        self._established.update(established)
 
         # Notices go out after the commit, outside the connection. The network
         # counters (snapshot None) are established like entities but raise no
