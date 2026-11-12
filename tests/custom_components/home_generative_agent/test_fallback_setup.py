@@ -361,6 +361,11 @@ def _patch_setup_dependencies(
         hga_component, "ChatOpenAI", lambda *_args, **_kwargs: FakeRunnable("openai")
     )
     monkeypatch.setattr(
+        hga_component,
+        "StatelessReasoningChatOpenAI",
+        lambda *_args, **_kwargs: FakeRunnable("openai"),
+    )
+    monkeypatch.setattr(
         hga_component, "ChatOllama", lambda *_args, **_kwargs: FakeRunnable("ollama")
     )
     monkeypatch.setattr(

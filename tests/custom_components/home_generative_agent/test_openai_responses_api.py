@@ -13,6 +13,9 @@ from langchain_core.tools import tool
 from langchain_openai.chat_models import base as lc_openai
 
 import custom_components.home_generative_agent as hga_component
+from custom_components.home_generative_agent.core.openai_client import (
+    drop_reasoning_items,
+)
 from custom_components.home_generative_agent.core.utils import (
     openai_api_configurable,
     openai_uses_responses_api,
@@ -58,12 +61,8 @@ def test_a_responses_model_sends_no_sampling_values() -> None:
         "use_responses_api": True,
         "temperature": None,
         "top_p": None,
-        "include": ["reasoning.encrypted_content"],
     }
-    assert openai_api_configurable("gpt-5") == {
-        "use_responses_api": False,
-        "include": None,
-    }
+    assert openai_api_configurable("gpt-5") == {"use_responses_api": False}
 
 
 @pytest.mark.parametrize(
@@ -243,7 +242,9 @@ def HassTurnOn(name: str) -> str:  # noqa: N802 - HA's intent tool name
     return name
 
 
-def _client(requests: list[httpx.Request]) -> Any:
+def _client(
+    requests: list[httpx.Request], stream: list[dict[str, Any]] | None = None
+) -> Any:
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if request.url.path.endswith("/chat/completions"):
@@ -252,9 +253,13 @@ def _client(requests: list[httpx.Request]) -> Any:
                 content=_CHAT_COMPLETIONS_STREAM,
                 headers={"content-type": "text/event-stream"},
             )
+        if not json.loads(request.content).get("stream"):
+            return httpx.Response(
+                200, json=_response([_REASONING, _MESSAGE, _CALL], "completed")
+            )
         return httpx.Response(
             200,
-            content=_sse(_STREAM),
+            content=_sse(_STREAM if stream is None else stream),
             headers={"content-type": "text/event-stream"},
         )
 
@@ -296,8 +301,6 @@ async def test_a_gpt6_tool_turn_streams_through_the_responses_api() -> None:
     body = json.loads(request.content)
     assert body["model"] == "gpt-6-luna"
     assert body["store"] is False
-    # store=False keeps nothing at OpenAI: the reasoning must come back encrypted.
-    assert body["include"] == ["reasoning.encrypted_content"]
     assert body["reasoning"]["effort"] == "none"
     assert "temperature" not in body
     assert "top_p" not in body
@@ -353,7 +356,6 @@ async def test_earlier_models_stay_on_chat_completions(
     body = json.loads(request.content)
     assert body["model"] == name
     assert body["store"] is False
-    assert "include" not in body
     for key, value in expected.items():
         assert body[key] == value
 
@@ -386,13 +388,87 @@ def _history() -> list[Any]:
     ]
 
 
-def test_the_next_openai_turn_replays_the_reasoning() -> None:
-    """With store=False, reasoning comes back from the checkpointed message."""
-    replay = lc_openai._construct_responses_api_input(_history(), store=False)
-    reasoning = [item for item in replay if item.get("type") == "reasoning"]
-    assert reasoning
-    assert reasoning[0]["encrypted_content"] == "ENC"
-    assert any(item.get("type") == "function_call_output" for item in replay)
+def _shifted(event: dict[str, Any], by: int) -> dict[str, Any]:
+    if "output_index" not in event:
+        return event
+    return {**event, "output_index": event["output_index"] + by}
+
+
+_REASONING_2 = {**_REASONING, "id": "rs_2", "encrypted_content": "ENC2"}
+# GPT-6 often returns several reasoning items in one reply (seen live): the v0
+# format holds one, so streaming concatenates them ("ENCENC2"), and OpenAI
+# rejects that on replay with 400 invalid_encrypted_content.
+_STREAM_TWO_REASONING = [
+    _STREAM[0],
+    *_STREAM[1:3],
+    {"type": "response.output_item.added", "output_index": 1, "item": _REASONING_2},
+    {"type": "response.output_item.done", "output_index": 1, "item": _REASONING_2},
+    *(_shifted(event, 1) for event in _STREAM[3:-1]),
+    {
+        "type": "response.completed",
+        "response": _response([_REASONING, _REASONING_2, _MESSAGE, _CALL], "completed"),
+    },
+]
+
+
+async def test_the_next_openai_turn_sends_no_reasoning() -> None:
+    """A tool turn's follow-up sends the call and its result, never the reasoning."""
+    requests: list[httpx.Request] = []
+    model = _configured(
+        _client(requests, _STREAM_TWO_REASONING), "gpt-6-luna"
+    ).bind_tools([HassTurnOn])
+    first = [HumanMessage("turn on the kitchen")]
+    chunks = [chunk async for chunk in model.astream(first)]
+    reply = chunks[0]
+    for chunk in chunks[1:]:
+        reply += chunk
+    # Merged, the v0 reply would hold one reasoning item with both items'
+    # encrypted contents run together; it is not kept at all.
+    assert "reasoning" not in reply.additional_kwargs
+    assert [c["name"] for c in reply.tool_calls] == ["HassTurnOn"]
+
+    history = [*first, reply, ToolMessage("done", tool_call_id="call_1")]
+    _ = [chunk async for chunk in model.astream(history)]
+
+    body = json.loads(requests[-1].content)
+    types = [item.get("type") for item in body["input"]]
+    assert "reasoning" not in types
+    assert "function_call" in types
+    assert "function_call_output" in types
+    assert "ENC" not in requests[-1].content.decode()
+
+
+async def test_a_replayed_history_with_reasoning_still_sends_none() -> None:
+    """A checkpointed reply that kept its reasoning item does not send it."""
+    requests: list[httpx.Request] = []
+    model = _configured(_client(requests), "gpt-6-luna").bind_tools([HassTurnOn])
+    history = _history()
+    assert history[1].additional_kwargs["reasoning"]["encrypted_content"] == "ENC"
+    _ = [chunk async for chunk in model.astream(history)]
+    body = json.loads(requests[-1].content)
+    assert "reasoning" not in [item.get("type") for item in body["input"]]
+
+
+async def test_a_non_streamed_reply_keeps_no_reasoning() -> None:
+    requests: list[httpx.Request] = []
+    model = _configured(_client(requests), "gpt-6-luna")
+    reply = await model.ainvoke([HumanMessage("hi")], stream=False)
+    assert json.loads(requests[-1].content).get("stream") is not True
+    assert "reasoning" not in reply.additional_kwargs
+    assert reply.tool_calls
+
+
+def test_drop_reasoning_items_leaves_other_payloads_alone() -> None:
+    chat = {"model": "gpt-5", "messages": [{"role": "user", "content": "hi"}]}
+    assert drop_reasoning_items(chat) is chat
+    text = {"model": "gpt-6-luna", "input": "hi"}
+    assert drop_reasoning_items(text) is text
+    responses = {
+        "model": "gpt-6-luna",
+        "input": [{"type": "reasoning", "id": "rs_1"}, {"role": "user"}],
+    }
+    assert drop_reasoning_items(responses)["input"] == [{"role": "user"}]
+    assert len(responses["input"]) == 2  # the caller's payload is not mutated
 
 
 def test_a_gpt6_history_converts_for_every_fallback_provider() -> None:

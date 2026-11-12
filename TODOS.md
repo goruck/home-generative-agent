@@ -1983,6 +1983,19 @@ label pair ("Server URL" vs "Base URL").
 
 ## Model Providers
 
+### GPT-6 reasoning is not replayed across tool turns
+
+**What:** `core/openai_client.py` (`StatelessReasoningChatOpenAI`) drops reasoning items from every OpenAI Responses request and from the reply, so after a tool result a GPT-6 model reasons afresh. OpenAI's guidance is to pass reasoning items back with tool outputs, which saves tokens and keeps the model's plan across a tool loop.
+
+**Why:** The client keeps replies in langchain-openai's `v0` output format so a history checkpointed on OpenAI still converts for an Ollama, Anthropic or Gemini fallback. `v0` holds one reasoning item per message in `additional_kwargs["reasoning"]`, and GPT-6 often returns several per reply (4-8 on a multi-step tool task, live 2026-11-11). Streaming concatenates their `encrypted_content`, and the next tool turn gets 400 `invalid_encrypted_content` (langchain-openai 1.6.7). With `store=False`, OpenAI returns the encrypted copy whether or not `include` asks for it, so leaving `include` out does not avoid it.
+
+**How to apply:** Either (a) report the `v0` merge to langchain-openai and drop the request filter once a fixed release keeps each item (e.g. a list under `additional_kwargs["reasoning"]`), or (b) switch the client to `output_version="responses/v1"`, which kept every item intact and replayed cleanly over 15 live turns, and add a step that strips `reasoning`/`function_call` blocks before a history reaches a non-OpenAI provider, summarization or any text consumer (the `responses/v1` blocks fail Ollama's converter with "Unsupported message content type"). Prove it live: the scratchpad energy-schedule prompt on `gpt-6-luna` at high effort reproduces the 400 within four conversations.
+
+**Effort:** M
+**Priority:** P2
+
+---
+
 ### Embedding calls and budget-less callers are not covered by stall detection
 
 **What:** #828 gives each chat, VLM and summarization chain member a share of the caller's budget and counts its timeouts toward a stall. `FallbackEmbeddings` (`core/fallback.py`) has neither: embedding calls carry no caller budget (`generate_embeddings` in `core/utils.py` sets no timeout) and the wrapper does not consult `ProviderStallTracker`. Calls made without `model_call_budget` (the startup tool-index build, the per-turn tool-index delta, `analyze_image` called as an agent tool) also get no per-member timeout, and `ChatOllama`/`OllamaEmbeddings` are built with no httpx timeout (`_ollama_httpx_client_kwargs` in `__init__.py`), so a hung Ollama server can still hold those calls indefinitely.

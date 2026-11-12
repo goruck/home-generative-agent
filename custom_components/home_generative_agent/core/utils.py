@@ -1848,7 +1848,6 @@ _EFFORT_LEVELS = frozenset({"minimal", "low", "medium", "high"})
 # and minimal; the other GPT-6 models accept none and no minimal.
 _GPT6_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
 _GPT6_NO_NONE_PREFIXES = ("gpt-6-astra", "gpt-6-sol", "gpt-6.1-sol")
-OPENAI_ENCRYPTED_REASONING = "reasoning.encrypted_content"
 _GPT5_MINOR_RE = re.compile(r"gpt-5\.(\d+)")
 # OpenAI: "Starting with GPT-5.4, Chat Completions does not support tool calling
 # with reasoning_effort values other than none."
@@ -1879,20 +1878,10 @@ def openai_api_configurable(model: Any) -> dict[str, Any]:
     A Responses model also gets no temperature or top_p: OpenAI's reasoning
     models accept only the default, and langchain-openai drops them for GPT-5
     only. A model on Chat Completions keeps the caller's sampling values.
-
-    A Responses model also asks for its reasoning encrypted: with ``store=False``
-    OpenAI keeps nothing, so the next turn can replay the reasoning only from
-    the encrypted copy, and without ``include`` the reply carries none.
-    Chat Completions rejects ``include``, so it is cleared there.
     """
     if not openai_uses_responses_api(model):
-        return {"use_responses_api": False, "include": None}
-    return {
-        "use_responses_api": True,
-        "temperature": None,
-        "top_p": None,
-        "include": [OPENAI_ENCRYPTED_REASONING],
-    }
+        return {"use_responses_api": False}
+    return {"use_responses_api": True, "temperature": None, "top_p": None}
 
 
 def _thinking_openai(

@@ -48,9 +48,17 @@ set reasoning_effort to 'none'."
    tool-call parsing, token counting, checkpoint replay on the next turn (reasoning items kept for
    OpenAI), and the fallback chain (reasoning items stripped before the history goes to
    Anthropic, Ollama or Gemini). `output_version` is the expected lever.
-4. **Storage (approved).** `store=False`. Reasoning still carries across turns from the
-   encrypted reasoning items in our own checkpoint, and nothing is kept at OpenAI. Same privacy
-   as today on Chat Completions.
+4. **Storage (approved).** `store=False`: nothing is kept at OpenAI. Same privacy as today on
+   Chat Completions.
+   **Reasoning replay (changed 2026-11-11 after the live test).** The plan was to replay the
+   encrypted reasoning items from our checkpoint. Live, GPT-6 often returns several reasoning
+   items in one reply (4-8 on a multi-step tool task), and the `v0` output format holds one per
+   message: streaming concatenates their encrypted contents, and the next tool turn gets 400
+   `invalid_encrypted_content` (reproduced on `gpt-6-luna`; OpenAI returns the encrypted copy
+   with `store=False` whether or not `include` asks for it). `responses/v1` keeps the items
+   apart and replayed cleanly over 15 live turns, but its blocks break the Ollama fallback.
+   Decision (Lindo): don't replay. `core/openai_client.py` drops reasoning items from every
+   Responses request and from the reply. Replay is a TODOS.md follow-up.
 5. **Model lists.** Add the documented IDs to the OpenAI chat, image-analysis, summarization and
    Sentinel lists where they fit. The recommended default stays `gpt-5`.
 

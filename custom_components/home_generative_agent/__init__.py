@@ -336,6 +336,7 @@ from .core.lifecycle import (
     defer_start_until_hass_started,
 )
 from .core.migrations import migrate_person_gallery
+from .core.openai_client import StatelessReasoningChatOpenAI
 from .core.openai_preload import preload_openai_resources
 from .core.person_gallery import PersonGalleryDAO
 from .core.pipeline_guard import async_clear_pin_pipeline_issue
@@ -2172,11 +2173,12 @@ def build_openai_chat(
     blocks and carries its reasoning items in ``additional_kwargs``: a history
     checkpointed on OpenAI then still converts for an Ollama, Anthropic or Gemini
     fallback (the default content blocks fail Ollama's converter), and the next
-    OpenAI turn still replays the reasoning. ``store=False`` keeps nothing at
-    OpenAI: the checkpointer owns the history, and reasoning replays from its
-    encrypted items, which a Responses call asks for through ``include``.
+    OpenAI turn still parses. ``store=False`` keeps nothing at OpenAI: the
+    checkpointer owns the history. Reasoning items are not sent back
+    (core.openai_client): the v0 format cannot hold the several a GPT-6 reply
+    returns.
     """
-    return ChatOpenAI(
+    return StatelessReasoningChatOpenAI(
         api_key=api_key,
         timeout=120,
         http_client=http_client,
@@ -2193,7 +2195,6 @@ def build_openai_chat(
         top_p=ConfigurableField(id="top_p"),
         max_tokens=ConfigurableField(id="max_tokens"),
         reasoning_effort=ConfigurableField(id="reasoning_effort"),
-        include=ConfigurableField(id="include"),
     )
 
 
