@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
 
+from custom_components.home_generative_agent.core.stop_latch import StopLatch
+
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
@@ -22,6 +24,7 @@ class DiscoveryStore:
         self._store = Store(hass, STORE_VERSION, STORE_KEY)
         self._records: list[dict[str, Any]] = []
         self._max_records = max_records
+        self._latch = StopLatch("Sentinel discovery")
 
     async def async_load(self) -> None:
         """Load discovery records from storage."""
@@ -32,8 +35,22 @@ class DiscoveryStore:
         if isinstance(data, list):
             self._records = list(data)
 
+    def close(self, latch: StopLatch | None = None) -> None:
+        """
+        Refuse later saves; called once the discovery loop has stopped.
+
+        A cycle that outlived the stop must not save over the records the
+        reloaded entry's store loads from the same file (#988).
+        """
+        if latch is not None:
+            # The owner's latch, so one stop logs one warning.
+            self._latch = latch
+        self._latch.close()
+
     async def async_save(self) -> None:
         """Persist discovery records."""
+        if self._latch.refuses("discovery record save"):
+            return
         try:
             await self._store.async_save(self._records)
         except (HomeAssistantError, OSError, ValueError):

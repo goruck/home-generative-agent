@@ -763,7 +763,10 @@ async def _trigger_sentinel_discovery(entry: HGAConfigEntry) -> dict[str, Any]:
     if discovery_engine is None:
         return {"status": "unavailable"}
     started = await discovery_engine.async_run_now()
-    return {"status": "ok" if started else "busy"}
+    if started:
+        return {"status": "ok"}
+    # A stopped engine (a reload or shutdown in progress) is not busy (#986).
+    return {"status": "unavailable" if discovery_engine.stopped else "busy"}
 
 
 async def _promote_discovery_candidate(  # noqa: PLR0911, PLR0912
@@ -4511,8 +4514,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     # ConfigEntries._async_shutdown only calls entry.async_shutdown(), which
     # cancels retry setup — so this stays the only stop path for a still-loaded
     # entry. Note it is deliberately NARROWER than async_unload_entry: the
-    # video analyzer, the notifier, and the DB pool are not torn down here,
-    # because the process is exiting anyway.
+    # video analyzer and the DB pool are not torn down here, because the
+    # process is exiting anyway (sentinel.stop() does stop the notifier, #988).
     #
     # Wrapped in async_on_unload because it was previously registered
     # unconditionally on every setup and never removed: each reload added

@@ -18,6 +18,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
     SENTINEL_TRIAGE_CALL_GAP_S,
 )
+from custom_components.home_generative_agent.core.stop_latch import StopLatch
 from custom_components.home_generative_agent.core.utils import (
     SENTINEL_ADMISSION_TIMEOUT_S,
     SentinelLLMDeferredError,
@@ -324,6 +325,12 @@ class SentinelDiscoveryEngine:
         # config-entry setup, so once it has been stopped it must never run
         # again — see the note in start().
         self._stopped = False
+        # Closed once stop() has stopped waiting (#988): a cycle left behind
+        # saves no records and cleans up no proposals. Proposal approvals
+        # are the user's and are not latched.
+        self._latch = StopLatch("Sentinel discovery")
+        # The manual run in progress (async_run_now), stopped with the loop.
+        self._run_now_task: asyncio.Task[bool] | None = None
 
     def start(self) -> None:
         """Start the discovery loop."""
@@ -345,18 +352,32 @@ class SentinelDiscoveryEngine:
         self._stop_event.clear()
         self._task = self._hass.async_create_task(self._run_loop())
 
+    @property
+    def stopped(self) -> bool:
+        """Return True once stop() has been called; it cannot start again."""
+        return self._stopped
+
     async def stop(self) -> None:
         """Stop the discovery loop."""
         # Latch before the not-started early return, not after: the entry that
         # never started is exactly the one whose deferred start is still armed.
         self._stopped = True
 
-        if self._task is None:
-            return
-        self._stop_event.set()
-        # Bounded, and a cancel of this caller gets through (#985).
-        await cancel_and_wait(self._task, "Sentinel discovery loop")
-        self._task = None
+        try:
+            if self._task is not None:
+                self._stop_event.set()
+                # Bounded, and a cancel of this caller gets through (#985).
+                await cancel_and_wait(self._task, "Sentinel discovery loop")
+                self._task = None
+            await cancel_and_wait(self._run_now_task, "Sentinel discovery manual run")
+        finally:
+            # A stop whose caller was cancelled before that wait still
+            # cancels the manual run.
+            if self._run_now_task is not None:
+                self._run_now_task.cancel()
+            # A cycle left behind by the bounded wait saves nothing (#988).
+            self._latch.close()
+            self._store.close(self._latch)
 
     async def _run_loop(self) -> None:
         interval = _coerce_int(
@@ -389,16 +410,49 @@ class SentinelDiscoveryEngine:
                 continue
 
     async def async_run_now(self) -> bool:
-        """Run one discovery cycle immediately if idle."""
-        if self._run_lock.locked():
+        """
+        Run one discovery cycle immediately if idle.
+
+        Returns False when a cycle is in progress or discovery has stopped: a
+        manual run during a reload or shutdown must not run on the stopped
+        engine (#986).
+        """
+        if self._stopped:
+            LOGGER.debug("Discovery stopped; skipping manual trigger.")
+            return False
+        if self._run_lock.locked() or self._run_now_task is not None:
+            # The task takes the lock only once it starts: a manual run
+            # already started counts as busy too.
             LOGGER.debug("Discovery run already in progress; skipping manual trigger.")
             return False
-        await self._run_once_guarded()
-        return True
+        # In a task of its own, so stop() cancels and waits for it like the
+        # loop's cycle (#988). Forgotten when it ends, not when the caller
+        # stops waiting: a run that caught its cancel is still one to end.
+        task = asyncio.create_task(
+            self._run_once_guarded(), name="Sentinel discovery manual run"
+        )
+        self._run_now_task = task
+        task.add_done_callback(self._forget_run_now)
+        try:
+            await asyncio.wait([task])
+        except asyncio.CancelledError:
+            # The caller was cancelled: so is the run, bounded as a stop is.
+            await cancel_and_wait(task, "Sentinel discovery manual run")
+            raise
+        return False if task.cancelled() else task.result()
 
-    async def _run_once_guarded(self) -> None:
+    def _forget_run_now(self, task: asyncio.Task[bool]) -> None:
+        """Drop the finished manual run, once it has really ended."""
+        if self._run_now_task is task:
+            self._run_now_task = None
+
+    async def _run_once_guarded(self) -> bool:
+        """Run one cycle under the lock; False when discovery stopped meanwhile."""
         async with self._run_lock:
+            if self._stopped:
+                return False
             await self._run_once()
+        return True
 
     @property
     def discovery_cycle_stats(self) -> dict[str, int]:
@@ -445,7 +499,9 @@ class SentinelDiscoveryEngine:
         # Bug 3 fix: prune stale unsupported proposals before building exclusion
         # context so they stop blocking the card indefinitely.  Wrapped in
         # try/except so a cleanup failure never aborts the discovery cycle.
-        if self._proposal_store is not None:
+        if self._proposal_store is not None and not self._latch.refuses(
+            "proposal cleanup"
+        ):
             try:
                 expired = await self._proposal_store.cleanup_unsupported_ttl()
                 if expired:

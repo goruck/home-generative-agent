@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -22,6 +23,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS,
     SNOOZE_PERMANENT,
 )
+from custom_components.home_generative_agent.core.stop_latch import StopLatch
 from custom_components.home_generative_agent.sentinel import engine as engine_module
 from custom_components.home_generative_agent.sentinel.engine import (
     SentinelEngine,
@@ -68,6 +70,7 @@ class DummySuppression(SuppressionManager):
     """Suppression manager stub."""
 
     def __init__(self) -> None:  # type: ignore[override]
+        self._latch = StopLatch("Sentinel")
         self._state = SuppressionState()
         self._read_only = False
 
@@ -85,6 +88,9 @@ class DummySuppression(SuppressionManager):
 
 class DummyNotifier:
     """Notification dispatcher stub."""
+
+    def stop(self) -> None:
+        """Unsubscribe; nothing to unsubscribe here."""
 
     def set_silence_check(self, check: object) -> None:
         """Accept the engine's level-0 check; unused by this stub."""
@@ -109,6 +115,9 @@ class DummyNotifier:
 
 class DummyAudit:
     """Audit store stub."""
+
+    def close(self) -> None:
+        """Refuse later sends or writes; nothing to refuse here."""
 
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
@@ -570,6 +579,24 @@ async def test_live_auto_execute_calls_ha_service(
         {"entity_id": "lock.front_door"},
         blocking=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_engine_auto_executes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run left behind by the stop runs no action through dispatch (#988)."""
+    engine, hass = _make_ae_engine(monkeypatch)
+    audit = cast("DummyAudit", cast("Any", engine)._audit_store)
+    engine._latch.close()  # what stop() does once its wait is over
+
+    # Every action refused: the run ends before the cooldown and audit, so
+    # the reloaded engine sees the finding as new and acts on it.
+    with pytest.raises(asyncio.CancelledError):
+        await engine._run_once()
+
+    hass.services.async_call.assert_not_called()
+    assert audit.calls == []
 
 
 @pytest.mark.asyncio

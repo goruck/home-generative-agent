@@ -51,6 +51,7 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
     RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS,
 )
+from custom_components.home_generative_agent.core.stop_latch import StopLatch
 from custom_components.home_generative_agent.core.utils import (
     cancel_and_wait,
     cancel_requested,
@@ -381,6 +382,10 @@ WHERE entity_id NOT LIKE 'network.%%'
 """
 
 
+class _UpdaterStoppedError(Exception):
+    """The updater stopped during a write; its transaction rolls back (#988)."""
+
+
 class SentinelBaselineUpdater:
     """
     Independent background task that maintains rolling baselines in PostgreSQL.
@@ -406,6 +411,11 @@ class SentinelBaselineUpdater:
         # config-entry setup, so once it has been stopped it must never run
         # again — see the note in start().
         self._stopped = False
+        # Closed once stop() has stopped waiting (#988); see _check_open.
+        self._latch = StopLatch("Sentinel baseline updater")
+        # Bumped by every reset: a write that a reset overtook during its
+        # commit establishes nothing (see _write_samples).
+        self._reset_generation = 0
         # entity_ids that crossed MIN_SAMPLES (no re-notification on restart).
         self._established: set[str] = set()
         # In-memory Welford state for DOW slots: key = "entity_id:dow:hour",
@@ -536,12 +546,28 @@ class SentinelBaselineUpdater:
         # never started is exactly the one whose deferred start is still armed.
         self._stopped = True
 
-        if self._task is None:
-            return
-        self._stop_event.set()
-        # Bounded, and a cancel of this caller gets through (#985).
-        await cancel_and_wait(self._task, "Sentinel baseline updater")
-        self._task = None
+        try:
+            if self._task is None:
+                return
+            self._stop_event.set()
+            # Bounded, and a cancel of this caller gets through (#985).
+            await cancel_and_wait(self._task, "Sentinel baseline updater")
+            self._task = None
+        finally:
+            # A write left behind by the bounded wait (a stalled database
+            # call released later) commits nothing beside the reloaded
+            # entry's updater (#988).
+            self._latch.close()
+
+    def _check_open(self) -> None:
+        """
+        Raise inside a write's transaction once the updater has stopped (#988).
+
+        The pool's connections autocommit, so each write runs in an explicit
+        transaction: raising here, at its end, rolls the whole write back.
+        """
+        if self._latch.refuses("baseline write"):
+            raise _UpdaterStoppedError
 
     # ---------------------------------------------------------------------- #
     # Run loop
@@ -627,12 +653,18 @@ class SentinelBaselineUpdater:
             return
         self._last_counter_prune = now
         try:
-            async with self._pool.connection() as conn, conn.cursor() as cur:
+            async with (
+                self._pool.connection() as conn,
+                conn.transaction(),
+                conn.cursor() as cur,
+            ):
                 await cur.execute(
                     _PRUNE_COUNTERS_SQL,
                     (f"{NETWORK_COUNTER_PREFIX}%", COUNTER_ROW_RETENTION_DAYS),
                 )
-                await conn.commit()
+                self._check_open()
+        except _UpdaterStoppedError:
+            return
         except Exception:  # noqa: BLE001
             LOGGER.debug("Counter baseline prune failed; will retry tomorrow.")
 
@@ -679,15 +711,21 @@ class SentinelBaselineUpdater:
         sit stale forever and count as such on the health sensor.
         """
         try:
-            async with self._pool.connection() as conn, conn.cursor() as cur:
+            async with (
+                self._pool.connection() as conn,
+                conn.transaction(),
+                conn.cursor() as cur,
+            ):
                 await cur.execute(_DELETE_ENTITIES_SQL, (entity_ids,))
-                await conn.commit()
+                self._check_open()
+        except _UpdaterStoppedError:
+            return
         except Exception:  # noqa: BLE001
             LOGGER.debug("Could not prune router sensor baseline rows; retrying later.")
             return
         self._router_rows_pruned = True
 
-    async def _write_samples(
+    async def _write_samples(  # noqa: PLR0912, PLR0915
         self,
         entity_values: dict[str, float],
         snapshot: FullStateSnapshot | None,
@@ -726,8 +764,17 @@ class SentinelBaselineUpdater:
             )
         )
 
+        # The write is one transaction: if it rolls back, the day-of-week
+        # sums it advanced in memory go back too, or the next write would
+        # store a sample the database never kept (#988 review).
+        dow_before = dict(self._dow_state)
+        generation = self._reset_generation
         try:
-            async with self._pool.connection() as conn, conn.cursor() as cur:
+            async with (
+                self._pool.connection() as conn,
+                conn.transaction(),
+                conn.cursor() as cur,
+            ):
                 # Collect sample_count from RETURNING clause — eliminates N+1 SELECTs.
                 rolling_sample_counts: dict[str, int] = {}
 
@@ -793,7 +840,7 @@ class SentinelBaselineUpdater:
                             (entity_id, dow_std_metric, dow_stddev, dow_count, now),
                         )
 
-                await conn.commit()
+                self._check_open()
 
                 # Check establishment crossings using RETURNING sample_count values.
                 established: list[str] = []
@@ -801,11 +848,23 @@ class SentinelBaselineUpdater:
                     if entity_id in self._established:
                         continue
                     if count >= min_samples:
-                        self._established.add(entity_id)
                         established.append(entity_id)
+        except _UpdaterStoppedError:
+            self._dow_state = dow_before
+            return
+        except asyncio.CancelledError:
+            self._dow_state = dow_before
+            raise
         except Exception:
+            self._dow_state = dow_before
             LOGGER.exception("Baseline DB write failed.")
             return
+        # Only once committed: a write that rolled back establishes nothing,
+        # and nor does one a reset overtook while it committed (the reset
+        # deleted what it wrote).
+        if self._reset_generation != generation:
+            established = []
+        self._established.update(established)
 
         # Notices go out after the commit, outside the connection. The network
         # counters (snapshot None) are established like entities but raise no
@@ -1197,6 +1256,7 @@ class SentinelBaselineUpdater:
                     await cur.execute(_DELETE_ALL_SQL)
                 deleted = cur.rowcount if cur.rowcount is not None else 0
                 await conn.commit()
+                self._reset_generation += 1
                 # Update in-memory state only after the DB commit succeeds.
                 if entity_id is not None:
                     self._established.discard(entity_id)

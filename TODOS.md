@@ -632,19 +632,6 @@ v3.41.1 rather than deferred; see the TODO above.
 
 ---
 
-### A Sentinel batch held at unload is never sent but is audited as delivered
-
-**What:** `SentinelNotifier.async_notify` (`sentinel/notifier.py`) holds non-high findings past the rate limit in `_held_batch` and returns True, so the engine audits them `not_suppressed`. `stop()` cancels the batch timer without flushing, so findings held when the entry unloads or reloads are never pushed, yet they stay counted in the daily digest and the health sensor's notification KPIs, and are protected from eviction. A batch summary that does go out also carries no per-finding action buttons.
-
-**Why:** Pre-existing; found in the review of the audit store fix (Claude adversarial and Codex both flagged it). Rare: it needs a reload inside the 30-second batch window after a rate-limit burst. The engine also persists the finding's pending prompt before the push, so the lost finding stays held for the prompt TTL (4 h) instead of retrying after its cooldown; since #723 made `entity_state_duration` / `entity_staleness` ids stable within an episode, those standing conditions are held this way too (Codex, #723 review).
-
-**How to apply:** Either flush `_held_batch` from `stop()` (schedule `_async_flush_batch` before clearing the handle), or return a third state for held findings and audit them under a distinct reason code that the batch flush settles; either way, resolve the pending prompt of a finding whose push never left. Pin it with a test that reloads with a held batch.
-
-**Effort:** S
-**Priority:** P3
-
----
-
 ### A grouped push that fails to deliver still holds every finding it named
 
 **What:** `_dispatch_compound` (`sentinel/engine.py`) registers the shown finding and every finding the "Also: ..." line named as pending prompts once `SentinelNotifier.async_notify` returns. The notifier calls the notify service with `blocking=False` and returns True once the call is scheduled, and the mobile_app notify service swallows push errors, so a push that never reached the phone still holds all of them for the prompt TTL (4 h) with nothing logged.
@@ -2174,6 +2161,20 @@ label pair ("Server URL" vs "Base URL").
 
 **Effort:** S
 **Priority:** P2
+**Depends on:** —
+
+---
+
+### A Sentinel write already under way when its stop gives up still lands
+
+**What:** The #988 `StopLatch` (`core/stop_latch.py`) is checked before a write or action starts. A left-behind run's save, database commit or service call that was already in flight when the stop stopped waiting still finishes: a suppression, inventory or discovery `Store.async_save` can then overwrite the reloaded entry's file, or recreate an inventory removing Sentinel has just deleted; a baseline transaction already committing commits; an auto-execute call already running actuates, and its audit row and cooldown are then refused; a notification button handler already running when the notifier stops has its closing saves refused (the latch warning then names a write it did not start). Pushes from a left-behind run are deliberately not latched (a refused push loses an alert whose cooldown was saved earlier).
+
+**Why:** Codex adversarial pass, review cycle 2 of the #988 PR (2026-11-12); reproduced with controlled probes. Lindo chose to ship the latch and record this: a left-behind run is almost always stuck in an LLM call, so its writes start after the close and are refused, and the window is a write in flight at that exact moment.
+
+**How to apply:** Give each per-setup store (suppression, audit, auth and network inventory, discovery, proposal) a pending-write tracker and have `async_unload_entry` and the Sentinel-removal path (`_forget_network_audit`) drain it, bounded, after the engine stops and before the replacement setup or the inventory reset runs. For the baseline, hold the transaction's commit behind the same drain. Track `ActionHandler` tasks in the notifier and wait for them in `stop()`. Record an auto-execute intent before dispatch so a completed action is audited independently of the closed run.
+
+**Effort:** M
+**Priority:** P3
 **Depends on:** —
 
 ---

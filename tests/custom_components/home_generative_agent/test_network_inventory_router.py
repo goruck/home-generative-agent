@@ -15,6 +15,7 @@ import custom_components.home_generative_agent as _hga
 from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_NETWORK_UNKNOWN_DEVICE_GRACE_MIN,
 )
+from custom_components.home_generative_agent.core.stop_latch import StopLatch
 from custom_components.home_generative_agent.sentinel.engine import SentinelEngine
 from custom_components.home_generative_agent.sentinel.network_inventory import (
     ROUTER_SOURCE,
@@ -234,6 +235,7 @@ def test_unknown_device_findings_get_the_trust_button() -> None:
 
 class _Suppression(SuppressionManager):
     def __init__(self) -> None:  # type: ignore[override]
+        self._latch = StopLatch("Sentinel")
         self._state = SuppressionState()
 
     @property
@@ -249,6 +251,9 @@ class _Suppression(SuppressionManager):
 
 
 class _Notifier:
+    def stop(self) -> None:
+        """Unsubscribe; nothing to unsubscribe here."""
+
     def set_silence_check(self, check: object) -> None:
         """Accept the engine's level-0 check; unused by this stub."""
         del check
@@ -261,6 +266,9 @@ class _Notifier:
 
 
 class _Audit:
+    def close(self) -> None:
+        """Refuse later sends or writes; nothing to refuse here."""
+
     async def async_append_finding(self, *_a: Any, **_kw: Any) -> None:
         return None
 

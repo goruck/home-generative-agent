@@ -230,6 +230,8 @@ class SentinelNotifier:
         self._cooldown_times: dict[str, datetime] = {}
         # Daily digest time-change unsubscribe handle.
         self._digest_unsub: Callable[[], None] | None = None
+        # Set by stop(); see the batching branch of async_notify.
+        self._stopped = False
         # Task spawned by the daily digest callback; kept so stop() can cancel it.
         self._digest_task: asyncio.Task[None] | None = None
         # True while Sentinel is at autonomy level 0 (set by the engine).
@@ -281,12 +283,17 @@ class SentinelNotifier:
 
     def stop(self) -> None:
         """Unsubscribe from action events and cancel the daily digest timer."""
+        self._stopped = True
         if self._unsub is not None:
             self._unsub()
             self._unsub = None
         if self._batch_cancel is not None:
             self._batch_cancel()
             self._batch_cancel = None
+        if self._held_batch:
+            # Sent now, not dropped: async_notify counted these as sent, so
+            # the audit and the saved cooldowns say they reached the user.
+            self._async_flush_batch()
         if self._digest_unsub is not None:
             self._digest_unsub()
             self._digest_unsub = None
@@ -324,8 +331,7 @@ class SentinelNotifier:
         Returns False when the push was dropped as a repeat of the same
         anomaly within the per-finding cooldown, so the audit does not count
         it as reaching the user. True when it was sent or held for the next
-        batch; a batch still held when ``stop`` runs is not sent (see
-        TODOS.md).
+        batch; a batch still held when ``stop`` runs is sent then.
         """
         # Register finding with the action handler so execute/handoff work.
         self._action_handler.register_finding(finding)
@@ -387,6 +393,10 @@ class SentinelNotifier:
             ]
             if (
                 len(self._notification_times) >= _BATCH_RATE_LIMIT
+                # A stopped notifier holds nothing: a push from a run that
+                # outlived Sentinel's stop goes out now, never from a timer
+                # left on the old notifier (#988).
+                and not self._stopped
                 and not also_line
                 and not canary_line
                 and finding.type not in CHANGE_ALERT_RULE_TYPES
