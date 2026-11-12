@@ -29,6 +29,7 @@ from custom_components.home_generative_agent.const import (
     NETWORK_AUDIT_TOOL_MAX_SUMMARY_CHARS,
     NETWORK_AUDIT_TOOL_PROMPT,
 )
+from custom_components.home_generative_agent.core.stop_latch import StopLatch
 from custom_components.home_generative_agent.sentinel.engine import SentinelEngine
 from custom_components.home_generative_agent.sentinel.network_audit import (
     PRIVACY_NOTES,
@@ -82,6 +83,7 @@ class DummySuppression(SuppressionManager):
     """Suppression manager stub."""
 
     def __init__(self) -> None:  # type: ignore[override]
+        self._latch = StopLatch("Sentinel")
         self._state = SuppressionState()
 
     @property
@@ -99,6 +101,9 @@ class DummySuppression(SuppressionManager):
 class DummyNotifier:
     """Notifier stub recording every dispatched finding."""
 
+    def close(self) -> None:
+        """Refuse later sends or writes; nothing to refuse here."""
+
     def set_silence_check(self, check: object) -> None:
         """Accept the engine's level-0 check; unused by this stub."""
         del check
@@ -112,6 +117,9 @@ class DummyNotifier:
 
 class DummyAudit:
     """Audit store stub recording every appended finding."""
+
+    def close(self) -> None:
+        """Refuse later sends or writes; nothing to refuse here."""
 
     def __init__(self) -> None:
         self.calls: list[Any] = []

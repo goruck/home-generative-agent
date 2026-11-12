@@ -351,12 +351,19 @@ class SentinelDiscoveryEngine:
         # never started is exactly the one whose deferred start is still armed.
         self._stopped = True
 
-        if self._task is None:
-            return
-        self._stop_event.set()
-        # Bounded, and a cancel of this caller gets through (#985).
-        await cancel_and_wait(self._task, "Sentinel discovery loop")
-        self._task = None
+        try:
+            if self._task is None:
+                return
+            self._stop_event.set()
+            # Bounded, and a cancel of this caller gets through (#985).
+            await cancel_and_wait(self._task, "Sentinel discovery loop")
+            self._task = None
+        finally:
+            # A cycle left behind by the bounded wait, or an on-demand one
+            # (not waited for), saves no records or proposals (#988).
+            self._store.close()
+            if self._proposal_store is not None:
+                self._proposal_store.close()
 
     async def _run_loop(self) -> None:
         interval = _coerce_int(
@@ -389,16 +396,28 @@ class SentinelDiscoveryEngine:
                 continue
 
     async def async_run_now(self) -> bool:
-        """Run one discovery cycle immediately if idle."""
+        """
+        Run one discovery cycle immediately if idle.
+
+        Returns False when a cycle is in progress or discovery has stopped: a
+        manual run during a reload or shutdown must not run on the stopped
+        engine (#986).
+        """
+        if self._stopped:
+            LOGGER.debug("Discovery stopped; skipping manual trigger.")
+            return False
         if self._run_lock.locked():
             LOGGER.debug("Discovery run already in progress; skipping manual trigger.")
             return False
-        await self._run_once_guarded()
-        return True
+        return await self._run_once_guarded()
 
-    async def _run_once_guarded(self) -> None:
+    async def _run_once_guarded(self) -> bool:
+        """Run one cycle under the lock; False when discovery stopped meanwhile."""
         async with self._run_lock:
+            if self._stopped:
+                return False
             await self._run_once()
+        return True
 
     @property
     def discovery_cycle_stats(self) -> dict[str, int]:

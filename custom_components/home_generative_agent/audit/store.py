@@ -190,8 +190,24 @@ class AuditStore:
         the reloaded entry's store has written since. Such a late record is
         dropped instead, as it was before saves were delayed.
         """
-        self._closed = True
+        self.close()
         await self.async_save()
+
+    def close(self) -> None:
+        """
+        Refuse later changes without writing; ``async_close`` also writes.
+
+        Called once the Sentinel engine has stopped, so a run that outlived
+        the stop (#988) changes nothing that the unload's final write would
+        then save.
+        """
+        self._closed = True
+
+    def _refuses(self, change: str) -> bool:
+        """Return True when the store is closed and *change* is dropped."""
+        if self._closed:
+            LOGGER.debug("Audit store closed; dropped a late %s", change)
+        return self._closed
 
     def _records_for_write(self) -> list[dict[str, Any]]:
         """Return the records for a delayed write and open the next window."""
@@ -242,6 +258,8 @@ class AuditStore:
         constituent's anomaly id to its own suppression reason code, so a
         push that left a partner out says why (issue #732).
         """
+        if self._refuses("finding record"):
+            return
         notification: dict[str, Any] = {
             "explanation": explanation,
             "notified_at": _now_iso(),
@@ -338,6 +356,8 @@ class AuditStore:
         explicitly marked suppressed.  Falls back to the newest match of any
         kind so responses are never dropped.
         """
+        if self._refuses("user response"):
+            return
         notified_match: dict[str, Any] | None = None
         unknown_match: dict[str, Any] | None = None
         suppressed_match: dict[str, Any] | None = None

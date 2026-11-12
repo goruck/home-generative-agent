@@ -13,6 +13,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
 )
+from custom_components.home_generative_agent.core.stop_latch import StopLatch
 from custom_components.home_generative_agent.sentinel.engine import (
     SentinelEngine,
     _parse_rule_entity_exclusions,
@@ -42,6 +43,7 @@ class DummySuppression(SuppressionManager):
     """Suppression manager stub."""
 
     def __init__(self) -> None:  # type: ignore[override]
+        self._latch = StopLatch("Sentinel")
         self._state = SuppressionState()
         self._read_only = False
 
@@ -60,6 +62,9 @@ class DummySuppression(SuppressionManager):
 class DummyNotifier:
     """Notification dispatcher stub."""
 
+    def close(self) -> None:
+        """Refuse later sends or writes; nothing to refuse here."""
+
     def set_silence_check(self, check: object) -> None:
         """Accept the engine's level-0 check; unused by this stub."""
         del check
@@ -73,6 +78,9 @@ class DummyNotifier:
 
 class DummyAudit:
     """Audit store stub."""
+
+    def close(self) -> None:
+        """Refuse later sends or writes; nothing to refuse here."""
 
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []

@@ -19,6 +19,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
     RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
 )
+from custom_components.home_generative_agent.core.stop_latch import StopLatch
 from custom_components.home_generative_agent.core.utils import hash_pin
 from custom_components.home_generative_agent.sentinel import engine as engine_module
 from custom_components.home_generative_agent.sentinel.engine import (
@@ -50,6 +51,7 @@ class DummySuppression(SuppressionManager):
     """Minimal suppression manager stub."""
 
     def __init__(self) -> None:  # type: ignore[override]
+        self._latch = StopLatch("Sentinel")
         self._state = SuppressionState()
 
     @property
@@ -63,6 +65,9 @@ class DummySuppression(SuppressionManager):
 class DummyNotifier:
     """Minimal notification dispatcher stub."""
 
+    def close(self) -> None:
+        """Refuse later sends or writes; nothing to refuse here."""
+
     def set_silence_check(self, check: object) -> None:
         """Accept the engine's level-0 check; unused by this stub."""
         del check
@@ -73,6 +78,9 @@ class DummyNotifier:
 
 class DummyAudit:
     """Minimal audit store stub."""
+
+    def close(self) -> None:
+        """Refuse later sends or writes; nothing to refuse here."""
 
     async def async_append_finding(
         self, snapshot: Any, finding: Any, explanation: Any, **kwargs: Any

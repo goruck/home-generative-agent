@@ -53,6 +53,7 @@ from custom_components.home_generative_agent.const import (
     SNOOZE_24H,
     SNOOZE_PERMANENT,
 )
+from custom_components.home_generative_agent.core.stop_latch import StopLatch
 from custom_components.home_generative_agent.core.utils import extract_final
 from custom_components.home_generative_agent.sentinel.hvac_context import (
     hvac_explained_by,
@@ -230,6 +231,7 @@ class SentinelNotifier:
         self._cooldown_times: dict[str, datetime] = {}
         # Daily digest time-change unsubscribe handle.
         self._digest_unsub: Callable[[], None] | None = None
+        self._latch = StopLatch("Sentinel")
         # Task spawned by the daily digest callback; kept so stop() can cancel it.
         self._digest_task: asyncio.Task[None] | None = None
         # True while Sentinel is at autonomy level 0 (set by the engine).
@@ -279,6 +281,16 @@ class SentinelNotifier:
                 second=0,
             )
 
+    def close(self) -> None:
+        """
+        Refuse later pushes, records, batches and digests (#988).
+
+        Called once the engine has stopped: a run that outlived the stop must
+        not alert beside the reloaded entry's engine. Button presses are
+        unaffected until ``stop`` unsubscribes them.
+        """
+        self._latch.close()
+
     def stop(self) -> None:
         """Unsubscribe from action events and cancel the daily digest timer."""
         if self._unsub is not None:
@@ -323,10 +335,12 @@ class SentinelNotifier:
 
         Returns False when the push was dropped as a repeat of the same
         anomaly within the per-finding cooldown, so the audit does not count
-        it as reaching the user. True when it was sent or held for the next
-        batch; a batch still held when ``stop`` runs is not sent (see
-        TODOS.md).
+        it as reaching the user, and once ``close`` has run. True when it was
+        sent or held for the next batch; a batch still held when ``stop`` runs
+        is not sent (see TODOS.md).
         """
+        if self._latch.refuses("notification"):
+            return False
         # Register finding with the action handler so execute/handoff work.
         self._action_handler.register_finding(finding)
 
@@ -586,7 +600,7 @@ class SentinelNotifier:
         self._batch_cancel = None
         held = self._held_batch[:]
         self._held_batch.clear()
-        if not held:
+        if not held or self._latch.refuses("held batch"):
             return
         if self._silenced():
             # Counted as sent when they were held, so say what was dropped,
@@ -676,7 +690,7 @@ class SentinelNotifier:
 
     async def _async_run_daily_digest(self) -> None:
         """Fetch the last 24 hours of notified findings and push a summary."""
-        if self._audit_store is None:
+        if self._audit_store is None or self._latch.refuses("daily digest"):
             return
         if self._silenced():
             LOGGER.debug("Sentinel is at autonomy level 0; no daily digest.")

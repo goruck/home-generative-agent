@@ -10,6 +10,8 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
+from custom_components.home_generative_agent.core.stop_latch import StopLatch
+
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
@@ -29,6 +31,7 @@ class ProposalStore:
         """Initialize persistent proposal storage."""
         self._store = Store(hass, STORE_VERSION, STORE_KEY)
         self._records: list[dict[str, Any]] = []
+        self._latch = StopLatch("Sentinel discovery")
 
     async def async_load(self) -> None:
         """Load proposal drafts from storage."""
@@ -39,8 +42,19 @@ class ProposalStore:
         if isinstance(data, list):
             self._records = list(data)
 
+    def close(self) -> None:
+        """
+        Refuse later saves; called once the discovery loop has stopped.
+
+        A cycle that outlived the stop must not save over the proposals the
+        reloaded entry's store loads from the same file (#988).
+        """
+        self._latch.close()
+
     async def async_save(self) -> None:
         """Persist proposal drafts."""
+        if self._latch.refuses("proposal save"):
+            return
         try:
             await self._store.async_save(self._records)
         except (HomeAssistantError, OSError, ValueError):

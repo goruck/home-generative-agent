@@ -4346,6 +4346,26 @@ async def test_the_verifier_needs_both_builds(  # noqa: PLR0913
 
 
 @pytest.mark.asyncio
+async def test_a_stop_during_the_reads_logs_and_records_nothing(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A read the stop turned into a failure is a stop, not an unread build (#988)."""
+    entry, chain, fallbacks = _held_in_entry(
+        hass, monkeypatch, fallback_build=None, fingerprint=OLLAMA_UNREAD
+    )
+    noted = MagicMock()
+    monkeypatch.setattr(er, "_note_held_by_check", noted)
+    monkeypatch.setattr(er, "cancel_requested", lambda: True)
+
+    assert not await er.async_verify_embedding_fallback(
+        hass, entry, fallbacks, FALLBACK_ID
+    )
+    assert "does not stand in for the primary" not in caplog.text
+    noted.assert_not_called()
+    assert _chain_ids(chain) == ["p1", "p2"]
+
+
+@pytest.mark.asyncio
 async def test_the_verifier_admits_nothing_for_an_unloaded_entry(
     hass: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

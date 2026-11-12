@@ -51,6 +51,7 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
     RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS,
 )
+from custom_components.home_generative_agent.core.stop_latch import StopLatch
 from custom_components.home_generative_agent.core.utils import (
     cancel_and_wait,
     cancel_requested,
@@ -406,6 +407,8 @@ class SentinelBaselineUpdater:
         # config-entry setup, so once it has been stopped it must never run
         # again — see the note in start().
         self._stopped = False
+        # Closed once stop() has stopped waiting (#988); see _commit.
+        self._latch = StopLatch("Sentinel baseline updater")
         # entity_ids that crossed MIN_SAMPLES (no re-notification on restart).
         self._established: set[str] = set()
         # In-memory Welford state for DOW slots: key = "entity_id:dow:hour",
@@ -536,12 +539,26 @@ class SentinelBaselineUpdater:
         # never started is exactly the one whose deferred start is still armed.
         self._stopped = True
 
-        if self._task is None:
-            return
-        self._stop_event.set()
-        # Bounded, and a cancel of this caller gets through (#985).
-        await cancel_and_wait(self._task, "Sentinel baseline updater")
-        self._task = None
+        try:
+            if self._task is None:
+                return
+            self._stop_event.set()
+            # Bounded, and a cancel of this caller gets through (#985).
+            await cancel_and_wait(self._task, "Sentinel baseline updater")
+            self._task = None
+        finally:
+            # A write left behind by the bounded wait (a stalled database
+            # call released later) commits nothing beside the reloaded
+            # entry's updater (#988).
+            self._latch.close()
+
+    async def _commit(self, conn: Any) -> bool:
+        """Commit, or roll back once the updater has stopped (#988)."""
+        if self._latch.refuses("baseline write"):
+            await conn.rollback()
+            return False
+        await conn.commit()
+        return True
 
     # ---------------------------------------------------------------------- #
     # Run loop
@@ -632,7 +649,7 @@ class SentinelBaselineUpdater:
                     _PRUNE_COUNTERS_SQL,
                     (f"{NETWORK_COUNTER_PREFIX}%", COUNTER_ROW_RETENTION_DAYS),
                 )
-                await conn.commit()
+                await self._commit(conn)
         except Exception:  # noqa: BLE001
             LOGGER.debug("Counter baseline prune failed; will retry tomorrow.")
 
@@ -681,7 +698,8 @@ class SentinelBaselineUpdater:
         try:
             async with self._pool.connection() as conn, conn.cursor() as cur:
                 await cur.execute(_DELETE_ENTITIES_SQL, (entity_ids,))
-                await conn.commit()
+                if not await self._commit(conn):
+                    return
         except Exception:  # noqa: BLE001
             LOGGER.debug("Could not prune router sensor baseline rows; retrying later.")
             return
@@ -793,7 +811,8 @@ class SentinelBaselineUpdater:
                             (entity_id, dow_std_metric, dow_stddev, dow_count, now),
                         )
 
-                await conn.commit()
+                if not await self._commit(conn):
+                    return
 
                 # Check establishment crossings using RETURNING sample_count values.
                 established: list[str] = []

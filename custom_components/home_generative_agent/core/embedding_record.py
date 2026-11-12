@@ -77,6 +77,7 @@ from .fallback import (
 )
 from .utils import (
     builds_differ,
+    cancel_requested,
     fetch_ollama_model_digest,
     generate_embeddings,
     mark_tool_index_stale,
@@ -1747,8 +1748,13 @@ async def _async_check_fallback_build(  # noqa: PLR0913
         if (current is None or current.digest is None) and rd.pool is not None
         else None
     )
-    if entry.state not in ACTIVE_ENTRY_STATES or (
-        chain is not None and rd.embeddings is not chain
+    # A stop that the Ollama or database read turned into an ordinary error
+    # (a failed read) is a stop, not an unread build: nothing is logged or
+    # recorded in the Repairs issue on the way out (#988).
+    if (
+        cancel_requested()
+        or entry.state not in ACTIVE_ENTRY_STATES
+        or (chain is not None and rd.embeddings is not chain)
     ):
         return False
     # Read after the waits: the record check may have learned the primary's

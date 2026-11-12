@@ -46,6 +46,8 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
+from custom_components.home_generative_agent.core.stop_latch import StopLatch
+
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
     from datetime import datetime
@@ -191,6 +193,7 @@ class NetworkInventory:
         # commit and withhold the bootstrap announcement until it lands.
         self._dirty = False
         self._pending_announcements: list[BootstrapSummary] = []
+        self._latch = StopLatch("Sentinel")
 
     # ------------------------------------------------------------------ #
     # Persistence
@@ -221,8 +224,20 @@ class NetworkInventory:
             "posture": _valid_posture(data.get("posture")),
         }
 
+    def close(self) -> None:
+        """
+        Refuse later commits and saves; called once the engine has stopped.
+
+        A commit from a run that outlived the stop would otherwise write over
+        the reloaded entry's inventory, or recreate the file removing Sentinel
+        has just deleted (#988). ``async_reset`` still clears it.
+        """
+        self._latch.close()
+
     async def async_save(self) -> bool:
         """Persist the inventory; return False when the write failed."""
+        if self._latch.refuses("network inventory save"):
+            return False
         try:
             await self._store.async_save(self._data)
         except (HomeAssistantError, OSError, ValueError):

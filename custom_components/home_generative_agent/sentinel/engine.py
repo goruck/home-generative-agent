@@ -74,6 +74,7 @@ from custom_components.home_generative_agent.const import (
     SENTINEL_TRIAGE_CALL_GAP_S,
     SIGNAL_SENTINEL_RUN_COMPLETE,
 )
+from custom_components.home_generative_agent.core.stop_latch import StopLatch
 from custom_components.home_generative_agent.core.utils import (
     EXCLUSION_ENTRY_MAX_LEN,
     cancel_and_wait,
@@ -625,6 +626,10 @@ class SentinelEngine:
         # config-entry setup, so once it has been stopped it must never run
         # again — see the note in start().
         self._stopped = False
+        # Closed once stop() has stopped waiting for the run loop: a run that
+        # outlived the wait (#985) then runs no action (#988), and the
+        # collaborators closed with it refuse its writes and alerts.
+        self._latch = StopLatch("Sentinel")
 
     @property
     def network_audit_share_details(self) -> bool:
@@ -1396,8 +1401,34 @@ class SentinelEngine:
             for unsub in self._event_unsubscribers:
                 unsub()
             self._event_unsubscribers.clear()
+            # Once the wait is over, whether the run ended or was left behind:
+            # a run that ended within it finished its writes; one left behind
+            # must write, alert and act no more (#988). Every save is refused,
+            # so what such a run changes in memory is never stored, and the
+            # reloaded entry starts from what was saved before. An on-demand
+            # run (async_run_now) is not waited for; it is refused the same way.
+            self._close_side_effects()
             if self._baseline_updater is not None:
                 await self._baseline_updater.stop()
+
+    def _close_side_effects(self) -> None:
+        """Refuse this engine's later actions, writes and alerts (#988)."""
+        self._latch.close()
+        self._suppression.close()
+        self._notifier.close()
+        self._audit_store.close()
+        if self._auth_inventory is not None:
+            self._auth_inventory.close()
+        if self._network_inventory is not None:
+            self._network_inventory.close()
+
+    async def _auto_execute(
+        self, finding: AnomalyFinding, execution_id: str | None
+    ) -> dict[str, Any]:
+        """Run the finding's actions, unless the engine has stopped (#988)."""
+        if self._latch.refuses("auto-execute action"):
+            return {"status": "stopped", "actions": [], "execution_id": execution_id}
+        return await _auto_execute_finding(self._hass, finding, execution_id)
 
     # ---------------------------------------------------------------------- #
     # Event-driven triggering
@@ -1531,10 +1562,28 @@ class SentinelEngine:
                 continue
 
     async def async_run_now(self) -> bool:
-        """Run one sentinel evaluation cycle immediately if idle."""
-        return await self._trigger_scheduler.run_now(
-            lambda: self._timed_run("on_demand")
-        )
+        """
+        Run one sentinel evaluation cycle immediately if idle.
+
+        Returns False when a run is in progress or the engine has stopped:
+        approving a rule during a reload or shutdown must not run a cycle on
+        the stopped engine with its old options (#986). Checked again under
+        the scheduler lock, in case the stop landed meanwhile.
+        """
+        if self._stopped:
+            LOGGER.debug("SentinelEngine stopped; not running on demand.")
+            return False
+        ran = False
+
+        async def _run() -> None:
+            nonlocal ran
+            if self._stopped:
+                return
+            ran = True
+            await self._timed_run("on_demand")
+
+        accepted = await self._trigger_scheduler.run_now(_run)
+        return accepted and ran
 
     async def _timed_run(self, trigger_source: str = "poll") -> None:
         """Record run timing, call _run_once, then fire the run-complete signal."""
@@ -2780,9 +2829,7 @@ class SentinelEngine:
             exec_result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
             and not canary_mode
         ):
-            action_outcome = await _auto_execute_finding(
-                self._hass, finding, exec_result.execution_id
-            )
+            action_outcome = await self._auto_execute(finding, exec_result.execution_id)
             if exec_result.execution_id is not None and action_outcome["status"] in {
                 "success",
                 "partial",
@@ -2998,9 +3045,7 @@ class SentinelEngine:
             exec_result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
             and not canary_mode
         ):
-            action_outcome = await _auto_execute_finding(
-                self._hass, best, exec_result.execution_id
-            )
+            action_outcome = await self._auto_execute(best, exec_result.execution_id)
             if exec_result.execution_id is not None and action_outcome["status"] in {
                 "success",
                 "partial",
