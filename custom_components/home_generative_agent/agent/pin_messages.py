@@ -51,6 +51,7 @@ from .helpers import (
     SET_POSITION_INTENT,
     STOP_MOVING_INTENT,
     TOOL_NAMESPACE_SEP,
+    another_voice_waiting,
     base_tool_name,
     intent_service_calls,
     is_actuating_intent,
@@ -160,6 +161,11 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "user's PIN. Ask for that PIN first; the user can request this one "
             "afterwards."
         ),
+        "pin_other_voice_waiting": (
+            "Not requested: another person's request on this device is waiting "
+            "for a PIN. Do not ask for a PIN; the user can make this request "
+            "again once that one is answered."
+        ),
         "pin_confirm_line": "Your PIN will confirm: {action}.",
         "pin_incorrect_line": "That PIN was incorrect.",
         "pin_request_again_line": "Make the request again.",
@@ -168,6 +174,9 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "pin_unknown_line": "PIN accepted; {action} may have run. Check the device.",
         # Ends a reply that is only the fixed line, so a satellite keeps
         # listening for the answer.
+        "pin_other_voice_waiting_line": (
+            "Another request is waiting for a PIN. Ask again after it is answered."
+        ),
         "pin_ask_line": "What is your PIN?",
         "action_lock": "lock {target}",
         "action_unlock": "unlock {target}",
@@ -301,6 +310,11 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "požádejte o PIN k té čekající akci; o tuto akci může uživatel "
             "požádat potom."
         ),
+        "pin_other_voice_waiting": (
+            "Nevyžádáno: na tomto zařízení čeká na PIN požadavek jiné osoby. "
+            "O PIN nežádejte; uživatel může tento požadavek zopakovat, až bude "
+            "ten čekající vyřízen."
+        ),
         "pin_confirm_line": "Váš PIN potvrdí: {action}.",
         "pin_incorrect_line": "Ten PIN byl nesprávný.",
         "pin_request_again_line": "Zopakujte požadavek.",
@@ -308,6 +322,9 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "pin_failed_line": "PIN přijat, ale {action} se nepodařilo.",
         "pin_unknown_line": (
             "PIN přijat; {action} možná proběhlo. Zkontrolujte zařízení."
+        ),
+        "pin_other_voice_waiting_line": (
+            "Na PIN čeká jiný požadavek. Zopakujte ten svůj, až bude vyřízen."
         ),
         "pin_ask_line": "Jaký je váš PIN?",
         "action_lock": "zamknout {target}",
@@ -410,12 +427,17 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "未发起请求：已有另一个受保护的操作正在等待用户的 PIN。"
             "请先索要那个 PIN；用户之后可以再请求这一个。"
         ),
+        "pin_other_voice_waiting": (
+            "未发起请求：此设备上另一个人的请求正在等待 PIN。不要索要 PIN；"
+            "那个请求处理完后，用户可以再次提出这一个。"
+        ),
         "pin_confirm_line": "你的 PIN 将确认：{action}。",
         "pin_incorrect_line": "PIN 不正确。",
         "pin_request_again_line": "请重新发出请求。",
         "pin_done_line": "PIN 已接受：{action}。",
         "pin_failed_line": "PIN 已接受，但{action}失败了。",
         "pin_unknown_line": "PIN 已接受；{action}可能已经执行。请检查设备。",
+        "pin_other_voice_waiting_line": "另一个请求正在等待 PIN。请在它处理完后再试。",
         "pin_ask_line": "你的 PIN 是多少？",
         "action_lock": "锁上{target}",
         "action_unlock": "解锁{target}",
@@ -492,6 +514,29 @@ def pin_msg(hass: HomeAssistant | None, key: str, /, **kwargs: Any) -> str:
     table = _MESSAGES.get(language, _MESSAGES[_DEFAULT_LANGUAGE])
     template = table.get(key) or _MESSAGES[_DEFAULT_LANGUAGE].get(key) or key
     return template.format(**kwargs) if kwargs else template
+
+
+def refused_pin_request(
+    hass: HomeAssistant | None,
+    pending_actions: Mapping[str, Mapping[str, Any]],
+    action: Mapping[str, Any],
+    configurable: Mapping[str, Any],
+) -> str:
+    """
+    Return why a protected request was not held, for the model.
+
+    Another voice's prompt that is still live refuses it (#974), and the
+    turn's reply then says so in fixed words (`PinReply.other_voice_waiting`).
+    Otherwise this turn already holds another request.
+    """
+    if another_voice_waiting(
+        pending_actions, action, pin_owner=configurable.get("pin_owner")
+    ):
+        pin_reply = configurable.get("pin_reply")
+        if pin_reply is not None:
+            pin_reply.other_voice_waiting = True
+        return pin_msg(hass, "pin_other_voice_waiting")
+    return pin_msg(hass, "pin_one_action_at_a_time")
 
 
 # Longest target name the action line repeats. The name comes from the model.

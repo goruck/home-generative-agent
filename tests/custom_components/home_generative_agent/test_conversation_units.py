@@ -173,6 +173,7 @@ from homeassistant.components import conversation as ha_conversation  # noqa: E4
 from homeassistant.util import dt as dt_util  # noqa: E402
 
 from custom_components.home_generative_agent.agent.helpers import (  # noqa: E402
+    another_voice_waiting,
     register_pending_action,
     start_pin_turn,
     waiting_pin_prompt,
@@ -3232,6 +3233,29 @@ async def test_a_confirmed_action_is_named_after_it_runs(
     )
 
 
+async def test_a_request_refused_for_another_voice_says_so_in_fixed_words(
+    frozen_assistant_content: None,  # noqa: ARG001
+) -> None:
+    """The model's own words could still ask for a PIN (#974 review)."""
+    pending: dict[str, Any] = {}
+    from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+        start_pin_turn,
+    )
+
+    reply = start_pin_turn(pending, "conv1:boris", "unlock the garage door")
+    reply.other_voice_waiting = True
+    chat_log = _DeltaChatLog([_assistant_reply("Someone else is confirming first.")])
+
+    await HGAConversationEntity._async_add_pin_lines(
+        _pin_entity(), cast("Any", chat_log), pending, reply, streamed=True
+    )
+
+    assert chat_log.content[-1].content == (
+        "Another request is waiting for a PIN. Ask again after it is answered."
+        "\n\nSomeone else is confirming first."
+    )
+
+
 async def test_a_turn_without_a_prompt_or_confirmation_is_left_alone(
     frozen_assistant_content: None,  # noqa: ARG001
 ) -> None:
@@ -3733,8 +3757,11 @@ async def test_person_id_wins_over_another_persons_name(
 
 
 def _waiting_action(thread_id: str, **fields: Any) -> dict[str, Any]:
+    # As the handler holds it: a voice's thread names its conversation.
+    voice = thread_id.split(":", 1)[0] if ":" in thread_id else None
     return {
         "thread_id": thread_id,
+        "voice_conversation": voice,
         "disclosed": True,
         "user": "ivan",
         "created_at": dt_util.utcnow().isoformat(),
@@ -3757,6 +3784,8 @@ def test_waiting_pin_prompt_is_found_on_any_voices_thread(thread: str) -> None:
         _waiting_action("conversation"),
         _waiting_action("conv:Пётр", disclosed=False),
         _waiting_action("conv:Пётр", reply_turn="t1"),
+        # A typed or automation conversation whose id has a colon is no voice.
+        _waiting_action("conv:front", voice_conversation=None),
     ],
 )
 def test_waiting_pin_prompt_ignores_prompts_nobody_can_answer(
@@ -3920,17 +3949,17 @@ def test_followed_reply_reissuing_the_request_keeps_the_owners_action() -> None:
     assert _is_wrong_user({"user_id": "Mary", "pin_owner": "ivan"}, action) is False
 
 
-def test_followed_reply_making_a_new_request_stays_the_speakers() -> None:
-    """Only the same request is the owner's; a new one is whoever asked for it."""
+def test_followed_reply_making_a_new_request_is_refused() -> None:
+    """The owner's prompt waits on that thread, so it wins (#974 review)."""
     pending: dict[str, dict[str, Any]] = {
         "a": _held_request(user="ivan", turn_id="t0", attempts=2, disclosed=True)
     }
     new = _held_request(user="Mary", turn_id="t1", tool_args={"name": "Garage"})
-    action_id = register_pending_action(pending, new, pin_owner="ivan")
-    assert action_id is not None
-    assert pending[action_id]["user"] == "Mary"
-    assert pending[action_id]["attempts"] == 0
+    assert register_pending_action(pending, new, pin_owner="ivan") is None
+    assert another_voice_waiting(pending, new, pin_owner="ivan") is True
+    assert list(pending) == ["a"]
     assert pending["a"]["user"] == "ivan"
+    assert pending["a"]["attempts"] == 2
 
 
 def test_another_users_same_request_is_not_the_owners_without_a_followed_prompt() -> (

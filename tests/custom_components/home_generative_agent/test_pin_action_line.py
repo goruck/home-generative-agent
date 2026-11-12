@@ -36,12 +36,14 @@ from custom_components.home_generative_agent.agent.helpers import (
     disclose_pin_prompts,
     keep_pin_prompts,
     parse_tool_response,
+    pin_lines_follow,
     prompts_awaiting_reply,
     register_pending_action,
     start_pin_turn,
 )
 from custom_components.home_generative_agent.agent.pin_messages import (
     describe_pending_action,
+    pin_msg,
 )
 from custom_components.home_generative_agent.agent.tools import confirm_sensitive_action
 from custom_components.home_generative_agent.const import (
@@ -617,6 +619,69 @@ def test_the_automation_request_carries_its_critical_calls() -> None:
     assert pending[payload["action_id"]]["critical_calls"] == [
         "lock.unlock (lock.front_door)"
     ]
+
+
+_AUTOMATION = {
+    "alias": "Morning",
+    "triggers": [{"trigger": "time", "at": "07:00:00"}],
+    "actions": [{"action": "lock.unlock", "target": {"entity_id": "lock.front_door"}}],
+}
+
+
+def _voice_ctx(pending: dict[str, Any], thread_id: str, text: str) -> Any:
+    """Start a voice's turn; the handler names its conversation (#974)."""
+    ctx = _ctx(pending, start_pin_turn(pending, thread_id, text))
+    ctx.config["configurable"].update(
+        {"thread_id": thread_id, "voice_conversation": "conv1"}
+    )
+    return ctx
+
+
+def _hold_through_guard(ctx: Any) -> Any:
+    return graph._critical_action_guard(
+        "HassTurnOff", dict(PLAYROOM), ctx, {"id": "c1"}
+    )
+
+
+def _hold_through_automation(ctx: Any) -> Any:
+    return tools_module._maybe_require_pin_for_automation(
+        cfg=ctx.config["configurable"],
+        validated_config=_AUTOMATION,
+        ha_automation_config=dict(_AUTOMATION, id="1"),
+    )
+
+
+def _held_id(result: Any) -> str:
+    content = result.content if hasattr(result, "content") else result
+    return json.loads(cast("str", content))["action_id"]
+
+
+@pytest.mark.parametrize("hold", [_hold_through_guard, _hold_through_automation])
+def test_a_voices_request_records_its_conversation(hold: Any) -> None:
+    """Without it the one-prompt rule cannot tell the voices apart."""
+    pending: dict[str, Any] = {}
+    action_id = _held_id(hold(_voice_ctx(pending, "conv1:anna", "unlock")))
+    assert pending[action_id]["voice_conversation"] == "conv1"
+
+
+@pytest.mark.parametrize("hold", [_hold_through_guard, _hold_through_automation])
+def test_another_voices_live_prompt_refuses_the_request_in_fixed_words(
+    hold: Any,
+) -> None:
+    pending: dict[str, Any] = {}
+    first = _voice_ctx(pending, "conv1:anna", "unlock the playroom")
+    anna = _held_id(_hold_through_guard(first))
+    disclose_pin_prompts(pending, first.config["configurable"]["pin_reply"])
+
+    second = _voice_ctx(pending, "conv1:boris", "unlock at 7")
+    result = hold(second)
+
+    content = result.content if hasattr(result, "content") else result
+    assert content == pin_msg(None, "pin_other_voice_waiting")
+    reply = second.config["configurable"]["pin_reply"]
+    assert reply.other_voice_waiting is True
+    assert pin_lines_follow(pending, reply) is True
+    assert list(pending) == [anna]
 
 
 class _FakeAPI:
