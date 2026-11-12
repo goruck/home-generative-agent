@@ -1554,7 +1554,11 @@ async def _append_security_audit_tool(  # noqa: PLR0913
 _HISTORY_TOOL = "get_entity_history"
 # Tool search misses "remember this" requests, above all in languages other than
 # English, and a memory the model cannot save is simply lost.
-_ALWAYS_OFFERED_LOCAL_TOOLS = (("hga_local", "upsert_memory"),)
+_ALWAYS_OFFERED_LOCAL_TOOLS = (
+    ("hga_local", "upsert_memory"),
+    ("hga_local", "list_memories"),
+    ("hga_local", "forget_memory"),
+)
 
 
 def _is_local_history_tool(tool: RawTool) -> bool:

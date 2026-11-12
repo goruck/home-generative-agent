@@ -11,7 +11,6 @@ import importlib
 import json
 import logging
 import re
-import string
 from collections import deque
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
@@ -92,9 +91,11 @@ from .agent.tools import (
     alarm_control,
     audit_home_security,
     confirm_sensitive_action,
+    forget_memory,
     get_and_analyze_camera_image,
     get_camera_last_events,
     get_entity_history,
+    list_memories,
     resolve_entity_ids,
     upsert_memory,
     write_yaml_file,
@@ -140,6 +141,7 @@ from .core.conversation_helpers import (
     _is_dashboard_request,
     _maybe_fix_dashboard_entities,
 )
+from .core.memories import memory_user as memory_store_user
 from .core.pipeline_guard import async_check_pin_pipeline_conflict
 from .core.utils import (
     builds_differ,
@@ -1481,6 +1483,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "get_and_analyze_camera_image": get_and_analyze_camera_image,
             "get_camera_last_events": get_camera_last_events,
             "upsert_memory": upsert_memory,
+            "list_memories": list_memories,
+            "forget_memory": forget_memory,
             "get_entity_history": get_entity_history,
             "confirm_sensitive_action": confirm_sensitive_action,
             "alarm_control": alarm_control,
@@ -2453,11 +2457,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         # A user name of None indicates an automation is being run.
         memory_user = self._memory_user(user_name, speaker)
-        clean_user_name = "robot" if memory_user is None else memory_user
-        # Remove special characters since memory namespace labels cannot contain them.
-        clean_user_name = clean_user_name.translate(
-            str.maketrans("", "", string.punctuation)
-        )
+        clean_user_name = memory_store_user(memory_user)
 
         app_config: RunnableConfig = {
             "configurable": {
@@ -2713,6 +2713,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "get_and_analyze_camera_image": get_and_analyze_camera_image,
             "get_camera_last_events": get_camera_last_events,
             "upsert_memory": upsert_memory,
+            "list_memories": list_memories,
+            "forget_memory": forget_memory,
             "get_entity_history": get_entity_history,
             "confirm_sensitive_action": confirm_sensitive_action,
             "alarm_control": alarm_control,

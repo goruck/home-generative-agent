@@ -190,6 +190,13 @@ RECOMMENDED_VOICE_ACK_TIMING = VOICE_ACK_TIMING_TURN_START
 # Sensors that name the voice a satellite recognized. Each applies to requests
 # from the device it belongs to. Empty means speaker recognition is off.
 CONF_SPEAKER_SENSORS = "speaker_sensors"
+# How many long-term memories one person may keep. 0 means unlimited.
+CONF_MEMORY_MAX_PER_PERSON = "memory_max_per_person"
+RECOMMENDED_MEMORY_MAX_PER_PERSON = 0
+# Whose memories a request without a known user reads and writes.
+SHARED_MEMORY_USER = "robot"
+# What one spoken "what do you remember" may return, so it fits the context.
+MEMORY_LIST_MAX_SHOWN = 30
 DEFAULT_STT_HALLUCINATION_PATTERNS: list[str] = []
 DEFAULT_STT_HALLUCINATION_EXACT_PATTERNS: list[str] = []
 
