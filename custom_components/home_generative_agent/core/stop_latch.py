@@ -25,11 +25,6 @@ class StopLatch:
         self._closed = False
         self._logged = False
 
-    @property
-    def closed(self) -> bool:
-        """Return True once ``close`` has been called."""
-        return self._closed
-
     def close(self) -> None:
         """Refuse every later side effect. Cannot be reopened."""
         self._closed = True
@@ -39,7 +34,8 @@ class StopLatch:
         Return True, and log, when *effect* must not happen: the latch is closed.
 
         Logged as a warning once per latch, since it means a run outlived its
-        stop, and at debug level after that.
+        stop, and at debug level after that. Collaborators closed with their
+        owner share its latch (``close(latch)``), so one stop warns once.
         """
         if not self._closed:
             return False
@@ -49,7 +45,7 @@ class StopLatch:
             self._logged = True
             LOGGER.warning(
                 "%s has stopped, but a run that outlived the stop tried to "
-                "write; dropped its %s and any later change (issue #988).",
+                "act; dropped its %s and any later write or action (issue #988).",
                 self._what,
                 effect,
             )

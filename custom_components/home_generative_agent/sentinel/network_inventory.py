@@ -224,7 +224,7 @@ class NetworkInventory:
             "posture": _valid_posture(data.get("posture")),
         }
 
-    def close(self) -> None:
+    def close(self, latch: StopLatch | None = None) -> None:
         """
         Refuse later commits and saves; called once the engine has stopped.
 
@@ -232,6 +232,9 @@ class NetworkInventory:
         the reloaded entry's inventory, or recreate the file removing Sentinel
         has just deleted (#988). ``async_reset`` still clears it.
         """
+        if latch is not None:
+            # The owner's latch, so one stop logs one warning.
+            self._latch = latch
         self._latch.close()
 
     async def async_save(self) -> bool:

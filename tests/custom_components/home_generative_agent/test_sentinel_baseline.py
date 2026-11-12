@@ -1402,7 +1402,9 @@ async def test_failed_write_posts_no_notice(
     updater, calls = _notice_updater(hass, 20, {CONF_SENTINEL_BASELINE_MIN_SAMPLES: 20})
     updater._established = set()
     pool = cast("MagicMock", updater._pool)
-    pool.connection.return_value.commit.side_effect = OSError("db down")
+    # The write commits when its transaction block exits (#988).
+    transaction = pool.connection.return_value.transaction.return_value
+    transaction.__aexit__.side_effect = OSError("db down")
 
     await updater._update_baselines(_snapshot([_entity("sensor.a", "1.0")]))
 

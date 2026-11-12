@@ -35,13 +35,16 @@ class DiscoveryStore:
         if isinstance(data, list):
             self._records = list(data)
 
-    def close(self) -> None:
+    def close(self, latch: StopLatch | None = None) -> None:
         """
         Refuse later saves; called once the discovery loop has stopped.
 
         A cycle that outlived the stop must not save over the records the
         reloaded entry's store loads from the same file (#988).
         """
+        if latch is not None:
+            # The owner's latch, so one stop logs one warning.
+            self._latch = latch
         self._latch.close()
 
     async def async_save(self) -> None:

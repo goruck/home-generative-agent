@@ -88,8 +88,8 @@ class DummySuppression(SuppressionManager):
 class DummyNotifier:
     """Notification dispatcher stub."""
 
-    def close(self) -> None:
-        """Refuse later sends or writes; nothing to refuse here."""
+    def stop(self) -> None:
+        """Unsubscribe; nothing to unsubscribe here."""
 
     def set_silence_check(self, check: object) -> None:
         """Accept the engine's level-0 check; unused by this stub."""
@@ -578,6 +578,19 @@ async def test_live_auto_execute_calls_ha_service(
         {"entity_id": "lock.front_door"},
         blocking=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_engine_auto_executes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run left behind by the stop runs no action through dispatch (#988)."""
+    engine, hass = _make_ae_engine(monkeypatch)
+    engine._latch.close()  # what stop() does once its wait is over
+
+    await engine._run_once()
+
+    hass.services.async_call.assert_not_called()
 
 
 @pytest.mark.asyncio

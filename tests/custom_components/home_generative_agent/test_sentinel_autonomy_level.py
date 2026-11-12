@@ -65,8 +65,8 @@ class DummySuppression(SuppressionManager):
 class DummyNotifier:
     """Minimal notification dispatcher stub."""
 
-    def close(self) -> None:
-        """Refuse later sends or writes; nothing to refuse here."""
+    def stop(self) -> None:
+        """Unsubscribe; nothing to unsubscribe here."""
 
     def set_silence_check(self, check: object) -> None:
         """Accept the engine's level-0 check; unused by this stub."""

@@ -18,6 +18,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
     SENTINEL_TRIAGE_CALL_GAP_S,
 )
+from custom_components.home_generative_agent.core.stop_latch import StopLatch
 from custom_components.home_generative_agent.core.utils import (
     SENTINEL_ADMISSION_TIMEOUT_S,
     SentinelLLMDeferredError,
@@ -324,6 +325,12 @@ class SentinelDiscoveryEngine:
         # config-entry setup, so once it has been stopped it must never run
         # again — see the note in start().
         self._stopped = False
+        # Closed once stop() has stopped waiting (#988): a cycle left behind
+        # saves no records and cleans up no proposals. Proposal approvals
+        # are the user's and are not latched.
+        self._latch = StopLatch("Sentinel discovery")
+        # The manual run in progress (async_run_now), stopped with the loop.
+        self._run_now_task: asyncio.Task[bool] | None = None
 
     def start(self) -> None:
         """Start the discovery loop."""
@@ -345,6 +352,11 @@ class SentinelDiscoveryEngine:
         self._stop_event.clear()
         self._task = self._hass.async_create_task(self._run_loop())
 
+    @property
+    def stopped(self) -> bool:
+        """Return True once stop() has been called; it cannot start again."""
+        return self._stopped
+
     async def stop(self) -> None:
         """Stop the discovery loop."""
         # Latch before the not-started early return, not after: the entry that
@@ -352,18 +364,16 @@ class SentinelDiscoveryEngine:
         self._stopped = True
 
         try:
-            if self._task is None:
-                return
-            self._stop_event.set()
-            # Bounded, and a cancel of this caller gets through (#985).
-            await cancel_and_wait(self._task, "Sentinel discovery loop")
-            self._task = None
+            if self._task is not None:
+                self._stop_event.set()
+                # Bounded, and a cancel of this caller gets through (#985).
+                await cancel_and_wait(self._task, "Sentinel discovery loop")
+                self._task = None
+            await cancel_and_wait(self._run_now_task, "Sentinel discovery manual run")
         finally:
-            # A cycle left behind by the bounded wait, or an on-demand one
-            # (not waited for), saves no records or proposals (#988).
-            self._store.close()
-            if self._proposal_store is not None:
-                self._proposal_store.close()
+            # A cycle left behind by the bounded wait saves nothing (#988).
+            self._latch.close()
+            self._store.close(self._latch)
 
     async def _run_loop(self) -> None:
         interval = _coerce_int(
@@ -409,7 +419,21 @@ class SentinelDiscoveryEngine:
         if self._run_lock.locked():
             LOGGER.debug("Discovery run already in progress; skipping manual trigger.")
             return False
-        return await self._run_once_guarded()
+        # In a task of its own, so stop() cancels and waits for it like the
+        # loop's cycle (#988).
+        task = asyncio.create_task(
+            self._run_once_guarded(), name="Sentinel discovery manual run"
+        )
+        self._run_now_task = task
+        try:
+            await asyncio.wait([task])
+        except asyncio.CancelledError:
+            task.cancel()  # the caller was cancelled: so is the run
+            raise
+        finally:
+            if self._run_now_task is task:
+                self._run_now_task = None
+        return False if task.cancelled() else task.result()
 
     async def _run_once_guarded(self) -> bool:
         """Run one cycle under the lock; False when discovery stopped meanwhile."""
@@ -464,7 +488,9 @@ class SentinelDiscoveryEngine:
         # Bug 3 fix: prune stale unsupported proposals before building exclusion
         # context so they stop blocking the card indefinitely.  Wrapped in
         # try/except so a cleanup failure never aborts the discovery cycle.
-        if self._proposal_store is not None:
+        if self._proposal_store is not None and not self._latch.refuses(
+            "proposal cleanup"
+        ):
             try:
                 expired = await self._proposal_store.cleanup_unsupported_ttl()
                 if expired:

@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from custom_components.home_generative_agent.core.stop_latch import StopLatch
 from custom_components.home_generative_agent.sentinel.proposal_store import (
     _UNSUPPORTED_TTL_DAYS,
     ProposalStore,
@@ -31,7 +30,6 @@ def _store_with_records(records: list[dict[str, Any]]) -> ProposalStore:
     """Return a ProposalStore pre-loaded with records (no HA hass needed)."""
     store = object.__new__(ProposalStore)
     store._records = list(records)
-    store._latch = StopLatch("Sentinel discovery")
     store._store = AsyncMock()
     store._store.async_save = AsyncMock()
     return store

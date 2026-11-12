@@ -382,6 +382,10 @@ WHERE entity_id NOT LIKE 'network.%%'
 """
 
 
+class _UpdaterStoppedError(Exception):
+    """The updater stopped during a write; its transaction rolls back (#988)."""
+
+
 class SentinelBaselineUpdater:
     """
     Independent background task that maintains rolling baselines in PostgreSQL.
@@ -552,13 +556,15 @@ class SentinelBaselineUpdater:
             # entry's updater (#988).
             self._latch.close()
 
-    async def _commit(self, conn: Any) -> bool:
-        """Commit, or roll back once the updater has stopped (#988)."""
+    def _check_open(self) -> None:
+        """
+        Raise inside a write's transaction once the updater has stopped (#988).
+
+        The pool's connections autocommit, so each write runs in an explicit
+        transaction: raising here, at its end, rolls the whole write back.
+        """
         if self._latch.refuses("baseline write"):
-            await conn.rollback()
-            return False
-        await conn.commit()
-        return True
+            raise _UpdaterStoppedError
 
     # ---------------------------------------------------------------------- #
     # Run loop
@@ -644,12 +650,18 @@ class SentinelBaselineUpdater:
             return
         self._last_counter_prune = now
         try:
-            async with self._pool.connection() as conn, conn.cursor() as cur:
+            async with (
+                self._pool.connection() as conn,
+                conn.transaction(),
+                conn.cursor() as cur,
+            ):
                 await cur.execute(
                     _PRUNE_COUNTERS_SQL,
                     (f"{NETWORK_COUNTER_PREFIX}%", COUNTER_ROW_RETENTION_DAYS),
                 )
-                await self._commit(conn)
+                self._check_open()
+        except _UpdaterStoppedError:
+            return
         except Exception:  # noqa: BLE001
             LOGGER.debug("Counter baseline prune failed; will retry tomorrow.")
 
@@ -696,10 +708,15 @@ class SentinelBaselineUpdater:
         sit stale forever and count as such on the health sensor.
         """
         try:
-            async with self._pool.connection() as conn, conn.cursor() as cur:
+            async with (
+                self._pool.connection() as conn,
+                conn.transaction(),
+                conn.cursor() as cur,
+            ):
                 await cur.execute(_DELETE_ENTITIES_SQL, (entity_ids,))
-                if not await self._commit(conn):
-                    return
+                self._check_open()
+        except _UpdaterStoppedError:
+            return
         except Exception:  # noqa: BLE001
             LOGGER.debug("Could not prune router sensor baseline rows; retrying later.")
             return
@@ -745,7 +762,11 @@ class SentinelBaselineUpdater:
         )
 
         try:
-            async with self._pool.connection() as conn, conn.cursor() as cur:
+            async with (
+                self._pool.connection() as conn,
+                conn.transaction(),
+                conn.cursor() as cur,
+            ):
                 # Collect sample_count from RETURNING clause — eliminates N+1 SELECTs.
                 rolling_sample_counts: dict[str, int] = {}
 
@@ -811,8 +832,7 @@ class SentinelBaselineUpdater:
                             (entity_id, dow_std_metric, dow_stddev, dow_count, now),
                         )
 
-                if not await self._commit(conn):
-                    return
+                self._check_open()
 
                 # Check establishment crossings using RETURNING sample_count values.
                 established: list[str] = []
@@ -822,6 +842,8 @@ class SentinelBaselineUpdater:
                     if count >= min_samples:
                         self._established.add(entity_id)
                         established.append(entity_id)
+        except _UpdaterStoppedError:
+            return
         except Exception:
             LOGGER.exception("Baseline DB write failed.")
             return

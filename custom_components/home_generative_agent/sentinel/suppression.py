@@ -821,13 +821,16 @@ class SuppressionManager:
         migrated = _migrate_suppression_state(data)
         self._state = SuppressionState.from_dict(migrated)
 
-    def close(self) -> None:
+    def close(self, latch: StopLatch | None = None) -> None:
         """
         Refuse later saves; called once the engine has stopped (#988).
 
         A run that outlived the stop must not save over the state the
         reloaded entry's manager loads from the same store.
         """
+        if latch is not None:
+            # The owner's latch, so one stop logs one warning.
+            self._latch = latch
         self._latch.close()
 
     async def async_save(self) -> None:
