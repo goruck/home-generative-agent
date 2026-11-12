@@ -1557,12 +1557,21 @@ _HISTORY_TOOL = "get_entity_history"
 # Tool search misses "remember this" requests, above all in languages other than
 # English, and a memory the model cannot save is simply lost.
 _MEMORY_TOOL = "upsert_memory"
+# "What do you remember about me?" and "forget that" (#997).
+_MEMORY_LIST_TOOL = "list_memories"
+_MEMORY_FORGET_TOOL = "forget_memory"
 # HGA's own tools that step 3g binds on every turn, outside the limit.
-_ALWAYS_BOUND_LOCAL_TOOLS = (_HISTORY_TOOL, _MEMORY_TOOL)
-# Of those, the tools that write the turn's user's memories. A turn with no
-# memory user (an unrecognized voice, an automation) runs as "robot", whose
-# memories everyone shares, so these are bound only when ranking picks them.
-_MEMORY_USER_TOOLS = frozenset({_MEMORY_TOOL})
+_ALWAYS_BOUND_LOCAL_TOOLS = (
+    _HISTORY_TOOL,
+    _MEMORY_TOOL,
+    _MEMORY_LIST_TOOL,
+    _MEMORY_FORGET_TOOL,
+)
+# Of those, the tools that read or write the turn's user's memories. A turn
+# with no memory user (an unrecognized voice, an automation) runs as "robot",
+# whose memories everyone shares, so these are bound only when ranking picks
+# them.
+_MEMORY_USER_TOOLS = frozenset({_MEMORY_TOOL, _MEMORY_LIST_TOOL, _MEMORY_FORGET_TOOL})
 
 
 def _always_bound_local_tools(config: RunnableConfig) -> tuple[str, ...]:
@@ -1592,7 +1601,9 @@ async def _append_always_bound_tools(
     ``upsert_memory``: a request to remember something ("remember that I take
     my tea without sugar") shares few words with the tool's description,
     above all in another language, so ranking often left it out and the fact
-    was lost. It is bound only on a turn with a memory user.
+    was lost. ``list_memories`` and ``forget_memory`` answer "what do you
+    remember about me?" and "forget that" (#997). The three are bound only on
+    a turn with a memory user.
 
     ``get_entity_history``: a history question phrased around the device
     ("when did the mudroom lights turn off today?") ranks entity-control and

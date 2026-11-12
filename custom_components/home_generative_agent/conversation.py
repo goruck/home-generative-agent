@@ -11,7 +11,6 @@ import importlib
 import json
 import logging
 import re
-import string
 from collections import deque
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
@@ -97,9 +96,11 @@ from .agent.tools import (
     alarm_control,
     audit_home_security,
     confirm_sensitive_action,
+    forget_memory,
     get_and_analyze_camera_image,
     get_camera_last_events,
     get_entity_history,
+    list_memories,
     resolve_entity_ids,
     upsert_memory,
     write_yaml_file,
@@ -128,6 +129,7 @@ from .const import (
     RECOMMENDED_SENTINEL_NETWORK_ENABLED,
     RECOMMENDED_VOICE_ACK_TIMING,
     SCHEMA_FIRST_YAML_PROMPT,
+    SHARED_MEMORY_USER,
     SIGNAL_TOOL_INDEX_UPDATED,
     SPEAKER_KNOWN_PROMPT,
     SPEAKER_NAME_MAX_CHARS,
@@ -146,6 +148,7 @@ from .core.conversation_helpers import (
     _is_dashboard_request,
     _maybe_fix_dashboard_entities,
 )
+from .core.memories import memory_user as memory_store_user
 from .core.pipeline_guard import async_check_pin_pipeline_conflict
 from .core.utils import (
     builds_differ,
@@ -1487,6 +1490,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "get_and_analyze_camera_image": get_and_analyze_camera_image,
             "get_camera_last_events": get_camera_last_events,
             "upsert_memory": upsert_memory,
+            "list_memories": list_memories,
+            "forget_memory": forget_memory,
             "get_entity_history": get_entity_history,
             "confirm_sensitive_action": confirm_sensitive_action,
             "alarm_control": alarm_control,
@@ -1702,12 +1707,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         as "robot", whose memories everyone shares. A user name that cleans to
         "robot" or to nothing is not a memory user of its own either (#1015).
         """
-        memory_user = cls._memory_user(user_name, speaker)
-        # Memory namespace labels cannot contain punctuation.
-        clean = (memory_user or "").translate(str.maketrans("", "", string.punctuation))
-        if clean in {"", "robot"}:
-            return "robot", False
-        return clean, True
+        clean = memory_store_user(cls._memory_user(user_name, speaker))
+        return clean, clean != SHARED_MEMORY_USER
 
     @staticmethod
     def _pin_owner(
@@ -2745,6 +2746,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "get_and_analyze_camera_image": get_and_analyze_camera_image,
             "get_camera_last_events": get_camera_last_events,
             "upsert_memory": upsert_memory,
+            "list_memories": list_memories,
+            "forget_memory": forget_memory,
             "get_entity_history": get_entity_history,
             "confirm_sensitive_action": confirm_sensitive_action,
             "alarm_control": alarm_control,

@@ -59,6 +59,7 @@ from .const import (
     CONF_MANAGE_CONTEXT_WITH_TOKENS,
     CONF_MAX_MESSAGES_IN_CONTEXT,
     CONF_MAX_TOKENS_IN_CONTEXT,
+    CONF_MEMORY_MAX_PER_PERSON,
     CONF_NOTIFY_SERVICE,
     CONF_PROMPT,
     CONF_SCHEMA_FIRST_YAML,
@@ -88,6 +89,7 @@ from .const import (
     RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS,
     RECOMMENDED_MAX_MESSAGES_IN_CONTEXT,
     RECOMMENDED_MAX_TOKENS_IN_CONTEXT,
+    RECOMMENDED_MEMORY_MAX_PER_PERSON,
     RECOMMENDED_TOOL_RELEVANCE_THRESHOLD,
     RECOMMENDED_TOOL_RETRIEVAL_LIMIT,
     RECOMMENDED_VIDEO_ANALYZER_EVENT_RECORDING_ENABLED,
@@ -798,6 +800,16 @@ async def _schema_for_options(
 
     schema.update(
         {
+            vol.Optional(
+                CONF_MEMORY_MAX_PER_PERSON,
+                default=opts.get(
+                    CONF_MEMORY_MAX_PER_PERSON, RECOMMENDED_MEMORY_MAX_PER_PERSON
+                ),
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0, max=100000, step=1, mode=NumberSelectorMode.BOX
+                )
+            ),
             vol.Optional(
                 CONF_SPEAKER_SENSORS,
                 description={"suggested_value": opts.get(CONF_SPEAKER_SENSORS, [])},
