@@ -388,12 +388,14 @@
             "model_name": "模型",
             "fallback_provider_ids": "备用提供商",
             "temperature": "温度",
+            "top_p": "Top P",
             "keepalive_s": "Ollama 保持运行（秒，或永不卸载 (-1)）",
             "context_size": "Ollama 上下文大小（token）",
             "reasoning": "思考 / 推理",
             "reasoning_budget": "思考预算（token）"
           },
           "data_description": {
+            "top_p": "留空则使用默认值。在兼容 OpenAI 的服务器上，留空时保留模型自身的取值。",
             "fallback_provider_ids": "备用提供商的有序列表。主提供商失败时，使用第一个可用的提供商。",
             "reasoning": "控制所选聊天模型的思考行为。提供商默认会保持服务器/模型原有的行为；关闭和开启会显式设置；强度等级会传给支持它的提供商。设置按模型名称记住，切换模型时会恢复各模型自己的配置。",
             "reasoning_budget": "可选的思考 token 预算，用于支持该设置的提供商（llama.cpp 等 OpenAI 兼容服务器、Gemini、Anthropic）。留空则使用提供商的默认值。"
