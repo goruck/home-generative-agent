@@ -42,12 +42,14 @@ set reasoning_effort to 'none'."
    provider stays on Chat Completions.
 2. **Reasoning effort.** Pass through `none|minimal|low|medium|high|xhigh|max` as the model
    accepts them. "Reasoning off" sends `none` only to models that accept it; for `gpt-6-astra`
-   and `gpt-6.1-sol` it sends `low` (the lowest they accept) and the options form says so.
+   and `gpt-6.1-sol` it sends `low` (the lowest they accept). The form labels the choice
+   "Off (GPT-6)"; `docs/configuration.md` says it is `low` on those two.
 3. **Message format.** Before writing the feature, a spike confirms that Responses-shaped
    messages work with: text extraction (`_normalize_ai_content`, streaming deltas, schema-first),
-   tool-call parsing, token counting, checkpoint replay on the next turn (reasoning items kept for
-   OpenAI), and the fallback chain (reasoning items stripped before the history goes to
-   Anthropic, Ollama or Gemini). `output_version` is the expected lever.
+   tool-call parsing, token counting, checkpoint replay on the next turn, and the fallback chain.
+   `output_version` is the lever: `v0` keeps a reply's content to text blocks, so the history
+   converts for Anthropic, Ollama and Gemini with no stripping step. (The agent graph also
+   checkpoints each reply as text plus tool calls only, `agent/graph.py` `_call_model`.)
 4. **Storage (approved).** `store=False`: nothing is kept at OpenAI. Same privacy as today on
    Chat Completions.
    **Reasoning replay (changed 2026-11-11 after the live test).** The plan was to replay the
@@ -71,7 +73,7 @@ on OpenAI, the fallback chain, token counting.
 ## Tests
 
 - Unit: routing predicate, effort mapping per model, normalization of Responses-shaped messages,
-  history cleaning before a fallback to another provider, `store=False` in the request.
+  a GPT-6 history converting for each fallback provider, `store=False` in the request.
 - A recorded streaming fixture for a Responses tool turn.
 - Live smoke test with Lindo's OpenAI key (never read from `core.config_entries`): a GPT-6 tool
   turn, a streamed voice reply, a PIN-held action, a mid-conversation fallback to Ollama, and an

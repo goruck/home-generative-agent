@@ -6,6 +6,7 @@ import asyncio
 import importlib
 import logging
 import math
+import re
 from collections import Counter
 from time import monotonic
 from typing import TYPE_CHECKING, Any, cast
@@ -88,6 +89,19 @@ except ImportError:
 DROPPABLE_SAMPLING_PARAMS = frozenset({"temperature", "top_p", "reasoning_effort"})
 
 _UNSUPPORTED_PARAM_CODES = frozenset({"unsupported_value", "unsupported_parameter"})
+# The Responses API names a rejected parameter by its request path; map each
+# to the configurable field the retry nulls (reasoning_effort is sent as
+# reasoning.effort there).
+_RESPONSES_PARAM_FIELDS = {"reasoning.effort": "reasoning_effort"}
+# langchain-openai raises a Responses stream's error event as
+# ValueError("<code>: <message>") and its response.failed event as
+# ValueError(str(ResponseError)), "ResponseError(code='<code>', ...)", without the SDK's
+# typed status errors. Only a message that starts with a transient code counts:
+# a refusal or 400 whose text merely quotes one must not move to another
+# provider.
+_RESPONSES_STREAM_TRANSIENT = re.compile(
+    r"(?:ResponseError\(code=')?(?:rate_limit_exceeded|server_error)\b"
+)
 
 
 def unsupported_sampling_param(err: Exception) -> str | None:
@@ -95,6 +109,8 @@ def unsupported_sampling_param(err: Exception) -> str | None:
     if OpenAIBadRequestError is None or not isinstance(err, OpenAIBadRequestError):
         return None
     param = getattr(err, "param", None)
+    if isinstance(param, str):
+        param = _RESPONSES_PARAM_FIELDS.get(param, param)
     code = getattr(err, "code", None)
     if param in DROPPABLE_SAMPLING_PARAMS and code in _UNSUPPORTED_PARAM_CODES:
         return param
@@ -371,6 +387,8 @@ def _is_retryable(err: Exception) -> bool:
         # treat the provider as misconfigured — record the failure (so the
         # circuit breaker can open) and let the chain try the next provider.
         return True
+    if isinstance(err, ValueError) and _RESPONSES_STREAM_TRANSIENT.match(str(err)):
+        return True
     # Also retry on rate-limit / API errors from common providers
     err_str = str(err).lower()
     return any(
@@ -453,7 +471,15 @@ def _retryable_empty_response(result: Any) -> HomeAssistantError | None:
         return None
     metadata = cast("dict[str, Any]", metadata_raw)
     finish_reason = metadata.get("finish_reason") or metadata.get("done_reason")
-    if str(finish_reason).lower() not in {"length", "max_tokens"}:
+    incomplete = metadata.get("incomplete_details")
+    # The Responses API reports an exhausted output budget as an incomplete
+    # status, not a finish reason.
+    out_of_tokens = (
+        metadata.get("status") == "incomplete"
+        and isinstance(incomplete, dict)
+        and incomplete.get("reason") == "max_output_tokens"
+    )
+    if str(finish_reason).lower() not in {"length", "max_tokens"} and not out_of_tokens:
         return None
 
     model_name = metadata.get("model_name") or metadata.get("model")

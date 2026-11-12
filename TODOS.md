@@ -1983,13 +1983,39 @@ label pair ("Server URL" vs "Base URL").
 
 ## Model Providers
 
+### GPT-6 at Extra-high or Max effort may outlast the request timeouts
+
+**What:** The OpenAI client reads with `timeout=120` (`build_openai_chat` in `__init__.py`) and a chat turn has `_LLM_INVOKE_TIMEOUT_S = 180.0` (`agent/graph.py`). With `store=False` and no reasoning summary, a Responses stream sends nothing while the model reasons, so an Extra-high or Max effort turn (new GPT-6 choices in `flows/feature_subentry_flow.py`) on a multi-step tool task could pass either limit. The fallback chain would then count a healthy OpenAI provider as a timeout or stall, fail over, and maybe open its circuit breaker.
+
+**Why:** Raised by the red-team pass of the GPT-6 Responses API review (2026-11-11). Unmeasured: the live runs used default, low and high effort, and none came near 120 s.
+
+**How to apply:** During the box field test, time a multi-step tool turn on `gpt-6-luna` at `max` and `xhigh`. If either nears 120 s, scale the read timeout and the turn budget with the effort (or ask for `reasoning.summary` so the stream sends events), and keep a deliberately high-effort timeout from counting toward the breaker. Otherwise note the measurement here and close it.
+
+**Effort:** S-M
+**Priority:** P2
+
+---
+
+### The Responses API's assistant phase is not kept between turns
+
+**What:** Newer OpenAI models (codex models from `gpt-5.3-codex`) tag assistant output with a `phase` (`commentary` vs `final_answer`) and expect it replayed. The `v0` output format drops it on a streamed reply, and `agent/graph.py` `_call_model` checkpoints each reply as text plus tool calls, so the next request loses the distinction between intermediate commentary and the final answer.
+
+**Why:** Raised by the Codex pass of the GPT-6 Responses API review (2026-11-11). No GPT-6 model observed needing it; the effect is on answer quality for codex models routed to the Responses API, not a request failure.
+
+**How to apply:** Same prerequisite as the reasoning replay entry below: `responses/v1` output plus a `_call_model` that keeps the reply's blocks, with a strip step for non-OpenAI providers. Verify live on a codex model that a commentary message is replayed with its phase.
+
+**Effort:** M
+**Priority:** P3
+
+---
+
 ### GPT-6 reasoning is not replayed across tool turns
 
 **What:** `core/openai_client.py` (`StatelessReasoningChatOpenAI`) drops reasoning items from every OpenAI Responses request and from the reply, so after a tool result a GPT-6 model reasons afresh. OpenAI's guidance is to pass reasoning items back with tool outputs, which saves tokens and keeps the model's plan across a tool loop.
 
-**Why:** The client keeps replies in langchain-openai's `v0` output format so a history checkpointed on OpenAI still converts for an Ollama, Anthropic or Gemini fallback. `v0` holds one reasoning item per message in `additional_kwargs["reasoning"]`, and GPT-6 often returns several per reply (4-8 on a multi-step tool task, live 2026-11-11). Streaming concatenates their `encrypted_content`, and the next tool turn gets 400 `invalid_encrypted_content` (langchain-openai 1.6.7). With `store=False`, OpenAI returns the encrypted copy whether or not `include` asks for it, so leaving `include` out does not avoid it.
+**Why:** The client keeps replies in langchain-openai's `v0` output format so a history checkpointed on OpenAI still converts for an Ollama, Anthropic or Gemini fallback. `v0` holds one reasoning item per message in `additional_kwargs["reasoning"]`, and GPT-6 often returns several per reply (4-8 on a multi-step tool task, live 2026-11-11). Streaming concatenates their `encrypted_content`, and the next tool turn gets 400 `invalid_encrypted_content` (langchain-openai 1.6.7). With `store=False`, OpenAI returns the encrypted copy whether or not `include` asks for it, so leaving `include` out does not avoid it. Note the agent graph never stored the items anyway: `_call_model` (`agent/graph.py`) checkpoints each reply as `AIMessage(content=text, tool_calls=...)`, dropping `additional_kwargs`, so the 400 was reproduced with a standalone langchain loop, not through Home Assistant.
 
-**How to apply:** Either (a) drop the request filter once langchain-openai fixes the `v0` merge ([langchain-ai/langchain#41807](https://github.com/langchain-ai/langchain/issues/41807), filed 2026-11-11) and a fixed release keeps each item (e.g. a list under `additional_kwargs["reasoning"]`), or (b) switch the client to `output_version="responses/v1"`, which kept every item intact and replayed cleanly over 15 live turns, and add a step that strips `reasoning`/`function_call` blocks before a history reaches a non-OpenAI provider, summarization or any text consumer (the `responses/v1` blocks fail Ollama's converter with "Unsupported message content type"). Prove it live: the scratchpad energy-schedule prompt on `gpt-6-luna` at high effort reproduces the 400 within four conversations.
+**How to apply:** Either (a) drop the request filter once langchain-openai fixes the `v0` merge (not yet reported upstream: the 2026-11-11 report was auto-closed because it was not filed through the GitHub web form; link the issue here once it is refiled) and a fixed release keeps each item (e.g. a list under `additional_kwargs["reasoning"]`), or (b) switch the client to `output_version="responses/v1"`, which kept every item intact and replayed cleanly over 15 live turns, make `_call_model` keep the reasoning blocks in the checkpointed reply, and add a step that strips `reasoning`/`function_call` blocks before a history reaches a non-OpenAI provider, summarization or any text consumer (the `responses/v1` blocks fail Ollama's converter with "Unsupported message content type"). Prove it live: the scratchpad energy-schedule prompt on `gpt-6-luna` at high effort reproduces the 400 within four conversations.
 
 **Effort:** M
 **Priority:** P2

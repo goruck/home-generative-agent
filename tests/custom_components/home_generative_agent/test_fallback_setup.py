@@ -1812,3 +1812,68 @@ async def test_a_healthy_fallback_is_chosen_over_a_down_primary(
     assert cast("FakeEmbeddings", seen["model"].chain[0][0]).name == (
         f"ollama@{fallback_url}"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model", "responses"), [("gpt-6-luna", True), ("gpt-5", False)]
+)
+async def test_setup_picks_the_openai_api_for_every_category(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, model: str, *, responses: bool
+) -> None:
+    """
+    Every OpenAI model setup configures picks its API from the model.
+
+    Chat, image analysis and summarization primaries, and an OpenAI chat
+    fallback (_configured_cloud_model). A Responses model sends no
+    temperature or top_p (Discussion #928); a Chat Completions model keeps them.
+    """
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    data.options[CONF_OPENAI_CHAT_MODEL] = model
+    data.options[CONF_OPENAI_VLM] = model
+    data.options[CONF_OPENAI_SUMMARIZATION_MODEL] = model
+    openai_fallback = ModelProviderConfig(
+        entry_id="openai2",
+        name="OpenAI Fallback",
+        provider_type="openai",
+        capabilities={"chat"},
+        data={"settings": {"api_key": "sk-test", "chat_model": model}},
+        deployment="cloud",
+    )
+    data.providers[openai_fallback.entry_id] = openai_fallback
+    data.fallback_chains["chat"] = [
+        data.providers["openai1"],
+        openai_fallback,
+        data.providers["ollama1"],
+    ]
+    _patch_setup_dependencies(hass, monkeypatch, data)
+
+    result = await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert result is True
+    runtime = entry.runtime_data
+    chat_model = cast("FallbackChatModel", runtime.chat_model)
+    configured = [
+        cast("FakeConfiguredModel", chat_model.chain[0][0]),
+        cast("FakeConfiguredModel", chat_model.chain[1][0]),
+        cast(
+            "FakeConfiguredModel", cast("FallbackVLM", runtime.vision_model).chain[0][0]
+        ),
+        cast(
+            "FakeConfiguredModel",
+            cast("FallbackChatModel", runtime.summarization_model).chain[0][0],
+        ),
+    ]
+    for member in configured:
+        assert member.base.name == "openai"
+        config = member.config["configurable"]
+        assert config["model_name"] == model
+        assert config["use_responses_api"] is responses
+        if responses:
+            assert config["temperature"] is None
+            assert config["top_p"] is None
+        else:
+            assert config["temperature"] is not None

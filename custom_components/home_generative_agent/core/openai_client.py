@@ -15,12 +15,14 @@ one string, and OpenAI rejects the replay with 400 ``invalid_encrypted_content``
 on the next tool turn.
 
 This subclass leaves reasoning items out of every Responses request, so the
-model reasons afresh after each tool result, as it does on Chat Completions.
-It also drops them from the reply: unused, they would only grow every
-checkpoint, which rewrites the whole message list, by 10-40 KB a turn.
-Replaying reasoning needs langchain's ``responses/v1`` format, which keeps
-the items apart, plus a step that strips them before the history reaches a
-non-OpenAI provider (TODOS.md; upstream langchain-ai/langchain#41807).
+model reasons afresh after each tool result, as it does on Chat Completions,
+and drops them from the reply. The agent graph already checkpoints a reply as
+its text and tool calls only (agent/graph.py ``_call_model``), so on that path
+this is defence in depth: it holds for any caller that keeps the reply whole,
+and for a later change that keeps ``additional_kwargs``. Replaying reasoning
+needs langchain's ``responses/v1`` format, which keeps the items apart, the
+graph to keep them, and a step that strips them before the history reaches a
+non-OpenAI provider (TODOS.md).
 """
 
 from __future__ import annotations
