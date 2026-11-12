@@ -9,6 +9,8 @@ HGA_CARD_STATIC_PATH = "/hga-card"
 HGA_CARD_STATIC_PATH_LEGACY = "/hga-enroll-card"
 
 CONFIG_ENTRY_VERSION = 6
+# Minor bumps keep an entry loadable by an older release (issue #949).
+CONFIG_ENTRY_MINOR_VERSION = 2
 
 SUBENTRY_TYPE_DATABASE = "database"
 SUBENTRY_TYPE_MODEL_PROVIDER = "model_provider"

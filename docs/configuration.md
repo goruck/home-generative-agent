@@ -265,7 +265,7 @@ The **Control Home Assistant** option in the Options flow is a multi-select that
 
 **Only exposed entities are visible to the agent.** The Assist API hands the model the entities exposed to Assist — as the entity context in the system prompt and as what `GetLiveContext` returns — and nothing else. Home Assistant exposes new entities automatically only for a fixed set of domains and device classes (lights, switches, covers, fans, climate, media players, scenes, humidifiers, to-do lists, vacuums, water heaters; door, window, opening, garage-door, lock, motion and presence binary sensors; temperature, humidity, CO, CO₂, AQI, PM2.5, PM10 and VOC sensors). A leak (`moisture`), smoke, gas, vibration or tamper sensor, a lock, a battery level or a power meter is not exposed by default, so the agent answers "I don't have a sensor for that" even though the entity exists. Expose it under **Settings → Voice assistants → Expose**, and name it and assign an area the way you will ask about it, since the model matches on friendly name and area. This applies to current state only: HGA's own `get_entity_history` tool looks entities up by exact friendly name across all of Home Assistant, but the model only learns names from the exposed list, so in practice an unexposed entity is unreachable through both. Sentinel does not use the exposed list; its snapshot reads every entity in Home Assistant.
 
-You can select any combination. Selecting both Assist and one or more MCP APIs merges all their tools into a single combined API. Note that deselecting everything does **not** disable HA control: an empty selection is stored as "unset", which the agent reads as the Assist default, so Assist is silently re-enabled on the next save. Running with no LLM API at all is currently not expressible through the form (tracked in `TODOS.md`).
+You can select any combination. Selecting both Assist and one or more MCP APIs merges all their tools into a single combined API. At least one API must stay selected: the agent answers through an LLM API, so the form refuses to save an empty selection.
 
 **Adding an MCP server:**
 
@@ -275,7 +275,7 @@ You can select any combination. Selecting both Assist and one or more MCP APIs m
 4. Open **Settings → Devices & Services → Home Generative Agent → Configure**.
 5. Select the new entry in **Control Home Assistant** and save.
 
-**Removing an MCP server:** if a selected server's integration is removed (or is temporarily unavailable), its entry stays selected and is shown as `<id> (no longer available)` so the form remains saveable and your selection is never dropped behind your back. Deselect the dead entry and save to clean it up. While it stays selected, a warning is logged when the options form is built and each time the agent loads its APIs; other selected APIs keep working, but if the unavailable entry is the *only* selection, conversations fail with "No LLM APIs could be loaded" until the server returns or you deselect it.
+**Removing an MCP server:** if a selected server's integration is removed (or is temporarily unavailable), its entry stays selected and is shown as `<id> (no longer available)` so the form remains saveable and your selection is never dropped behind your back. Deselect the dead entry and save to clean it up; if it is your only selection, select another API (Assist, for example) in the same save, since the form refuses an empty selection. While it stays selected, a warning is logged when the options form is built and each time the agent loads its APIs; other selected APIs keep working, but if the unavailable entry is the *only* selection, conversations fail with "No LLM APIs could be loaded" until the server returns or you deselect it.
 
 ### Internet search
 
@@ -455,7 +455,7 @@ Example: *"Save this YAML to a file called garage-light."*
 
 Protects sensitive actions (unlocking doors, opening covers) behind a second verification step.
 
-**Setup:** Go to **Settings → Devices & Services → Home Generative Agent → Configure** and toggle **Require critical action PIN**. Enter a 4–10 digit PIN. The value is stored as a salted hash. Leaving the field blank while the toggle is on clears the stored PIN; turning the toggle off removes the guard entirely.
+**Setup:** Go to **Settings → Devices & Services → Home Generative Agent → Configure** and toggle **Require critical action PIN**. Enter a 4–10 digit PIN. The value is stored as a salted hash. Leaving the field blank keeps the stored PIN. The form will not save the toggle on with no PIN set, because the agent then lets critical actions through without asking; turning the toggle off removes the PIN and the guard entirely.
 
 > **You must turn off "Prefer handling commands locally"** in your voice assistant pipeline for this PIN to protect anything.
 >

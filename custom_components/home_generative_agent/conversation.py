@@ -1235,9 +1235,9 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         # locally" is on, whatever this flag says.  Guarding that combination
         # is the repair issue raised in async_added_to_hass, not this line.
         #
-        # The default matters because the options flow deletes the key when no
-        # API is selected, so an absent key means "use Assist" to every other
-        # reader; active_llm_api_ids is the single definition of that.
+        # An absent key means "use Assist" to every other reader (entries
+        # migrated to v6.2 always carry it); active_llm_api_ids is the single
+        # definition of that.
         if active_llm_api_ids(self.entry.runtime_data.options):
             self._attr_supported_features = (
                 conversation.ConversationEntityFeature.CONTROL

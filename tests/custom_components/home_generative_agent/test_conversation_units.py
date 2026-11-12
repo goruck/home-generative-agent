@@ -1408,10 +1408,10 @@ def test_control_feature_set_when_llm_api_key_absent() -> None:
     """
     An absent CONF_LLM_HASS_API must still advertise CONTROL.
 
-    The options flow deletes the key when no API is selected, and the rest of
-    the integration reads that absence as "default to Assist"; __init__ read it
-    as falsy, so the entity's capability disagreed with the tools it actually
-    had.
+    Before issue #949 the options flow deleted the key when no API was
+    selected, and the rest of the integration reads that absence as "default
+    to Assist"; __init__ read it as falsy, so the entity's capability disagreed
+    with the tools it actually had.
 
     CONTROL is NOT a security control -- its only consumer routes state
     questions and media search to the agent. This test pins capability/tool

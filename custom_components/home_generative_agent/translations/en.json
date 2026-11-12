@@ -533,6 +533,14 @@
           "video_analyzer_motion_camera_map": "One override per line: binary_sensor.X_motion: camera.Y — use this when automatic resolution picks the wrong camera. Leave blank to rely on device-based and name-based resolution."
         }
       }
+    },
+    "error": {
+      "cannot_connect": "Can't reach the service. Check keys/URLs and try again.",
+      "invalid_pin": "PIN must be 4-10 digits.",
+      "llm_api_required": "Select at least one API. The agent needs an LLM API to answer.",
+      "pin_required": "Enter a PIN, or turn off the critical action PIN.",
+      "tool_excluded_and_included": "A tool cannot be both excluded and always included. Remove it from one of the two lists.",
+      "unknown": "Unexpected error."
     }
   },
   "issues": {

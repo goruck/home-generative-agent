@@ -1112,8 +1112,7 @@ async def test_the_refused_pin_warning_hashes_off_the_event_loop(
 def test_the_options_flow_stores_a_full_width_pin_as_ascii() -> None:
     """A PIN typed in full-width digits is enrolled as the ASCII PIN."""
     options: dict[str, Any] = {}
-    error = HomeGenerativeAgentOptionsFlow._maybe_edit_pin(
-        cast("Any", None),
+    error = HomeGenerativeAgentOptionsFlow()._maybe_edit_pin(
         options,
         {
             CONF_CRITICAL_ACTION_PIN_ENABLED: True,
@@ -1151,8 +1150,7 @@ def test_the_options_flow_refuses_digits_that_do_not_fold_to_ascii() -> None:
     fold to ASCII and no message could ever confirm such a PIN.
     """
     options: dict[str, Any] = {}
-    error = HomeGenerativeAgentOptionsFlow._maybe_edit_pin(
-        cast("Any", None),
+    error = HomeGenerativeAgentOptionsFlow()._maybe_edit_pin(
         options,
         {
             CONF_CRITICAL_ACTION_PIN_ENABLED: True,

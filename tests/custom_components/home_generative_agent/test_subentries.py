@@ -19,6 +19,7 @@ from homeassistant.const import (
     CONF_USERNAME,
 )
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import llm
 from homeassistant.helpers.selector import EntitySelector
 from pytest_homeassistant.common import MockConfigEntry
 
@@ -60,9 +61,11 @@ from custom_components.home_generative_agent.const import (
     CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_URL,
     CONF_OPENAI_EMBEDDING_MODEL,
+    CONF_PROMPT,
     CONF_SENTINEL_APPLIANCE_DURATION_MIN,
     CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     CONF_SENTINEL_CAMERA_ENTRY_LINKS,
+    CONF_SENTINEL_COOLDOWN_MINUTES,
     CONF_SENTINEL_DAILY_DIGEST_ENABLED,
     CONF_SENTINEL_DAILY_DIGEST_TIME,
     CONF_SENTINEL_ENABLED,
@@ -76,6 +79,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
     CONF_SUMMARIZATION_MODEL_PROVIDER,
     CONF_VLM_PROVIDER,
+    CONFIG_ENTRY_MINOR_VERSION,
     CONFIG_ENTRY_VERSION,
     DEFAULT_FEATURE_TYPES,
     DOMAIN,
@@ -2412,21 +2416,148 @@ async def test_migration_v5_to_v6_string_api_id(hass: HomeAssistant) -> None:
 
 
 @pytest.mark.asyncio
-async def test_migration_v5_to_v6_none_sentinel(hass: HomeAssistant) -> None:
-    """v5 'none' sentinel is converted to an empty list (no APIs)."""
+async def test_migration_v5_none_sentinel_ends_on_assist(hass: HomeAssistant) -> None:
+    """
+    v5 'none' becomes [] at v6, and v6.2 turns that into the Assist default.
+
+    A stored [] failed every conversation with "No LLM APIs could be loaded"
+    (issue #949), so v6.2 rewrites it to the default an absent key ran.
+    """
     entry = _make_v5_entry(hass, {CONF_LLM_HASS_API: "none"})
     assert await async_migrate_entry(hass, entry)
-    assert entry.options.get(CONF_LLM_HASS_API) == []
+    assert entry.options.get(CONF_LLM_HASS_API) == [llm.LLM_API_ASSIST]
     assert entry.version == CONFIG_ENTRY_VERSION
 
 
 @pytest.mark.asyncio
-async def test_migration_v5_to_v6_absent_key(hass: HomeAssistant) -> None:
-    """v5 absent CONF_LLM_HASS_API key is converted to empty list."""
+async def test_migration_v5_absent_key_ends_on_assist(hass: HomeAssistant) -> None:
+    """A v5 entry with no CONF_LLM_HASS_API key ends on the Assist default."""
     entry = _make_v5_entry(hass, {})
     assert await async_migrate_entry(hass, entry)
-    assert entry.options.get(CONF_LLM_HASS_API) == []
+    assert entry.options.get(CONF_LLM_HASS_API) == [llm.LLM_API_ASSIST]
     assert entry.version == CONFIG_ENTRY_VERSION
+
+
+# ---------------------------------------------------------------------------
+# v6.1 -> v6.2 migration: an unset CONF_LLM_HASS_API is written out (#949)
+# ---------------------------------------------------------------------------
+
+
+def _make_v6_entry(hass: Any, options: dict[str, Any]) -> Any:
+    """Return a v6 MockConfigEntry with the given options, added to hass."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Home Generative Agent",
+        version=6,
+        data={},
+        options=options,
+    )
+    entry.add_to_hass(hass)
+    return entry
+
+
+@pytest.mark.asyncio
+async def test_migration_v6_absent_key_keeps_running_assist(
+    hass: HomeAssistant,
+) -> None:
+    """
+    An absent key ran Assist at v6.1, so v6.2 stores Assist explicitly.
+
+    The v6 options flow deleted the key when every API was deselected, so this
+    is the state of any entry whose user cleared the selection.
+    """
+    entry = _make_v6_entry(hass, {CONF_PROMPT: "keep me"})
+    assert await async_migrate_entry(hass, entry)
+    assert entry.options[CONF_LLM_HASS_API] == [llm.LLM_API_ASSIST]
+    assert entry.options[CONF_PROMPT] == "keep me"
+    assert entry.version == CONFIG_ENTRY_VERSION
+
+
+@pytest.mark.asyncio
+async def test_migration_v6_empty_list_becomes_assist(hass: HomeAssistant) -> None:
+    """A stored [] failed every turn at v6.1; v6.2 replaces it with Assist."""
+    entry = _make_v6_entry(hass, {CONF_LLM_HASS_API: []})
+    assert await async_migrate_entry(hass, entry)
+    assert entry.options[CONF_LLM_HASS_API] == [llm.LLM_API_ASSIST]
+    assert entry.version == CONFIG_ENTRY_VERSION
+
+
+@pytest.mark.asyncio
+async def test_migration_v6_selection_is_kept(hass: HomeAssistant) -> None:
+    """A v6 selection is kept exactly; only the version moves."""
+    entry = _make_v6_entry(hass, {CONF_LLM_HASS_API: ["mcp-abc"]})
+    assert await async_migrate_entry(hass, entry)
+    assert entry.options[CONF_LLM_HASS_API] == ["mcp-abc"]
+    assert entry.version == CONFIG_ENTRY_VERSION
+
+
+@pytest.mark.asyncio
+async def test_migration_v6_does_not_rerun_the_v3_to_v6_steps(
+    hass: HomeAssistant,
+) -> None:
+    """
+    A v6.1 entry gets only the v6.2 step.
+
+    The v3 -> v6 body moves model settings into subentries and trims options;
+    rerunning it on a v6 entry would drop options set since then.
+    """
+    entry = _make_v6_entry(
+        hass,
+        {CONF_LLM_HASS_API: ["assist"], CONF_SENTINEL_COOLDOWN_MINUTES: 12},
+    )
+    assert await async_migrate_entry(hass, entry)
+    assert entry.options[CONF_SENTINEL_COOLDOWN_MINUTES] == 12
+    assert entry.version == CONFIG_ENTRY_VERSION
+
+
+@pytest.mark.asyncio
+async def test_migration_current_entry_is_left_alone(hass: HomeAssistant) -> None:
+    """An entry already at the current version is not rewritten."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Home Generative Agent",
+        version=CONFIG_ENTRY_VERSION,
+        minor_version=CONFIG_ENTRY_MINOR_VERSION,
+        data={},
+        options={},
+    )
+    entry.add_to_hass(hass)
+    assert await async_migrate_entry(hass, entry)
+    assert dict(entry.options) == {}
+
+
+@pytest.mark.asyncio
+async def test_migration_lands_on_the_minor_version(hass: HomeAssistant) -> None:
+    """
+    The fix is a minor bump, so an older release can still load the entry.
+
+    Home Assistant refuses an entry whose major version is above its
+    handler's, but loads one whose minor version is higher.
+    """
+    entry = _make_v6_entry(hass, {})
+    assert await async_migrate_entry(hass, entry)
+    assert (entry.version, entry.minor_version) == (6, CONFIG_ENTRY_MINOR_VERSION)
+
+
+@pytest.mark.asyncio
+async def test_migration_warns_when_it_turns_control_back_on(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A stored 'no APIs' choice becoming Assist is logged; an absent key is not."""
+    assert await async_migrate_entry(hass, _make_v6_entry(hass, {}))
+    assert "#949" not in caplog.text
+
+    entry = _make_v5_entry(hass, {CONF_LLM_HASS_API: "none"})
+    assert await async_migrate_entry(hass, entry)
+    assert "#949" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_migration_repairs_a_list_of_blank_ids(hass: HomeAssistant) -> None:
+    """A list the reader normalizes to [] is repaired like []."""
+    entry = _make_v6_entry(hass, {CONF_LLM_HASS_API: [""]})
+    assert await async_migrate_entry(hass, entry)
+    assert entry.options[CONF_LLM_HASS_API] == [llm.LLM_API_ASSIST]
 
 
 # ---------------------------------------------------------------------------
@@ -6170,3 +6301,45 @@ async def test_basic_setup_writes_nothing_if_the_dialog_closed_during_the_test(
     assert result.get("type") == "abort"
     assert _features(entry) == []
     assert _database(entry) is None
+
+
+@pytest.mark.asyncio
+async def test_migration_keeps_a_selection_stored_in_entry_data(
+    hass: HomeAssistant,
+) -> None:
+    """
+    A selection stored in entry.data is not overwritten.
+
+    Runtime options lay entry.options over entry.data, so a selection in data
+    is the one that runs and the repair must not write Assist over it.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Home Generative Agent",
+        version=6,
+        data={CONF_LLM_HASS_API: ["mcp-abc"]},
+        options={},
+    )
+    entry.add_to_hass(hass)
+    assert await async_migrate_entry(hass, entry)
+    effective = {**entry.data, **entry.options}
+    assert effective[CONF_LLM_HASS_API] == ["mcp-abc"]
+    assert entry.minor_version == CONFIG_ENTRY_MINOR_VERSION
+
+
+@pytest.mark.asyncio
+async def test_migration_from_an_older_minor_still_repairs(
+    hass: HomeAssistant,
+) -> None:
+    """A v5 entry's own minor version does not skip the 6.2 repair."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Home Generative Agent",
+        version=5,
+        minor_version=3,
+        data={},
+        options={},
+    )
+    entry.add_to_hass(hass)
+    assert await async_migrate_entry(hass, entry)
+    assert entry.options[CONF_LLM_HASS_API] == [llm.LLM_API_ASSIST]
