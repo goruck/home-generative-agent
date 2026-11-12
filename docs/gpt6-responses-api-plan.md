@@ -79,6 +79,12 @@ on OpenAI, the fallback chain, token counting.
   turn, a streamed voice reply, a PIN-held action, a mid-conversation fallback to Ollama, and an
   old Chat Completions thread continued on GPT-6.
 
+Box field test (2026-11-12, HA 2026.11.0, Conversation on `gpt-6-luna` with an Anthropic
+fallback): a tool turn, a streamed voice reply and a PIN-held action passed, with no 400 and no
+fallback. A read-only multi-step task (read every temperature sensor and light, propose a
+schedule) took 11-15 s at Extra-high effort and 44-49 s at Max, well inside the 120 s read
+timeout and the 180 s turn limit, so the effort-timeout follow-up from the review was closed.
+
 ## Out of scope
 
 `previous_response_id` (the checkpointer owns history), OpenAI built-in tools, `reasoning.mode`,

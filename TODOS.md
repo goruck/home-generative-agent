@@ -1983,19 +1983,6 @@ label pair ("Server URL" vs "Base URL").
 
 ## Model Providers
 
-### GPT-6 at Extra-high or Max effort may outlast the request timeouts
-
-**What:** The OpenAI client reads with `timeout=120` (`build_openai_chat` in `__init__.py`) and a chat turn has `_LLM_INVOKE_TIMEOUT_S = 180.0` (`agent/graph.py`). With `store=False` and no reasoning summary, a Responses stream sends nothing while the model reasons, so an Extra-high or Max effort turn (new GPT-6 choices in `flows/feature_subentry_flow.py`) on a multi-step tool task could pass either limit. The fallback chain would then count a healthy OpenAI provider as a timeout or stall, fail over, and maybe open its circuit breaker.
-
-**Why:** Raised by the red-team pass of the GPT-6 Responses API review (2026-11-11). Unmeasured: the live runs used default, low and high effort, and none came near 120 s.
-
-**How to apply:** During the box field test, time a multi-step tool turn on `gpt-6-luna` at `max` and `xhigh`. If either nears 120 s, scale the read timeout and the turn budget with the effort (or ask for `reasoning.summary` so the stream sends events), and keep a deliberately high-effort timeout from counting toward the breaker. Otherwise note the measurement here and close it.
-
-**Effort:** S-M
-**Priority:** P2
-
----
-
 ### The Responses API's assistant phase is not kept between turns
 
 **What:** Newer OpenAI models (codex models from `gpt-5.3-codex`) tag assistant output with a `phase` (`commentary` vs `final_answer`) and expect it replayed. The `v0` output format drops it on a streamed reply, and `agent/graph.py` `_call_model` checkpoints each reply as text plus tool calls, so the next request loses the distinction between intermediate commentary and the final answer.
