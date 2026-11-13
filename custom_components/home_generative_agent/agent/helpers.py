@@ -1259,9 +1259,9 @@ def register_pending_action(
 
     Nor is a request held in place of a prompt that is locked out (it could
     only announce an action no PIN can confirm, while no longer blocking
-    another voice's), or of one whose PIN reply another turn is still
-    handling (#1001). Each refusal returns None and records its reason on
-    `pin_reply` (`PinReply.refusal`).
+    another voice's), or of one another turn is still handling: its line not
+    delivered yet, or its PIN reply in progress (#1001). Each refusal returns
+    None and records its reason on `pin_reply` (`PinReply.refusal`).
     """
     now = dt_util.utcnow()
     thread_id = action.get("thread_id")
@@ -1517,7 +1517,9 @@ def keep_pin_prompt(action: dict[str, Any], reply: PinReply | None) -> bool:
     Keep the action's prompt for the user's next message, if this turn answers it.
 
     Returns False when it is not kept: this is not the prompt's reply turn, or
-    the prompt has taken its MAX_PIN_REPLIES replies.
+    the prompt can take no more replies (its MAX_PIN_REPLIES replies taken, or
+    its request locked out after MAX_PIN_ATTEMPTS wrong PINs; see
+    `prompt_renewable`).
     """
     if reply is None or action.get("reply_turn") != reply.turn_id:
         return False
@@ -1575,6 +1577,23 @@ def prompts_awaiting_reply(
     ]
 
 
+def refusal_line_due(
+    pending_actions: Mapping[str, Mapping[str, Any]], reply: PinReply
+) -> bool:
+    """
+    Return True when the turn's reply carries a line for a refused request.
+
+    When another prompt refused it (`PinReply.refused_for_a_prompt`), unless
+    this turn's PIN ran an action or the refusing prompt is the one this turn
+    is answering: then there is nothing for the speaker to wait for.
+    conversation.py builds the line (`_refusal_line`) after the same test.
+    """
+    if not reply.refused_for_a_prompt or reply.confirmed:
+        return False
+    refusing = pending_actions.get(reply.waiting_action_id or "")
+    return refusing is None or refusing.get("reply_turn") != reply.turn_id
+
+
 def pin_lines_follow(
     pending_actions: Mapping[str, dict[str, Any]], reply: PinReply
 ) -> bool:
@@ -1591,7 +1610,7 @@ def pin_lines_follow(
     return bool(
         reply.confirmed
         or reply.spent
-        or reply.refused_for_a_prompt
+        or refusal_line_due(pending_actions, reply)
         or prompts_awaiting_reply(pending_actions, reply)
     )
 

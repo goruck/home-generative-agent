@@ -65,6 +65,7 @@ from .agent.helpers import (
     pending_action_expired,
     pin_length_number,
     prompts_awaiting_reply,
+    refusal_line_due,
     remote_house_words,
     resolve_critical_action_policy,
     safe_convert,
@@ -2094,7 +2095,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         user is asked to make the request again. Nothing is said once this
         turn's PIN ran an action, or about the prompt this turn is answering.
         """
-        if not pin_reply.refused_for_a_prompt or pin_reply.confirmed:
+        if not refusal_line_due(pending_actions, pin_reply):
             return None
         now = dt_util.utcnow()
         refusing = pending_actions.get(pin_reply.waiting_action_id or "")
@@ -2103,8 +2104,6 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             or int(refusing.get("attempts", 0) or 0) >= MAX_PIN_ATTEMPTS
         ):
             refusing = None
-        if refusing is not None and refusing.get("reply_turn") == pin_reply.turn_id:
-            return None
         if pin_reply.other_voice_waiting:
             conversation_id = pin_reply.waiting_conversation
             followed = (
@@ -2175,9 +2174,10 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         itself and go in front of the reply, so the turn's result shows them
         and the reply still ends with the model's question, which is what
         keeps a satellite listening for the PIN (ChatLog.continue_conversation
-        reads the last character). A refusal for another voice's prompt with
-        no prompt of this turn's goes after the reply instead, so the reply
-        ends on it and the satellite stops listening (#1001). They are also
+        reads the last character). A refusal for another prompt (another
+        voice's, or one another turn is still handling) with no prompt of this
+        turn's goes after the reply instead, so the reply ends on it and the
+        satellite stops listening (#1001). They are also
         spoken when a pipeline is listening for deltas: only the lines when
         the reply was streamed, the joined reply when it was not (schema-first
         mode), since a pipeline past HA's streaming threshold speaks deltas
@@ -2209,7 +2209,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             # A refusal with nothing to answer goes after the model's reply,
             # so the reply ends on it rather than on a question of the
             # model's: a satellite would keep listening, and the PIN said
-            # next would follow the other voice's prompt (#1001).
+            # next would go to the prompt that refused it (#1001).
             merged = f"{reply.content}\n\n{text}"
         else:
             merged = f"{text}\n\n{reply.content}"

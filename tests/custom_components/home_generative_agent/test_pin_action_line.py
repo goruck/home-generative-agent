@@ -725,6 +725,40 @@ def test_a_request_during_another_turns_pin_reply_tells_the_model_so(
     assert content == pin_msg(None, "pin_request_in_progress")
 
 
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        (_hold_through_automation, _hold_through_guard),
+        (_hold_through_guard, _hold_through_automation),
+    ],
+)
+def test_the_held_request_records_which_voice_made_it(first: Any, second: Any) -> None:
+    """
+    Two voices with no linked person both run as robot (#1001).
+
+    Boris's turn follows Anna's prompt onto her thread and asks for something
+    else: through the guard and the automation tool alike, the voice that
+    spoke reaches the held request, so it is refused as another voice's.
+    """
+    pending: dict[str, Any] = {}
+    anna_turn = _voice_ctx(pending, "conv1:anna", "unlock")
+    anna_turn.config["configurable"]["voice_thread"] = "conv1:anna"
+    anna = _held_id(first(anna_turn))
+    assert pending[anna]["voice_thread"] == "conv1:anna"
+    disclose_pin_prompts(pending, anna_turn.config["configurable"]["pin_reply"])
+    end_pin_turn(pending, anna_turn.config["configurable"]["pin_reply"].turn_id)
+
+    boris_turn = _voice_ctx(pending, "conv1:anna", "1234, and open the garage")
+    boris_turn.config["configurable"].update(
+        {"voice_thread": "conv1:boris", "pin_owner": "robot"}
+    )
+    result = second(boris_turn)
+
+    content = result.content if hasattr(result, "content") else result
+    assert content == pin_msg(None, "pin_other_voice_waiting")
+    assert list(pending) == [anna]
+
+
 class _FakeAPI:
     def __init__(self, result: Any = None) -> None:
         self.result = {"success": True} if result is None else result

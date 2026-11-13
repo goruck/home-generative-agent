@@ -3324,6 +3324,27 @@ def test_the_refusal_names_the_prompt_a_pin_would_follow_now() -> None:
         assert line == pin_msg(None, "pin_request_again_line")
 
 
+def test_make_the_request_again_is_said_once() -> None:
+    """The wrong-PIN lines and the refusal fallback can both ask for it."""
+    from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+        PIN_REFUSED_OTHER_VOICE,
+        PinReply,
+    )
+    from custom_components.home_generative_agent.agent.pin_messages import (  # noqa: PLC0415
+        pin_msg,
+    )
+
+    reply = PinReply("0000")
+    reply.spent = True
+    reply.refusal = PIN_REFUSED_OTHER_VOICE
+    reply.waiting_action_id = "gone"
+    reply.waiting_conversation = "conv1"
+
+    lines = _pin_entity()._pin_lines({}, reply)
+
+    assert lines.count(pin_msg(None, "pin_request_again_line")) == 1
+
+
 def test_no_refusal_line_once_this_turns_pin_ran_the_waiting_request() -> None:
     """A reply saying "PIN accepted", then to ask again, would contradict itself."""
     from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415

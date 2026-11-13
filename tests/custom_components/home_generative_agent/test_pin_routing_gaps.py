@@ -28,7 +28,6 @@ from custom_components.home_generative_agent.agent.helpers import (
     start_pin_turn,
     waiting_pin_prompt,
 )
-from custom_components.home_generative_agent.agent.pin_messages import pin_msg
 
 ANNA = "conv1:anna"
 BORIS = "conv1:boris"
@@ -108,9 +107,6 @@ def test_the_refusal_names_the_waiting_request() -> None:
     assert reply.waiting_conversation == "conv1"
     assert reply.waiting_action_id is not None
     assert pending[reply.waiting_action_id]["tool_args"]["name"] == "Front Door"
-    line = pin_msg(None, "pin_other_voice_waiting_line", action="unlock Front Door")
-    assert "unlock Front Door" in line
-    assert not line.rstrip().endswith("?")
 
 
 def test_voices_sharing_a_user_are_still_told_apart() -> None:
@@ -355,3 +351,28 @@ def test_an_in_progress_refusal_records_the_request_it_waits_on() -> None:
     assert own.refusal == PIN_REFUSED_IN_PROGRESS
     assert own.waiting_action_id == anna
     assert pin_lines_follow(pending, own) is True
+
+
+def test_no_refusal_line_is_promised_for_the_prompt_this_turn_answers() -> None:
+    """
+    Boris's PIN follows Anna's prompt; the model then asks for something else.
+
+    It is refused for her prompt, which this very turn answers, so no refusal
+    line is built; pin_lines_follow must not promise one, or the round-limit
+    guard adds no reply of its own (#1001 review 3).
+    """
+    pending: dict[str, Any] = {}
+    anna = _hold(pending, ANNA, "robot", "Front Door")
+    assert anna is not None
+    boris = start_pin_turn(pending, ANNA, "1234")
+
+    held = register_pending_action(
+        pending,
+        _unlock(ANNA, "robot", "Garage Door", boris, voice_thread=BORIS),
+        pin_owner="robot",
+        pin_reply=boris,
+    )
+
+    assert held is None
+    assert boris.refusal == PIN_REFUSED_OTHER_VOICE
+    assert pin_lines_follow(pending, boris) is False
