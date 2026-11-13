@@ -57,7 +57,6 @@ from custom_components.home_generative_agent.core.subentry_types import (
 from custom_components.home_generative_agent.flows.feature_subentry_flow import (
     _fallback_provider_options,
     _provider_options,
-    _shared_slot_clash,
 )
 
 from .test_fallback_setup import (
@@ -423,7 +422,7 @@ async def test_an_unreachable_sentinel_provider_falls_back_to_chat(
 
 
 # ---------------------------------------------------------------------------
-# One runtime slot per provider type
+# Two providers of one type (#970)
 # ---------------------------------------------------------------------------
 
 
@@ -463,33 +462,28 @@ def _two_server_entry(sentinel_provider_id: str) -> DummyEntry:
     )
 
 
-def test_a_second_server_of_one_type_never_moves_conversation(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Sentinel runs on chat rather than take over Conversation's slot."""
+def test_a_second_server_of_one_type_serves_the_tier() -> None:
+    """
+    The Sentinel Model runs on its own server of a type Conversation uses too.
+
+    Before #970 every provider of a type shared one key or server, so this
+    choice was refused and Sentinel ran on the Conversation model; each
+    provider now gets a client of its own, and Conversation keeps its server.
+    """
     entry = _two_server_entry("cloud")
     options = resolve_runtime_options(entry)  # type: ignore[arg-type]
 
-    assert options[CONF_OPENAI_COMPATIBLE_BASE_URL] == "http://lan:8000/v1"
-    assert CONF_SENTINEL_MODEL_PROVIDER not in options
+    assert options[CONF_SENTINEL_MODEL_PROVIDER] == "openai_compatible"
     providers = resolve_model_provider_configs(entry, {})  # type: ignore[arg-type]
-    assert "sentinel" not in build_model_deployments(entry, providers, {})  # type: ignore[arg-type]
-    assert "sentinel" not in resolve_fallback_chains(entry, providers, {})  # type: ignore[arg-type]
-    assert "runs on the Conversation model instead" in caplog.text
+    chains = resolve_fallback_chains(entry, providers, {})  # type: ignore[arg-type]
+    assert [p.entry_id for p in chains["sentinel"]][:1] == ["cloud"]
+    assert [p.entry_id for p in chains["chat"]][:1] == ["lan"]
 
 
 def test_the_conversation_provider_itself_serves_the_tier() -> None:
     options = resolve_runtime_options(_two_server_entry("lan"))  # type: ignore[arg-type]
     assert options[CONF_SENTINEL_MODEL_PROVIDER] == "openai_compatible"
     assert options[CONF_OPENAI_COMPATIBLE_BASE_URL] == "http://lan:8000/v1"
-
-
-def test_setup_refuses_a_second_server_of_one_type() -> None:
-    entry = _two_server_entry("lan")
-    assert _shared_slot_clash(entry, "sentinel_model", "cloud") == "LAN"  # type: ignore[arg-type]
-    assert _shared_slot_clash(entry, "sentinel_model", "lan") is None  # type: ignore[arg-type]
-    # Only the opt-in tier is refused; the other features keep their behaviour.
-    assert _shared_slot_clash(entry, "conversation", "cloud") is None  # type: ignore[arg-type]
 
 
 def test_a_dangling_pin_is_logged(caplog: pytest.LogCaptureFixture) -> None:

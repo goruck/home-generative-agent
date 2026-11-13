@@ -1292,7 +1292,8 @@ async def test_setup_rechecks_each_failed_openai_compatible_url_once(
         name="Local server",
         provider_type="openai_compatible",
         capabilities={"chat"},
-        data={"settings": {"base_url": "http://user:pw@oc/v1"}},
+        # The options below are written from these settings in production.
+        data={"settings": {"base_url": "http://user:pw@oc/v1", "api_key": "oc-key"}},
         deployment="edge",
     )
     data.providers[compatible.entry_id] = compatible
@@ -1877,3 +1878,162 @@ async def test_setup_picks_the_openai_api_for_every_category(
             assert config["top_p"] is None
         else:
             assert config["temperature"] is not None
+
+
+def _openai(entry_id: str, name: str, key: str) -> ModelProviderConfig:
+    return ModelProviderConfig(
+        entry_id=entry_id,
+        name=name,
+        provider_type="openai",
+        capabilities={"chat", "vlm", "summarization", "embedding"},
+        data={"settings": {"api_key": key}},
+        deployment="cloud",
+    )
+
+
+def _two_openai_accounts(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> tuple[FallbackSetupData, dict[str, str]]:
+    """
+    Two OpenAI providers, each with its own key (#970).
+
+    Conversation and embeddings run on "Work", camera analysis and
+    summarization on "Personal". The flat option key holds whichever the
+    resolver wrote last, Personal's, as setup sees it.
+    """
+    work = _openai("work", "Work OpenAI", "sk-WORK")
+    personal = _openai("personal", "Personal OpenAI", "sk-PERS")
+    data = _fallback_setup_data()
+    data.providers = {work.entry_id: work, personal.entry_id: personal}
+    data.options[CONF_API_KEY] = "sk-PERS"
+    data.fallback_chains = {
+        "chat": [work, personal],
+        "vlm": [personal],
+        "summarization": [personal],
+        "embedding": [work],
+    }
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    monkeypatch.setattr(
+        hga_component,
+        "build_openai_chat",
+        lambda secret, **_kwargs: FakeRunnable(f"openai:{secret.get_secret_value()}"),
+    )
+    embedding_keys: dict[str, str] = {}
+
+    def _embeddings(*_args: Any, api_key: Any = None, **_kwargs: Any) -> Any:
+        embedding_keys["key"] = api_key.get_secret_value()
+        return FakeEmbeddings("openai")
+
+    monkeypatch.setattr(hga_component, "OpenAIEmbeddings", _embeddings)
+    return data, embedding_keys
+
+
+def _head(model: Any) -> Any:
+    assert isinstance(model, (FallbackChatModel, FallbackVLM))
+    return model.chain[0][0]
+
+
+@pytest.mark.asyncio
+async def test_each_category_uses_its_own_providers_key(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Two providers of one type no longer share the key written last (#970).
+
+    Before, every category ran on the flat option key, so Work's requests were
+    billed to Personal; and a fallback to the second account was no fallback.
+    """
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    _, embedding_keys = _two_openai_accounts(hass, monkeypatch)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    chat = entry.runtime_data.chat_model
+    assert _head(chat).base.name == "openai:sk-WORK"
+    assert cast("Any", chat).chain[1][0].base.name == "openai:sk-PERS"
+    assert _head(entry.runtime_data.vision_model).base.name == "openai:sk-PERS"
+    assert _head(entry.runtime_data.summarization_model).base.name == ("openai:sk-PERS")
+    assert embedding_keys["key"] == "sk-WORK"
+
+
+@pytest.mark.asyncio
+async def test_a_second_key_that_fails_is_rechecked_on_its_own(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each key is checked, and a failed one re-checked, by its provider (#970)."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    _two_openai_accounts(hass, monkeypatch)
+    checked: list[str] = []
+
+    async def _openai_healthy(_hass: Any, key: Any, **_kwargs: Any) -> bool:
+        checked.append(key)
+        return key != "sk-WORK"
+
+    monkeypatch.setattr(hga_component, "openai_healthy", _openai_healthy)
+    scheduled = _capture_recheck(monkeypatch)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert sorted(checked) == ["sk-PERS", "sk-WORK"]
+    assert [probe.label for probe in scheduled] == ["OpenAI (Work OpenAI)"]
+    # Work's chat head is down; Personal, its fallback, still answers.
+    chat = cast("Any", entry.runtime_data.chat_model)
+    assert [member[0].base.name for member in chat.chain] == ["openai:sk-PERS"]
+
+
+@pytest.mark.asyncio
+async def test_two_openai_compatible_servers_each_get_their_own_client(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Conversation on one server, camera analysis on another (#970)."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+
+    def _server(entry_id: str, url: str, key: str) -> ModelProviderConfig:
+        return ModelProviderConfig(
+            entry_id=entry_id,
+            name=entry_id,
+            provider_type="openai_compatible",
+            capabilities={"chat", "vlm"},
+            data={"settings": {"base_url": url, "api_key": key}},
+            deployment="edge",
+        )
+
+    chat_server = _server("chat-server", "http://chat/v1", "k1")
+    vlm_server = _server("vlm-server", "http://vlm/v1", "k2")
+    data.providers = {
+        chat_server.entry_id: chat_server,
+        vlm_server.entry_id: vlm_server,
+    }
+    data.fallback_chains = {"chat": [chat_server], "vlm": [vlm_server]}
+    data.options.update(
+        {
+            CONF_CHAT_MODEL_PROVIDER: "openai_compatible",
+            CONF_VLM_PROVIDER: "openai_compatible",
+            # Written last: the camera analysis server's.
+            CONF_OPENAI_COMPATIBLE_BASE_URL: "http://vlm/v1",
+            CONF_OPENAI_COMPATIBLE_API_KEY: "k2",
+        }
+    )
+    _patch_setup_dependencies(hass, monkeypatch, data)
+
+    async def _healthy(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(hga_component, "openai_compatible_healthy", _healthy)
+
+    def _chat_openai(*_args: Any, base_url: str = "", **_kwargs: Any) -> FakeRunnable:
+        return FakeRunnable(base_url)
+
+    monkeypatch.setattr(hga_component, "ChatOpenAI", _chat_openai)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert _head(entry.runtime_data.chat_model).base.name.startswith("http://chat")
+    assert _head(entry.runtime_data.vision_model).base.name.startswith("http://vlm")

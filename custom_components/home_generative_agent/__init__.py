@@ -1361,6 +1361,32 @@ def _default_feature_payload(feature_type: str) -> dict[str, Any]:
     }
 
 
+# Provider types whose client carries the provider's own credential, so two
+# providers of one type with different keys or servers get a client each
+# (#970). Ollama clients are keyed by server URL instead.
+_KEYED_PROVIDER_TYPES = frozenset(
+    {"openai", "gemini", "anthropic", "openai_compatible"}
+)
+
+
+def _provider_credential(provider: ModelProviderConfig) -> tuple[str, ...] | None:
+    """
+    Return what a provider's client is built from, or None when it has none.
+
+    The API key; for an OpenAI-compatible server, its base URL and key.
+    """
+    settings = provider.data.get("settings", {})
+    if provider.provider_type == "openai_compatible":
+        base_url = settings.get("base_url")
+        if not base_url:
+            return None
+        return (str(base_url), str(settings.get("api_key") or "none"))
+    if provider.provider_type in _KEYED_PROVIDER_TYPES:
+        api_key = settings.get("api_key")
+        return (str(api_key),) if api_key else None
+    return None
+
+
 def _provider_api_key(
     providers: Mapping[str, ModelProviderConfig], provider_type: str
 ) -> str | None:
@@ -2269,9 +2295,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         (LOGGER.warning if embedding_left_out_chosen else LOGGER.info)(
             "Embedding fallback provider(s) %s left out: only another Ollama "
             "server behind an Ollama primary can be an embedding fallback. Any "
-            "other fallback of the primary provider %s adds no failover (a "
-            "second OpenAI or Gemini provider shares its client) or could mix "
-            "models in the memory store.",
+            "other fallback of the primary provider %s could mix models in the "
+            "memory store.",
             ", ".join(p.name for p in embedding_left_out),
             embedding_chain[0].name,
         )
@@ -2521,9 +2546,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         cooldown_seconds=FALLBACK_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
     )
 
-    def _model_instance_for_provider(provider: Any) -> Any:
-        """Map a ModelProviderConfig to the initialized LangChain instance."""
+    def _model_instance_for_provider(provider: Any) -> Any:  # noqa: PLR0911
+        """
+        Map a ModelProviderConfig to the initialized LangChain instance.
+
+        A provider whose credential differs from the one its type's client was
+        built from has a client of its own (#970); the rest share the type's.
+        """
         pt = provider.provider_type
+        if pt in _KEYED_PROVIDER_TYPES:
+            credential = _provider_credential(provider)
+            if credential is not None and (pt, credential) in own_clients:
+                return own_clients[(pt, credential)]
         if pt == "openai":
             return openai_provider
         if pt == "openai_compatible":
@@ -2636,6 +2670,65 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         )
     else:
         openai_compatible_embedding_ok = False
+
+    # One client per credential (#970). The type's client is built from the
+    # flat option key, which holds whichever provider of that type the
+    # resolver wrote last, so every other provider of the type that a chain
+    # uses (or the embedding head) is checked and built with its own.
+    default_credentials: dict[str, tuple[str, ...] | None] = {
+        "openai": (api_key,) if api_key else None,
+        "gemini": (gemini_key,) if gemini_key else None,
+        "anthropic": (anthropic_key,) if anthropic_key else None,
+        "openai_compatible": (
+            (openai_compatible_base_url, openai_compatible_api_key)
+            if openai_compatible_base_url
+            else None
+        ),
+    }
+    embedding_head = (fallback_chains.get("embedding") or [None])[0]
+    credential_users = [
+        p
+        for category, chain in fallback_chains.items()
+        if category != "embedding"
+        for p in chain
+    ]
+    if embedding_head is not None and embedding_head.provider_type in {
+        "openai",
+        "gemini",
+    }:
+        credential_users.append(embedding_head)
+    own_credentials: dict[tuple[str, tuple[str, ...]], ModelProviderConfig] = {}
+    for provider in credential_users:
+        credential = _provider_credential(provider)
+        if credential is not None and credential != default_credentials.get(
+            provider.provider_type
+        ):
+            own_credentials.setdefault((provider.provider_type, credential), provider)
+
+    async def _credential_healthy(
+        provider_type: str, credential: tuple[str, ...]
+    ) -> bool:
+        if provider_type == "openai":
+            return await openai_healthy(hass, credential[0], timeout_s=health_timeout)
+        if provider_type == "gemini":
+            return await gemini_healthy(hass, credential[0], timeout_s=health_timeout)
+        if provider_type == "anthropic":
+            return await anthropic_healthy(
+                hass, credential[0], timeout_s=health_timeout
+            )
+        return await openai_compatible_healthy(
+            hass, credential[0], credential[1], timeout_s=health_timeout
+        )
+
+    own_health: dict[tuple[str, tuple[str, ...]], bool] = dict(
+        zip(
+            own_credentials,
+            await asyncio.gather(
+                *(_credential_healthy(t, c) for t, c in own_credentials)
+            ),
+            strict=True,
+        )
+    )
     ollama_any_ok = any(ollama_health.values())
 
     # A failed check is not final: re-probe after HA has started and reload
@@ -2673,6 +2766,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             recheck_probes.append(
                 ProviderProbe(label, partial(validate, hass, key, health_timeout))
             )
+    key_validators = {
+        "openai": ("OpenAI", validate_openai_key),
+        "gemini": ("Gemini", validate_gemini_key),
+        "anthropic": ("Anthropic", validate_anthropic_key),
+    }
+    for (provider_type, credential), provider in own_credentials.items():
+        if own_health[(provider_type, credential)] or provider_type not in (
+            key_validators
+        ):
+            continue
+        label, validate = key_validators[provider_type]
+        recheck_probes.append(
+            ProviderProbe(
+                f"{label} ({provider.name})",
+                partial(validate, hass, credential[0], health_timeout),
+            )
+        )
 
     # Setup builds one OpenAI-compatible chat client from the base URL and one
     # embedding client from the embedding URL, so each URL counts only when a
@@ -2697,6 +2807,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             (openai_compatible_embedding_url, openai_compatible_embedding_api_key),
             openai_compatible_embedding_ok,
         )
+    for (provider_type, credential), ok in own_health.items():
+        if provider_type == "openai_compatible":
+            compatible_endpoints.setdefault((credential[0], credential[1]), ok)
     recheck_probes.extend(
         ProviderProbe(
             endpoint_label("OpenAI-compatible", url),
@@ -2748,16 +2861,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     entry.async_on_unload(_close_openai_http_client)
 
     # Instantiate providers.
-    openai_provider: RunnableSerializable[LanguageModelInput, BaseMessage] | None = None
-    if openai_ok:
+    def _build_openai_client(
+        secret: SecretStr | None,
+    ) -> RunnableSerializable[LanguageModelInput, BaseMessage] | None:
         try:
-            openai_provider = build_openai_chat(
-                openai_secret,
+            return build_openai_chat(
+                secret,
                 http_client=openai_http_client,
                 http_async_client=http_async_client,
             )
         except Exception:
             LOGGER.exception("OpenAI provider init failed; continuing without it.")
+            return None
+
+    openai_provider: RunnableSerializable[LanguageModelInput, BaseMessage] | None = (
+        _build_openai_client(openai_secret) if openai_ok else None
+    )
 
     def _build_ollama_provider(
         url: str,
@@ -2797,11 +2916,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 type(err).__name__,
             )
 
-    gemini_provider: RunnableSerializable[LanguageModelInput, BaseMessage] | None = None
-    if gemini_ok:
+    def _build_gemini_client(
+        secret: SecretStr | None,
+    ) -> RunnableSerializable[LanguageModelInput, BaseMessage] | None:
         try:
-            gemini_provider = ChatGoogleGenerativeAI(
-                google_api_key=gemini_secret,
+            return ChatGoogleGenerativeAI(
+                google_api_key=secret,
                 model=RECOMMENDED_GEMINI_CHAT_MODEL,
             ).configurable_fields(
                 model=ConfigurableField(id="model"),
@@ -2814,18 +2934,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             )
         except Exception:
             LOGGER.exception("Gemini provider init failed; continuing without it.")
+            return None
 
-    anthropic_provider: RunnableSerializable[LanguageModelInput, BaseMessage] | None = (
-        None
+    gemini_provider: RunnableSerializable[LanguageModelInput, BaseMessage] | None = (
+        _build_gemini_client(gemini_secret) if gemini_ok else None
     )
-    if anthropic_ok:
+
+    async def _async_build_anthropic_client(
+        secret: SecretStr | None,
+    ) -> RunnableSerializable[LanguageModelInput, BaseMessage] | None:
         # Top-level cache_control = Anthropic's automatic breakpoint on the
         # LAST block of every request (history reuse inside a tool loop). The
         # stable system prefix gets its own explicit breakpoint per call in
         # core/prompt_cache.py (issue #617).
         try:
             anthropic_chat = SharedClientChatAnthropic(  # type: ignore[call-arg]
-                anthropic_api_key=anthropic_secret,  # type: ignore[call-arg]
+                anthropic_api_key=secret,  # type: ignore[call-arg]
                 model=RECOMMENDED_ANTHROPIC_CHAT_MODEL,  # type: ignore[call-arg]
                 model_kwargs={"cache_control": dict(CACHE_CONTROL_EPHEMERAL)},
                 streaming=True,
@@ -2837,7 +2961,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             # fails here it would fail the same way on the loop, so the
             # provider stays unset and the fallback chain takes over.
             await async_prime_async_client(hass, anthropic_chat)
-            anthropic_provider = anthropic_chat.configurable_fields(
+            return anthropic_chat.configurable_fields(
                 model=ConfigurableField(id="model"),
                 temperature=ConfigurableField(id="temperature"),
                 thinking=ConfigurableField(id="thinking"),
@@ -2847,17 +2971,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             )
         except Exception:
             LOGGER.exception("Anthropic provider init failed; continuing without it.")
+            return None
 
-    openai_compatible_provider: (
-        RunnableSerializable[LanguageModelInput, BaseMessage] | None
-    ) = None
-    if openai_compatible_ok and openai_compatible_base_url:
+    anthropic_provider: RunnableSerializable[LanguageModelInput, BaseMessage] | None = (
+        await _async_build_anthropic_client(anthropic_secret) if anthropic_ok else None
+    )
+
+    def _build_compatible_client(
+        base_url: str, compatible_key: str
+    ) -> RunnableSerializable[LanguageModelInput, BaseMessage] | None:
         try:
-            openai_compatible_provider = ChatOpenAI(
-                api_key=SecretStr(openai_compatible_api_key),
-                base_url=normalize_openai_compatible_base_url(
-                    openai_compatible_base_url
-                ),
+            return ChatOpenAI(
+                api_key=SecretStr(compatible_key),
+                base_url=normalize_openai_compatible_base_url(base_url),
                 timeout=120,
                 http_client=openai_http_client,
                 http_async_client=http_async_client,
@@ -2877,13 +3003,66 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             LOGGER.exception(
                 "OpenAI-compatible provider init failed; continuing without it."
             )
+            return None
+
+    openai_compatible_provider: (
+        RunnableSerializable[LanguageModelInput, BaseMessage] | None
+    ) = (
+        _build_compatible_client(openai_compatible_base_url, openai_compatible_api_key)
+        if openai_compatible_ok and openai_compatible_base_url
+        else None
+    )
+
+    # A client for each other credential a chain uses (#970), None where its
+    # check failed, so that provider is skipped like an unavailable one.
+    own_clients: dict[
+        tuple[str, tuple[str, ...]],
+        RunnableSerializable[LanguageModelInput, BaseMessage] | None,
+    ] = {}
+    for provider_type, credential in own_credentials:
+        client: RunnableSerializable[LanguageModelInput, BaseMessage] | None = None
+        if own_health[(provider_type, credential)]:
+            if provider_type == "openai":
+                client = _build_openai_client(SecretStr(credential[0]))
+            elif provider_type == "gemini":
+                client = _build_gemini_client(SecretStr(credential[0]))
+            elif provider_type == "anthropic":
+                client = await _async_build_anthropic_client(SecretStr(credential[0]))
+            else:
+                client = _build_compatible_client(credential[0], credential[1])
+        own_clients[(provider_type, credential)] = client
+
+    def _head_model(category: str, type_client: Any) -> Any:
+        """
+        Return the client a category's head provider runs on.
+
+        Its own when its credential differs from the type's (#970), else the
+        type's client.
+        """
+        chain = fallback_chains.get(category)
+        if chain and chain[0].provider_type in _KEYED_PROVIDER_TYPES:
+            return _model_instance_for_provider(chain[0])
+        return type_client
+
+    def _embedding_credential(
+        provider_type: str, type_secret: SecretStr | None, *, type_ok: bool
+    ) -> tuple[SecretStr | None, bool]:
+        """Return the key and health the embedding head of a type embeds with."""
+        if embedding_head is not None and embedding_head.provider_type == provider_type:
+            credential = _provider_credential(embedding_head)
+            if credential is not None and (provider_type, credential) in own_health:
+                return SecretStr(credential[0]), own_health[(provider_type, credential)]
+        return type_secret, type_ok
 
     # Embeddings: instantiate both, then select based on provider
     openai_embeddings: OpenAIEmbeddings | None = None
-    if openai_ok:
+    openai_embedding_secret, openai_embedding_ok = _embedding_credential(
+        "openai", openai_secret, type_ok=openai_ok
+    )
+    if openai_embedding_ok:
         try:
             openai_embeddings = OpenAIEmbeddings(
-                api_key=openai_secret,
+                api_key=openai_embedding_secret,
                 model=options.get(
                     CONF_OPENAI_EMBEDDING_MODEL, RECOMMENDED_OPENAI_EMBEDDING_MODEL
                 ),
@@ -2927,10 +3106,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     )
 
     gemini_embeddings: GoogleGenerativeAIEmbeddings | None = None
-    if gemini_ok:
+    gemini_embedding_secret, gemini_embedding_ok = _embedding_credential(
+        "gemini", gemini_secret, type_ok=gemini_ok
+    )
+    if gemini_embedding_ok:
         try:
             gemini_embeddings = GoogleGenerativeAIEmbeddings(
-                google_api_key=gemini_secret,
+                google_api_key=gemini_embedding_secret,
                 model=options.get(
                     CONF_GEMINI_EMBEDDING_MODEL, RECOMMENDED_GEMINI_EMBEDDING_MODEL
                 ),
@@ -3470,7 +3652,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         openai_chat_model = options.get(
             CONF_OPENAI_CHAT_MODEL, RECOMMENDED_OPENAI_CHAT_MODEL
         )
-        chat_model = (openai_provider or NullChat()).with_config(
+        chat_model = (_head_model("chat", openai_provider) or NullChat()).with_config(
             config={
                 "configurable": {
                     "model_name": openai_chat_model,
@@ -3486,7 +3668,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             CONF_OPENAI_COMPATIBLE_CHAT_MODEL,
             RECOMMENDED_OPENAI_COMPATIBLE_CHAT_MODEL,
         )
-        chat_model = (openai_compatible_provider or NullChat()).with_config(
+        chat_model = (
+            _head_model("chat", openai_compatible_provider) or NullChat()
+        ).with_config(
             config={
                 "configurable": {
                     "model_name": openai_compatible_chat_model,
@@ -3502,7 +3686,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         gemini_chat_model = options.get(
             CONF_GEMINI_CHAT_MODEL, RECOMMENDED_GEMINI_CHAT_MODEL
         )
-        chat_model = (gemini_provider or NullChat()).with_config(
+        chat_model = (_head_model("chat", gemini_provider) or NullChat()).with_config(
             config={
                 "configurable": {
                     "model": gemini_chat_model,
@@ -3520,7 +3704,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         anthropic_chat_model = options.get(
             CONF_ANTHROPIC_CHAT_MODEL, RECOMMENDED_ANTHROPIC_CHAT_MODEL
         )
-        chat_model = (anthropic_provider or NullChat()).with_config(
+        chat_model = (
+            _head_model("chat", anthropic_provider) or NullChat()
+        ).with_config(
             config={
                 "configurable": {
                     "model": anthropic_chat_model,
@@ -3555,7 +3741,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     vlm_temp = options.get(CONF_VLM_TEMPERATURE, RECOMMENDED_VLM_TEMPERATURE)
     if vlm_provider == "openai":
         openai_vlm = options.get(CONF_OPENAI_VLM, RECOMMENDED_OPENAI_VLM)
-        vision_model = (openai_provider or NullChat()).with_config(
+        vision_model = (_head_model("vlm", openai_provider) or NullChat()).with_config(
             config={
                 "configurable": {
                     "model_name": openai_vlm,
@@ -3566,7 +3752,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             }
         )
     elif vlm_provider == "openai_compatible":
-        vision_model = (openai_compatible_provider or NullChat()).with_config(
+        vision_model = (
+            _head_model("vlm", openai_compatible_provider) or NullChat()
+        ).with_config(
             config={
                 "configurable": {
                     "model_name": options.get(
@@ -3579,7 +3767,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         )
     elif vlm_provider == "gemini":
         gemini_vlm = options.get(CONF_GEMINI_VLM, RECOMMENDED_GEMINI_VLM)
-        vision_model = (gemini_provider or NullChat()).with_config(
+        vision_model = (_head_model("vlm", gemini_provider) or NullChat()).with_config(
             config={
                 "configurable": {
                     "model": gemini_vlm,
@@ -3593,7 +3781,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             }
         )
     elif vlm_provider == "anthropic":
-        vision_model = (anthropic_provider or NullChat()).with_config(
+        vision_model = (
+            _head_model("vlm", anthropic_provider) or NullChat()
+        ).with_config(
             config={
                 "configurable": {
                     "model": options.get(CONF_ANTHROPIC_VLM, RECOMMENDED_ANTHROPIC_VLM),
@@ -3636,7 +3826,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         openai_sum_model = options.get(
             CONF_OPENAI_SUMMARIZATION_MODEL, RECOMMENDED_OPENAI_SUMMARIZATION_MODEL
         )
-        summarization_model = (openai_provider or NullChat()).with_config(
+        summarization_model = (
+            _head_model("summarization", openai_provider) or NullChat()
+        ).with_config(
             config={
                 "configurable": {
                     "model_name": openai_sum_model,
@@ -3647,7 +3839,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             }
         )
     elif sum_provider == "openai_compatible":
-        summarization_model = (openai_compatible_provider or NullChat()).with_config(
+        summarization_model = (
+            _head_model("summarization", openai_compatible_provider) or NullChat()
+        ).with_config(
             config={
                 "configurable": {
                     "model_name": options.get(
@@ -3664,7 +3858,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             CONF_GEMINI_SUMMARIZATION_MODEL,
             RECOMMENDED_GEMINI_SUMMARIZATION_MODEL,
         )
-        summarization_model = (gemini_provider or NullChat()).with_config(
+        summarization_model = (
+            _head_model("summarization", gemini_provider) or NullChat()
+        ).with_config(
             config={
                 "configurable": {
                     "model": gemini_sum_model,
@@ -3680,7 +3876,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             }
         )
     elif sum_provider == "anthropic":
-        summarization_model = (anthropic_provider or NullChat()).with_config(
+        summarization_model = (
+            _head_model("summarization", anthropic_provider) or NullChat()
+        ).with_config(
             config={
                 "configurable": {
                     "model": options.get(
@@ -3733,7 +3931,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         openai_sentinel_model = options.get(
             CONF_OPENAI_SENTINEL_MODEL, RECOMMENDED_OPENAI_SENTINEL_MODEL
         )
-        sentinel_model = (openai_provider or NullChat()).with_config(
+        sentinel_model = (
+            _head_model("sentinel", openai_provider) or NullChat()
+        ).with_config(
             config={
                 "configurable": {
                     "model_name": openai_sentinel_model,
@@ -3744,7 +3944,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             }
         )
     elif sentinel_provider == "openai_compatible":
-        sentinel_model = (openai_compatible_provider or NullChat()).with_config(
+        sentinel_model = (
+            _head_model("sentinel", openai_compatible_provider) or NullChat()
+        ).with_config(
             config={
                 "configurable": {
                     "model_name": options.get(
@@ -3760,7 +3962,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         gemini_sentinel_model = options.get(
             CONF_GEMINI_SENTINEL_MODEL, RECOMMENDED_GEMINI_SENTINEL_MODEL
         )
-        sentinel_model = (gemini_provider or NullChat()).with_config(
+        sentinel_model = (
+            _head_model("sentinel", gemini_provider) or NullChat()
+        ).with_config(
             config={
                 "configurable": {
                     "model": gemini_sentinel_model,
@@ -3774,7 +3978,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             }
         )
     elif sentinel_provider == "anthropic":
-        sentinel_model = (anthropic_provider or NullChat()).with_config(
+        sentinel_model = (
+            _head_model("sentinel", anthropic_provider) or NullChat()
+        ).with_config(
             config={
                 "configurable": {
                     "model": options.get(
