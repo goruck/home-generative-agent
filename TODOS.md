@@ -455,6 +455,18 @@ v3.41.1 rather than deferred; see the TODO above.
 
 ---
 
+### Per-credential provider clients branch on provider type in three places
+
+**What:** `async_setup_entry` (`__init__.py`) decides per provider type in three separate places how a provider's own credential becomes a client: the own-client builders (`_build_openai_client`, `_build_gemini_client`, `_async_build_anthropic_client`, `_build_compatible_client`), `_model_instance_for_provider` (which type client to fall back to), and `_embedding_credential` (OpenAI and Gemini only). A new keyed provider type has to be added to all three plus `KEYED_PROVIDER_TYPES` in `core/subentry_resolver.py`.
+
+**Why:** Maintainability and Simplification specialists, #970 review cycle 1 (2026-11-13). Lindo chose to record it rather than refactor in the #970 PR. The behaviour is correct and tested today.
+
+**How to apply:** One table keyed by provider type holding the builder, the type client and whether it embeds; drive the own-client loop, the model lookup and the embedding key from it. Keep `test_fallback_setup.py`'s #970 tests green; they cover each branch.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
 ### Mixed-provider fallback chains: lossy schema for capable fallbacks, schema 400s do not advance the chain
 
 **What:** `_bind_model_tools` now re-runs the provider-gated schema passes per chain member (`_tools_for_chain_member`, `agent/graph.py`), which fixed the field failure (Ollama primary, Gemini fallback, `any_of[0].required` 400, 2026-10-03). Two leftovers: (1) the passes are subtractive and run on the primary's already-shaped list, so an OpenAI/Anthropic/Gemini primary still hands its lossy flattened or sanitized schema to a union-capable fallback (Ollama); (2) `_is_retryable` (`core/fallback.py`) does not classify an invalid-function-schema 400 as a chain-advance error, so a novel rejected shape on a middle member hard-fails the wrapper and relies on the graph-level drop-and-retry, which re-walks the chain from the primary.
