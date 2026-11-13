@@ -2469,12 +2469,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         if provider.provider_type == "ollama":
             return gate_server_for_url(ollama_provider_settings_url(settings))
         if provider.provider_type == "openai_compatible":
-            # Every OpenAI-compatible member shares one client per kind, at
-            # these URLs, whatever its own settings say.
+            # Embeddings run on the one embedding client, at its URL; any
+            # other category on the provider's own server (#970).
             return gate_server_for_url(
                 openai_compatible_embedding_url
                 if category == "embedding"
-                else openai_compatible_base_url
+                else settings.get("base_url")
             )
         return gate_server_for_url(settings.get("base_url"))
 
@@ -2556,7 +2556,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         pt = provider.provider_type
         if pt in _KEYED_PROVIDER_TYPES:
             credential = _provider_credential(provider)
-            if credential is not None and (pt, credential) in own_clients:
+            if credential is None:
+                # No key (or server) of its own: never run it on another
+                # provider's account (#970).
+                return None
+            if (pt, credential) in own_clients:
                 return own_clients[(pt, credential)]
         if pt == "openai":
             return openai_provider
@@ -2578,21 +2582,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         providers, "anthropic"
     )
     anthropic_secret = SecretStr(anthropic_key) if anthropic_key else None
-    openai_compatible_base_url = conf.get(
-        CONF_OPENAI_COMPATIBLE_BASE_URL
-    ) or _provider_setting(providers, "openai_compatible", "base_url")
-    openai_compatible_api_key = (
-        conf.get(CONF_OPENAI_COMPATIBLE_API_KEY)
-        or _provider_setting(providers, "openai_compatible", "api_key")
-        or "none"
-    )
+    # A server's URL and key always come from the same provider, and an empty
+    # key means none: filling it from another provider of the type would send
+    # that provider's secret to this server (#970).
+    openai_compatible_base_url = conf.get(CONF_OPENAI_COMPATIBLE_BASE_URL)
+    if openai_compatible_base_url:
+        openai_compatible_api_key = conf.get(CONF_OPENAI_COMPATIBLE_API_KEY) or "none"
+    else:
+        first_compatible = next(
+            (
+                p
+                for p in providers.values()
+                if p.provider_type == "openai_compatible"
+                and _provider_credential(p) is not None
+            ),
+            None,
+        )
+        first_credential = (
+            _provider_credential(first_compatible) if first_compatible else None
+        )
+        openai_compatible_base_url = first_credential[0] if first_credential else None
+        openai_compatible_api_key = first_credential[1] if first_credential else "none"
     # Embeddings may live on a separate OpenAI-compatible server from chat.
-    openai_compatible_embedding_url = (
-        conf.get(CONF_OPENAI_COMPATIBLE_EMBEDDING_URL) or openai_compatible_base_url
-    )
-    openai_compatible_embedding_api_key = (
-        conf.get(CONF_OPENAI_COMPATIBLE_EMBEDDING_API_KEY) or openai_compatible_api_key
-    )
+    if conf.get(CONF_OPENAI_COMPATIBLE_EMBEDDING_URL):
+        openai_compatible_embedding_url = conf.get(CONF_OPENAI_COMPATIBLE_EMBEDDING_URL)
+        openai_compatible_embedding_api_key = (
+            conf.get(CONF_OPENAI_COMPATIBLE_EMBEDDING_API_KEY) or "none"
+        )
+    else:
+        openai_compatible_embedding_url = openai_compatible_base_url
+        openai_compatible_embedding_api_key = openai_compatible_api_key
     base_ollama_url = (
         normalized_ollama_url(conf.get(CONF_OLLAMA_URL)) or RECOMMENDED_OLLAMA_URL
     )
@@ -2626,7 +2645,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     # provider used only as a fallback would never be checked or built at its
     # own URL, leaving its chain empty (issue #749). A head runs at its
     # category's URL, which the options already cover.
-    chained = [p for chain in fallback_chains.values() for p in chain]
     fallback_ollama_urls = {
         category: [
             _ollama_provider_url(p) for p in chain[1:] if p.provider_type == "ollama"
@@ -2644,32 +2662,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             )
         )
         ollama_health = dict(zip(ollama_urls, ollama_results, strict=False))
-
-    openai_ok, gemini_ok, openai_compatible_ok, anthropic_ok = await asyncio.gather(
-        openai_healthy(hass, api_key, timeout_s=health_timeout),
-        gemini_healthy(hass, gemini_key, timeout_s=health_timeout),
-        openai_compatible_healthy(
-            hass,
-            openai_compatible_base_url,
-            openai_compatible_api_key,
-            timeout_s=health_timeout,
-        ),
-        anthropic_healthy(hass, anthropic_key, timeout_s=health_timeout),
-    )
-    if (
-        openai_compatible_embedding_url == openai_compatible_base_url
-        and openai_compatible_embedding_api_key == openai_compatible_api_key
-    ):
-        openai_compatible_embedding_ok = openai_compatible_ok
-    elif openai_compatible_embedding_url:
-        openai_compatible_embedding_ok = await openai_compatible_healthy(
-            hass,
-            openai_compatible_embedding_url,
-            openai_compatible_embedding_api_key,
-            timeout_s=health_timeout,
-        )
-    else:
-        openai_compatible_embedding_ok = False
 
     # One client per credential (#970). The type's client is built from the
     # flat option key, which holds whichever provider of that type the
@@ -2720,22 +2712,72 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             hass, credential[0], credential[1], timeout_s=health_timeout
         )
 
-    own_health: dict[tuple[str, tuple[str, ...]], bool] = dict(
-        zip(
-            own_credentials,
-            await asyncio.gather(
-                *(_credential_healthy(t, c) for t, c in own_credentials)
-            ),
-            strict=True,
-        )
+    # The type checks and every other credential's, in one batch.
+    own_keys = list(own_credentials)
+    health_results = await asyncio.gather(
+        openai_healthy(hass, api_key, timeout_s=health_timeout),
+        gemini_healthy(hass, gemini_key, timeout_s=health_timeout),
+        openai_compatible_healthy(
+            hass,
+            openai_compatible_base_url,
+            openai_compatible_api_key,
+            timeout_s=health_timeout,
+        ),
+        anthropic_healthy(hass, anthropic_key, timeout_s=health_timeout),
+        *(_credential_healthy(t, c) for t, c in own_keys),
     )
+    openai_ok, gemini_ok, openai_compatible_ok, anthropic_ok = health_results[:4]
+    own_health: dict[tuple[str, tuple[str, ...]], bool] = dict(
+        zip(own_keys, health_results[4:], strict=True)
+    )
+    for (provider_type, _credential), healthy in own_health.items():
+        if not healthy:
+            LOGGER.warning(
+                "Model provider '%s' (%s) failed its health check; it stays "
+                "unavailable until it answers (#970).",
+                own_credentials[(provider_type, _credential)].name,
+                provider_type,
+            )
+    embedding_endpoint = (
+        "openai_compatible",
+        (
+            str(openai_compatible_embedding_url),
+            str(openai_compatible_embedding_api_key),
+        ),
+    )
+    if (
+        openai_compatible_embedding_url == openai_compatible_base_url
+        and openai_compatible_embedding_api_key == openai_compatible_api_key
+    ):
+        openai_compatible_embedding_ok = openai_compatible_ok
+    elif embedding_endpoint in own_health:
+        # One check per server and key, shared by chat and embeddings.
+        openai_compatible_embedding_ok = own_health[embedding_endpoint]
+    elif openai_compatible_embedding_url:
+        openai_compatible_embedding_ok = await openai_compatible_healthy(
+            hass,
+            openai_compatible_embedding_url,
+            openai_compatible_embedding_api_key,
+            timeout_s=health_timeout,
+        )
+    else:
+        openai_compatible_embedding_ok = False
+
     ollama_any_ok = any(ollama_health.values())
 
     # A failed check is not final: re-probe after HA has started and reload
     # when the provider answers (issue #711). Only providers some category's
     # chain uses count: a spare key, a stale legacy Ollama URL or the default
     # Ollama URL coming back would reload the entry for nothing.
-    chained_types = {p.provider_type for p in chained}
+    # A type's own key is re-checked only when a chain runs on it: one no
+    # chain uses (each user of the type has its own key) would reload the
+    # entry for nothing when it answers (#970).
+    used_default_types = {
+        p.provider_type
+        for p in credential_users
+        if _provider_credential(p) is not None
+        and _provider_credential(p) == default_credentials.get(p.provider_type)
+    }
     used_ollama_urls = {url for urls in fallback_ollama_urls.values() for url in urls}
     for category, url in (
         ("chat", ollama_chat_url),
@@ -2762,7 +2804,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         ("gemini", "Gemini", gemini_key, gemini_ok, validate_gemini_key),
         ("anthropic", "Anthropic", anthropic_key, anthropic_ok, validate_anthropic_key),
     ):
-        if key and not ok and provider_type in chained_types:
+        if key and not ok and provider_type in used_default_types:
             recheck_probes.append(
                 ProviderProbe(label, partial(validate, hass, key, health_timeout))
             )
@@ -2784,9 +2826,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             )
         )
 
-    # Setup builds one OpenAI-compatible chat client from the base URL and one
-    # embedding client from the embedding URL, so each URL counts only when a
-    # chain of its own kind uses an OpenAI-compatible provider.
+    # The type's OpenAI-compatible chat client is built from the base URL and
+    # the embedding client from the embedding URL; another server a chain uses
+    # has its own client and check (own_health, merged below).
     def _chains_use_compatible(categories: tuple[str, ...]) -> bool:
         return any(
             p.provider_type == "openai_compatible"
@@ -2796,9 +2838,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     # Keyed by URL and key: setup shares one check only when both match.
     compatible_endpoints: dict[tuple[str, str], bool] = {}
-    if openai_compatible_base_url and _chains_use_compatible(
-        ("chat", "vlm", "summarization", "sentinel")
-    ):
+    if openai_compatible_base_url and "openai_compatible" in used_default_types:
         compatible_endpoints[
             (openai_compatible_base_url, openai_compatible_api_key)
         ] = openai_compatible_ok
@@ -2941,7 +2981,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     )
 
     async def _async_build_anthropic_client(
-        secret: SecretStr | None,
+        secret: SecretStr | None, *, close_on_unload: bool = False
     ) -> RunnableSerializable[LanguageModelInput, BaseMessage] | None:
         # Top-level cache_control = Anthropic's automatic breakpoint on the
         # LAST block of every request (history reuse inside a tool loop). The
@@ -2961,6 +3001,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             # fails here it would fail the same way on the loop, so the
             # provider stays unset and the fallback chain takes over.
             await async_prime_async_client(hass, anthropic_chat)
+            sdk_client = getattr(anthropic_chat, "shared_async_client", None)
+            if close_on_unload and sdk_client is not None:
+                # A provider's own client is built per reload; release its
+                # connection pool with the entry (#970).
+                entry.async_on_unload(sdk_client.close)
             return anthropic_chat.configurable_fields(
                 model=ConfigurableField(id="model"),
                 temperature=ConfigurableField(id="temperature"),
@@ -3027,7 +3072,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             elif provider_type == "gemini":
                 client = _build_gemini_client(SecretStr(credential[0]))
             elif provider_type == "anthropic":
-                client = await _async_build_anthropic_client(SecretStr(credential[0]))
+                client = await _async_build_anthropic_client(
+                    SecretStr(credential[0]), close_on_unload=True
+                )
             else:
                 client = _build_compatible_client(credential[0], credential[1])
         own_clients[(provider_type, credential)] = client
@@ -3044,13 +3091,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             return _model_instance_for_provider(chain[0])
         return type_client
 
+    # Token-based trimming counts Conversation's history with the Gemini key
+    # in the options (agent/token_counter.py); that is the key written last,
+    # so set it to Conversation's own, or the history is sent to another
+    # account (#970).
+    chat_chain = fallback_chains.get("chat") or []
+    if chat_chain and chat_chain[0].provider_type == "gemini":
+        if chat_credential := _provider_credential(chat_chain[0]):
+            options[CONF_GEMINI_API_KEY] = chat_credential[0]
+        else:
+            options.pop(CONF_GEMINI_API_KEY, None)
+
     def _embedding_credential(
         provider_type: str, type_secret: SecretStr | None, *, type_ok: bool
     ) -> tuple[SecretStr | None, bool]:
         """Return the key and health the embedding head of a type embeds with."""
         if embedding_head is not None and embedding_head.provider_type == provider_type:
             credential = _provider_credential(embedding_head)
-            if credential is not None and (provider_type, credential) in own_health:
+            if credential is None:
+                # No key of its own: not another provider's (#970).
+                return None, False
+            if (provider_type, credential) in own_health:
                 return SecretStr(credential[0]), own_health[(provider_type, credential)]
         return type_secret, type_ok
 
@@ -4778,6 +4839,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     entry.async_on_unload(_cancel_stop_listener)
 
     async_schedule_provider_recheck(hass, entry, recheck_probes)
+
+    if own_failed := sorted(
+        own_credentials[key].name for key, ok in own_health.items() if not ok
+    ):
+        LOGGER.warning(
+            "Model providers that failed their health check: %s.",
+            ", ".join(own_failed),
+        )
 
     msg = (
         "Home Generative Agent initialized with the following models: "

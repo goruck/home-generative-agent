@@ -636,8 +636,8 @@ async def test_setup_probes_only_isolated_servers_during_chat(
     """
     The stall probe is sent during chat only to a server of Sentinel's own.
 
-    An OpenAI-compatible provider is judged by the one URL every such member
-    calls, not by its own settings.
+    An OpenAI-compatible provider is judged by the server it calls itself,
+    since each gets a client of its own (#970); this one shares chat's host.
     """
     captured: dict[str, Any] = {}
     real_tracker = hga_component.ProviderStallTracker
@@ -656,7 +656,7 @@ async def test_setup_probes_only_isolated_servers_during_chat(
         name="Compatible",
         provider_type="openai_compatible",
         capabilities={"chat"},
-        data={"settings": {"base_url": "http://gpu3.lan:8000/v1"}},
+        data={"settings": {"base_url": "http://ollama:8000/v1"}},
         deployment="edge",
     )
 
@@ -699,3 +699,21 @@ async def test_a_compatible_embedding_server_is_its_own_client_url(
     await _set_up(hass, monkeypatch, data)
 
     assert utils_mod._sentinel_isolated is False
+
+
+def test_an_automatic_chain_leaves_out_another_account_of_the_heads_type() -> None:
+    """
+    No feature ranked the second server, so it gets no automatic traffic.
+
+    Before #970 it ran on the head's key, so it was no fallback; with a client
+    of its own it would now be sent the household's requests, billed to an
+    account the user never chose for the feature.
+    """
+    entry = _entry_with(
+        _compatible_provider("lan", "LAN", "http://lan:8000/v1"),
+        _compatible_provider("cloud", "Cloud", "https://cloud.example/v1"),
+    )
+    providers = resolve_model_provider_configs(entry, {})  # type: ignore[arg-type]
+    chains = resolve_fallback_chains(entry, providers, {})  # type: ignore[arg-type]
+
+    assert len(chains["chat"]) == 1

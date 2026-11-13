@@ -1234,6 +1234,33 @@ def resolve_runtime_options(entry: ConfigEntry) -> dict[str, Any]:
     return options
 
 
+# Provider types whose providers each hold a key (and, for OpenAI-compatible,
+# a server) of their own.
+_ACCOUNT_PROVIDER_TYPES = frozenset(
+    {"openai", "gemini", "anthropic", "openai_compatible"}
+)
+
+
+def _another_account_of(
+    provider: ModelProviderConfig, head: ModelProviderConfig
+) -> bool:
+    """
+    Return True when *provider* is another account or server of head's type.
+
+    Such a provider runs on its own key or server (#970), so an automatic
+    chain leaves it out: the household's requests go only to accounts the
+    user ranked for the feature, never to one they set up for another.
+    """
+    if (
+        provider.provider_type != head.provider_type
+        or provider.provider_type not in _ACCOUNT_PROVIDER_TYPES
+    ):
+        return False
+    mine = provider.data.get("settings", {})
+    theirs = head.data.get("settings", {})
+    return any(mine.get(key) != theirs.get(key) for key in ("api_key", "base_url"))
+
+
 def resolve_fallback_chains(
     entry: ConfigEntry,
     providers: Mapping[str, ModelProviderConfig],
@@ -1243,7 +1270,8 @@ def resolve_fallback_chains(
     Return {category: [primary, fallback1, ...]} for each model category.
 
     Uses explicit fallback_provider_ids from feature subentries when available,
-    otherwise builds an automatic chain from remaining capable providers.
+    otherwise builds an automatic chain from remaining capable providers,
+    leaving out another account or server of the head's type (#970).
     """
     features = resolve_feature_configs(entry, providers, options)
     providers_by_id = dict(providers)
@@ -1279,6 +1307,7 @@ def resolve_fallback_chains(
             if provider.entry_id != head.entry_id
             and cat in provider.capabilities
             and _provider_supports_category(provider, cat)
+            and not _another_account_of(provider, head)
         )
         chains[cat] = chain
 
@@ -1299,9 +1328,10 @@ def split_embedding_chain(
 
     Of those, only another Ollama server behind an Ollama primary is kept
     (#853): its build of the model is checked against the primary's (#855).
-    OpenAI and Gemini have one client each, so a second provider of the type
-    is the primary again, and two OpenAI-compatible servers can serve other
-    weights under one model name with no way to tell.
+    A second OpenAI or Gemini account embeds on its own key (#970), but its
+    embeddings are not checked against the primary's the way an Ollama
+    server's build is, and two OpenAI-compatible servers can serve other
+    weights under one model name with no way to tell; both stay left out.
     """
     if not chain:
         return [], []

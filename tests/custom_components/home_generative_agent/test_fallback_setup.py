@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from homeassistant.const import CONF_API_KEY
@@ -36,6 +36,7 @@ from custom_components.home_generative_agent.const import (
     CONF_OPENAI_VLM,
     CONF_SENTINEL_DISCOVERY_ENABLED,
     CONF_SENTINEL_ENABLED,
+    CONF_SENTINEL_MODEL_PROVIDER,
     CONF_SENTINEL_TRIAGE_ENABLED,
     CONF_SUMMARIZATION_MODEL_PROVIDER,
     CONF_VIDEO_ANALYZER_MODE,
@@ -2037,3 +2038,323 @@ async def test_two_openai_compatible_servers_each_get_their_own_client(
 
     assert _head(entry.runtime_data.chat_model).base.name.startswith("http://chat")
     assert _head(entry.runtime_data.vision_model).base.name.startswith("http://vlm")
+
+
+def _compatible(entry_id: str, url: str, key: str | None, caps: set[str]) -> Any:
+    settings: dict[str, Any] = {"base_url": url}
+    if key is not None:
+        settings["api_key"] = key
+    return ModelProviderConfig(
+        entry_id=entry_id,
+        name=entry_id,
+        provider_type="openai_compatible",
+        capabilities=caps,
+        data={"settings": settings},
+        deployment="edge",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_provider_with_no_key_never_runs_on_anothers(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A keyless OpenAI provider is unavailable, not billed to Work (#970)."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data, _ = _two_openai_accounts(hass, monkeypatch)
+    keyless = ModelProviderConfig(
+        entry_id="keyless",
+        name="Keyless OpenAI",
+        provider_type="openai",
+        capabilities={"vlm"},
+        data={"settings": {}},
+        deployment="cloud",
+    )
+    data.providers[keyless.entry_id] = keyless
+    data.options[CONF_API_KEY] = "sk-WORK"
+    data.fallback_chains["vlm"] = [keyless]
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    vision = entry.runtime_data.vision_model
+    assert not isinstance(vision, FallbackVLM), "the keyless head ran on a key"
+
+
+@pytest.mark.asyncio
+async def test_an_empty_compatible_key_never_borrows_another_servers(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A server stored with an empty key is called with no key, not another's.
+
+    The flat key is empty, and setup used to fill it from the first provider
+    of the type that had one, sending server A's secret to server B (#970).
+    """
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    server_a = _compatible("a", "http://a/v1", "secret-a", {"vlm"})
+    server_b = _compatible("b", "http://b/v1", "", {"chat"})
+    data.providers = {server_a.entry_id: server_a, server_b.entry_id: server_b}
+    data.fallback_chains = {"chat": [server_b], "vlm": [server_a]}
+    data.options.update(
+        {
+            CONF_CHAT_MODEL_PROVIDER: "openai_compatible",
+            CONF_VLM_PROVIDER: "openai_compatible",
+            CONF_OPENAI_COMPATIBLE_BASE_URL: "http://b/v1",
+            CONF_OPENAI_COMPATIBLE_API_KEY: "",
+        }
+    )
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    probed: list[tuple[str, str]] = []
+
+    async def _healthy(_hass: Any, url: str, key: str, **_kwargs: Any) -> bool:
+        probed.append((url, key))
+        return True
+
+    monkeypatch.setattr(hga_component, "openai_compatible_healthy", _healthy)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert ("http://b/v1", "secret-a") not in probed
+    assert ("http://b/v1", "none") in probed
+
+
+@pytest.mark.asyncio
+async def test_token_counting_uses_the_conversation_providers_gemini_key(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Conversation on Gemini A is counted on A, not the key written last (#970)."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+
+    def _gemini(entry_id: str, key: str) -> ModelProviderConfig:
+        return ModelProviderConfig(
+            entry_id=entry_id,
+            name=entry_id,
+            provider_type="gemini",
+            capabilities={"chat", "vlm"},
+            data={"settings": {"api_key": key}},
+            deployment="cloud",
+        )
+
+    gemini_a, gemini_b = _gemini("a", "key-A"), _gemini("b", "key-B")
+    data.providers = {gemini_a.entry_id: gemini_a, gemini_b.entry_id: gemini_b}
+    data.fallback_chains = {"chat": [gemini_a], "vlm": [gemini_b]}
+    data.options.update(
+        {
+            CONF_CHAT_MODEL_PROVIDER: "gemini",
+            CONF_VLM_PROVIDER: "gemini",
+            CONF_GEMINI_API_KEY: "key-B",
+        }
+    )
+    _patch_setup_dependencies(hass, monkeypatch, data)
+
+    async def _healthy(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(hga_component, "gemini_healthy", _healthy)
+
+    def _chat_gemini(*_args: Any, google_api_key: Any = None, **_kwargs: Any) -> Any:
+        return FakeRunnable(f"gemini:{google_api_key.get_secret_value()}")
+
+    monkeypatch.setattr(hga_component, "ChatGoogleGenerativeAI", _chat_gemini)
+    monkeypatch.setattr(
+        hga_component,
+        "GoogleGenerativeAIEmbeddings",
+        lambda *_args, **_kwargs: FakeEmbeddings("gemini"),
+    )
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert _head(entry.runtime_data.chat_model).base.name == "gemini:key-A"
+    assert _head(entry.runtime_data.vision_model).base.name == "gemini:key-B"
+    assert entry.runtime_data.options[CONF_GEMINI_API_KEY] == "key-A"
+
+
+@pytest.mark.asyncio
+async def test_an_unused_type_key_is_not_rechecked(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The type's key, used by no chain, is not re-probed into a reload (#970).
+
+    Server B is the chat fallback with its own client; server A, first of the
+    type, is in no chain, so A coming back must not reload the entry.
+    """
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    openai = next(iter(data.providers.values()))
+    server_a = _compatible("a", "http://a/v1", "ka", {"chat"})
+    server_b = _compatible("b", "http://b/v1", "kb", {"chat"})
+    data.providers = {
+        openai.entry_id: openai,
+        server_a.entry_id: server_a,
+        server_b.entry_id: server_b,
+    }
+    data.fallback_chains = {"chat": [openai, server_b]}
+    _patch_setup_dependencies(hass, monkeypatch, data)
+
+    async def _healthy(_hass: Any, url: str, *_args: Any, **_kwargs: Any) -> bool:
+        return url != "http://a/v1"
+
+    monkeypatch.setattr(hga_component, "openai_compatible_healthy", _healthy)
+    scheduled = _capture_recheck(monkeypatch)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert not [p for p in scheduled if "a/v1" in p.label]
+
+
+@pytest.mark.asyncio
+async def test_two_compatible_servers_are_two_servers_for_the_gpu_gates(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Sentinel on a server of its own is isolated from chat's (#877, #970)."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    chat_server = _compatible("chat", "http://chat:8000/v1", "kc", {"chat"})
+    sentinel_server = _compatible("sentinel", "http://sent:8000/v1", "ks", {"chat"})
+    data.providers = {
+        chat_server.entry_id: chat_server,
+        sentinel_server.entry_id: sentinel_server,
+    }
+    data.fallback_chains = {"chat": [chat_server], "sentinel": [sentinel_server]}
+    data.options.update(
+        {
+            CONF_CHAT_MODEL_PROVIDER: "openai_compatible",
+            CONF_SENTINEL_MODEL_PROVIDER: "openai_compatible",
+            # Written last: Sentinel's.
+            CONF_OPENAI_COMPATIBLE_BASE_URL: "http://sent:8000/v1",
+            CONF_OPENAI_COMPATIBLE_API_KEY: "ks",
+        }
+    )
+    data.deployments["sentinel"] = "edge"
+    data.options[CONF_EXPLAIN_ENABLED] = True
+    _patch_setup_dependencies(hass, monkeypatch, data)
+
+    async def _healthy(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    def _chat_openai(*_args: Any, base_url: str = "", **_kwargs: Any) -> FakeRunnable:
+        return FakeRunnable(base_url)
+
+    explained: list[Any] = []
+
+    def _explainer(model: Any, *_args: Any, **_kwargs: Any) -> Any:
+        explained.append(model)
+        return MagicMock()
+
+    monkeypatch.setattr(hga_component, "openai_compatible_healthy", _healthy)
+    monkeypatch.setattr(hga_component, "ChatOpenAI", _chat_openai)
+    monkeypatch.setattr(hga_component, "LLMExplainer", _explainer)
+    caplog.set_level("INFO")
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert "Sentinel Model runs on a server of its own" in caplog.text
+    # Sentinel's model runs on its own server, Conversation on its own.
+    assert _head(explained[0]).base.name.startswith("http://sent")
+    assert _head(entry.runtime_data.chat_model).base.name.startswith("http://chat")
+
+
+@pytest.mark.asyncio
+async def test_a_second_anthropic_key_gets_its_own_client_closed_on_unload(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second key's SDK client is its own, primed, and closed with the entry."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+
+    def _anthropic(entry_id: str, key: str) -> ModelProviderConfig:
+        return ModelProviderConfig(
+            entry_id=entry_id,
+            name=entry_id,
+            provider_type="anthropic",
+            capabilities={"chat", "vlm"},
+            data={"settings": {"api_key": key}},
+            deployment="cloud",
+        )
+
+    first, second = _anthropic("a", "key-A"), _anthropic("b", "key-B")
+    data.providers = {first.entry_id: first, second.entry_id: second}
+    data.fallback_chains = {"chat": [first], "vlm": [second]}
+    data.options.update(
+        {
+            CONF_CHAT_MODEL_PROVIDER: "anthropic",
+            CONF_VLM_PROVIDER: "anthropic",
+            CONF_ANTHROPIC_API_KEY: "key-A",
+        }
+    )
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    sdk_clients: dict[str, AsyncMock] = {}
+
+    def _chat(*_args: Any, anthropic_api_key: Any = None, **_kwargs: Any) -> Any:
+        key = anthropic_api_key.get_secret_value()
+        runnable = FakeRunnable(f"anthropic:{key}")
+        sdk_clients[key] = AsyncMock()
+        cast("Any", runnable).shared_async_client = sdk_clients[key]
+        return runnable
+
+    async def _healthy(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(hga_component, "anthropic_healthy", _healthy)
+    monkeypatch.setattr(hga_component, "SharedClientChatAnthropic", _chat)
+    monkeypatch.setattr(hga_component, "async_prime_async_client", AsyncMock())
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert _head(entry.runtime_data.chat_model).base.name == "anthropic:key-A"
+    assert _head(entry.runtime_data.vision_model).base.name == "anthropic:key-B"
+    sdk_clients["key-B"].close.assert_not_awaited()
+    await entry._async_process_on_unload(hass)
+    sdk_clients["key-B"].close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_second_compatible_server_that_fails_is_rechecked(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A down second server is re-probed on its own and skipped meanwhile."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    chat_server = _compatible("chat-server", "http://chat/v1", "k1", {"chat"})
+    vlm_server = _compatible("vlm-server", "http://vlm/v1", "k2", {"vlm"})
+    data.providers = {
+        chat_server.entry_id: chat_server,
+        vlm_server.entry_id: vlm_server,
+    }
+    data.fallback_chains = {"chat": [chat_server], "vlm": [vlm_server]}
+    data.options.update(
+        {
+            CONF_CHAT_MODEL_PROVIDER: "openai_compatible",
+            CONF_VLM_PROVIDER: "openai_compatible",
+            CONF_OPENAI_COMPATIBLE_BASE_URL: "http://vlm/v1",
+            CONF_OPENAI_COMPATIBLE_API_KEY: "k2",
+        }
+    )
+    _patch_setup_dependencies(hass, monkeypatch, data)
+
+    async def _healthy(_hass: Any, url: str, *_args: Any, **_kwargs: Any) -> bool:
+        return url != "http://chat/v1"
+
+    monkeypatch.setattr(hga_component, "openai_compatible_healthy", _healthy)
+    scheduled = _capture_recheck(monkeypatch)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert [p.label for p in scheduled] == ["OpenAI-compatible (http://chat/v1)"]
+    assert not isinstance(entry.runtime_data.chat_model, FallbackChatModel)
