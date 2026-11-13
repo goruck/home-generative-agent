@@ -267,4 +267,5 @@ async def test_a_half_done_call_reaches_the_model_as_success_naming_the_rest(
     message = await graph._run_ha_tool("GetLiveContext", {}, _ctx(api), {"id": "call1"})
 
     assert message.status == "success"
-    assert "Back Lock" in json.loads(cast("str", message.content))["partial_failure"]
+    content = json.loads(cast("str", message.content))
+    assert content["failed_devices"] == ["Back Lock"]

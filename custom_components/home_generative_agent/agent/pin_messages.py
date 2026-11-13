@@ -672,6 +672,33 @@ def _one_line(value: Any, limit: int, *, mark_cut: bool = False) -> str:
     return sanitize_tool_text(text, limit=limit)
 
 
+# How many failed devices a partial line names before "and N more" (#948).
+_FAILED_TARGETS_MAX = 5
+
+
+def describe_failed_targets(hass: HomeAssistant | None, names: Any) -> str:
+    """
+    Name the devices a half-done action failed on, for the fixed line (#948).
+
+    Each one line, bounded and quoted like every name in these lines, so a
+    device name cannot add a sentence of its own; at most five, then a count.
+    """
+    quoted = [
+        _named(hass, _one_line(name, _ACTION_TARGET_MAX_LEN, mark_cut=True))
+        for name in names
+        if _one_line(name, _ACTION_TARGET_MAX_LEN)
+    ]
+    shown = ", ".join(quoted[:_FAILED_TARGETS_MAX])
+    if len(quoted) > _FAILED_TARGETS_MAX:
+        shown = pin_msg(
+            hass,
+            "action_calls_more",
+            calls=shown,
+            count=len(quoted) - _FAILED_TARGETS_MAX,
+        )
+    return shown
+
+
 def _first(value: Any) -> str:
     """Return the first entry of a list value, or the value, as text."""
     if isinstance(value, list):

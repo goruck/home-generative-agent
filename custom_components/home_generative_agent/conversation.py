@@ -82,7 +82,11 @@ from .agent.indirect_pin import (
     is_remote_home_assistant,
     remote_house_name,
 )
-from .agent.pin_messages import describe_pending_action, pin_msg
+from .agent.pin_messages import (
+    describe_failed_targets,
+    describe_pending_action,
+    pin_msg,
+)
 from .agent.rag_embedding_text import (
     strip_for_embedding,
     truncate_for_embedding_index,
@@ -2134,7 +2138,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     self.hass,
                     "pin_partial_line",
                     action=pin_reply.confirmed,
-                    failed=", ".join(pin_reply.failed_targets),
+                    failed=describe_failed_targets(self.hass, pin_reply.failed_targets),
                 )
             )
         elif pin_reply.confirmed:

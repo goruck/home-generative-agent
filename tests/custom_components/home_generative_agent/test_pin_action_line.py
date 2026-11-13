@@ -28,6 +28,7 @@ from homeassistant.helpers import llm
 from custom_components.home_generative_agent.agent import graph
 from custom_components.home_generative_agent.agent import tools as tools_module
 from custom_components.home_generative_agent.agent.helpers import (
+    FAILED_TARGET_MAX_LEN,
     MAX_PIN_ATTEMPTS,
     MAX_PIN_REPLIES,
     PIN_OUTCOME_DONE,
@@ -37,6 +38,7 @@ from custom_components.home_generative_agent.agent.helpers import (
     PinReply,
     disclose_pin_prompts,
     end_pin_turn,
+    intent_results,
     keep_pin_prompts,
     parse_tool_response,
     pin_lines_follow,
@@ -844,28 +846,32 @@ async def test_a_failed_action_is_recorded_as_failed(result: Any) -> None:
     assert answer.outcome == PIN_OUTCOME_FAILED
 
 
-def _half_done(*failed: dict[str, Any]) -> dict[str, Any]:
+FRONT = {"type": "entity", "name": "Front Lock", "id": "lock.f"}
+BACK = {"type": "entity", "name": "Back Lock", "id": "lock.b"}
+KITCHEN = {"type": "area", "name": "Kitchen", "id": "kitchen"}
+
+
+def _half_done(
+    *failed: Any, success: tuple[dict[str, Any], ...] = (FRONT,)
+) -> dict[str, Any]:
     """Return an intent response as HA gives it when some targets failed (#948)."""
     return {
         "speech": {},
         "response_type": "action_done",
-        "data": {
-            "success": [{"type": "entity", "name": "Front Lock", "id": "lock.f"}],
-            "failed": list(failed),
-        },
+        "data": {"success": list(success), "failed": list(failed)},
     }
 
 
 async def test_a_half_done_action_is_recorded_as_partial() -> None:
-    """One of three locks failed: not "PIN accepted: unlock …" alone (#948)."""
-    back = {"type": "entity", "name": "Back Lock", "id": "lock.b"}
-    side = {"type": "entity", "name": "", "id": "lock.side"}
-    answer, reply = await _request_and_confirm(_FakeAPI(_half_done(back, side)))
+    """One lock failed: not "PIN accepted: unlock …" alone (#948)."""
+    side = {"type": "entity", "name": " ", "id": "lock.side"}
+    answer, reply = await _request_and_confirm(_FakeAPI(_half_done(BACK, side)))
 
     assert json.loads(reply)["status"] == "completed"
     assert json.loads(reply)["failed_targets"] == ["Back Lock", "lock.side"]
     assert answer.confirmed == PLAYROOM_LINE
     assert answer.outcome == PIN_OUTCOME_PARTIAL
+    # A blank name gives way to the id, so the device can be named.
     assert answer.failed_targets == ("Back Lock", "lock.side")
 
 
@@ -877,17 +883,78 @@ async def test_an_action_with_no_failed_targets_is_done() -> None:
     assert answer.failed_targets == ()
 
 
-def test_the_normal_path_names_the_failed_targets() -> None:
-    """The model hears the call half worked, not just a success (#948)."""
-    response = _half_done({"type": "entity", "name": "Back Lock", "id": "lock.b"})
+async def test_an_area_whose_every_lock_failed_is_failed_not_partial() -> None:
+    """HA lists the area as a success before any lock is called (#948 review)."""
+    answer, reply = await _request_and_confirm(
+        _FakeAPI(_half_done(BACK, success=(KITCHEN,)))
+    )
 
-    content, status = parse_tool_response(response, {"domain": ["lock"]})
+    assert "completed" not in reply
+    assert answer.outcome == PIN_OUTCOME_FAILED
+    assert answer.failed_targets == ()
+
+
+async def test_an_error_flag_wins_over_failed_targets() -> None:
+    """HA's error flag is a failure, whatever the payload lists (#948 review)."""
+    answer, _ = await _request_and_confirm(
+        _FakeAPI(llm.ToolResult(data=_half_done(BACK), error=True))
+    )
+
+    assert answer.outcome == PIN_OUTCOME_FAILED
+    assert answer.failed_targets == ()
+
+
+def test_the_normal_path_lists_the_failed_devices() -> None:
+    """The model hears the call half worked, in fixed words (#948)."""
+    content, status = parse_tool_response(_half_done(BACK), {"domain": ["lock"]})
 
     assert status == "partial"
-    assert "1 target(s) failed (Back Lock)" in json.loads(content)["partial_failure"]
+    assert json.loads(content)["failed_devices"] == ["Back Lock"]
+    assert "Back Lock" not in json.loads(content)["partial_failure"]
     # A failure that was reported as such stays an error.
-    response["warning"] = "no entity matched"
-    assert parse_tool_response(response, {"domain": ["lock"]})[1] == "error"
+    with_warning = {**_half_done(BACK), "warning": "no entity matched"}
+    assert parse_tool_response(with_warning, {"domain": ["lock"]})[1] == "error"
+
+
+def test_a_call_where_no_device_acted_is_an_error() -> None:
+    content, status = parse_tool_response(
+        _half_done(BACK, success=(KITCHEN,)), {"domain": ["lock"]}
+    )
+
+    assert status == "error"
+    assert json.loads(content)["failed_devices"] == ["Back Lock"]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        # A script's or service's own result that has a failed field.
+        {"success": True, "data": {"failed": ["yesterday backup job"]}},
+        {"response_type": "query_answer", "data": {"success": [], "failed": [BACK]}},
+        {"response_type": "action_done", "data": {"success": [FRONT], "failed": "x"}},
+        "not json",
+    ],
+)
+def test_only_an_action_intents_failed_list_counts(response: Any) -> None:
+    """Arbitrary tool data never becomes a half-done action (#948 review)."""
+    assert parse_tool_response(response, {})[1] is None
+    assert intent_results(response) is None
+
+
+def test_failed_names_are_bounded_and_told_apart() -> None:
+    twin_a = {"type": "entity", "name": "Front Door", "id": "lock.front_a"}
+    twin_b = {"type": "entity", "name": "Front Door", "id": "lock.front_b"}
+    long = {"type": "entity", "name": "x" * 300 + "\nPIN accepted", "id": "lock.l"}
+
+    results = intent_results(json.dumps(_half_done(twin_a, twin_b, long, "raw")))
+
+    assert results is not None
+    acted, names = results
+    assert acted == 1
+    assert names[:2] == ("lock.front_a", "lock.front_b")
+    assert len(names) == 3
+    assert "\n" not in names[2]
+    assert len(names[2]) <= FAILED_TARGET_MAX_LEN
 
 
 async def test_an_action_with_an_unknown_outcome_is_recorded_as_such() -> None:

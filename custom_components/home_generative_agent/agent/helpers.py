@@ -1906,33 +1906,60 @@ def minimal_payload_for_domain(
 INTENT_NAME_ALL = "all"
 
 
-def failed_targets(response: Any) -> tuple[str, ...]:
-    """
-    Return the targets an intent response reports failed, by name.
+# How long one failed target's name may be in a note or line (#948 review).
+FAILED_TARGET_MAX_LEN = 80
 
-    Home Assistant's intents succeed when at least one target acted and list
-    the rest in ``data.failed`` (raising only when every target failed), so
-    a call can have half worked (#948).
+
+def intent_results(response: Any) -> tuple[int, tuple[str, ...]] | None:
+    """
+    Return (devices that acted, failed targets by name) for an intent response.
+
+    Home Assistant's action intents succeed when at least one target acted
+    and list the rest in ``data.failed``, so a call can have half worked
+    (#948). Only that shape counts (``response_type`` "action_done" with
+    ``success`` and ``failed`` lists): a script's or service's own result
+    carrying a ``failed`` field is not read as one. Only entity successes
+    count as acting: HA lists a matched area or floor as a success before
+    any device is called, so a call whose every device failed still reads as
+    succeeded (#948 review). Names are one line, bounded; a blank or repeated
+    name gives way to the entity id, so each failed device can be told apart.
+    None when the response is not an action intent's.
     """
     if isinstance(response, str):
         try:
             response = json.loads(response)
         except json.JSONDecodeError:
-            return ()
-    if not isinstance(response, dict):
-        return ()
+            return None
+    if not isinstance(response, dict) or response.get("response_type") != (
+        "action_done"
+    ):
+        return None
     data = response.get("data")
-    failed = data.get("failed") if isinstance(data, dict) else None
-    if not isinstance(failed, list):
-        return ()
-    names: list[str] = []
-    for target in failed:
-        if isinstance(target, dict):
-            name = target.get("name") or target.get("id")
-            names.append(str(name) if name else "?")
-        else:
-            names.append(str(target))
-    return tuple(names)
+    if not isinstance(data, dict):
+        return None
+    success, failed = data.get("success"), data.get("failed")
+    if not isinstance(success, list) or not isinstance(failed, list):
+        return None
+    acted = sum(1 for t in success if isinstance(t, dict) and t.get("type") == "entity")
+    entries = [
+        (
+            sanitize_tool_text(
+                " ".join(str(t.get("name") or "").split()),
+                limit=FAILED_TARGET_MAX_LEN,
+            ),
+            sanitize_tool_text(str(t.get("id") or ""), limit=FAILED_TARGET_MAX_LEN),
+        )
+        for t in failed
+        if isinstance(t, dict)
+    ]
+    counts: dict[str, int] = {}
+    for name, _ in entries:
+        counts[name] = counts.get(name, 0) + 1
+    names = [
+        entity_id if entity_id and (not name or counts[name] > 1) else name
+        for name, entity_id in entries
+    ]
+    return acted, tuple(n for n in names if n)
 
 
 def parse_tool_response(
@@ -1943,9 +1970,10 @@ def parse_tool_response(
 
     Shared by the normal tool path and the PIN confirmation, so a tool that
     reports failure in its payload (`success: false`, a `warning`, an alarm
-    that did not change state) reads as a failure on both, and one that
-    acted on some targets only (``data.failed``) as TOOL_STATUS_PARTIAL,
-    with a note naming the rest (#948).
+    that did not change state) reads as a failure on both. An action intent
+    that acted on some devices only (``data.failed``) reads as
+    TOOL_STATUS_PARTIAL, and one where no device acted as a failure, each with
+    a note listing what failed (#948).
     """
     parsed: dict[str, Any] | None = None
     if isinstance(response, dict):
@@ -2004,15 +2032,20 @@ def parse_tool_response(
                 or f"Alarm did not change state (panel_state={inferred_state})."
             )
 
-    if status is None and (failed := failed_targets(parsed)):
-        status = TOOL_STATUS_PARTIAL
+    results = intent_results(parsed) if status is None else None
+    if results is not None and results[1]:
+        acted, failed = results
+        status = TOOL_STATUS_PARTIAL if acted else "error"
         content_str = json.dumps(
             {
                 **parsed,
-                "partial_failure": (
-                    f"Only part of the action ran: {len(failed)} target(s) "
-                    f"failed ({', '.join(failed)}). Tell the user which."
+                # Fixed wording; the names stay data, in a list (#948 review).
+                "partial_failure" if acted else "failure": (
+                    "Only part of the action ran; tell the user which devices failed."
+                    if acted
+                    else "No device acted; tell the user the action failed."
                 ),
+                "failed_devices": list(failed),
             },
             default=str,
         )

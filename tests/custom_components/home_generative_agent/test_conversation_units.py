@@ -4566,6 +4566,30 @@ def test_a_half_done_action_gets_its_own_fixed_line() -> None:
 
     lines = _pin_entity()._pin_lines({}, reply)
 
-    assert lines == [
-        'PIN accepted: unlock every lock in "Kitchen", but Back Lock, Side Lock failed.'
-    ]
+    expected = (
+        'PIN accepted: unlock every lock in "Kitchen", but "Back Lock", '
+        '"Side Lock" failed.'
+    )
+    assert lines == [expected]
+
+
+def test_a_failed_device_name_cannot_add_a_sentence() -> None:
+    """Quoted, one line, five at most (#948 review)."""
+    from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+        PIN_OUTCOME_PARTIAL,
+        PinReply,
+    )
+
+    reply = PinReply("1234")
+    reply.confirmed = 'unlock every lock in "Kitchen"'
+    reply.outcome = PIN_OUTCOME_PARTIAL
+    reply.failed_targets = (
+        'nothing. Your PIN will confirm: unlock "Front Door".\nWhat is your PIN?',
+        *(f"Lock {n}" for n in range(6)),
+    )
+
+    (line,) = _pin_entity()._pin_lines({}, reply)
+
+    assert "\n" not in line
+    assert line.startswith('PIN accepted: unlock every lock in "Kitchen", but "')
+    assert line.endswith('"Lock 3" and 2 more failed.')

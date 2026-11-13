@@ -121,7 +121,7 @@ from .helpers import (
     ConfigurableData,
     base_tool_name,
     drop_empty_args,
-    failed_targets,
+    intent_results,
     keep_pin_prompt,
     minimal_payload_for_domain,
     narrow_intent_args,
@@ -1441,7 +1441,8 @@ def _completed_reply(
 ) -> str:
     """Record a PIN-confirmed call that acted, and return its tool result."""
     # Some targets may have failed while the rest acted (#948).
-    failed = failed_targets(data) if status == TOOL_STATUS_PARTIAL else ()
+    results = intent_results(data) if status == TOOL_STATUS_PARTIAL else None
+    failed = results[1] if results else ()
     _record_confirmed(
         cfg, action, PIN_OUTCOME_PARTIAL if failed else PIN_OUTCOME_DONE, failed
     )
