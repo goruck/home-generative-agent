@@ -2056,7 +2056,7 @@ def _compatible(entry_id: str, url: str, key: str | None, caps: set[str]) -> Any
 
 @pytest.mark.asyncio
 async def test_a_provider_with_no_key_never_runs_on_anothers(
-    hass: Any, monkeypatch: pytest.MonkeyPatch
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A keyless OpenAI provider is unavailable, not billed to Work (#970)."""
     entry = MockConfigEntry(domain=DOMAIN, data={})
@@ -2079,6 +2079,7 @@ async def test_a_provider_with_no_key_never_runs_on_anothers(
 
     vision = entry.runtime_data.vision_model
     assert not isinstance(vision, FallbackVLM), "the keyless head ran on a key"
+    assert "'Keyless OpenAI' (openai) has no API key" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -2177,6 +2178,60 @@ async def test_token_counting_uses_the_conversation_providers_gemini_key(
 
 
 @pytest.mark.asyncio
+async def test_token_counting_never_uses_another_key_for_a_keyless_head(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A keyless Gemini Conversation head leaves no key to count with (#970)."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    keyless = ModelProviderConfig(
+        entry_id="a",
+        name="a",
+        provider_type="gemini",
+        capabilities={"chat"},
+        data={"settings": {}},
+        deployment="cloud",
+    )
+    data.providers = {keyless.entry_id: keyless}
+    data.fallback_chains = {"chat": [keyless]}
+    data.options.update(
+        {CONF_CHAT_MODEL_PROVIDER: "gemini", CONF_GEMINI_API_KEY: "key-B"}
+    )
+    _patch_setup_dependencies(hass, monkeypatch, data)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert CONF_GEMINI_API_KEY not in entry.runtime_data.options
+
+
+@pytest.mark.asyncio
+async def test_a_keyless_embedding_provider_never_embeds_on_anothers_key(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Household memory is not embedded on Personal's key (#970)."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data, embedding_keys = _two_openai_accounts(hass, monkeypatch)
+    keyless = ModelProviderConfig(
+        entry_id="keyless",
+        name="Keyless OpenAI",
+        provider_type="openai",
+        capabilities={"embedding"},
+        data={"settings": {}},
+        deployment="cloud",
+    )
+    data.providers[keyless.entry_id] = keyless
+    data.fallback_chains["embedding"] = [keyless]
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert embedding_keys == {}
+
+
+@pytest.mark.asyncio
 async def test_an_unused_type_key_is_not_rechecked(
     hass: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2209,7 +2264,7 @@ async def test_an_unused_type_key_is_not_rechecked(
 
     assert await cast("Any", hga_component).async_setup_entry(hass, entry)
 
-    assert not [p for p in scheduled if "a/v1" in p.label]
+    assert scheduled == []
 
 
 @pytest.mark.asyncio
@@ -2267,10 +2322,15 @@ async def test_two_compatible_servers_are_two_servers_for_the_gpu_gates(
 
 
 @pytest.mark.asyncio
-async def test_a_second_anthropic_key_gets_its_own_client_closed_on_unload(
+async def test_a_second_anthropic_key_gets_its_own_client_left_open_on_unload(
     hass: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A second key's SDK client is its own, primed, and closed with the entry."""
+    """
+    A second key's SDK client is its own and primed, but never closed.
+
+    langchain-anthropic gives every client one cached httpx transport, so
+    closing one would close every Anthropic client in the process (#970).
+    """
     entry = MockConfigEntry(domain=DOMAIN, data={})
     entry.add_to_hass(hass)
     hass.data.setdefault(DOMAIN, {})["http_registered"] = True
@@ -2317,9 +2377,9 @@ async def test_a_second_anthropic_key_gets_its_own_client_closed_on_unload(
 
     assert _head(entry.runtime_data.chat_model).base.name == "anthropic:key-A"
     assert _head(entry.runtime_data.vision_model).base.name == "anthropic:key-B"
-    sdk_clients["key-B"].close.assert_not_awaited()
     await entry._async_process_on_unload(hass)
-    sdk_clients["key-B"].close.assert_awaited_once()
+    for sdk_client in sdk_clients.values():
+        sdk_client.close.assert_not_awaited()
 
 
 @pytest.mark.asyncio

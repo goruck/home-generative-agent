@@ -1236,9 +1236,28 @@ def resolve_runtime_options(entry: ConfigEntry) -> dict[str, Any]:
 
 # Provider types whose providers each hold a key (and, for OpenAI-compatible,
 # a server) of their own.
-_ACCOUNT_PROVIDER_TYPES = frozenset(
-    {"openai", "gemini", "anthropic", "openai_compatible"}
-)
+# Provider types whose client carries the provider's own credential, so two
+# providers of one type with different keys or servers get a client each
+# (#970). Ollama clients are keyed by server URL instead.
+KEYED_PROVIDER_TYPES = frozenset({"openai", "gemini", "anthropic", "openai_compatible"})
+
+
+def provider_credential(provider: ModelProviderConfig) -> tuple[str, ...] | None:
+    """
+    Return what a provider's client is built from, or None when it has none.
+
+    The API key; for an OpenAI-compatible server, its base URL and key.
+    """
+    settings = provider.data.get("settings", {})
+    if provider.provider_type == "openai_compatible":
+        base_url = settings.get("base_url")
+        if not base_url:
+            return None
+        return (str(base_url), str(settings.get("api_key") or "none"))
+    if provider.provider_type in KEYED_PROVIDER_TYPES:
+        api_key = settings.get("api_key")
+        return (str(api_key),) if api_key else None
+    return None
 
 
 def _another_account_of(
@@ -1248,17 +1267,17 @@ def _another_account_of(
     Return True when *provider* is another account or server of head's type.
 
     Such a provider runs on its own key or server (#970), so an automatic
-    chain leaves it out: the household's requests go only to accounts the
-    user ranked for the feature, never to one they set up for another.
+    chain (a feature with no provider chosen) leaves it out: that type's
+    requests stay on the head's account, never one set up for another feature.
     """
     if (
         provider.provider_type != head.provider_type
-        or provider.provider_type not in _ACCOUNT_PROVIDER_TYPES
+        or provider.provider_type not in KEYED_PROVIDER_TYPES
     ):
         return False
-    mine = provider.data.get("settings", {})
-    theirs = head.data.get("settings", {})
-    return any(mine.get(key) != theirs.get(key) for key in ("api_key", "base_url"))
+    # Compared as runtime builds clients, so a missing and an empty key on
+    # one server are the same account.
+    return provider_credential(provider) != provider_credential(head)
 
 
 def resolve_fallback_chains(

@@ -352,11 +352,13 @@ from .core.provider_recheck import (
 from .core.provider_stall import ProviderStallTracker
 from .core.runtime import HGAConfigEntry, HGAData
 from .core.subentry_resolver import (
+    KEYED_PROVIDER_TYPES,
     build_database_uri_from_entry,
     build_model_deployments,
     chosen_fallback_ids,
     legacy_feature_configs,
     legacy_model_provider_configs,
+    provider_credential,
     resolve_fallback_chains,
     resolve_model_provider_configs,
     resolve_runtime_options,
@@ -1361,32 +1363,6 @@ def _default_feature_payload(feature_type: str) -> dict[str, Any]:
     }
 
 
-# Provider types whose client carries the provider's own credential, so two
-# providers of one type with different keys or servers get a client each
-# (#970). Ollama clients are keyed by server URL instead.
-_KEYED_PROVIDER_TYPES = frozenset(
-    {"openai", "gemini", "anthropic", "openai_compatible"}
-)
-
-
-def _provider_credential(provider: ModelProviderConfig) -> tuple[str, ...] | None:
-    """
-    Return what a provider's client is built from, or None when it has none.
-
-    The API key; for an OpenAI-compatible server, its base URL and key.
-    """
-    settings = provider.data.get("settings", {})
-    if provider.provider_type == "openai_compatible":
-        base_url = settings.get("base_url")
-        if not base_url:
-            return None
-        return (str(base_url), str(settings.get("api_key") or "none"))
-    if provider.provider_type in _KEYED_PROVIDER_TYPES:
-        api_key = settings.get("api_key")
-        return (str(api_key),) if api_key else None
-    return None
-
-
 def _provider_api_key(
     providers: Mapping[str, ModelProviderConfig], provider_type: str
 ) -> str | None:
@@ -1540,19 +1516,6 @@ def _hold_unchecked_embedding_fallbacks(  # noqa: PLR0913
         ),
         admitted_callback=_admitted,
     )
-
-
-def _provider_setting(
-    providers: Mapping[str, ModelProviderConfig], provider_type: str, key: str
-) -> str | None:
-    """Return a named setting for the first matching provider type, or None."""
-    for provider in providers.values():
-        if provider.provider_type != provider_type:
-            continue
-        value = provider.data.get("settings", {}).get(key)
-        if value:
-            return str(value)
-    return None
 
 
 def _resolve_www_dir() -> str | None:
@@ -2546,6 +2509,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         cooldown_seconds=FALLBACK_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
     )
 
+    keyless_logged: set[str] = set()
+
     def _model_instance_for_provider(provider: Any) -> Any:  # noqa: PLR0911
         """
         Map a ModelProviderConfig to the initialized LangChain instance.
@@ -2554,11 +2519,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         built from has a client of its own (#970); the rest share the type's.
         """
         pt = provider.provider_type
-        if pt in _KEYED_PROVIDER_TYPES:
-            credential = _provider_credential(provider)
+        if pt in KEYED_PROVIDER_TYPES:
+            credential = provider_credential(provider)
             if credential is None:
                 # No key (or server) of its own: never run it on another
                 # provider's account (#970).
+                if provider.entry_id not in keyless_logged:
+                    keyless_logged.add(provider.entry_id)
+                    LOGGER.warning(
+                        "Model provider '%s' (%s) has no API key or server "
+                        "stored, so it is unavailable; reconfigure it to add one.",
+                        provider.name,
+                        pt,
+                    )
                 return None
             if (pt, credential) in own_clients:
                 return own_clients[(pt, credential)]
@@ -2594,12 +2567,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 p
                 for p in providers.values()
                 if p.provider_type == "openai_compatible"
-                and _provider_credential(p) is not None
+                and provider_credential(p) is not None
             ),
             None,
         )
         first_credential = (
-            _provider_credential(first_compatible) if first_compatible else None
+            provider_credential(first_compatible) if first_compatible else None
         )
         openai_compatible_base_url = first_credential[0] if first_credential else None
         openai_compatible_api_key = first_credential[1] if first_credential else "none"
@@ -2691,7 +2664,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         credential_users.append(embedding_head)
     own_credentials: dict[tuple[str, tuple[str, ...]], ModelProviderConfig] = {}
     for provider in credential_users:
-        credential = _provider_credential(provider)
+        credential = provider_credential(provider)
         if credential is not None and credential != default_credentials.get(
             provider.provider_type
         ):
@@ -2775,8 +2748,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     used_default_types = {
         p.provider_type
         for p in credential_users
-        if _provider_credential(p) is not None
-        and _provider_credential(p) == default_credentials.get(p.provider_type)
+        if provider_credential(p) is not None
+        and provider_credential(p) == default_credentials.get(p.provider_type)
     }
     used_ollama_urls = {url for urls in fallback_ollama_urls.values() for url in urls}
     for category, url in (
@@ -2981,7 +2954,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     )
 
     async def _async_build_anthropic_client(
-        secret: SecretStr | None, *, close_on_unload: bool = False
+        secret: SecretStr | None,
     ) -> RunnableSerializable[LanguageModelInput, BaseMessage] | None:
         # Top-level cache_control = Anthropic's automatic breakpoint on the
         # LAST block of every request (history reuse inside a tool loop). The
@@ -3001,11 +2974,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             # fails here it would fail the same way on the loop, so the
             # provider stays unset and the fallback chain takes over.
             await async_prime_async_client(hass, anthropic_chat)
-            sdk_client = getattr(anthropic_chat, "shared_async_client", None)
-            if close_on_unload and sdk_client is not None:
-                # A provider's own client is built per reload; release its
-                # connection pool with the entry (#970).
-                entry.async_on_unload(sdk_client.close)
+            # Not closed on unload: langchain-anthropic hands every client
+            # one cached httpx transport, so closing a provider's own client
+            # would close every Anthropic client in the process (#970).
             return anthropic_chat.configurable_fields(
                 model=ConfigurableField(id="model"),
                 temperature=ConfigurableField(id="temperature"),
@@ -3072,9 +3043,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             elif provider_type == "gemini":
                 client = _build_gemini_client(SecretStr(credential[0]))
             elif provider_type == "anthropic":
-                client = await _async_build_anthropic_client(
-                    SecretStr(credential[0]), close_on_unload=True
-                )
+                client = await _async_build_anthropic_client(SecretStr(credential[0]))
             else:
                 client = _build_compatible_client(credential[0], credential[1])
         own_clients[(provider_type, credential)] = client
@@ -3087,7 +3056,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         type's client.
         """
         chain = fallback_chains.get(category)
-        if chain and chain[0].provider_type in _KEYED_PROVIDER_TYPES:
+        if chain and chain[0].provider_type in KEYED_PROVIDER_TYPES:
             return _model_instance_for_provider(chain[0])
         return type_client
 
@@ -3097,7 +3066,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     # account (#970).
     chat_chain = fallback_chains.get("chat") or []
     if chat_chain and chat_chain[0].provider_type == "gemini":
-        if chat_credential := _provider_credential(chat_chain[0]):
+        if chat_credential := provider_credential(chat_chain[0]):
             options[CONF_GEMINI_API_KEY] = chat_credential[0]
         else:
             options.pop(CONF_GEMINI_API_KEY, None)
@@ -3107,7 +3076,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     ) -> tuple[SecretStr | None, bool]:
         """Return the key and health the embedding head of a type embeds with."""
         if embedding_head is not None and embedding_head.provider_type == provider_type:
-            credential = _provider_credential(embedding_head)
+            credential = provider_credential(embedding_head)
             if credential is None:
                 # No key of its own: not another provider's (#970).
                 return None, False
@@ -4839,14 +4808,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     entry.async_on_unload(_cancel_stop_listener)
 
     async_schedule_provider_recheck(hass, entry, recheck_probes)
-
-    if own_failed := sorted(
-        own_credentials[key].name for key, ok in own_health.items() if not ok
-    ):
-        LOGGER.warning(
-            "Model providers that failed their health check: %s.",
-            ", ".join(own_failed),
-        )
 
     msg = (
         "Home Generative Agent initialized with the following models: "

@@ -717,3 +717,16 @@ def test_an_automatic_chain_leaves_out_another_account_of_the_heads_type() -> No
     chains = resolve_fallback_chains(entry, providers, {})  # type: ignore[arg-type]
 
     assert len(chains["chat"]) == 1
+
+
+def test_a_missing_and_an_empty_key_on_one_server_are_one_account() -> None:
+    """Compared as setup builds clients, so the fallback stays (#970 review)."""
+    head = _compatible_provider("lan", "LAN", "http://lan:8000/v1")
+    other = _compatible_provider("lan2", "LAN 2", "http://lan:8000/v1")
+    head.data["settings"]["api_key"] = None
+    other.data["settings"]["api_key"] = ""
+    entry = _entry_with(head, other)
+    providers = resolve_model_provider_configs(entry, {})  # type: ignore[arg-type]
+    chains = resolve_fallback_chains(entry, providers, {})  # type: ignore[arg-type]
+
+    assert len(chains["chat"]) == 2
