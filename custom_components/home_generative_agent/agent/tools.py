@@ -961,13 +961,15 @@ def _maybe_require_pin_for_automation(
         "user": cfg.get("user_id"),
         "thread_id": cfg.get("thread_id"),
         "voice_conversation": cfg.get("voice_conversation"),
+        "voice_thread": cfg.get("voice_thread"),
         "turn_id": _turn_id(cfg),
     }
+    pin_reply = cfg.get("pin_reply")
     action_id = register_pending_action(
-        pending_actions, action, pin_owner=cfg.get("pin_owner")
+        pending_actions, action, pin_owner=cfg.get("pin_owner"), pin_reply=pin_reply
     )
     if action_id is None:
-        return refused_pin_request(cfg.get("hass"), pending_actions, action, cfg)
+        return refused_pin_request(cfg.get("hass"), pin_reply)
     return json.dumps(
         {
             "status": "requires_pin",

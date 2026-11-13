@@ -27,6 +27,7 @@ from custom_components.home_generative_agent.agent.helpers import (
     PIN_REFUSAL_ENDS_TURN,
     PinReply,
     disclose_pin_prompts,
+    end_pin_turn,
     keep_pin_prompts,
     normalize_pin,
     pin_digits,
@@ -124,8 +125,9 @@ class _Turns:
         )
 
     def say(self, text: str) -> None:
-        """Start the next turn with the user's message."""
+        """End the current turn, as the handler does, and start the next one."""
         configurable = self.config["configurable"]
+        end_pin_turn(self.pending, configurable["pin_reply"].turn_id)
         configurable["pin_reply"] = start_pin_turn(
             self.pending, configurable["thread_id"], text
         )
@@ -994,8 +996,10 @@ def test_a_new_turn_only_ages_its_own_conversation() -> None:
         start_pin_turn(pending, "conv-b", "hello")
     assert action_id in pending
 
-    start_pin_turn(pending, "conv-a", "1234")
+    pin_turn = start_pin_turn(pending, "conv-a", "1234")
     assert pending[action_id]["reply_turn"] is not None
+    # The reply turn ends without keeping the prompt, which drops it.
+    end_pin_turn(pending, pin_turn.turn_id)
     start_pin_turn(pending, "conv-a", "never mind")
     assert action_id not in pending
 

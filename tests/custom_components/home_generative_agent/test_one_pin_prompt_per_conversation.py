@@ -11,15 +11,16 @@ from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.agent.helpers import (
     MAX_PIN_ATTEMPTS,
+    MAX_PIN_REPLIES,
     PENDING_ACTION_TTL,
     PinReply,
-    another_voice_waiting,
     disclose_pin_prompts,
     end_pin_turn,
     keep_pin_prompts,
     register_pending_action,
     start_pin_turn,
     waiting_pin_prompt,
+    waiting_voice_prompt,
 )
 
 ANNA = "conv1:anna"
@@ -95,6 +96,29 @@ def test_a_pin_reply_in_progress_is_not_cut_off() -> None:
     assert _hold(pending, BORIS, "boris", "Garage Door") is None
 
     assert pending[anna]["reply_turn"] == reply.turn_id
+    # Her PIN in this turn still reaches her request (#1001 review).
+    assert waiting_pin_prompt(pending, "conv1", "1234") is None
+    assert [a["tool_args"]["name"] for a in pending.values()] == ["Front Door"]
+
+
+def test_an_answered_prompt_that_took_all_its_replies_stops_blocking() -> None:
+    """
+    Kept for another reply but out of replies, it is dropped as the turn ends.
+
+    So it cannot block another voice's request with a prompt nobody can
+    answer any more.
+    """
+    pending: dict[str, Any] = {}
+    anna = _hold(pending, ANNA, "anna", "Front Door")
+    assert anna is not None
+    reply = start_pin_turn(pending, ANNA, "0000")
+    pending[anna]["replies"] = MAX_PIN_REPLIES
+    pending[anna]["renew"] = True
+
+    end_pin_turn(pending, reply.turn_id)
+
+    assert anna not in pending
+    assert _hold(pending, BORIS, "boris", "Garage Door") is not None
 
 
 def test_a_prompt_from_a_failed_turn_does_not_block() -> None:
@@ -204,7 +228,7 @@ def test_another_voice_waiting_ignores_a_voices_own_prompt() -> None:
     pending: dict[str, Any] = {}
     _hold(pending, ANNA, "anna", "Front Door")
     reply = start_pin_turn(pending, ANNA, "unlock the garage door")
-    assert not another_voice_waiting(
+    assert not waiting_voice_prompt(
         pending, _unlock(ANNA, "anna", "Garage Door", reply)
     )
 
@@ -213,6 +237,20 @@ def test_the_handler_names_the_conversation_only_for_a_voice() -> None:
     """Read as text: importing conversation.py needs hassil."""
     src = (_COMPONENT_DIR / "conversation.py").read_text()
     assert '"voice_conversation": conversation_id if speaker else None' in src
+    # And the voice's own thread, which a followed turn leaves (#1001).
+    assert "self._thread_id(conversation_id, speaker) if speaker else None" in src
+
+
+def test_the_turn_ends_with_the_id_it_started_with() -> None:
+    """
+    The id the turn's end drops by is the one its PinReply carries.
+
+    Were start_pin_turn to mint its own, end_pin_turn would drop nothing and
+    dead prompts would block the other voices (#1001).
+    """
+    src = (_COMPONENT_DIR / "conversation.py").read_text()
+    assert "thread_id, user_input.text, pin_turn_id" in src
+    assert "pin_turn_id: str,\n" in src
 
 
 def test_the_handler_ends_every_turn() -> None:

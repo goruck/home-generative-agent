@@ -28,12 +28,14 @@ from homeassistant.helpers import llm
 from custom_components.home_generative_agent.agent import graph
 from custom_components.home_generative_agent.agent import tools as tools_module
 from custom_components.home_generative_agent.agent.helpers import (
+    MAX_PIN_ATTEMPTS,
     MAX_PIN_REPLIES,
     PIN_OUTCOME_DONE,
     PIN_OUTCOME_FAILED,
     PIN_OUTCOME_UNKNOWN,
     PinReply,
     disclose_pin_prompts,
+    end_pin_turn,
     keep_pin_prompts,
     parse_tool_response,
     pin_lines_follow,
@@ -483,6 +485,7 @@ def test_a_request_repeated_on_the_last_reply_starts_a_fresh_prompt() -> None:
         reply = start_pin_turn(pending, "conv1", "9999")
         keep_pin_prompts(pending, reply)
         disclose_pin_prompts(pending, reply)
+        end_pin_turn(pending, reply.turn_id)
     old_id = next(iter(pending))
     pending[old_id]["attempts"] = 2
     last = start_pin_turn(pending, "conv1", "unlock the playroom door")
@@ -507,7 +510,11 @@ def test_a_prompt_whose_line_was_never_delivered_cannot_be_answered() -> None:
     reply = start_pin_turn(pending, "conv1", "unlock the playroom door")
     action_id = _register(pending, reply)
 
+    # While its turn is still running, the next message cannot answer it.
     start_pin_turn(pending, "conv1", PIN)
+    assert pending[action_id].get("reply_turn") is None
+    # The turn ends without delivering its line, which drops it.
+    end_pin_turn(pending, reply.turn_id)
 
     assert action_id not in pending
 
@@ -532,6 +539,7 @@ def test_a_disclosed_prompt_survives_a_turn_that_failed() -> None:
 
     failed = start_pin_turn(pending, "conv1", PIN)
     keep_pin_prompts(pending, failed)
+    end_pin_turn(pending, failed.turn_id)
     again = start_pin_turn(pending, "conv1", PIN)
 
     assert pending[action_id]["reply_turn"] == again.turn_id
@@ -681,6 +689,73 @@ def test_another_voices_live_prompt_refuses_the_request_in_fixed_words(
     reply = second.config["configurable"]["pin_reply"]
     assert reply.other_voice_waiting is True
     assert pin_lines_follow(pending, reply) is True
+    assert list(pending) == [anna]
+
+
+@pytest.mark.parametrize("hold", [_hold_through_guard, _hold_through_automation])
+def test_a_locked_out_request_asked_again_tells_the_model_so(hold: Any) -> None:
+    """The model hears the lockout, not "ask for that PIN first" (#1001)."""
+    pending: dict[str, Any] = {}
+    first = _voice_ctx(pending, "conv1:anna", "unlock the playroom")
+    anna = _held_id(_hold_through_guard(first))
+    disclose_pin_prompts(pending, first.config["configurable"]["pin_reply"])
+    again = _voice_ctx(pending, "conv1:anna", "0000")
+    pending[anna]["attempts"] = MAX_PIN_ATTEMPTS
+
+    result = hold(again)
+
+    content = result.content if hasattr(result, "content") else result
+    assert content == pin_msg(None, "pin_too_many_attempts")
+
+
+@pytest.mark.parametrize("hold", [_hold_through_guard, _hold_through_automation])
+def test_a_request_during_another_turns_pin_reply_tells_the_model_so(
+    hold: Any,
+) -> None:
+    """Not "ask for that PIN first": this turn cannot answer it (#1001)."""
+    pending: dict[str, Any] = {}
+    first = _voice_ctx(pending, "conv1:anna", "unlock the playroom")
+    _held_id(_hold_through_guard(first))
+    disclose_pin_prompts(pending, first.config["configurable"]["pin_reply"])
+    start_pin_turn(pending, "conv1:anna", "1234")  # another voice's reply, running
+
+    result = hold(_voice_ctx(pending, "conv1:anna", "lock it at 7 instead"))
+
+    content = result.content if hasattr(result, "content") else result
+    assert content == pin_msg(None, "pin_request_in_progress")
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        (_hold_through_automation, _hold_through_guard),
+        (_hold_through_guard, _hold_through_automation),
+    ],
+)
+def test_the_held_request_records_which_voice_made_it(first: Any, second: Any) -> None:
+    """
+    Two voices with no linked person both run as robot (#1001).
+
+    Boris's turn follows Anna's prompt onto her thread and asks for something
+    else: through the guard and the automation tool alike, the voice that
+    spoke reaches the held request, so it is refused as another voice's.
+    """
+    pending: dict[str, Any] = {}
+    anna_turn = _voice_ctx(pending, "conv1:anna", "unlock")
+    anna_turn.config["configurable"]["voice_thread"] = "conv1:anna"
+    anna = _held_id(first(anna_turn))
+    assert pending[anna]["voice_thread"] == "conv1:anna"
+    disclose_pin_prompts(pending, anna_turn.config["configurable"]["pin_reply"])
+    end_pin_turn(pending, anna_turn.config["configurable"]["pin_reply"].turn_id)
+
+    boris_turn = _voice_ctx(pending, "conv1:anna", "1234, and open the garage")
+    boris_turn.config["configurable"].update(
+        {"voice_thread": "conv1:boris", "pin_owner": "robot"}
+    )
+    result = second(boris_turn)
+
+    content = result.content if hasattr(result, "content") else result
+    assert content == pin_msg(None, "pin_other_voice_waiting")
     assert list(pending) == [anna]
 
 
