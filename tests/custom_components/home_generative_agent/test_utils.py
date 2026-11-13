@@ -1321,9 +1321,9 @@ async def test_probe_logs_never_show_a_base_urls_login(
 
     with contextlib.suppress(CannotConnectError, InvalidAuthError):
         await validate_openai_compatible_url(
-            hass, "http://user:s3cr3t@oc:8000/v1", capability_path="/audio/speech"
+            hass, "http://user:s3cret@face-api:8000/v1", capability_path="/audio/speech"
         )
 
     assert "OpenAI-compatible" in caplog.text
-    assert "s3cr3t" not in caplog.text
-    assert "oc:8000" in caplog.text
+    assert "s3cret" not in caplog.text
+    assert "face-api:8000" in caplog.text
