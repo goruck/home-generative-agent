@@ -62,6 +62,7 @@ from .agent.helpers import (
     langchain_tool_parameters_json,
     llm_api_is_supported,
     newest_pin_prompt,
+    pending_action_expired,
     pin_length_number,
     prompts_awaiting_reply,
     remote_house_words,
@@ -2081,31 +2082,43 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         self, pending_actions: Mapping[str, dict[str, Any]], pin_reply: PinReply
     ) -> str | None:
         """
-        Return the fixed line for a request refused for another voice's prompt.
+        Return the fixed line for a request another prompt refused, if any.
 
         Said in fixed words, not only the model's (#974), and naming the
         request a PIN said next would confirm, so it is not spent on an action
         its speaker never heard named (#1001). That is read when the line is
         built, not when the request was refused: the prompt that refused it
-        may be gone by then, or replaced by another voice's. The one a PIN
-        would follow (`newest_pin_prompt`) is named; failing that, the one
-        that refused it if it is still waiting its turn; with neither, the
-        user is asked to make the request again.
+        may be gone by then, or replaced. For another voice's prompt, the one
+        a PIN would follow (`newest_pin_prompt`) is named; failing that, the
+        one that refused it if it can still be answered; with neither, the
+        user is asked to make the request again. Nothing is said once this
+        turn's PIN ran an action, or about the prompt this turn is answering.
         """
-        if not pin_reply.other_voice_waiting:
+        if not pin_reply.refused_for_a_prompt or pin_reply.confirmed:
             return None
-        conversation_id = pin_reply.waiting_conversation
-        waiting = (
-            newest_pin_prompt(pending_actions, conversation_id)
-            if conversation_id
-            else None
-        ) or pending_actions.get(pin_reply.waiting_action_id or "")
+        now = dt_util.utcnow()
+        refusing = pending_actions.get(pin_reply.waiting_action_id or "")
+        if refusing is not None and (
+            pending_action_expired(refusing, now)
+            or int(refusing.get("attempts", 0) or 0) >= MAX_PIN_ATTEMPTS
+        ):
+            refusing = None
+        if refusing is not None and refusing.get("reply_turn") == pin_reply.turn_id:
+            return None
+        if pin_reply.other_voice_waiting:
+            conversation_id = pin_reply.waiting_conversation
+            followed = (
+                newest_pin_prompt(pending_actions, conversation_id)
+                if conversation_id
+                else None
+            )
+            waiting, key = followed or refusing, "pin_other_voice_waiting_line"
+        else:
+            waiting, key = refusing, "pin_in_progress_line"
         if waiting is None:
             return pin_msg(self.hass, "pin_request_again_line")
         return pin_msg(
-            self.hass,
-            "pin_other_voice_waiting_line",
-            action=describe_pending_action(self.hass, waiting),
+            self.hass, key, action=describe_pending_action(self.hass, waiting)
         )
 
     def _pin_lines(
@@ -2131,7 +2144,9 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 # The prompt took its last reply, or the request its last
                 # attempt: no question follows, so say what comes next.
                 lines.append(pin_msg(self.hass, "pin_request_again_line"))
-        if refusal := self._refusal_line(pending_actions, pin_reply):
+        if (
+            refusal := self._refusal_line(pending_actions, pin_reply)
+        ) and refusal not in lines:
             lines.append(refusal)
         lines.extend(
             pin_msg(
@@ -2188,7 +2203,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             await self._async_add_spoken_reply(chat_log, text)
             disclose_pin_prompts(pending_actions, pin_reply)
             return
-        if pin_reply.other_voice_waiting and not prompts_awaiting_reply(
+        if pin_reply.refused_for_a_prompt and not prompts_awaiting_reply(
             pending_actions, pin_reply
         ):
             # A refusal with nothing to answer goes after the model's reply,

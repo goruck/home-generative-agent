@@ -3313,6 +3313,68 @@ def test_the_refusal_names_the_prompt_a_pin_would_follow_now() -> None:
     assert entity._refusal_line({}, reply) == pin_msg(None, "pin_request_again_line")
     assert entity._refusal_line({}, PinReply("hello")) is None
 
+    # Not a prompt no PIN can confirm, nor one that has expired.
+    locked = _voice_prompt("Garage Door")
+    locked["attempts"] = 5
+    expired = _voice_prompt("Garage Door")
+    expired["created_at"] = "2000-01-01T00:00:00+00:00"
+    for stale in (locked, expired):
+        reply.waiting_action_id = "x"
+        line = entity._refusal_line({"x": stale}, reply)
+        assert line == pin_msg(None, "pin_request_again_line")
+
+
+def test_no_refusal_line_once_this_turns_pin_ran_the_waiting_request() -> None:
+    """A reply saying "PIN accepted", then to ask again, would contradict itself."""
+    from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+        PIN_REFUSED_OTHER_VOICE,
+        PinReply,
+    )
+
+    reply = PinReply("1234")
+    reply.refusal = PIN_REFUSED_OTHER_VOICE
+    reply.waiting_action_id = "gone"
+    reply.waiting_conversation = "conv1"
+    reply.confirmed = 'unlock "Front Door"'
+
+    assert _pin_entity()._refusal_line({}, reply) is None
+
+
+def test_no_refusal_line_naming_the_prompt_this_turn_answers() -> None:
+    """The turn answering a prompt is not told that prompt is waiting."""
+    from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+        PIN_REFUSED_OTHER_VOICE,
+        PinReply,
+    )
+
+    reply = PinReply("0000")
+    reply.refusal = PIN_REFUSED_OTHER_VOICE
+    reply.waiting_action_id = "anna"
+    reply.waiting_conversation = "conv1"
+    answered = _voice_prompt("Front Door")
+    answered["reply_turn"] = reply.turn_id
+
+    assert _pin_entity()._refusal_line({"anna": answered}, reply) is None
+
+
+def test_an_in_progress_refusal_names_the_request_being_handled() -> None:
+    from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+        PIN_REFUSED_IN_PROGRESS,
+        PinReply,
+    )
+
+    reply = PinReply("unlock the back door instead")
+    reply.refusal = PIN_REFUSED_IN_PROGRESS
+    reply.waiting_action_id = "anna"
+    being_answered = _voice_prompt("Front Door")
+    being_answered["reply_turn"] = "another turn"
+
+    line = _pin_entity()._refusal_line({"anna": being_answered}, reply)
+
+    assert line is not None
+    assert "Front Door" in line
+    assert line.endswith(".")
+
 
 async def test_a_refusal_with_a_prompt_of_its_own_keeps_the_question_last(
     frozen_assistant_content: None,  # noqa: ARG001

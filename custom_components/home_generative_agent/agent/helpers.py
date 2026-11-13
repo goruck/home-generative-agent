@@ -474,6 +474,9 @@ class ConfigurableData(TypedDict, total=False):
     thread_id: str
     # The satellite conversation of a voice's turn, else None (#974).
     voice_conversation: str | None
+    # The thread of the voice that spoke, which a PIN-only reply may have left
+    # for another voice's: voices are told apart by it (#1001).
+    voice_thread: str | None
     # The user a reply that follows a voice's PIN prompt is checked as.
     pin_owner: str | None
     # The user's message for this turn. A PIN confirmation is accepted only
@@ -518,6 +521,17 @@ class PinReply:
     def other_voice_waiting(self) -> bool:
         """Return True when another voice's live prompt refused the request."""
         return self.refusal == PIN_REFUSED_OTHER_VOICE
+
+    @property
+    def refused_for_a_prompt(self) -> bool:
+        """
+        Return True when another prompt refused the request, so a line names it.
+
+        Another voice's, or one another turn is still handling: either way the
+        PIN said next would go to that one, so the reply says so in fixed
+        words and ends on them (#1001).
+        """
+        return self.refusal in {PIN_REFUSED_OTHER_VOICE, PIN_REFUSED_IN_PROGRESS}
 
 
 # Why a protected request was not held, for `PinReply.refusal`.
@@ -1269,7 +1283,12 @@ def register_pending_action(
             )
         ):
             if refusal := _replacement_refused(existing, action):
-                _refuse(pin_reply, refusal)
+                _refuse(
+                    pin_reply,
+                    refusal,
+                    action,
+                    key if refusal == PIN_REFUSED_IN_PROGRESS else None,
+                )
                 return None
             # Still the existing prompt's request: its owner's, and its voice's
             # even when another voice's turn followed it here (#1001).
@@ -1338,14 +1357,16 @@ def start_pin_turn(
 
     A pending action is answered by the user's next message or not at all:
     the first turn after the one that created it is its reply turn, and the
-    turn after that drops it (`end_pin_turn`, as the reply turn ends). A
-    prompt the user moved on from ("never mind", or just another request)
-    cannot be confirmed later by a number that happens to equal the PIN.
+    prompt is dropped as that turn ends (`end_pin_turn`). A prompt the user
+    moved on from ("never mind", or just another request) cannot be
+    confirmed later by a number that happens to equal the PIN.
 
-    While the user is still answering, the prompt is kept for one more
-    message: after a wrong or unreadable PIN, the request repeated, or a
-    turn that failed (see `keep_pin_prompts`), up to MAX_PIN_REPLIES replies.
-    Expired actions are dropped here too.
+    While the user is still answering, the reply turn may keep the prompt
+    for one more message: after a wrong or unreadable PIN, the request
+    repeated, or a turn that failed (see `keep_pin_prompts`), up to
+    MAX_PIN_REPLIES replies. `end_pin_turn` hands it to the next message;
+    this function only gives it that message. Expired actions are dropped
+    here.
 
     A prompt still waiting on another turn is left alone: one whose fixed
     line that turn has not delivered yet, or one whose PIN reply another
@@ -1507,8 +1528,17 @@ def keep_pin_prompt(action: dict[str, Any], reply: PinReply | None) -> bool:
 
 
 def prompt_renewable(action: Mapping[str, Any]) -> bool:
-    """Return True while the prompt has not taken all its MAX_PIN_REPLIES replies."""
-    return int(action.get("replies", 0) or 0) < MAX_PIN_REPLIES
+    """
+    Return True while the prompt can take another reply.
+
+    Not once it has taken all its MAX_PIN_REPLIES replies, nor once its
+    request is locked out after MAX_PIN_ATTEMPTS wrong PINs: no PIN can
+    confirm it, so the reply must not offer it again (#1001).
+    """
+    return (
+        int(action.get("replies", 0) or 0) < MAX_PIN_REPLIES
+        and int(action.get("attempts", 0) or 0) < MAX_PIN_ATTEMPTS
+    )
 
 
 def keep_pin_prompts(
@@ -1561,7 +1591,7 @@ def pin_lines_follow(
     return bool(
         reply.confirmed
         or reply.spent
-        or reply.other_voice_waiting
+        or reply.refused_for_a_prompt
         or prompts_awaiting_reply(pending_actions, reply)
     )
 

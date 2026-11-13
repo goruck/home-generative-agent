@@ -184,6 +184,10 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "A request to {action} is waiting for a PIN. Ask again after it is "
             "answered."
         ),
+        "pin_in_progress_line": (
+            "A PIN reply to {action} is still being handled. Ask again after it "
+            "is done."
+        ),
         # Ends a reply that is only the fixed line, so a satellite keeps
         # listening for the answer.
         "pin_ask_line": "What is your PIN?",
@@ -340,6 +344,10 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "pin_other_voice_waiting_line": (
             "Na PIN čeká požadavek: {action}. Zopakujte ten svůj, až bude vyřízen."
         ),
+        "pin_in_progress_line": (
+            "Odpověď s PIN na požadavek {action} se ještě vyřizuje. Zopakujte "
+            "ten svůj, až bude hotová."
+        ),
         "pin_ask_line": "Jaký je váš PIN?",
         "action_lock": "zamknout {target}",
         "action_unlock": "odemknout {target}",
@@ -458,6 +466,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "pin_other_voice_waiting_line": (
             "“{action}”的请求正在等待 PIN。请在它处理完后再试。"
         ),
+        "pin_in_progress_line": "“{action}”的 PIN 回复仍在处理中。请在它完成后再试。",
         "pin_ask_line": "你的 PIN 是多少？",
         "action_lock": "锁上{target}",
         "action_unlock": "解锁{target}",

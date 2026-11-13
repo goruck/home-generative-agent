@@ -15,11 +15,15 @@ from custom_components.home_generative_agent.agent.helpers import (
     MAX_PIN_ATTEMPTS,
     PIN_REFUSED_IN_PROGRESS,
     PIN_REFUSED_LOCKED,
+    PIN_REFUSED_ONE_AT_A_TIME,
     PIN_REFUSED_OTHER_VOICE,
     PinReply,
     disclose_pin_prompts,
     end_pin_turn,
+    keep_pin_prompts,
     newest_pin_prompt,
+    pin_lines_follow,
+    prompts_awaiting_reply,
     register_pending_action,
     start_pin_turn,
     waiting_pin_prompt,
@@ -286,3 +290,68 @@ def test_a_prompt_kept_by_a_running_reply_is_not_taken_over() -> None:
     end_pin_turn(pending, boris.turn_id)
     assert pending[again]["reply_turn"] is None
     assert newest_pin_prompt(pending, "conv1") is pending[again]
+
+
+def test_a_locked_out_prompt_is_not_kept_for_another_reply() -> None:
+    """
+    No PIN can confirm it, so the reply must not offer it again.
+
+    keep_pin_prompt checked only the reply count, so a locked prompt kept
+    after a failed turn was announced as confirmable (#1001 review 2).
+    """
+    pending: dict[str, Any] = {}
+    anna = _hold(pending, ANNA, "anna", "Front Door")
+    assert anna is not None
+    reply = start_pin_turn(pending, ANNA, "0000")
+    pending[anna]["attempts"] = MAX_PIN_ATTEMPTS
+
+    keep_pin_prompts(pending, reply)
+
+    assert prompts_awaiting_reply(pending, reply) == []
+    end_pin_turn(pending, reply.turn_id)
+    assert anna not in pending
+
+
+def test_a_second_refusal_in_the_turn_replaces_the_first_reason() -> None:
+    """An other-voice refusal does not linger on a later, different refusal."""
+    pending: dict[str, Any] = {}
+    anna = _hold(pending, ANNA, "anna", "Front Door")
+    assert anna is not None
+    boris = start_pin_turn(pending, BORIS, "open the garage")
+    register_pending_action(
+        pending, _unlock(BORIS, "boris", "Garage Door", boris), pin_reply=boris
+    )
+    assert boris.refusal == PIN_REFUSED_OTHER_VOICE
+    pending.pop(anna)
+    assert (
+        register_pending_action(
+            pending, _unlock(BORIS, "boris", "Garage Door", boris), pin_reply=boris
+        )
+        is not None
+    )
+
+    other = register_pending_action(
+        pending, _unlock(BORIS, "boris", "Shed", boris), pin_reply=boris
+    )
+
+    assert other is None
+    assert boris.refusal == PIN_REFUSED_ONE_AT_A_TIME
+    assert boris.waiting_action_id is None
+
+
+def test_an_in_progress_refusal_records_the_request_it_waits_on() -> None:
+    """So the reply can name it in fixed words, like another voice's."""
+    pending: dict[str, Any] = {}
+    anna = _hold(pending, ANNA, "anna", "Front Door")
+    assert anna is not None
+    start_pin_turn(pending, ANNA, "1234")  # another voice's PIN reply, running
+    own = start_pin_turn(pending, ANNA, "unlock the back door instead")
+
+    held = register_pending_action(
+        pending, _unlock(ANNA, "anna", "Back Door", own), pin_reply=own
+    )
+
+    assert held is None
+    assert own.refusal == PIN_REFUSED_IN_PROGRESS
+    assert own.waiting_action_id == anna
+    assert pin_lines_follow(pending, own) is True
