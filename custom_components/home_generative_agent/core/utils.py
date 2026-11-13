@@ -1470,18 +1470,20 @@ async def _probe_openai_compatible_route(
         )
         raise CannotConnectError from err
     if resp.status_code == HTTP_STATUS_UNAUTHORIZED:
-        LOGGER.debug("OpenAI-compatible capability probe unauthorized: %s", url)
+        LOGGER.debug(
+            "OpenAI-compatible capability probe unauthorized: %s", redact_url(url)
+        )
         raise InvalidAuthError
     if resp.status_code in _ROUTE_ABSENT_STATUSES:
         LOGGER.debug(
             "OpenAI-compatible capability probe: %s is not served here (HTTP %s)",
-            url,
+            redact_url(url),
             resp.status_code,
         )
         raise CannotConnectError
     LOGGER.debug(
         "OpenAI-compatible capability probe: %s is served (HTTP %s)",
-        url,
+        redact_url(url),
         resp.status_code,
     )
 
@@ -1532,13 +1534,13 @@ async def validate_openai_compatible_url(
             "OpenAI-compatible model catalog probe answered HTTP %s at %s but the "
             "body is not a model catalog; treating it as absent",
             resp.status_code,
-            url,
+            redact_url(url),
         )
     else:
         LOGGER.debug(
             "OpenAI-compatible model catalog probe failed (HTTP %s): %s",
             resp.status_code,
-            url,
+            redact_url(url),
         )
     if capability_path is None:
         raise CannotConnectError
