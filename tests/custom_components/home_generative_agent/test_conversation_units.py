@@ -173,10 +173,11 @@ from homeassistant.components import conversation as ha_conversation  # noqa: E4
 from homeassistant.util import dt as dt_util  # noqa: E402
 
 from custom_components.home_generative_agent.agent.helpers import (  # noqa: E402
-    another_voice_waiting,
+    end_pin_turn,
     register_pending_action,
     start_pin_turn,
     waiting_pin_prompt,
+    waiting_voice_prompt,
 )
 from custom_components.home_generative_agent.agent.tools import (  # noqa: E402
     MAX_PIN_ATTEMPTS,
@@ -3249,12 +3250,11 @@ async def test_a_request_refused_for_another_voice_says_so_in_fixed_words(
         start_pin_turn,
     )
 
+    pending["anna"] = _voice_prompt("Front Door")
     reply = start_pin_turn(pending, "conv1:boris", "unlock the garage door")
     reply.refusal = PIN_REFUSED_OTHER_VOICE
-    reply.waiting_action = {
-        "tool_name": "HassTurnOff",
-        "tool_args": {"domain": ["lock"], "name": "Front Door"},
-    }
+    reply.waiting_action_id = "anna"
+    reply.waiting_conversation = "conv1"
     chat_log = _DeltaChatLog([_assistant_reply("Shall I try again later?")])
 
     await HGAConversationEntity._async_add_pin_lines(
@@ -3265,6 +3265,88 @@ async def test_a_request_refused_for_another_voice_says_so_in_fixed_words(
     assert content.startswith("Shall I try again later?\n\nA request to ")
     assert "Front Door" in content
     assert content.endswith("is waiting for a PIN. Ask again after it is answered.")
+
+
+def _voice_prompt(name: str, turn_id: str = "earlier") -> dict[str, Any]:
+    """Return another voice's disclosed, waiting prompt in conversation conv1."""
+    from homeassistant.util import dt as dt_util  # noqa: PLC0415
+
+    return {
+        "tool_name": "HassTurnOff",
+        "tool_args": {"domain": ["lock"], "name": name},
+        "thread_id": "conv1:anna",
+        "voice_conversation": "conv1",
+        "voice_thread": "conv1:anna",
+        "turn_id": turn_id,
+        "disclosed": True,
+        "attempts": 0,
+        "created_at": dt_util.utcnow().isoformat(),
+    }
+
+
+def test_the_refusal_names_the_prompt_a_pin_would_follow_now() -> None:
+    """
+    The refusal names the prompt a PIN said next would follow now.
+
+    The prompt that refused the request is gone; another voice's has replaced
+    it. The line names that one, not the stale one (Codex, #1001 review);
+    with none, it asks to make the request again.
+    """
+    from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+        PIN_REFUSED_OTHER_VOICE,
+        PinReply,
+    )
+    from custom_components.home_generative_agent.agent.pin_messages import (  # noqa: PLC0415
+        pin_msg,
+    )
+
+    reply = PinReply("unlock the back door")
+    reply.refusal = PIN_REFUSED_OTHER_VOICE
+    reply.waiting_action_id = "gone"
+    reply.waiting_conversation = "conv1"
+    entity = _pin_entity()
+
+    line = entity._refusal_line({"clara": _voice_prompt("Garage Door")}, reply)
+    assert line is not None
+    assert "Garage Door" in line
+
+    assert entity._refusal_line({}, reply) == pin_msg(None, "pin_request_again_line")
+    assert entity._refusal_line({}, PinReply("hello")) is None
+
+
+async def test_a_refusal_with_a_prompt_of_its_own_keeps_the_question_last(
+    frozen_assistant_content: None,  # noqa: ARG001
+) -> None:
+    """With this turn's prompt waiting, the lines go first and the reply ends it."""
+    from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+        PIN_REFUSED_OTHER_VOICE,
+        register_pending_action,
+        start_pin_turn,
+    )
+
+    pending: dict[str, Any] = {"anna": _voice_prompt("Front Door")}
+    reply = start_pin_turn(pending, "conv1:boris", "lock the shed")
+    register_pending_action(
+        pending,
+        {
+            "tool_name": "HassTurnOn",
+            "tool_args": {"domain": ["lock"], "name": "Shed"},
+            "thread_id": "conv1:boris",
+            "turn_id": reply.turn_id,
+        },
+    )
+    reply.refusal = PIN_REFUSED_OTHER_VOICE
+    reply.waiting_action_id = "anna"
+    reply.waiting_conversation = "conv1"
+    chat_log = _DeltaChatLog([_assistant_reply("What is your PIN?")])
+
+    await HGAConversationEntity._async_add_pin_lines(
+        _pin_entity(), cast("Any", chat_log), pending, reply, streamed=True
+    )
+
+    content = chat_log.content[-1].content
+    assert content.startswith("A request to ")
+    assert content.endswith("What is your PIN?")
 
 
 async def test_a_turn_without_a_prompt_or_confirmation_is_left_alone(
@@ -3807,9 +3889,19 @@ def test_waiting_pin_prompt_ignores_prompts_nobody_can_answer(
 
 
 def test_waiting_pin_prompt_keeps_a_renewed_prompt() -> None:
-    """A wrong PIN keeps the prompt for one more reply."""
+    """
+    A wrong PIN keeps the prompt for one more reply, once its turn ends.
+
+    While the turn that kept it still runs, the prompt is not followed, so a
+    PIN reply in progress is not taken over (#1001).
+    """
     action = _waiting_action("conv:Пётр", reply_turn="t1", renew=True)
-    assert waiting_pin_prompt({"a": action}, "conv", "1234") is action
+    pending = {"a": action}
+    assert waiting_pin_prompt(pending, "conv", "1234") is None
+
+    end_pin_turn(pending, "t1")
+
+    assert waiting_pin_prompt(pending, "conv", "1234") is action
 
 
 def test_waiting_pin_prompt_skips_an_expired_prompt(
@@ -3967,7 +4059,7 @@ def test_followed_reply_making_a_new_request_is_refused() -> None:
     }
     new = _held_request(user="Mary", turn_id="t1", tool_args={"name": "Garage"})
     assert register_pending_action(pending, new, pin_owner="ivan") is None
-    assert another_voice_waiting(pending, new, pin_owner="ivan") is True
+    assert waiting_voice_prompt(pending, new, pin_owner="ivan") is not None
     assert list(pending) == ["a"]
     assert pending["a"]["user"] == "ivan"
     assert pending["a"]["attempts"] == 2

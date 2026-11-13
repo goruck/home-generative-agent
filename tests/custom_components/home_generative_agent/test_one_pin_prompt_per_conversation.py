@@ -14,13 +14,13 @@ from custom_components.home_generative_agent.agent.helpers import (
     MAX_PIN_REPLIES,
     PENDING_ACTION_TTL,
     PinReply,
-    another_voice_waiting,
     disclose_pin_prompts,
     end_pin_turn,
     keep_pin_prompts,
     register_pending_action,
     start_pin_turn,
     waiting_pin_prompt,
+    waiting_voice_prompt,
 )
 
 ANNA = "conv1:anna"
@@ -228,7 +228,7 @@ def test_another_voice_waiting_ignores_a_voices_own_prompt() -> None:
     pending: dict[str, Any] = {}
     _hold(pending, ANNA, "anna", "Front Door")
     reply = start_pin_turn(pending, ANNA, "unlock the garage door")
-    assert not another_voice_waiting(
+    assert not waiting_voice_prompt(
         pending, _unlock(ANNA, "anna", "Garage Door", reply)
     )
 

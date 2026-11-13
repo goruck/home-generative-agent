@@ -48,11 +48,13 @@ from homeassistant.helpers.service import async_get_cached_service_description
 from .automation_pin import DATA_CONTAINER_KEYS
 from .helpers import (
     INTENT_NAME_ALL,
+    PIN_REFUSED_IN_PROGRESS,
     PIN_REFUSED_LOCKED,
     PIN_REFUSED_OTHER_VOICE,
     SET_POSITION_INTENT,
     STOP_MOVING_INTENT,
     TOOL_NAMESPACE_SEP,
+    PinReply,
     base_tool_name,
     intent_service_calls,
     is_actuating_intent,
@@ -166,6 +168,11 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "Not requested: another person's request on this device is waiting "
             "for a PIN. Do not ask for a PIN; the user can make this request "
             "again once that one is answered."
+        ),
+        "pin_request_in_progress": (
+            "Not requested: a PIN prompt for another request in this conversation "
+            "is still being handled. Do not ask for a PIN; the user can make "
+            "this request again once that one is done."
         ),
         "pin_confirm_line": "Your PIN will confirm: {action}.",
         "pin_incorrect_line": "That PIN was incorrect.",
@@ -317,6 +324,11 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "O PIN nežádejte; uživatel může tento požadavek zopakovat, až bude "
             "ten čekající vyřízen."
         ),
+        "pin_request_in_progress": (
+            "Nevyžádáno: výzva k PIN pro jiný požadavek v této konverzaci se "
+            "ještě vyřizuje. O PIN nežádejte; uživatel může tento požadavek "
+            "zopakovat, až bude ten první dokončen."
+        ),
         "pin_confirm_line": "Váš PIN potvrdí: {action}.",
         "pin_incorrect_line": "Ten PIN byl nesprávný.",
         "pin_request_again_line": "Zopakujte požadavek.",
@@ -433,6 +445,10 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "未发起请求：此设备上另一个人的请求正在等待 PIN。不要索要 PIN；"
             "那个请求处理完后，用户可以再次提出这一个。"
         ),
+        "pin_request_in_progress": (
+            "未发起请求：此对话中另一个请求的 PIN 提示仍在处理。不要索要 PIN；"
+            "那个处理完后，用户可以再次提出这一个。"
+        ),
         "pin_confirm_line": "你的 PIN 将确认：{action}。",
         "pin_incorrect_line": "PIN 不正确。",
         "pin_request_again_line": "请重新发出请求。",
@@ -520,7 +536,7 @@ def pin_msg(hass: HomeAssistant | None, key: str, /, **kwargs: Any) -> str:
     return template.format(**kwargs) if kwargs else template
 
 
-def refused_pin_request(hass: HomeAssistant | None, pin_reply: Any) -> str:
+def refused_pin_request(hass: HomeAssistant | None, pin_reply: PinReply | None) -> str:
     """
     Return why a protected request was not held, for the model.
 
@@ -529,12 +545,13 @@ def refused_pin_request(hass: HomeAssistant | None, pin_reply: Any) -> str:
     reply then names in fixed words; a locked-out prompt; or a request this
     turn, or another turn's PIN reply, already holds (#1001).
     """
-    refusal = getattr(pin_reply, "refusal", "")
-    if refusal == PIN_REFUSED_OTHER_VOICE:
-        return pin_msg(hass, "pin_other_voice_waiting")
-    if refusal == PIN_REFUSED_LOCKED:
-        return pin_msg(hass, "pin_too_many_attempts")
-    return pin_msg(hass, "pin_one_action_at_a_time")
+    refusal = pin_reply.refusal if pin_reply is not None else ""
+    key = {
+        PIN_REFUSED_OTHER_VOICE: "pin_other_voice_waiting",
+        PIN_REFUSED_LOCKED: "pin_too_many_attempts",
+        PIN_REFUSED_IN_PROGRESS: "pin_request_in_progress",
+    }.get(refusal, "pin_one_action_at_a_time")
+    return pin_msg(hass, key)
 
 
 # Longest target name the action line repeats. The name comes from the model.

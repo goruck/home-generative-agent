@@ -2077,20 +2077,35 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         ):
             pass
 
-    def _refusal_line(self, pin_reply: PinReply) -> str | None:
+    def _refusal_line(
+        self, pending_actions: Mapping[str, dict[str, Any]], pin_reply: PinReply
+    ) -> str | None:
         """
         Return the fixed line for a request refused for another voice's prompt.
 
         Said in fixed words, not only the model's (#974), and naming the
-        waiting request, so a PIN said next is not spent on an action its
-        speaker never heard named (#1001).
+        request a PIN said next would confirm, so it is not spent on an action
+        its speaker never heard named (#1001). That is read when the line is
+        built, not when the request was refused: the prompt that refused it
+        may be gone by then, or replaced by another voice's. The one a PIN
+        would follow (`newest_pin_prompt`) is named; failing that, the one
+        that refused it if it is still waiting its turn; with neither, the
+        user is asked to make the request again.
         """
-        if not pin_reply.other_voice_waiting or pin_reply.waiting_action is None:
+        if not pin_reply.other_voice_waiting:
             return None
+        conversation_id = pin_reply.waiting_conversation
+        waiting = (
+            newest_pin_prompt(pending_actions, conversation_id)
+            if conversation_id
+            else None
+        ) or pending_actions.get(pin_reply.waiting_action_id or "")
+        if waiting is None:
+            return pin_msg(self.hass, "pin_request_again_line")
         return pin_msg(
             self.hass,
             "pin_other_voice_waiting_line",
-            action=describe_pending_action(self.hass, pin_reply.waiting_action),
+            action=describe_pending_action(self.hass, waiting),
         )
 
     def _pin_lines(
@@ -2116,7 +2131,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 # The prompt took its last reply, or the request its last
                 # attempt: no question follows, so say what comes next.
                 lines.append(pin_msg(self.hass, "pin_request_again_line"))
-        if refusal := self._refusal_line(pin_reply):
+        if refusal := self._refusal_line(pending_actions, pin_reply):
             lines.append(refusal)
         lines.extend(
             pin_msg(
@@ -2499,7 +2514,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 # The error is the whole reply, so it says why a request was
                 # not held (#1001). No prompt was delivered, so it promises
                 # nothing for the PIN; end_pin_turn drops what this turn made.
-                refusal = self._refusal_line(pin_reply)
+                refusal = self._refusal_line(runtime_data.pending_actions, pin_reply)
                 intent_response.async_set_error(
                     intent.IntentResponseErrorCode.UNKNOWN,
                     f"{refusal} {err}" if refusal else str(err),

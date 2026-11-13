@@ -579,7 +579,6 @@ def _critical_action_guard(  # noqa: PLR0913
         "api_tool_name": origin.tool_name if origin is not None else None,
         "remote": origin is not None and origin.remote,
     }
-    pin_reply = configurable.get("pin_reply")
     action_id = register_pending_action(
         ctx.pending_actions,
         action,

@@ -26,6 +26,7 @@ from custom_components.home_generative_agent.agent.helpers import (
     PIN_OUTCOME_UNKNOWN,
     PinReply,
     disclose_pin_prompts,
+    end_pin_turn,
     start_pin_turn,
 )
 from custom_components.home_generative_agent.agent.tools import (
@@ -52,8 +53,10 @@ async def confirm_tool(
 ) -> str:
     """Confirm as the user's reply to the PIN prompt: a new message with the PIN."""
     configurable = config["configurable"]
-    # The request turn ended by naming the prompt, as conversation.py does.
+    # The request turn ended by naming the prompt, as conversation.py does,
+    # and then ended (end_pin_turn hands a kept prompt to the next message).
     disclose_pin_prompts(configurable["pending_actions"], configurable["pin_reply"])
+    end_pin_turn(configurable["pending_actions"], configurable["pin_reply"].turn_id)
     configurable["pin_reply"] = start_pin_turn(
         configurable["pending_actions"], configurable["thread_id"], pin
     )
