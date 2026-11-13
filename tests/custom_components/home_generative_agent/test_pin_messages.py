@@ -27,6 +27,7 @@ _DUMMY_KWARGS: dict[str, Any] = {
     "max_len": 10,
     "err": "err",
     "action": "action",
+    "failed": "failed",
     "target": "target",
     "service": "service",
     "name": "name",

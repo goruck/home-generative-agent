@@ -114,11 +114,14 @@ from .helpers import (
     PIN_AWAITING_USER_REPLY,
     PIN_OUTCOME_DONE,
     PIN_OUTCOME_FAILED,
+    PIN_OUTCOME_PARTIAL,
     PIN_OUTCOME_UNKNOWN,
     PIN_REFUSAL_ENDS_TURN,
+    TOOL_STATUS_PARTIAL,
     ConfigurableData,
     base_tool_name,
     drop_empty_args,
+    failed_targets,
     keep_pin_prompt,
     minimal_payload_for_domain,
     narrow_intent_args,
@@ -1383,13 +1386,17 @@ def _claim_pending_action(cfg: Mapping[str, Any], action_id: str) -> bool:
 
 
 def _record_confirmed(
-    cfg: Mapping[str, Any], action: Mapping[str, Any], outcome: str
+    cfg: Mapping[str, Any],
+    action: Mapping[str, Any],
+    outcome: str,
+    failed: tuple[str, ...] = (),
 ) -> None:
     """Record on the user's message the action its PIN was accepted for and its end."""
     pin_reply = cfg.get("pin_reply")
     if pin_reply is not None:
         pin_reply.confirmed = describe_pending_action(cfg.get("hass"), action)
         pin_reply.outcome = outcome
+        pin_reply.failed_targets = failed
 
 
 def _spend_pin_reply(cfg: Mapping[str, Any]) -> None:
@@ -1423,6 +1430,31 @@ def _held_api(ha_llm_api: Any, held_api: object, tool_name: str) -> Any | None:
         )
     ]
     return owners[0] if len(owners) == 1 else None
+
+
+def _completed_reply(
+    cfg: Mapping[str, Any],
+    action: Mapping[str, Any],
+    action_id: str,
+    data: Any,
+    status: str | None,
+) -> str:
+    """Record a PIN-confirmed call that acted, and return its tool result."""
+    # Some targets may have failed while the rest acted (#948).
+    failed = failed_targets(data) if status == TOOL_STATUS_PARTIAL else ()
+    _record_confirmed(
+        cfg, action, PIN_OUTCOME_PARTIAL if failed else PIN_OUTCOME_DONE, failed
+    )
+    completed: dict[str, Any] = {
+        "status": "completed",
+        "action_id": action_id,
+        "result": data,
+    }
+    if failed:
+        completed["failed_targets"] = list(failed)
+    # default=str: a result the JSON encoder cannot take must not raise after
+    # the action ran.
+    return json.dumps(completed, default=str)
 
 
 async def _execute_pending_action(  # noqa: PLR0911, PLR0912
@@ -1526,17 +1558,7 @@ async def _execute_pending_action(  # noqa: PLR0911, PLR0912
         failure = type(err).__name__
     else:
         if not response.error and status != "error":
-            _record_confirmed(cfg, action, PIN_OUTCOME_DONE)
-            # default=str: a result the JSON encoder cannot take must not
-            # raise after the action ran.
-            return json.dumps(
-                {
-                    "status": "completed",
-                    "action_id": resolved_action_id,
-                    "result": data,
-                },
-                default=str,
-            ), None
+            return _completed_reply(cfg, action, resolved_action_id, data, status), None
         # HA 2026.10's error flag gets the same reply as a raised error.
         failure = (
             content if status == "error" else json.dumps(response.data, default=str)

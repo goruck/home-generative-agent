@@ -4550,3 +4550,22 @@ async def test_wrong_pins_count_against_the_sentence_checks(
             None,
         )
         entity.hass.async_add_executor_job.assert_not_called()
+
+
+def test_a_half_done_action_gets_its_own_fixed_line() -> None:
+    """Naming what failed, in fixed words (#948)."""
+    from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+        PIN_OUTCOME_PARTIAL,
+        PinReply,
+    )
+
+    reply = PinReply("1234")
+    reply.confirmed = 'unlock every lock in "Kitchen"'
+    reply.outcome = PIN_OUTCOME_PARTIAL
+    reply.failed_targets = ("Back Lock", "Side Lock")
+
+    lines = _pin_entity()._pin_lines({}, reply)
+
+    assert lines == [
+        'PIN accepted: unlock every lock in "Kitchen", but Back Lock, Side Lock failed.'
+    ]

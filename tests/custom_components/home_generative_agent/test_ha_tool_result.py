@@ -249,3 +249,22 @@ def test_failed_live_context_is_not_rewritten_as_all_clear() -> None:
     )
 
     assert filtered.content == content
+
+
+async def test_a_half_done_call_reaches_the_model_as_success_naming_the_rest(
+    tool_result_cls: type,
+) -> None:
+    """It acted, so no error; its content says which targets failed (#948)."""
+    data = {
+        "response_type": "action_done",
+        "data": {
+            "success": [{"type": "entity", "name": "Front Lock", "id": "lock.f"}],
+            "failed": [{"type": "entity", "name": "Back Lock", "id": "lock.b"}],
+        },
+    }
+    api = _FakeAPI(tool_result_cls(data=data))
+
+    message = await graph._run_ha_tool("GetLiveContext", {}, _ctx(api), {"id": "call1"})
+
+    assert message.status == "success"
+    assert "Back Lock" in json.loads(cast("str", message.content))["partial_failure"]

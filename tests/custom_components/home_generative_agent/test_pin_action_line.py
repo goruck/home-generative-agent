@@ -32,6 +32,7 @@ from custom_components.home_generative_agent.agent.helpers import (
     MAX_PIN_REPLIES,
     PIN_OUTCOME_DONE,
     PIN_OUTCOME_FAILED,
+    PIN_OUTCOME_PARTIAL,
     PIN_OUTCOME_UNKNOWN,
     PinReply,
     disclose_pin_prompts,
@@ -841,6 +842,52 @@ async def test_a_failed_action_is_recorded_as_failed(result: Any) -> None:
     assert "completed" not in reply
     assert answer.confirmed == PLAYROOM_LINE
     assert answer.outcome == PIN_OUTCOME_FAILED
+
+
+def _half_done(*failed: dict[str, Any]) -> dict[str, Any]:
+    """Return an intent response as HA gives it when some targets failed (#948)."""
+    return {
+        "speech": {},
+        "response_type": "action_done",
+        "data": {
+            "success": [{"type": "entity", "name": "Front Lock", "id": "lock.f"}],
+            "failed": list(failed),
+        },
+    }
+
+
+async def test_a_half_done_action_is_recorded_as_partial() -> None:
+    """One of three locks failed: not "PIN accepted: unlock …" alone (#948)."""
+    back = {"type": "entity", "name": "Back Lock", "id": "lock.b"}
+    side = {"type": "entity", "name": "", "id": "lock.side"}
+    answer, reply = await _request_and_confirm(_FakeAPI(_half_done(back, side)))
+
+    assert json.loads(reply)["status"] == "completed"
+    assert json.loads(reply)["failed_targets"] == ["Back Lock", "lock.side"]
+    assert answer.confirmed == PLAYROOM_LINE
+    assert answer.outcome == PIN_OUTCOME_PARTIAL
+    assert answer.failed_targets == ("Back Lock", "lock.side")
+
+
+async def test_an_action_with_no_failed_targets_is_done() -> None:
+    answer, reply = await _request_and_confirm(_FakeAPI(_half_done()))
+
+    assert "failed_targets" not in json.loads(reply)
+    assert answer.outcome == PIN_OUTCOME_DONE
+    assert answer.failed_targets == ()
+
+
+def test_the_normal_path_names_the_failed_targets() -> None:
+    """The model hears the call half worked, not just a success (#948)."""
+    response = _half_done({"type": "entity", "name": "Back Lock", "id": "lock.b"})
+
+    content, status = parse_tool_response(response, {"domain": ["lock"]})
+
+    assert status == "partial"
+    assert "1 target(s) failed (Back Lock)" in json.loads(content)["partial_failure"]
+    # A failure that was reported as such stays an error.
+    response["warning"] = "no entity matched"
+    assert parse_tool_response(response, {"domain": ["lock"]})[1] == "error"
 
 
 async def test_an_action_with_an_unknown_outcome_is_recorded_as_such() -> None:

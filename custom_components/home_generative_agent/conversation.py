@@ -50,6 +50,7 @@ from .agent.automation_targets import normalize_notify_service
 from .agent.graph import workflow
 from .agent.helpers import (
     PIN_OUTCOME_FAILED,
+    PIN_OUTCOME_PARTIAL,
     PIN_OUTCOME_UNKNOWN,
     active_llm_api_ids,
     chat_log_tool_result,
@@ -2125,7 +2126,18 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
     ) -> list[str]:
         """Return the fixed lines this turn's reply must carry, in order."""
         lines: list[str] = []
-        if pin_reply.confirmed:
+        if pin_reply.confirmed and pin_reply.outcome == PIN_OUTCOME_PARTIAL:
+            # Said in fixed words: "PIN accepted: unlock..." alone would
+            # read as done with one of the locks still locked (#948).
+            lines.append(
+                pin_msg(
+                    self.hass,
+                    "pin_partial_line",
+                    action=pin_reply.confirmed,
+                    failed=", ".join(pin_reply.failed_targets),
+                )
+            )
+        elif pin_reply.confirmed:
             key = {
                 PIN_OUTCOME_FAILED: "pin_failed_line",
                 PIN_OUTCOME_UNKNOWN: "pin_unknown_line",

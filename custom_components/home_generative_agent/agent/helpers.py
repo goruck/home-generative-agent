@@ -506,6 +506,9 @@ class PinReply:
     # in words the model did not choose, and how it ended (`outcome`).
     confirmed: str = ""
     outcome: str = ""
+    # For PIN_OUTCOME_PARTIAL: the targets Home Assistant reported failed,
+    # by name, for the fixed line (#948).
+    failed_targets: tuple[str, ...] = ()
     # Why `register_pending_action` refused this turn's protected request
     # (a PIN_REFUSED_* value, "" when none was), so the tool result and the
     # reply's fixed line say so without working it out again.
@@ -550,6 +553,11 @@ PIN_OUTCOME_DONE = "done"
 PIN_OUTCOME_FAILED = "failed"
 # An error or timeout after the claim: the device may have acted.
 PIN_OUTCOME_UNKNOWN = "unknown"
+# Some targets acted and Home Assistant reported the rest failed (#948).
+PIN_OUTCOME_PARTIAL = "partial"
+
+# `parse_tool_response`'s status for a call that acted on some targets only.
+TOOL_STATUS_PARTIAL = "partial"
 
 
 # How long a pending PIN confirmation stays valid, used by the sweep here and
@@ -1898,6 +1906,35 @@ def minimal_payload_for_domain(
 INTENT_NAME_ALL = "all"
 
 
+def failed_targets(response: Any) -> tuple[str, ...]:
+    """
+    Return the targets an intent response reports failed, by name.
+
+    Home Assistant's intents succeed when at least one target acted and list
+    the rest in ``data.failed`` (raising only when every target failed), so
+    a call can have half worked (#948).
+    """
+    if isinstance(response, str):
+        try:
+            response = json.loads(response)
+        except json.JSONDecodeError:
+            return ()
+    if not isinstance(response, dict):
+        return ()
+    data = response.get("data")
+    failed = data.get("failed") if isinstance(data, dict) else None
+    if not isinstance(failed, list):
+        return ()
+    names: list[str] = []
+    for target in failed:
+        if isinstance(target, dict):
+            name = target.get("name") or target.get("id")
+            names.append(str(name) if name else "?")
+        else:
+            names.append(str(target))
+    return tuple(names)
+
+
 def parse_tool_response(
     response: Any, tool_args: dict[str, Any]
 ) -> tuple[str, str | None]:
@@ -1906,7 +1943,9 @@ def parse_tool_response(
 
     Shared by the normal tool path and the PIN confirmation, so a tool that
     reports failure in its payload (`success: false`, a `warning`, an alarm
-    that did not change state) reads as a failure on both.
+    that did not change state) reads as a failure on both, and one that
+    acted on some targets only (``data.failed``) as TOOL_STATUS_PARTIAL,
+    with a note naming the rest (#948).
     """
     parsed: dict[str, Any] | None = None
     if isinstance(response, dict):
@@ -1964,6 +2003,19 @@ def parse_tool_response(
                 result_text
                 or f"Alarm did not change state (panel_state={inferred_state})."
             )
+
+    if status is None and (failed := failed_targets(parsed)):
+        status = TOOL_STATUS_PARTIAL
+        content_str = json.dumps(
+            {
+                **parsed,
+                "partial_failure": (
+                    f"Only part of the action ran: {len(failed)} target(s) "
+                    f"failed ({', '.join(failed)}). Tell the user which."
+                ),
+            },
+            default=str,
+        )
 
     return content_str, status
 

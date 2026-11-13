@@ -180,6 +180,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "pin_done_line": "PIN accepted: {action}.",
         "pin_failed_line": "PIN accepted, but {action} failed.",
         "pin_unknown_line": "PIN accepted; {action} may have run. Check the device.",
+        "pin_partial_line": "PIN accepted: {action}, but {failed} failed.",
         "pin_other_voice_waiting_line": (
             "A request to {action} is waiting for a PIN. Ask again after it is "
             "answered."
@@ -341,6 +342,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "pin_unknown_line": (
             "PIN přijat; {action} možná proběhlo. Zkontrolujte zařízení."
         ),
+        "pin_partial_line": "PIN přijat: {action}, ale u {failed} se to nepodařilo.",
         "pin_other_voice_waiting_line": (
             "Na PIN čeká požadavek: {action}. Zopakujte ten svůj, až bude vyřízen."
         ),
@@ -463,6 +465,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "pin_done_line": "PIN 已接受：{action}。",
         "pin_failed_line": "PIN 已接受，但{action}失败了。",
         "pin_unknown_line": "PIN 已接受；{action}可能已经执行。请检查设备。",
+        "pin_partial_line": "PIN 已接受：{action}，但{failed}失败了。",
         "pin_other_voice_waiting_line": (
             "“{action}”的请求正在等待 PIN。请在它处理完后再试。"
         ),
