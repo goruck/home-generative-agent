@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import logging
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -1290,3 +1292,38 @@ async def test_validate_ollama_url_maps_an_invalid_url_to_cannot_connect(
 
     with pytest.raises(CannotConnectError):
         await validate_ollama_url(hass, "http://ollama:11434")
+
+
+@pytest.mark.parametrize(
+    "statuses",
+    [
+        (HTTP_SERVER_ERROR, None, 401),  # catalog failed, route unauthorized
+        (HTTP_SERVER_ERROR, None, 404),  # catalog failed, route not served
+        (HTTP_OK, {"not": "a catalog"}, HTTP_OK),  # not a catalog, route served
+    ],
+)
+async def test_probe_logs_never_show_a_base_urls_login(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    statuses: tuple[int, Any, int],
+) -> None:
+    """A base URL may carry user:password; the debug lines drop it (#1006)."""
+    get_status, body, post_status = statuses
+    client = _FakeClient(
+        status_code=get_status, body=body, post_status_code=post_status
+    )
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+    caplog.set_level(logging.DEBUG)
+
+    with contextlib.suppress(CannotConnectError, InvalidAuthError):
+        await validate_openai_compatible_url(
+            hass, "http://user:s3cret@face-api:8000/v1", capability_path="/audio/speech"
+        )
+
+    assert "OpenAI-compatible" in caplog.text
+    assert "s3cret" not in caplog.text
+    assert "face-api:8000" in caplog.text

@@ -330,32 +330,6 @@ def with_implied_capabilities(capabilities: set[str]) -> set[str]:
     return caps
 
 
-# Provider types whose credentials (and, for OpenAI-compatible, server URL)
-# live in one runtime slot per type, shared by every category but embedding.
-_SHARED_SLOT_PROVIDER_TYPES = frozenset(
-    {"openai", "openai_compatible", "gemini", "anthropic"}
-)
-
-
-def shares_runtime_slot(
-    provider_type: str,
-    settings: Mapping[str, Any],
-    other_type: str,
-    other_settings: Mapping[str, Any],
-) -> bool:
-    """
-    Return True when two providers would overwrite each other's runtime slot.
-
-    Two providers of one type with a different key or server cannot both be
-    used: whichever is applied last serves every category (#866).
-    """
-    if provider_type != other_type or provider_type not in _SHARED_SLOT_PROVIDER_TYPES:
-        return False
-    return any(
-        settings.get(key) != other_settings.get(key) for key in ("api_key", "base_url")
-    )
-
-
 def get_database_subentry(
     _hass: Any, config_entry: ConfigEntry
 ) -> ConfigSubentry | None:
@@ -1082,57 +1056,6 @@ MODEL_CATEGORIES = ("chat", "vlm", "summarization", "embedding", "sentinel")
 OPT_IN_CATEGORIES: frozenset[str] = frozenset({"sentinel"})
 
 
-def _drop_slot_clashes(
-    category_provider: dict[str, ModelProviderConfig], *, warn: bool
-) -> None:
-    """
-    Leave an opt-in category unresolved when it would take another's slot.
-
-    It never moves another category onto its provider's credentials or
-    server (#866); its consumer runs on the chat model instead.
-    """
-    for cat in OPT_IN_CATEGORIES:
-        provider = category_provider.get(cat)
-        if provider is None:
-            continue
-        clash = next(
-            (
-                other
-                for other_cat, other in category_provider.items()
-                if other_cat not in OPT_IN_CATEGORIES
-                # OpenAI-compatible embeddings have a URL and key of their own.
-                and not (
-                    other_cat == "embedding"
-                    and other.provider_type == "openai_compatible"
-                )
-                and shares_runtime_slot(
-                    provider.provider_type,
-                    provider.data.get("settings", {}),
-                    other.provider_type,
-                    other.data.get("settings", {}),
-                )
-            ),
-            None,
-        )
-        if clash is None:
-            continue
-        del category_provider[cat]
-        if warn:
-            LOGGER.warning(
-                "The %s provider '%s' and the %s provider '%s' are both %s "
-                "providers with different credentials or servers, and only one "
-                "of a type can be used at a time; %s runs on the Conversation "
-                "model instead. Choose '%s' or a provider of another type.",
-                cat,
-                provider.name,
-                next(c for c, p in category_provider.items() if p is clash),
-                clash.name,
-                provider.provider_type,
-                cat,
-                clash.name,
-            )
-
-
 def _warn_unserved_opt_in(
     features: Mapping[str, FeatureConfig],
     category_provider: Mapping[str, ModelProviderConfig],
@@ -1207,8 +1130,6 @@ def _resolve_category_providers(
             ):
                 category_provider[cat] = provider
                 break
-
-    _drop_slot_clashes(category_provider, warn=warn)
 
     if warn:
         _warn_unserved_opt_in(features, category_provider, providers_by_id)
@@ -1313,6 +1234,52 @@ def resolve_runtime_options(entry: ConfigEntry) -> dict[str, Any]:
     return options
 
 
+# Provider types whose providers each hold a key (and, for OpenAI-compatible,
+# a server) of their own.
+# Provider types whose client carries the provider's own credential, so two
+# providers of one type with different keys or servers get a client each
+# (#970). Ollama clients are keyed by server URL instead.
+KEYED_PROVIDER_TYPES = frozenset({"openai", "gemini", "anthropic", "openai_compatible"})
+
+
+def provider_credential(provider: ModelProviderConfig) -> tuple[str, ...] | None:
+    """
+    Return what a provider's client is built from, or None when it has none.
+
+    The API key; for an OpenAI-compatible server, its base URL and key.
+    """
+    settings = provider.data.get("settings", {})
+    if provider.provider_type == "openai_compatible":
+        base_url = settings.get("base_url")
+        if not base_url:
+            return None
+        return (str(base_url), str(settings.get("api_key") or "none"))
+    if provider.provider_type in KEYED_PROVIDER_TYPES:
+        api_key = settings.get("api_key")
+        return (str(api_key),) if api_key else None
+    return None
+
+
+def _another_account_of(
+    provider: ModelProviderConfig, head: ModelProviderConfig
+) -> bool:
+    """
+    Return True when *provider* is another account or server of head's type.
+
+    Such a provider runs on its own key or server (#970), so an automatic
+    chain (a feature with no provider chosen) leaves it out: that type's
+    requests stay on the head's account, never one set up for another feature.
+    """
+    if (
+        provider.provider_type != head.provider_type
+        or provider.provider_type not in KEYED_PROVIDER_TYPES
+    ):
+        return False
+    # Compared as runtime builds clients, so a missing and an empty key on
+    # one server are the same account.
+    return provider_credential(provider) != provider_credential(head)
+
+
 def resolve_fallback_chains(
     entry: ConfigEntry,
     providers: Mapping[str, ModelProviderConfig],
@@ -1322,7 +1289,8 @@ def resolve_fallback_chains(
     Return {category: [primary, fallback1, ...]} for each model category.
 
     Uses explicit fallback_provider_ids from feature subentries when available,
-    otherwise builds an automatic chain from remaining capable providers.
+    otherwise builds an automatic chain from remaining capable providers,
+    leaving out another account or server of the head's type (#970).
     """
     features = resolve_feature_configs(entry, providers, options)
     providers_by_id = dict(providers)
@@ -1358,6 +1326,7 @@ def resolve_fallback_chains(
             if provider.entry_id != head.entry_id
             and cat in provider.capabilities
             and _provider_supports_category(provider, cat)
+            and not _another_account_of(provider, head)
         )
         chains[cat] = chain
 
@@ -1378,9 +1347,10 @@ def split_embedding_chain(
 
     Of those, only another Ollama server behind an Ollama primary is kept
     (#853): its build of the model is checked against the primary's (#855).
-    OpenAI and Gemini have one client each, so a second provider of the type
-    is the primary again, and two OpenAI-compatible servers can serve other
-    weights under one model name with no way to tell.
+    A second OpenAI or Gemini account embeds on its own key (#970), but its
+    embeddings are not checked against the primary's the way an Ollama
+    server's build is, and two OpenAI-compatible servers can serve other
+    weights under one model name with no way to tell; both stay left out.
     """
     if not chain:
         return [], []

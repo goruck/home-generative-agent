@@ -57,7 +57,6 @@ from custom_components.home_generative_agent.core.subentry_types import (
 from custom_components.home_generative_agent.flows.feature_subentry_flow import (
     _fallback_provider_options,
     _provider_options,
-    _shared_slot_clash,
 )
 
 from .test_fallback_setup import (
@@ -423,7 +422,7 @@ async def test_an_unreachable_sentinel_provider_falls_back_to_chat(
 
 
 # ---------------------------------------------------------------------------
-# One runtime slot per provider type
+# Two providers of one type (#970)
 # ---------------------------------------------------------------------------
 
 
@@ -463,33 +462,28 @@ def _two_server_entry(sentinel_provider_id: str) -> DummyEntry:
     )
 
 
-def test_a_second_server_of_one_type_never_moves_conversation(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Sentinel runs on chat rather than take over Conversation's slot."""
+def test_a_second_server_of_one_type_serves_the_tier() -> None:
+    """
+    The Sentinel Model runs on its own server of a type Conversation uses too.
+
+    Before #970 every provider of a type shared one key or server, so this
+    choice was refused and Sentinel ran on the Conversation model; each
+    provider now gets a client of its own, and Conversation keeps its server.
+    """
     entry = _two_server_entry("cloud")
     options = resolve_runtime_options(entry)  # type: ignore[arg-type]
 
-    assert options[CONF_OPENAI_COMPATIBLE_BASE_URL] == "http://lan:8000/v1"
-    assert CONF_SENTINEL_MODEL_PROVIDER not in options
+    assert options[CONF_SENTINEL_MODEL_PROVIDER] == "openai_compatible"
     providers = resolve_model_provider_configs(entry, {})  # type: ignore[arg-type]
-    assert "sentinel" not in build_model_deployments(entry, providers, {})  # type: ignore[arg-type]
-    assert "sentinel" not in resolve_fallback_chains(entry, providers, {})  # type: ignore[arg-type]
-    assert "runs on the Conversation model instead" in caplog.text
+    chains = resolve_fallback_chains(entry, providers, {})  # type: ignore[arg-type]
+    assert [p.entry_id for p in chains["sentinel"]][:1] == ["cloud"]
+    assert [p.entry_id for p in chains["chat"]][:1] == ["lan"]
 
 
 def test_the_conversation_provider_itself_serves_the_tier() -> None:
     options = resolve_runtime_options(_two_server_entry("lan"))  # type: ignore[arg-type]
     assert options[CONF_SENTINEL_MODEL_PROVIDER] == "openai_compatible"
     assert options[CONF_OPENAI_COMPATIBLE_BASE_URL] == "http://lan:8000/v1"
-
-
-def test_setup_refuses_a_second_server_of_one_type() -> None:
-    entry = _two_server_entry("lan")
-    assert _shared_slot_clash(entry, "sentinel_model", "cloud") == "LAN"  # type: ignore[arg-type]
-    assert _shared_slot_clash(entry, "sentinel_model", "lan") is None  # type: ignore[arg-type]
-    # Only the opt-in tier is refused; the other features keep their behaviour.
-    assert _shared_slot_clash(entry, "conversation", "cloud") is None  # type: ignore[arg-type]
 
 
 def test_a_dangling_pin_is_logged(caplog: pytest.LogCaptureFixture) -> None:
@@ -642,8 +636,8 @@ async def test_setup_probes_only_isolated_servers_during_chat(
     """
     The stall probe is sent during chat only to a server of Sentinel's own.
 
-    An OpenAI-compatible provider is judged by the one URL every such member
-    calls, not by its own settings.
+    An OpenAI-compatible provider is judged by the server it calls itself,
+    since each gets a client of its own (#970); this one shares chat's host.
     """
     captured: dict[str, Any] = {}
     real_tracker = hga_component.ProviderStallTracker
@@ -662,7 +656,7 @@ async def test_setup_probes_only_isolated_servers_during_chat(
         name="Compatible",
         provider_type="openai_compatible",
         capabilities={"chat"},
-        data={"settings": {"base_url": "http://gpu3.lan:8000/v1"}},
+        data={"settings": {"base_url": "http://ollama:8000/v1"}},
         deployment="edge",
     )
 
@@ -705,3 +699,34 @@ async def test_a_compatible_embedding_server_is_its_own_client_url(
     await _set_up(hass, monkeypatch, data)
 
     assert utils_mod._sentinel_isolated is False
+
+
+def test_an_automatic_chain_leaves_out_another_account_of_the_heads_type() -> None:
+    """
+    No feature ranked the second server, so it gets no automatic traffic.
+
+    Before #970 it ran on the head's key, so it was no fallback; with a client
+    of its own it would now be sent the household's requests, billed to an
+    account the user never chose for the feature.
+    """
+    entry = _entry_with(
+        _compatible_provider("lan", "LAN", "http://lan:8000/v1"),
+        _compatible_provider("cloud", "Cloud", "https://cloud.example/v1"),
+    )
+    providers = resolve_model_provider_configs(entry, {})  # type: ignore[arg-type]
+    chains = resolve_fallback_chains(entry, providers, {})  # type: ignore[arg-type]
+
+    assert len(chains["chat"]) == 1
+
+
+def test_a_missing_and_an_empty_key_on_one_server_are_one_account() -> None:
+    """Compared as setup builds clients, so the fallback stays (#970 review)."""
+    head = _compatible_provider("lan", "LAN", "http://lan:8000/v1")
+    other = _compatible_provider("lan2", "LAN 2", "http://lan:8000/v1")
+    head.data["settings"]["api_key"] = None
+    other.data["settings"]["api_key"] = ""
+    entry = _entry_with(head, other)
+    providers = resolve_model_provider_configs(entry, {})  # type: ignore[arg-type]
+    chains = resolve_fallback_chains(entry, providers, {})  # type: ignore[arg-type]
+
+    assert len(chains["chat"]) == 2

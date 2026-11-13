@@ -36,7 +36,7 @@ def test_openai_provider_http_client_preserved() -> None:
     block = _provider_block("def build_openai_chat(", 2000)
     assert "http_client=http_client" in block
     assert "http_async_client=http_async_client" in block
-    setup = _provider_block("openai_provider = build_openai_chat(")
+    setup = _provider_block("return build_openai_chat(")
     assert "http_client=openai_http_client" in setup
     assert "http_async_client=http_async_client" in setup
 
@@ -47,5 +47,5 @@ def test_anthropic_provider_primed_before_publish() -> None:
     end = _INIT.index("except Exception:", start)
     block = _INIT[start:end]
     prime = block.index("await async_prime_async_client(hass, anthropic_chat)")
-    publish = block.index("anthropic_provider = anthropic_chat.configurable_fields(")
+    publish = block.index("return anthropic_chat.configurable_fields(")
     assert prime < publish
