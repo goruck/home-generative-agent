@@ -1552,6 +1552,9 @@ async def _append_security_audit_tool(  # noqa: PLR0913
 
 
 _HISTORY_TOOL = "get_entity_history"
+# Tool search misses "remember this" requests, above all in languages other than
+# English, and a memory the model cannot save is simply lost.
+_ALWAYS_OFFERED_LOCAL_TOOLS = (("hga_local", "upsert_memory"),)
 
 
 def _is_local_history_tool(tool: RawTool) -> bool:
@@ -3056,6 +3059,12 @@ async def _append_included_tools(
     """
     Append the user's always-included tools to the candidate list.
 
+    HGA's long-term memory tool is appended the same way on every turn
+    (``_ALWAYS_OFFERED_LOCAL_TOOLS``): the pinning form lists only Home
+    Assistant's tools, and tool search often misses a "remember this" request.
+    It is not counted against TOOL_INCLUSIONS_MAX_PER_TURN, and an exclusion
+    stored for it still removes it.
+
     Three filters still apply to an inclusion — the API must be active this
     turn, the live-tool filter (via ``_get_tool_by_name``) must know the tool,
     and an exclusion beats an inclusion. The exclusion check looks redundant
@@ -3087,7 +3096,7 @@ async def _append_included_tools(
             len(inclusions),
         )
         inclusions = inclusions[:TOOL_INCLUSIONS_MAX_PER_TURN]
-    for api_id, name in inclusions:
+    for api_id, name in [*_ALWAYS_OFFERED_LOCAL_TOOLS, *inclusions]:
         if api_id not in allowed_api_ids or is_tool_excluded(
             name, excluded_names.get(api_id, ())
         ):
