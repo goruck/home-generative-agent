@@ -119,6 +119,7 @@ from .helpers import (
     PIN_REFUSAL_ENDS_TURN,
     TOOL_STATUS_PARTIAL,
     ConfigurableData,
+    IntentResults,
     base_tool_name,
     drop_empty_args,
     intent_results,
@@ -1389,14 +1390,15 @@ def _record_confirmed(
     cfg: Mapping[str, Any],
     action: Mapping[str, Any],
     outcome: str,
-    failed: tuple[str, ...] = (),
+    results: IntentResults | None = None,
 ) -> None:
     """Record on the user's message the action its PIN was accepted for and its end."""
     pin_reply = cfg.get("pin_reply")
     if pin_reply is not None:
         pin_reply.confirmed = describe_pending_action(cfg.get("hass"), action)
         pin_reply.outcome = outcome
-        pin_reply.failed_targets = failed
+        pin_reply.failed_count = results.failed if results else 0
+        pin_reply.failed_targets = results.names if results else ()
 
 
 def _spend_pin_reply(cfg: Mapping[str, Any]) -> None:
@@ -1442,17 +1444,25 @@ def _completed_reply(
     """Record a PIN-confirmed call that acted, and return its tool result."""
     # Some targets may have failed while the rest acted (#948).
     results = intent_results(data) if status == TOOL_STATUS_PARTIAL else None
-    failed = results[1] if results else ()
+    partial = results is not None and results.failed > 0
     _record_confirmed(
-        cfg, action, PIN_OUTCOME_PARTIAL if failed else PIN_OUTCOME_DONE, failed
+        cfg,
+        action,
+        PIN_OUTCOME_PARTIAL if partial else PIN_OUTCOME_DONE,
+        results if partial else None,
     )
     completed: dict[str, Any] = {
         "status": "completed",
         "action_id": action_id,
         "result": data,
     }
-    if failed:
-        completed["failed_targets"] = list(failed)
+    if partial and results is not None:
+        completed["partial_failure"] = (
+            "Only part of the action ran; tell the user which devices failed."
+        )
+        completed["failed_count"] = results.failed
+        if results.names:
+            completed["failed_devices"] = list(results.names)
     # default=str: a result the JSON encoder cannot take must not raise after
     # the action ran.
     return json.dumps(completed, default=str)

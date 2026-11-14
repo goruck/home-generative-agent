@@ -26,6 +26,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import llm
 
 from custom_components.home_generative_agent.agent import graph
+from custom_components.home_generative_agent.agent import helpers as helpers_module
 from custom_components.home_generative_agent.agent import tools as tools_module
 from custom_components.home_generative_agent.agent.helpers import (
     FAILED_TARGET_MAX_LEN,
@@ -868,11 +869,51 @@ async def test_a_half_done_action_is_recorded_as_partial() -> None:
     answer, reply = await _request_and_confirm(_FakeAPI(_half_done(BACK, side)))
 
     assert json.loads(reply)["status"] == "completed"
-    assert json.loads(reply)["failed_targets"] == ["Back Lock", "lock.side"]
+    assert json.loads(reply)["failed_devices"] == ["Back Lock", "lock.side"]
+    assert "tell the user" in json.loads(reply)["partial_failure"]
     assert answer.confirmed == PLAYROOM_LINE
     assert answer.outcome == PIN_OUTCOME_PARTIAL
+    assert answer.failed_count == 2
     # A blank name gives way to the id, so the device can be named.
     assert answer.failed_targets == ("Back Lock", "lock.side")
+
+
+async def test_an_older_home_assistant_records_only_how_many_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Before 2026.11 HA paired names with results by finish order (#948)."""
+    monkeypatch.setattr(helpers_module, "INTENT_RESULTS_NAME_THEIR_TARGETS", False)
+    answer, reply = await _request_and_confirm(_FakeAPI(_half_done(BACK)))
+
+    assert answer.outcome == PIN_OUTCOME_PARTIAL
+    assert answer.failed_count == 1
+    assert answer.failed_targets == ()
+    assert "failed_devices" not in json.loads(reply)
+
+
+def test_home_assistant_names_its_targets_from_2026_11() -> None:
+    """The gate follows the release that paired results with their targets."""
+    from homeassistant.const import MAJOR_VERSION, MINOR_VERSION  # noqa: PLC0415
+
+    assert helpers_module.INTENT_RESULTS_NAME_THEIR_TARGETS is (
+        (MAJOR_VERSION, MINOR_VERSION) >= (2026, 11)
+    )
+
+
+def test_a_failed_device_named_like_one_that_acted_is_named_by_id() -> None:
+    front_too = {"type": "entity", "name": "Front Lock", "id": "lock.front_2"}
+
+    results = intent_results(_half_done(front_too))
+
+    assert results is not None
+    assert results.names == ("lock.front_2",)
+
+
+def test_a_nameless_failure_still_counts() -> None:
+    """A failed entry HA gives no name or id is not dropped (#948 review)."""
+    response = _half_done({"type": "entity", "name": "", "id": ""})
+
+    assert parse_tool_response(response, {"domain": ["lock"]})[1] == "partial"
 
 
 async def test_an_action_with_no_failed_targets_is_done() -> None:
@@ -949,12 +990,12 @@ def test_failed_names_are_bounded_and_told_apart() -> None:
     results = intent_results(json.dumps(_half_done(twin_a, twin_b, long, "raw")))
 
     assert results is not None
-    acted, names = results
-    assert acted == 1
-    assert names[:2] == ("lock.front_a", "lock.front_b")
-    assert len(names) == 3
-    assert "\n" not in names[2]
-    assert len(names[2]) <= FAILED_TARGET_MAX_LEN
+    assert results.acted == 1
+    assert results.failed == 4
+    assert results.names[:2] == ("lock.front_a", "lock.front_b")
+    assert len(results.names) == 3
+    assert "\n" not in results.names[2]
+    assert len(results.names[2]) <= FAILED_TARGET_MAX_LEN
 
 
 async def test_an_action_with_an_unknown_outcome_is_recorded_as_such() -> None:

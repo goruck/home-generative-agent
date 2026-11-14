@@ -2138,7 +2138,9 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     self.hass,
                     "pin_partial_line",
                     action=pin_reply.confirmed,
-                    failed=describe_failed_targets(self.hass, pin_reply.failed_targets),
+                    failed=describe_failed_targets(
+                        self.hass, pin_reply.failed_targets, pin_reply.failed_count
+                    ),
                 )
             )
         elif pin_reply.confirmed:
