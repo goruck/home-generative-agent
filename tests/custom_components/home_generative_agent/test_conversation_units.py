@@ -40,6 +40,7 @@ from custom_components.home_generative_agent.const import (
     CONF_NOTIFY_SERVICE,
     CONF_SPEAKER_SENSORS,
     CONF_TOOL_EXCLUSIONS,
+    NO_REPLY_APOLOGY,
     SPEAKER_NAME_MAX_CHARS,
     TOOL_SUBSET_PROMPT,
 )
@@ -2611,7 +2612,7 @@ def test_the_pin_lines_are_added_after_the_reply() -> None:
     assert "pin_lines_pending=lambda: bool(" in call
     assert "self._pin_lines(runtime_data.pending_actions, pin_reply)" in call
     finish_src = inspect.getsource(HGAConversationEntity._async_finish_reply)
-    assert finish_src.index("I'm sorry, I was unable to respond.") < finish_src.index(
+    assert finish_src.index("NO_REPLY_APOLOGY") < finish_src.index(
         "await self._async_add_pin_lines("
     )
 
@@ -3771,6 +3772,27 @@ async def test_a_turn_with_no_reply_and_no_prompt_still_apologizes(
     assert [c.content for c in chat_log.content] == [
         "I'm sorry, I was unable to respond. Please try again."
     ]
+
+
+@pytest.mark.parametrize("text", ["", " \n"])
+async def test_an_empty_model_reply_counts_as_no_reply(
+    frozen_assistant_content: None,  # noqa: ARG001
+    text: str,
+) -> None:
+    """A reply with no text and no tool call is no reply (#946)."""
+    from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+        start_pin_turn,
+    )
+
+    pending: dict[str, Any] = {}
+    reply = start_pin_turn(pending, "conv1", "hello")
+    chat_log = _DeltaChatLog([_assistant_reply(text)])
+
+    await HGAConversationEntity._async_finish_reply(
+        _pin_entity(), cast("Any", chat_log), pending, reply, streamed=False
+    )
+
+    assert chat_log.content[-1].content == NO_REPLY_APOLOGY
 
 
 def _indexed_rows(

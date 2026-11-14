@@ -124,6 +124,7 @@ from .const import (
     DOMAIN,
     LANGCHAIN_LOGGING_LEVEL,
     NETWORK_AUDIT_TOOL_PROMPT,
+    NO_REPLY_APOLOGY,
     RECOMMENDED_SENTINEL_NETWORK_ENABLED,
     RECOMMENDED_VOICE_ACK_TIMING,
     SCHEMA_FIRST_YAML_PROMPT,
@@ -2594,17 +2595,17 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         # our mark on it (see _async_get_message_history). A PIN line is a
         # reply of its own, and "try again" would be wrong next to "PIN
         # accepted".
-        no_reply = not chat_log.content or not isinstance(
-            chat_log.content[-1], conversation.AssistantContent
+        last = chat_log.content[-1] if chat_log.content else None
+        # An entry with no text and no tool call says nothing either (#946).
+        no_reply = not isinstance(last, conversation.AssistantContent) or not (
+            (last.content and last.content.strip()) or last.tool_calls
         )
         if no_reply and not self._pin_lines(pending_actions, pin_reply):
             # Nothing to say at all: a turn ended on a tool round whose PIN
             # prompt vanished before the reply (the store evicted it, or a
             # concurrent turn dropped it), or recovery found nothing.
             _LOGGER.warning("Turn ended with no reply; apologizing.")
-            await self._async_add_spoken_reply(
-                chat_log, "I'm sorry, I was unable to respond. Please try again."
-            )
+            await self._async_add_spoken_reply(chat_log, NO_REPLY_APOLOGY)
         await self._async_add_pin_lines(
             chat_log, pending_actions, pin_reply, streamed=streamed
         )
