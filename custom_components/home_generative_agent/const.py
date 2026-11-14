@@ -1746,3 +1746,7 @@ ACTUATION_TOOL_PREFIXES = (
 )
 
 ACTUATION_LANGCHAIN_TOOLS = ("alarm_control",)
+
+# Said when a turn ends with nothing to say: a model reply with no text and no
+# tool call, or a turn that committed no reply at all (#946).
+NO_REPLY_APOLOGY = "I'm sorry, I was unable to respond. Please try again."

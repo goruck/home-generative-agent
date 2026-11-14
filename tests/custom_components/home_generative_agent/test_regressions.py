@@ -36,7 +36,10 @@ from custom_components.home_generative_agent.agent.graph import (
     _should_continue,
     _tool_loop_guard,
 )
-from custom_components.home_generative_agent.const import SIGNAL_HGA_RECOGNIZED
+from custom_components.home_generative_agent.const import (
+    NO_REPLY_APOLOGY,
+    SIGNAL_HGA_RECOGNIZED,
+)
 from custom_components.home_generative_agent.core.fallback import (
     EmbeddingsUnavailableError,
 )
@@ -462,6 +465,64 @@ async def test_call_model_injects_done_fallback_after_empty_tool_response(
     ai_msg = result["messages"]
     assert isinstance(ai_msg, AIMessage)
     assert ai_msg.content == "Done.", f"expected 'Done.' but got {ai_msg.content!r}"
+    assert not ai_msg.tool_calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", ["", "\n\n "])
+async def test_call_model_apologizes_for_an_empty_first_reply(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+    content: str,
+) -> None:
+    """
+    An empty reply to the request itself gets the apology, not "Done." (#946).
+
+    No tool ran, so "Done." would claim an action; left empty, the user got a
+    blank reply in schema-first mode and the empty AIMessage stayed in the
+    checkpoint.
+    """
+
+    async def _fake_invoke_model(*_args: object, **_kwargs: object) -> AIMessage:
+        return AIMessage(content=content, tool_calls=[])
+
+    async def _fake_trim(
+        messages: list[object], *_args: object, **_kwargs: object
+    ) -> list[object]:
+        return messages
+
+    mock_store = MagicMock()
+    mock_store.asearch = AsyncMock(return_value=[])
+    monkeypatch.setattr(agent_graph, "_invoke_model", _fake_invoke_model)
+    monkeypatch.setattr(agent_graph, "_trim_messages_for_model", _fake_trim)
+
+    state: dict[str, object] = {
+        "messages": [HumanMessage(content="what's the weather like")],
+        "selected_tools": [],
+        "summary": "",
+        "tool_routing_map": {},
+        "messages_to_remove": [],
+        "chat_model_usage_metadata": {},
+    }
+    config: dict[str, object] = {
+        "configurable": {
+            "chat_model": MagicMock(),
+            "user_id": "user-test",
+            "hass": hass,
+            "options": {},
+            "chat_model_options": {},
+            "prompt": "You are a helpful assistant.",
+            "langchain_tools": {},
+            "ha_llm_api": None,
+            "pending_actions": {},
+        }
+    }
+
+    result = await agent_graph._call_model(state, config, store=mock_store)  # type: ignore[arg-type]
+
+    ai_msg = result["messages"]
+    assert isinstance(ai_msg, AIMessage)
+    assert ai_msg.content == NO_REPLY_APOLOGY
     assert not ai_msg.tool_calls
 
 
