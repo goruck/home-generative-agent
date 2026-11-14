@@ -46,7 +46,7 @@ from .core.openai_endpoint import (
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
-    from homeassistant.helpers.entity_platform import AddEntitiesCallback
+    from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
     from .core.runtime import HGAConfigEntry
 
@@ -220,16 +220,17 @@ def _ensure_wav(audio_bytes: bytes, metadata: SpeechMetadata) -> bytes:
 async def async_setup_entry(
     hass: HomeAssistant,  # noqa: ARG001
     entry: HGAConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up STT entities from config entries."""
-    entities: list[HGASttEntity] = []
+    """Set up STT entities, one per STT provider subentry."""
     for subentry in entry.subentries.values():
         if subentry.subentry_type != SUBENTRY_TYPE_STT_PROVIDER:
             continue
-        entities.append(HGASttEntity(entry, subentry.subentry_id))
-    if entities:
-        async_add_entities(entities)
+        # Bound to the subentry so the entity-registry entry is removed with it.
+        async_add_entities(
+            [HGASttEntity(entry, subentry.subentry_id)],
+            config_subentry_id=subentry.subentry_id,
+        )
 
 
 def _format_extension(metadata: SpeechMetadata) -> str:
