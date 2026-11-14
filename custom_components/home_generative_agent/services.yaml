@@ -16,24 +16,6 @@ enroll_person:
       example: "/media/faces/eva_face.jpg"
       selector:
         text:
-confirm_enroll:
-  name: Confirm Enroll
-  description: Confirm and assign a name to a previously detected unknown face.
-  fields:
-    uid:
-      name: UID
-      description: Identifier for the unknown face
-      required: true
-      example: "unk_deadbeef"
-      selector:
-        text:
-    name:
-      name: Person name
-      description: Name to assign to the person
-      required: true
-      example: "Eva"
-      selector:
-        text:
 
 save_and_analyze_snapshot:
   name: Save & analyze snapshot
