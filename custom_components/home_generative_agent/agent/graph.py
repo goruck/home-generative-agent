@@ -61,6 +61,7 @@ from custom_components.home_generative_agent.const import (
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
     MAX_AFFIRMATIVE_FOLLOW_UP_WORDS,
     MAX_REFERENTIAL_FOLLOW_UP_WORDS,
+    NO_REPLY_APOLOGY,
     NON_OPEN_ACTUATION_KEYWORDS_REGEX,
     OPEN_AS_STATE_REGEX,
     OPEN_COMMAND_CLAUSE_REGEX,
@@ -3765,6 +3766,24 @@ async def _search_memories(store: BaseStore, user_id: str, query: str | None) ->
     return await _recent_memories(store, user_id)
 
 
+def _empty_reply_fallback(last_message: AnyMessage) -> str:
+    """
+    Return the text for a model reply with no text and no tool call.
+
+    Qwen3 extended-thinking: Ollama strips <think>…</think> tokens from
+    content, leaving content='' when all output was reasoning. After a tool
+    round a minimal acknowledgement keeps the conversation from going
+    silent. A first reply gets the apology instead: "Done." would claim an
+    action that never ran, and an empty AIMessage would stay in the
+    checkpoint for every later turn to read (#946).
+    """
+    if isinstance(last_message, ToolMessage):
+        LOGGER.debug("Empty model response after tool execution; injecting fallback.")
+        return "Done."
+    LOGGER.warning("Model returned an empty reply; apologizing.")
+    return NO_REPLY_APOLOGY
+
+
 async def _call_model(
     state: State, config: RunnableConfig, *, store: BaseStore
 ) -> dict[str, Any]:
@@ -3871,17 +3890,8 @@ async def _call_model(
 
     tool_calls = getattr(raw_response, "tool_calls", []) or []
 
-    # Qwen3 extended-thinking: Ollama strips <think>…</think> tokens from content,
-    # leaving content='' when all output was reasoning.  On a post-tool turn with no
-    # follow-up tool call the user would receive no reply at all.  Inject a minimal
-    # acknowledgement so the conversation doesn't go silent.
-    if (
-        not response
-        and not tool_calls
-        and isinstance(state["messages"][-1], ToolMessage)
-    ):
-        LOGGER.debug("Empty model response after tool execution; injecting fallback.")
-        response = "Done."
+    if not response.strip() and not tool_calls:
+        response = _empty_reply_fallback(state["messages"][-1])
 
     # Create AI message, no need to include tool call metadata if there's none.
     if tool_calls:
