@@ -525,7 +525,7 @@ The file must be inside Home Assistant's `/media` folder so it is accessible to 
 
 ### Enroll via Dashboard Card
 
-HGA loads the card itself. Add it to any dashboard:
+HGA loads the card itself. If you added an `/hga-card/...` or `/hga-enroll-card/...` entry under **Settings → Dashboards → Resources**, remove it after updating: a cached copy of the old file can otherwise load first and bring back the old card. Add it to any dashboard:
 
 ```yaml
 type: custom:hga-enroll-card

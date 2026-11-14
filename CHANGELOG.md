@@ -18,7 +18,7 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ### Changed
 
-- **Dashboard cards load automatically.** The enroll and proposals cards no longer need a manual entry under **Settings → Dashboards → Resources**: add the card to a dashboard directly. An existing entry still works and can be removed.
+- **Dashboard cards load automatically.** The enroll and proposals cards no longer need a manual entry under **Settings → Dashboards → Resources**: add the card to a dashboard directly. If you added an `/hga-card/...` or `/hga-enroll-card/...` entry under **Settings → Dashboards → Resources**, remove it after updating: a cached copy of the old file can otherwise load first and bring back the old card.
 
 ### Fixed
 

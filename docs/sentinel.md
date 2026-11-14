@@ -774,7 +774,7 @@ type: custom:hga-proposals-card
 title: Sentinel Proposals
 ```
 
-> If the card shows as unknown, hard-refresh the browser. A Resources entry added by hand for an HGA card, including a legacy `/hga-enroll-card/...` URL, still works and can be removed.
+> If the card shows as unknown, hard-refresh the browser. If you added an `/hga-card/...` or `/hga-enroll-card/...` entry under **Settings → Dashboards → Resources**, remove it after updating: a cached copy of the old file can otherwise load first and bring back the old card.
 
 ---
 

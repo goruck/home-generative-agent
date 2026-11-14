@@ -92,7 +92,7 @@ Install the Blueprints from the `blueprints/` directory to create automations th
 - Enable the `face_recognition` option (off by default) and set the face-service URL in the integration's options.
 - Enroll people via **Developer Tools → Actions → Enroll Person** in the HA UI.
 - Note: Sentinel's unknown-person rules key on face recognition and never fire while it is disabled.
-- HGA loads its dashboard cards itself, so there is no resource to register. Add `custom:hga-enroll-card` for enrollment or `custom:hga-proposals-card` for Sentinel proposals to any dashboard.
+- HGA loads its dashboard cards itself, so there is no resource to register. Add `custom:hga-enroll-card` for enrollment or `custom:hga-proposals-card` for Sentinel proposals to any dashboard. If you added an `/hga-card/...` or `/hga-enroll-card/...` entry under **Settings → Dashboards → Resources**, remove it after updating: a cached copy of the old file can otherwise load first and bring back the old card.
 
 ---
 
