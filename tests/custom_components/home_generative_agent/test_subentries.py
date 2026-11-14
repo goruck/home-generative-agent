@@ -44,6 +44,7 @@ from custom_components.home_generative_agent.const import (
     CONF_FEATURE_MODEL_REASONING,
     CONF_FEATURE_MODEL_REASONING_BUDGET,
     CONF_FEATURE_MODEL_REASONING_BY_MODEL,
+    CONF_FEATURE_MODEL_TOP_P,
     CONF_GEMINI_API_KEY,
     CONF_NOTIFY_SERVICE,
     CONF_OLLAMA_CHAT_MODEL,
@@ -6343,3 +6344,104 @@ async def test_migration_from_an_older_minor_still_repairs(
     entry.add_to_hass(hass)
     assert await async_migrate_entry(hass, entry)
     assert entry.options[CONF_LLM_HASS_API] == [llm.LLM_API_ASSIST]
+
+
+def _conversation_flow_on(
+    hass: HomeAssistant, provider_type: str, model: dict[str, Any] | None = None
+) -> tuple[FeatureSubentryFlow, DummySubentry]:
+    """Return a Conversation feature flow on a provider of the given type."""
+    provider = DummySubentry(
+        "prov1",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Provider",
+        {"provider_type": provider_type, "capabilities": ["chat"]},
+    )
+    data: dict[str, Any] = {
+        "feature_type": "conversation",
+        "model_provider_id": "prov1",
+    }
+    if model is not None:
+        data[CONF_FEATURE_MODEL] = model
+    feature = DummySubentry("feature1", SUBENTRY_TYPE_FEATURE, "Conversation", data)
+    entry = DummyEntry()
+    entry.subentries[provider.subentry_id] = provider
+    entry.subentries[feature.subentry_id] = feature
+    flow = FeatureSubentryFlow()
+    flow.hass = hass
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "data_schema": kwargs["data_schema"],
+        "errors": kwargs.get("errors"),
+    }
+    flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "abort",
+        "reason": kwargs.get("reason"),
+    }
+
+    def _update_subentry(
+        _entry: DummyEntry,
+        subentry: DummySubentry,
+        data: Mapping[str, Any],
+        title: str | None,
+    ) -> None:
+        _ = title
+        subentry.data = {**subentry.data, **data}
+
+    flow.hass.config_entries.async_update_subentry = (  # type: ignore[assignment]
+        _update_subentry
+    )
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
+    _patch_entry(flow, entry)
+    flow.context["subentry_id"] = feature.subentry_id
+    return flow, feature
+
+
+async def _model_form_fields(flow: FeatureSubentryFlow) -> set[str]:
+    await flow.async_step_user()
+    form = await flow.async_step_conversation({"model_provider_id": "prov1"})
+    assert form.get("type") == "form"
+    fields = {str(key) for key in cast("Any", form)["data_schema"].schema}
+    # The model form itself, with the temperature the Top P sits next to.
+    assert {"model_name", "temperature"} <= fields
+    return fields
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider_type", "shown"),
+    [
+        ("ollama", True),
+        ("openai", True),
+        ("openai_compatible", True),
+        ("anthropic", False),
+    ],
+)
+async def test_the_top_p_field_is_offered_except_for_anthropic(
+    hass: HomeAssistant, provider_type: str, *, shown: bool
+) -> None:
+    flow, _ = _conversation_flow_on(hass, provider_type)
+    assert (CONF_FEATURE_MODEL_TOP_P in await _model_form_fields(flow)) is shown
+
+
+@pytest.mark.asyncio
+async def test_a_submitted_top_p_is_saved_with_the_model(hass: HomeAssistant) -> None:
+    flow, feature = _conversation_flow_on(hass, "ollama")
+    await _model_form_fields(flow)
+    result = await flow.async_step_feature_model(
+        {"model_name": "gpt-oss", CONF_FEATURE_MODEL_TOP_P: 0.9}
+    )
+    assert result.get("type") == "abort"
+    assert feature.data[CONF_FEATURE_MODEL][CONF_FEATURE_MODEL_TOP_P] == 0.9
+
+
+@pytest.mark.asyncio
+async def test_emptying_the_top_p_box_removes_the_value(hass: HomeAssistant) -> None:
+    flow, feature = _conversation_flow_on(
+        hass,
+        "ollama",
+        {CONF_FEATURE_MODEL_NAME: "gpt-oss", CONF_FEATURE_MODEL_TOP_P: 0.9},
+    )
+    await _model_form_fields(flow)
+    result = await flow.async_step_feature_model({"model_name": "gpt-oss"})
+    assert result.get("type") == "abort"
+    assert feature.data[CONF_FEATURE_MODEL].get(CONF_FEATURE_MODEL_TOP_P) is None

@@ -330,7 +330,7 @@
             "reasoning_budget": "Düşünme bütçesi (token)"
           },
           "data_description": {
-            "top_p": "Varsayılan için boş bırakın. OpenAI uyumlu bir sunucuda boş bırakmak modelin kendi değerini korur.",
+            "top_p": "Varsayılan için boş bırakın. OpenAI uyumlu bir sunucuda boş bırakmak modelin kendi değerini korur. OpenAI akıl yürütme modellerine (GPT-5, o serisi, Responses API modelleri) ve varsayılan sıcaklıktaki bir Gemini 3 modeline gönderilmez.",
             "fallback_provider_ids": "Sıralı yedek sağlayıcı listesi. Birincil sağlayıcı başarısız olursa ilk kullanılabilir sağlayıcı kullanılır.",
             "reasoning": "Seçili sohbet modeli için model düşünmesini denetler. Sağlayıcı varsayılanı sunucu/model davranışını değiştirmez; Kapalı ve Açık bunu açıkça ayarlar; çaba düzeyleri destekleyen sağlayıcılara iletilir. Ayarlar model adına göre hatırlanır, bu nedenle model değiştirildiğinde her modelin yapılandırması geri yüklenir.",
             "reasoning_budget": "Bunu destekleyen sağlayıcılar için isteğe bağlı düşünme token bütçesi (llama.cpp gibi OpenAI uyumlu sunucular, Gemini, Anthropic). Sağlayıcı varsayılanı için boş bırakın."

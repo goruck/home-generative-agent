@@ -3648,7 +3648,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         CONF_CHAT_MODEL_TEMPERATURE, RECOMMENDED_CHAT_MODEL_TEMPERATURE
     )
     chat_top_p_setting = options.get(CONF_CHAT_MODEL_TOP_P)
-    chat_top_p = CHAT_MODEL_TOP_P if chat_top_p_setting is None else chat_top_p_setting
+    chat_top_p = options.get(CONF_CHAT_MODEL_TOP_P, CHAT_MODEL_TOP_P)
     chat_reasoning = options.get(CONF_CHAT_REASONING)
     chat_reasoning_budget = options.get(CONF_CHAT_REASONING_BUDGET)
     chat_reasoning_by_model: dict[str, Any] = dict(
@@ -3796,7 +3796,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     vlm_provider = options.get(CONF_VLM_PROVIDER, RECOMMENDED_VLM_PROVIDER)
     vlm_temp = options.get(CONF_VLM_TEMPERATURE, RECOMMENDED_VLM_TEMPERATURE)
     vlm_top_p_setting = options.get(CONF_VLM_TOP_P)
-    vlm_top_p = VLM_TOP_P if vlm_top_p_setting is None else vlm_top_p_setting
+    vlm_top_p = options.get(CONF_VLM_TOP_P, VLM_TOP_P)
     if vlm_provider == "openai":
         openai_vlm = options.get(CONF_OPENAI_VLM, RECOMMENDED_OPENAI_VLM)
         vision_model = (_head_model("vlm", openai_provider) or NullChat()).with_config(
@@ -3881,9 +3881,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     )
     sum_top_p_setting = options.get(CONF_SUMMARIZATION_MODEL_TOP_P)
-    sum_top_p = (
-        SUMMARIZATION_MODEL_TOP_P if sum_top_p_setting is None else sum_top_p_setting
-    )
+    sum_top_p = options.get(CONF_SUMMARIZATION_MODEL_TOP_P, SUMMARIZATION_MODEL_TOP_P)
     if sum_provider == "openai":
         openai_sum_model = options.get(
             CONF_OPENAI_SUMMARIZATION_MODEL, RECOMMENDED_OPENAI_SUMMARIZATION_MODEL
@@ -3990,11 +3988,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         CONF_SENTINEL_MODEL_TEMPERATURE, RECOMMENDED_SENTINEL_MODEL_TEMPERATURE
     )
     sentinel_top_p_setting = options.get(CONF_SENTINEL_MODEL_TOP_P)
-    sentinel_top_p = (
-        SENTINEL_MODEL_TOP_P
-        if sentinel_top_p_setting is None
-        else sentinel_top_p_setting
-    )
+    sentinel_top_p = options.get(CONF_SENTINEL_MODEL_TOP_P, SENTINEL_MODEL_TOP_P)
     if sentinel_provider == "openai":
         openai_sentinel_model = options.get(
             CONF_OPENAI_SENTINEL_MODEL, RECOMMENDED_OPENAI_SENTINEL_MODEL
@@ -4107,6 +4101,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             return sentinel_top_p
         return None
 
+    def _category_top_p_setting(category: str) -> float | None:
+        """Return the top-p the user set for a category; None when left empty."""
+        return {
+            "chat": chat_top_p_setting,
+            "vlm": vlm_top_p_setting,
+            "summarization": sum_top_p_setting,
+            "sentinel": sentinel_top_p_setting,
+        }.get(category)
+
     def _configured_cloud_model(
         model: Any,
         provider: ModelProviderConfig,
@@ -4124,8 +4127,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         # An OpenAI-compatible server applies the model's own top_p default.
         top_p = _category_top_p(category)
         if provider.provider_type == "openai_compatible":
-            top_p_key = str(MODEL_CATEGORY_SPECS.get(category, {}).get("top_p_key"))
-            config.update(_top_p_if_set(options.get(top_p_key)))
+            config.update(_top_p_if_set(_category_top_p_setting(category)))
         elif top_p is not None:
             config["top_p"] = top_p
         if provider.provider_type == "openai":

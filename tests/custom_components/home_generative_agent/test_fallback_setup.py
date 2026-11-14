@@ -17,6 +17,7 @@ import custom_components.home_generative_agent as hga_component
 from custom_components.home_generative_agent.const import (
     CONF_ANTHROPIC_API_KEY,
     CONF_CHAT_MODEL_PROVIDER,
+    CONF_CHAT_MODEL_TOP_P,
     CONF_EMBEDDING_MODEL_PROVIDER,
     CONF_EXPLAIN_ENABLED,
     CONF_FACE_RECOGNITION,
@@ -30,6 +31,7 @@ from custom_components.home_generative_agent.const import (
     CONF_OPENAI_CHAT_MODEL,
     CONF_OPENAI_COMPATIBLE_API_KEY,
     CONF_OPENAI_COMPATIBLE_BASE_URL,
+    CONF_OPENAI_COMPATIBLE_CHAT_MODEL,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_API_KEY,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_URL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
@@ -39,8 +41,10 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_MODEL_PROVIDER,
     CONF_SENTINEL_TRIAGE_ENABLED,
     CONF_SUMMARIZATION_MODEL_PROVIDER,
+    CONF_SUMMARIZATION_MODEL_TOP_P,
     CONF_VIDEO_ANALYZER_MODE,
     CONF_VLM_PROVIDER,
+    CONF_VLM_TOP_P,
     DOMAIN,
     GEMINI_3_RECOMMENDED_TEMPERATURE,
     RECOMMENDED_GEMINI_CHAT_MODEL,
@@ -2418,3 +2422,145 @@ async def test_a_second_compatible_server_that_fails_is_rechecked(
 
     assert [p.label for p in scheduled] == ["OpenAI-compatible (http://chat/v1)"]
     assert not isinstance(entry.runtime_data.chat_model, FallbackChatModel)
+
+
+def _configurable(model: Any, index: int) -> dict[str, Any]:
+    """Return what setup configured for one member of a fallback chain."""
+    member = cast("FakeConfiguredModel", model.chain[index][0])
+    return member.config["configurable"]
+
+
+@pytest.mark.asyncio
+async def test_each_features_top_p_reaches_its_primary_and_fallback(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A Top P set per feature reaches that feature's models, and only theirs.
+
+    Distinct values catch one feature's value on another's branch (#1000
+    review): with nothing set, every branch still produced 1.0.
+    """
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    data.options[CONF_CHAT_MODEL_TOP_P] = 0.91
+    data.options[CONF_VLM_TOP_P] = 0.92
+    data.options[CONF_SUMMARIZATION_MODEL_TOP_P] = 0.93
+    _patch_setup_dependencies(hass, monkeypatch, data)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    runtime = entry.runtime_data
+    for model, expected in (
+        (runtime.chat_model, 0.91),
+        (runtime.vision_model, 0.92),
+        (runtime.summarization_model, 0.93),
+    ):
+        # The OpenAI primary and the Ollama fallback.
+        assert _configurable(model, 0)["top_p"] == expected
+        assert _configurable(model, 1)["top_p"] == expected
+
+
+@pytest.mark.asyncio
+async def test_an_empty_top_p_keeps_the_default_on_openai_and_ollama(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    _patch_setup_dependencies(hass, monkeypatch, data)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    chat_model = entry.runtime_data.chat_model
+    assert _configurable(chat_model, 0)["top_p"] == 1.0
+    assert _configurable(chat_model, 1)["top_p"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_a_gpt5_primary_gets_no_top_p(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GPT-5 on Chat Completions rejects any but the default (#1000 review)."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    data.options[CONF_OPENAI_CHAT_MODEL] = "gpt-5"
+    data.options[CONF_CHAT_MODEL_TOP_P] = 0.9
+    _patch_setup_dependencies(hass, monkeypatch, data)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    chat_model = entry.runtime_data.chat_model
+    assert _configurable(chat_model, 0)["top_p"] is None
+    # The Ollama fallback still gets the value.
+    assert _configurable(chat_model, 1)["top_p"] == 0.9
+
+
+def _openai_compatible_chat_data() -> FallbackSetupData:
+    """Return setup data with an OpenAI-compatible chat primary and fallback."""
+    data = _fallback_setup_data()
+    primary = ModelProviderConfig(
+        entry_id="oc1",
+        name="Local server",
+        provider_type="openai_compatible",
+        capabilities={"chat"},
+        data={"settings": {"base_url": "http://oc/v1", "api_key": "oc-key"}},
+        deployment="edge",
+    )
+    fallback = ModelProviderConfig(
+        entry_id="oc2",
+        name="Second server",
+        provider_type="openai_compatible",
+        capabilities={"chat"},
+        data={
+            "settings": {
+                "base_url": "http://oc2/v1",
+                "api_key": "oc2-key",
+                "chat_model": "second-chat",
+            }
+        },
+        deployment="edge",
+    )
+    data.providers[primary.entry_id] = primary
+    data.providers[fallback.entry_id] = fallback
+    data.fallback_chains["chat"] = [primary, fallback]
+    data.options[CONF_CHAT_MODEL_PROVIDER] = "openai_compatible"
+    data.options[CONF_OPENAI_COMPATIBLE_BASE_URL] = "http://oc/v1"
+    data.options[CONF_OPENAI_COMPATIBLE_API_KEY] = "oc-key"
+    data.options[CONF_OPENAI_COMPATIBLE_CHAT_MODEL] = "local-chat"
+    return data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("top_p", [None, 0.9])
+async def test_an_openai_compatible_chain_sends_only_a_set_top_p(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, top_p: float | None
+) -> None:
+    """With none set, the server keeps the model's own value (vLLM's 0.95)."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _openai_compatible_chat_data()
+    if top_p is not None:
+        data.options[CONF_CHAT_MODEL_TOP_P] = top_p
+    _patch_setup_dependencies(hass, monkeypatch, data)
+
+    async def _healthy(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(hga_component, "openai_compatible_healthy", _healthy)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    chat_model = entry.runtime_data.chat_model
+    assert len(chat_model.chain) == 2
+    for index in (0, 1):
+        configurable = _configurable(chat_model, index)
+        if top_p is None:
+            assert "top_p" not in configurable
+        else:
+            assert configurable["top_p"] == top_p

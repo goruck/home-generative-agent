@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import inspect
-
 import pytest
 
 import custom_components.home_generative_agent as hga
@@ -15,25 +13,6 @@ from custom_components.home_generative_agent.const import (
 from custom_components.home_generative_agent.core.subentry_resolver import (
     _apply_feature_model_to_options,
 )
-
-
-@pytest.mark.parametrize(
-    "provider", ["chat_provider", "vlm_provider", "sum_provider", "sentinel_provider"]
-)
-def test_openai_compatible_primary_sends_no_top_p(provider: str) -> None:
-    """The hard-coded 1.0 overrode what the model's authors recommend."""
-    source = inspect.getsource(hga.async_setup_entry)
-    start = source.index(f'elif {provider} == "openai_compatible":')
-    branch = source[start : source.index("elif ", start + 10)]
-    assert '"model_name"' in branch
-    assert '"top_p"' not in branch
-    assert "**_top_p_if_set(" in branch
-
-
-def test_openai_compatible_fallback_sends_only_a_configured_top_p() -> None:
-    """A fallback on such a server is configured the same way."""
-    source = inspect.getsource(hga.async_setup_entry)
-    assert "config.update(_top_p_if_set(options.get(top_p_key)))" in source
 
 
 def test_top_p_is_sent_only_when_set() -> None:

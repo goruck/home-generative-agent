@@ -62,7 +62,23 @@ def test_a_responses_model_sends_no_sampling_values() -> None:
         "temperature": None,
         "top_p": None,
     }
-    assert openai_api_configurable("gpt-5") == {"use_responses_api": False}
+    assert openai_api_configurable("gpt-4o") == {"use_responses_api": False}
+
+
+@pytest.mark.parametrize(
+    "model", ["gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-5.1", "o4-mini", "o3", "o1"]
+)
+def test_a_reasoning_model_on_chat_completions_sends_no_top_p(model: str) -> None:
+    """These take only the default top_p; any other value is an HTTP 400 (#1000)."""
+    assert openai_api_configurable(model) == {
+        "use_responses_api": False,
+        "top_p": None,
+    }
+
+
+@pytest.mark.parametrize("model", ["gpt-5-chat-latest", "gpt-4o", "gpt-4.1-nano"])
+def test_other_chat_completions_models_keep_top_p(model: str) -> None:
+    assert openai_api_configurable(model) == {"use_responses_api": False}
 
 
 @pytest.mark.parametrize(
