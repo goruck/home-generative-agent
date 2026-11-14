@@ -34,6 +34,7 @@ from ..const import (  # noqa: TID252
     CONF_FEATURE_MODEL_REASONING_BUDGET,
     CONF_FEATURE_MODEL_REASONING_BY_MODEL,
     CONF_FEATURE_MODEL_TEMPERATURE,
+    CONF_FEATURE_MODEL_TOP_P,
     CONF_GEMINI_API_KEY,
     CONF_GEMINI_CHAT_MODEL,
     CONF_GEMINI_EMBEDDING_MODEL,
@@ -1005,6 +1006,11 @@ def _apply_feature_model_to_options(
         temp_value = spec.get("recommended_temperature")
     if temp_key and temp_value is not None:
         options[temp_key] = temp_value
+
+    top_p_key = spec.get("top_p_key")
+    top_p_value = model_data.get(CONF_FEATURE_MODEL_TOP_P)
+    if top_p_key and top_p_value is not None:
+        options[top_p_key] = top_p_value
 
     if provider_type == "ollama":
         keepalive_map = {

@@ -50,6 +50,7 @@ from ..const import (  # noqa: TID252
     CONF_FEATURE_MODEL_REASONING_BUDGET,
     CONF_FEATURE_MODEL_REASONING_BY_MODEL,
     CONF_FEATURE_MODEL_TEMPERATURE,
+    CONF_FEATURE_MODEL_TOP_P,
     CONF_VECTORS_BOOTSTRAPPED,
     EMBEDDING_MODEL_DIMS,
     FEATURE_CATEGORY_MAP,
@@ -1262,6 +1263,22 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                     default=temp_default,
                 )
             ] = NumberSelector(NumberSelectorConfig(min=0, max=1, step=0.05))
+            # A box, since a slider cannot be left empty. Anthropic gets no top-p.
+            if provider_type != "anthropic":
+                schema[
+                    vol.Optional(
+                        CONF_FEATURE_MODEL_TOP_P,
+                        description={
+                            "suggested_value": existing_model.get(
+                                CONF_FEATURE_MODEL_TOP_P
+                            )
+                        },
+                    )
+                ] = NumberSelector(
+                    NumberSelectorConfig(
+                        min=0.01, max=1, step=0.01, mode=NumberSelectorMode.BOX
+                    )
+                )
 
         if provider_type == "ollama":
             keepalive_default = existing_model.get(
@@ -1336,6 +1353,7 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
                     CONF_FEATURE_MODEL_TEMPERATURE: user_input.get(
                         CONF_FEATURE_MODEL_TEMPERATURE
                     ),
+                    CONF_FEATURE_MODEL_TOP_P: user_input.get(CONF_FEATURE_MODEL_TOP_P),
                     CONF_FEATURE_MODEL_KEEPALIVE: user_input.get(
                         CONF_FEATURE_MODEL_KEEPALIVE
                     ),
