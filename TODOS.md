@@ -2173,6 +2173,18 @@ label pair ("Server URL" vs "Base URL").
 **Priority:** P3
 **Depends on:** None
 
+### The tool-bound sampling retry drops every sampling parameter, not the rejected one
+
+**What:** When a provider rejects a sampling parameter with tools bound, the retry rebinds with `dict.fromkeys(DROPPABLE_SAMPLING_PARAMS)`, clearing `temperature`, `top_p` and `reasoning_effort` together, whichever one was rejected: `_retry_with_default_sampling` in `core/fallback.py` and `_invoke_chat_model_with_sampling_rebind` in `agent/graph.py`. Since PR #1000 makes Top P configurable per feature, a rejected `reasoning_effort` or temperature also discards the user's Top P for that call. The untooled path removes only the rejected parameter.
+
+**Why:** Codex adversarial pass on PR #1000 (2026-11-14), confirmed in the code; the retry dates from #502. Before #1000 the only Top P was the built-in 1.0, so dropping it changed nothing. The retry logs a warning ("retried with provider-default sampling parameters"), so it is not silent, and it fires only for a provider that rejects a sampling setting.
+
+**How to apply:** Rebind with only the parameter `unsupported_sampling_param_in_chain(err)` names, and repeat if the retry is rejected for another one, as the untooled path does; keep the attempt bound. Note the Gemini entry under Agent: a `None` temperature cannot unset a Gemini model's field, so the selective rebind must not pass `None` for a field the model type cannot take. Test both call sites with a fake model that rejects `reasoning_effort` and check the retry still carries `top_p`.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
 ## Config Entry Lifecycle
 
 ### Decide whether face enrollment should be admin-only
