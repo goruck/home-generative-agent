@@ -1908,9 +1908,20 @@ def minimal_payload_for_domain(
 INTENT_NAME_ALL = "all"
 
 
-# How long one failed target's name may be as data; the fixed line cuts it
-# further, and shows the cut (#948 review).
-FAILED_TARGET_MAX_LEN = 200
+# How long one failed target's name may be, as the fixed line shows it: a
+# longer one is cut, the cut shown (#948 review).
+FAILED_TARGET_MAX_LEN = 80
+
+# Quote marks a device's own name may carry, read in a fixed line as its end:
+# shown as apostrophes. The lines' own marks (" „ “ ”), the fullwidth one,
+# and the marks that look like them in common fonts (#948 review).
+QUOTE_MARKS = str.maketrans(
+    dict.fromkeys(
+        '"\u201c\u201d\u201e\u201f\uff02\u2033\u2036\u02ba\u02dd\u3003'
+        "\u05f4\u275d\u275e\u301d\u301e\u301f\U0001f676\U0001f677\U0001f678",
+        "'",
+    )
+)
 
 # Before 2026.11, HA paired each call's result with the target in the order
 # the calls finished (`zip(states, asyncio.as_completed(...))`), so a failed
@@ -1964,9 +1975,12 @@ def intent_results(response: Any) -> IntentResults | None:
         return IntentResults(len(acted), len(failed), ())
 
     def _label(value: Any) -> str:
-        return sanitize_tool_text(
-            " ".join(str(value or "").split()), limit=FAILED_TARGET_MAX_LEN
-        )
+        # As the fixed line shows it, so two names that read alike there are
+        # told apart here (#948 review).
+        text = " ".join(str(value or "").split()).translate(QUOTE_MARKS)
+        if len(text) > FAILED_TARGET_MAX_LEN:
+            text = text[: FAILED_TARGET_MAX_LEN - 1] + "\u2026"
+        return sanitize_tool_text(text, limit=FAILED_TARGET_MAX_LEN)
 
     entries = [
         (_label(t.get("name")), _label(t.get("id")))
@@ -1982,6 +1996,46 @@ def intent_results(response: Any) -> IntentResults | None:
         for name, entity_id in entries
     ]
     return IntentResults(len(acted), len(failed), tuple(n for n in names if n))
+
+
+def with_failure_note(
+    payload: Mapping[str, Any], results: IntentResults
+) -> dict[str, Any]:
+    """
+    Return an action intent's result with a fixed note on what failed (#948).
+
+    The note is fixed wording and the names stay data, in a list. On a Home
+    Assistant that may have paired each result with the wrong device, the
+    names are taken out of the result itself (its success and failed lists,
+    and the `action_performed` line built from them), and the note says
+    which devices failed is not known, so the model cannot name the wrong
+    one (#948 review).
+    """
+    out = dict(payload)
+    if not INTENT_RESULTS_NAME_THEIR_TARGETS:
+        out.pop("action_performed", None)
+        data = out.get("data")
+        if isinstance(data, dict):
+            out["data"] = {
+                **data,
+                "success": "withheld: may name the wrong devices",
+                "failed": "withheld: may name the wrong devices",
+            }
+    if not results.acted:
+        out["failure"] = "No device acted; tell the user the action failed."
+    elif results.names:
+        out["partial_failure"] = (
+            "Only part of the action ran; tell the user which devices failed."
+        )
+    else:
+        out["partial_failure"] = (
+            "Only part of the action ran; this Home Assistant cannot say which "
+            "devices failed. Tell the user how many, and to check them."
+        )
+    out["failed_count"] = results.failed
+    if results.names:
+        out["failed_devices"] = list(results.names)
+    return out
 
 
 def parse_tool_response(
@@ -2057,18 +2111,7 @@ def parse_tool_response(
     results = intent_results(parsed) if status is None else None
     if results is not None and results.failed:
         status = TOOL_STATUS_PARTIAL if results.acted else "error"
-        note: dict[str, Any] = {
-            # Fixed wording; the names stay data, in a list (#948 review).
-            "partial_failure" if results.acted else "failure": (
-                "Only part of the action ran; tell the user which devices failed."
-                if results.acted
-                else "No device acted; tell the user the action failed."
-            ),
-            "failed_count": results.failed,
-        }
-        if results.names:
-            note["failed_devices"] = list(results.names)
-        content_str = json.dumps({**parsed, **note}, default=str)
+        content_str = json.dumps(with_failure_note(parsed, results), default=str)
 
     return content_str, status
 

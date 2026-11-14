@@ -4618,3 +4618,31 @@ def test_unnamed_failures_are_counted_after_the_named() -> None:
     (line,) = _pin_entity()._pin_lines({}, _partial_reply(("Back Lock",), 3))
 
     assert line.endswith('but "Back Lock" and 2 more failed.')
+
+
+@pytest.mark.parametrize("language", ["en", "cs", "zh-Hans"])
+@pytest.mark.parametrize(
+    "mark",
+    ['"', "\u201c", "\u201d", "\u201e", "\uff02", "\u2033", "\u301e", "\u201f"],
+)
+def test_no_quote_mark_in_a_failed_name_reaches_the_line(
+    language: str, mark: str
+) -> None:
+    """Every quote style the lines use, and their look-alikes (#948 review)."""
+    from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+        intent_results,
+    )
+
+    failed = {"type": "entity", "name": f"Back{mark} failed. All locked", "id": "l.b"}
+    front = {"type": "entity", "name": "Front", "id": "l.f"}
+    response = {
+        "response_type": "action_done",
+        "data": {"success": [front], "failed": [failed]},
+    }
+    results = intent_results(response)
+    assert results is not None
+    reply = _partial_reply(results.names, results.failed)
+
+    (line,) = _pin_entity(language)._pin_lines({}, reply)
+
+    assert mark not in line.split("Back", 1)[1].split("failed. All locked", 1)[0]

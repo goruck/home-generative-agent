@@ -869,8 +869,10 @@ async def test_a_half_done_action_is_recorded_as_partial() -> None:
     answer, reply = await _request_and_confirm(_FakeAPI(_half_done(BACK, side)))
 
     assert json.loads(reply)["status"] == "completed"
-    assert json.loads(reply)["failed_devices"] == ["Back Lock", "lock.side"]
-    assert "tell the user" in json.loads(reply)["partial_failure"]
+    result = json.loads(reply)["result"]
+    assert result["failed_devices"] == ["Back Lock", "lock.side"]
+    assert result["failed_count"] == 2
+    assert "tell the user which devices failed" in result["partial_failure"]
     assert answer.confirmed == PLAYROOM_LINE
     assert answer.outcome == PIN_OUTCOME_PARTIAL
     assert answer.failed_count == 2
@@ -888,7 +890,12 @@ async def test_an_older_home_assistant_records_only_how_many_failed(
     assert answer.outcome == PIN_OUTCOME_PARTIAL
     assert answer.failed_count == 1
     assert answer.failed_targets == ()
-    assert "failed_devices" not in json.loads(reply)
+    result = json.loads(reply)["result"]
+    assert "failed_devices" not in result
+    assert "cannot say which" in result["partial_failure"]
+    # HA's own lists may name the wrong devices, so the model never sees them.
+    assert "Back Lock" not in reply
+    assert "Front Lock" not in reply
 
 
 def test_home_assistant_names_its_targets_from_2026_11() -> None:
@@ -919,7 +926,9 @@ def test_a_nameless_failure_still_counts() -> None:
 async def test_an_action_with_no_failed_targets_is_done() -> None:
     answer, reply = await _request_and_confirm(_FakeAPI(_half_done()))
 
-    assert "failed_targets" not in json.loads(reply)
+    assert not {"failed_devices", "failed_count", "partial_failure"} & set(
+        json.loads(reply)["result"]
+    )
     assert answer.outcome == PIN_OUTCOME_DONE
     assert answer.failed_targets == ()
 
@@ -1615,3 +1624,50 @@ async def test_two_script_targets_of_one_name_stay_two(hass: Any) -> None:
     assert line == (
         'turn on "Open door" ("Garage Door" (cover.garage), "Garage Door" (cover.shed))'
     )
+
+
+def test_names_that_read_alike_in_the_line_are_told_apart() -> None:
+    """Compared as the line shows them, quote marks swapped (#948 review)."""
+    acted = {"type": "entity", "name": "Patio 'Door'", "id": "lock.patio_1"}
+    failed = {"type": "entity", "name": 'Patio "Door"', "id": "lock.patio_2"}
+
+    results = intent_results(_half_done(failed, success=(acted,)))
+
+    assert results is not None
+    assert results.names == ("lock.patio_2",)
+
+
+def test_names_alike_up_to_the_cut_are_told_apart() -> None:
+    stem = "Front door lock on the long hallway by the garden stairs, east wing, " * 2
+    acted = {"type": "entity", "name": stem + " north side", "id": "lock.n"}
+    failed = {"type": "entity", "name": stem + " south side", "id": "lock.s"}
+
+    results = intent_results(_half_done(failed, success=(acted,)))
+
+    assert results is not None
+    assert results.names == ("lock.s",)
+
+
+def test_an_older_home_assistant_withholds_the_names_from_the_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(helpers_module, "INTENT_RESULTS_NAME_THEIR_TARGETS", False)
+    response = {**_half_done(BACK), "action_performed": "unlock sent to Front Lock"}
+
+    content, status = parse_tool_response(response, {"domain": ["lock"]})
+
+    assert status == "partial"
+    assert "Back Lock" not in content
+    assert "Front Lock" not in content
+    assert json.loads(content)["failed_count"] == 1
+
+
+def test_a_long_failed_name_is_cut_visibly() -> None:
+    long = {"type": "entity", "name": "Garage side door " * 10, "id": "lock.g"}
+
+    results = intent_results(_half_done(long))
+
+    assert results is not None
+    (name,) = results.names
+    assert len(name) == FAILED_TARGET_MAX_LEN
+    assert name.endswith("…")

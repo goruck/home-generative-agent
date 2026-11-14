@@ -136,6 +136,7 @@ from .helpers import (
     sanitize_tool_args,
     sanitize_tool_text,
     tool_call_data,
+    with_failure_note,
 )
 from .indirect_pin import (
     BUILTIN_INTENT,
@@ -1451,21 +1452,17 @@ def _completed_reply(
         PIN_OUTCOME_PARTIAL if partial else PIN_OUTCOME_DONE,
         results if partial else None,
     )
-    completed: dict[str, Any] = {
-        "status": "completed",
-        "action_id": action_id,
-        "result": data,
-    }
+    result = data
     if partial and results is not None:
-        completed["partial_failure"] = (
-            "Only part of the action ran; tell the user which devices failed."
-        )
-        completed["failed_count"] = results.failed
-        if results.names:
-            completed["failed_devices"] = list(results.names)
+        payload = json.loads(data) if isinstance(data, str) else data
+        # The same note, names withheld the same way, as the normal path's.
+        result = with_failure_note(payload, results)
     # default=str: a result the JSON encoder cannot take must not raise after
     # the action ran.
-    return json.dumps(completed, default=str)
+    return json.dumps(
+        {"status": "completed", "action_id": action_id, "result": result},
+        default=str,
+    )
 
 
 async def _execute_pending_action(  # noqa: PLR0911, PLR0912

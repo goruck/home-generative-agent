@@ -51,6 +51,7 @@ from .helpers import (
     PIN_REFUSED_IN_PROGRESS,
     PIN_REFUSED_LOCKED,
     PIN_REFUSED_OTHER_VOICE,
+    QUOTE_MARKS,
     SET_POSITION_INTENT,
     STOP_MOVING_INTENT,
     TOOL_NAMESPACE_SEP,
@@ -780,10 +781,9 @@ def _slot_line(value: Any) -> str:
     return _one_line(str(value), _ACTION_TARGET_MAX_LEN)
 
 
-# Quote marks a device's own name may carry, read in the line as its end.
-_QUOTE_MARKS = str.maketrans(
-    dict.fromkeys('"“”„\uff02', "'")  # \uff02: the fullwidth quote mark
-)
+# Quote marks a device's own name may carry, read in the line as its end
+# (shared with the failed-device names, helpers.py).
+_QUOTE_MARKS = QUOTE_MARKS
 
 
 def _entity_friendly_name(hass: HomeAssistant | None, raw_name: Any) -> str:
