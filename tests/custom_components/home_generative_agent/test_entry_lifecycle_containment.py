@@ -20,11 +20,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import CoreState
@@ -40,6 +42,8 @@ from .test_deferred_start_listener import (
     REMOVE_LISTENER_ERROR,
     _setup_with_deferred_sentinel_start,
 )
+
+_COMPONENT_DIR = Path(hga_component.__file__).parent
 
 # ---------------------------------------------------------------------------
 # image.py / sensor.py deferred entity adds
@@ -719,3 +723,26 @@ async def test_unload_gives_up_on_a_store_worker_that_never_dies(
     finally:
         release.set()
         await worker
+
+
+@pytest.mark.asyncio
+async def test_services_yaml_lists_exactly_the_registered_services(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Every service services.yaml advertises is registered, and no other (#971).
+
+    ``confirm_enroll`` sat in services.yaml for over a year with no handler,
+    so Developer Tools offered a service that failed with "Unable to find
+    service". ``_register_services`` is stubbed by the setup harness, so it is
+    called here, taken before the harness replaces it, for
+    ``save_and_analyze_snapshot``.
+    """
+    register_services = cast("Any", hga_component)._register_services
+    entry, *_ = await _setup_with_deferred_sentinel_start(hass, monkeypatch)
+    register_services(hass, entry)
+    registered = set(hass.services.async_services().get(DOMAIN, {}))
+
+    advertised = set(yaml.safe_load((_COMPONENT_DIR / "services.yaml").read_text()))
+
+    assert advertised == registered
