@@ -7,15 +7,20 @@ import asyncio
 import base64
 import contextlib
 import json
+import logging
 import ssl
+from datetime import timedelta
 from types import MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 import pytest
 from homeassistant.components import stt as ha_stt
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.entity_platform import EntityPlatform
 from openai import Omit
 from openai._models import FinalRequestOptions
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.home_generative_agent import stt as hga_stt
 from custom_components.home_generative_agent.const import (
@@ -28,6 +33,7 @@ from custom_components.home_generative_agent.const import (
     CONF_STT_RESPONSE_FORMAT,
     CONF_STT_TEMPERATURE,
     CONF_STT_TRANSLATE,
+    DOMAIN,
     LOCAL_KEYLESS_API_KEY,
     RECOMMENDED_LOCAL_STT_MODEL,
     STT_REQUEST_FORMAT_JSON,
@@ -39,6 +45,8 @@ from custom_components.home_generative_agent.stt import HGASttEntity
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+    from homeassistant.core import HomeAssistant
 
 AUDIO = b"\x00\x01" * 32
 
@@ -1177,3 +1185,95 @@ async def test_json_request_format_on_the_real_sdk_path_keyless(
     # The constructor placeholder must not reach the wire by any other route.
     assert LOCAL_KEYLESS_API_KEY not in seen[0].headers.get("authorization", "")
     assert LOCAL_KEYLESS_API_KEY.encode() not in seen[0].content
+
+
+async def _setup_stt_platform(hass: HomeAssistant, entry: MockConfigEntry) -> None:
+    """Run the STT platform's setup for ``entry`` on a real entity platform."""
+    platform = EntityPlatform(
+        hass=hass,
+        logger=logging.getLogger(__name__),
+        domain=ha_stt.DOMAIN,
+        platform_name=DOMAIN,
+        platform=cast("Any", hga_stt),
+        scan_interval=timedelta(seconds=30),
+        entity_namespace=None,
+    )
+    assert await platform.async_setup_entry(entry)
+    await hass.async_block_till_done()
+
+
+def _stt_entry(hass: HomeAssistant) -> MockConfigEntry:
+    """Build an entry with one STT subentry and one model provider subentry."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Home Generative Agent",
+        subentries_data=[
+            {
+                "subentry_type": SUBENTRY_TYPE_STT_PROVIDER,
+                "subentry_id": "stt_1",
+                "title": "Whisper",
+                "unique_id": None,
+                "data": {"provider_type": "openai", "settings": {}, "model": {}},
+            },
+            {
+                "subentry_type": SUBENTRY_TYPE_MODEL_PROVIDER,
+                "subentry_id": "prov_1",
+                "title": "OpenAI",
+                "unique_id": None,
+                "data": {"settings": {}},
+            },
+        ],
+    )
+    entry.add_to_hass(hass)
+    return entry
+
+
+async def test_setup_entry_binds_each_stt_entity_to_its_subentry(
+    hass: HomeAssistant,
+) -> None:
+    """Only STT subentries produce entities, each listed under its subentry (#967)."""
+    entry = _stt_entry(hass)
+
+    await _setup_stt_platform(hass, entry)
+
+    registry = er.async_get(hass)
+    entries = er.async_entries_for_config_entry(registry, entry.entry_id)
+    assert [(e.unique_id, e.config_subentry_id) for e in entries] == [
+        (f"{entry.entry_id}_stt_1", "stt_1")
+    ]
+
+
+async def test_an_stt_entity_registered_unbound_is_bound_on_load(
+    hass: HomeAssistant,
+) -> None:
+    """An entity created before the binding gets it on the next load (#967)."""
+    entry = _stt_entry(hass)
+    registry = er.async_get(hass)
+    old = registry.async_get_or_create(
+        ha_stt.DOMAIN,
+        DOMAIN,
+        f"{entry.entry_id}_stt_1",
+        config_entry=entry,
+    )
+    assert old.config_subentry_id is None
+
+    await _setup_stt_platform(hass, entry)
+
+    bound = registry.async_get(old.entity_id)
+    assert bound is not None
+    assert bound.config_subentry_id == "stt_1"
+
+
+async def test_deleting_the_stt_subentry_removes_its_entity(
+    hass: HomeAssistant,
+) -> None:
+    """No orphaned registry entry is left after the subentry is deleted (#967)."""
+    entry = _stt_entry(hass)
+    await _setup_stt_platform(hass, entry)
+    registry = er.async_get(hass)
+    (stt_entity,) = er.async_entries_for_config_entry(registry, entry.entry_id)
+
+    hass.config_entries.async_remove_subentry(entry, "stt_1")
+    await hass.async_block_till_done()
+
+    assert registry.async_get(stt_entity.entity_id) is None
