@@ -471,6 +471,8 @@ class ConfigurableData(TypedDict, total=False):
     pending_actions: dict[str, dict[str, Any]]
     hass: HomeAssistant
     user_id: str
+    # False on a turn whose memories are the shared "robot" namespace.
+    has_memory_user: bool
     ha_llm_api: Any
     thread_id: str
     # The satellite conversation of a voice's turn, else None (#974).

@@ -2491,6 +2491,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     self._thread_id(conversation_id, speaker) if speaker else None
                 ),
                 "user_id": clean_user_name,
+                "has_memory_user": memory_user is not None,
                 "pin_owner": self._pin_owner(user_name, waiting_prompt),
                 "pin_reply": pin_reply,
                 "requester_is_admin": requester_is_admin,

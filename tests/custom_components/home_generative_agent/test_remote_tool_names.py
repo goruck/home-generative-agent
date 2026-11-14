@@ -30,7 +30,7 @@ from langchain_core.messages import HumanMessage
 
 from custom_components.home_generative_agent.agent.graph import (
     RawTool,
-    _append_history_tool,
+    _append_always_bound_tools,
     _append_included_tools,
     _append_security_audit_tool,
     _format_and_dedupe_tools,
@@ -575,7 +575,7 @@ async def test_hgas_own_history_tool_is_bound_beside_a_remote_namesake() -> None
     remote = _Item("get_entity_history", REMOTE)
     config = _retrieval_config(api)
     config["configurable"]["options"]["llm_hass_api"] = [REMOTE]
-    candidates = await _append_history_tool(
+    candidates = await _append_always_bound_tools(
         [cast("Any", dict(remote.value))],
         cast("Any", _Store([], [local, remote])),
         config,

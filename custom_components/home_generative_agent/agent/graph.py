@@ -1556,29 +1556,51 @@ async def _append_security_audit_tool(  # noqa: PLR0913
 _HISTORY_TOOL = "get_entity_history"
 # Tool search misses "remember this" requests, above all in languages other than
 # English, and a memory the model cannot save is simply lost.
-_ALWAYS_OFFERED_LOCAL_TOOLS = (("hga_local", "upsert_memory"),)
+_MEMORY_TOOL = "upsert_memory"
+# HGA's own tools that step 3g binds on every turn, outside the limit.
+_ALWAYS_BOUND_LOCAL_TOOLS = (_HISTORY_TOOL, _MEMORY_TOOL)
+# Of those, the tools that write the turn's user's memories. A turn with no
+# memory user (an unrecognized voice, an automation) runs as "robot", whose
+# memories everyone shares, so these are bound only when ranking picks them.
+_MEMORY_USER_TOOLS = frozenset({_MEMORY_TOOL})
 
 
-def _is_local_history_tool(tool: RawTool) -> bool:
-    """Return True for HGA's own history tool, which step 3g always binds."""
-    return tool["api_id"] == "hga_local" and tool["name"] == _HISTORY_TOOL
+def _always_bound_local_tools(config: RunnableConfig) -> tuple[str, ...]:
+    """Return the names of HGA's own tools step 3g binds on this turn."""
+    has_memory_user = config.get("configurable", {}).get("has_memory_user", False)
+    return tuple(
+        name
+        for name in _ALWAYS_BOUND_LOCAL_TOOLS
+        if has_memory_user or name not in _MEMORY_USER_TOOLS
+    )
 
 
-async def _append_history_tool(
+def _is_always_bound_local_tool(tool: RawTool, names: Sequence[str]) -> bool:
+    """Return True for one of HGA's own tools step 3g binds on this turn."""
+    return tool["api_id"] == "hga_local" and tool["name"] in names
+
+
+async def _append_always_bound_tools(
     candidates: list[RawTool],
     store: BaseStore,
     config: RunnableConfig,
     live_tool_ids: set[tuple[str, str]] | None,
 ) -> list[RawTool]:
     """
-    Bind ``get_entity_history`` on every turn.
+    Bind HGA's own every-turn tools (`_always_bound_local_tools`).
 
-    A history question phrased around the device ("when did the mudroom
-    lights turn off today?") ranks entity-control and date/time tools above
-    the history tool, and a model that is not handed the tool tells the user
-    it has no access to history (issue #715). English intent patterns caught
-    some of those, never other languages (#902), and missed English
-    phrasings such as "did anyone open the garage while I was away?". An eval
+    ``upsert_memory``: a request to remember something ("remember that I take
+    my tea without sugar") shares few words with the tool's description,
+    above all in another language, so ranking often left it out and the fact
+    was lost. It is bound only on a turn with a memory user.
+
+    ``get_entity_history``: a history question phrased around the device
+    ("when did the mudroom lights turn off today?") ranks entity-control and
+    date/time tools above the history tool, and a model that is not handed the
+    tool tells the user it has no access to history (issue #715). English
+    intent patterns caught some of those, never other languages (#902), and
+    missed English phrasings such as "did anyone open the garage while I was
+    away?". An eval
     on four Ollama models found that binding it every turn never drew a
     history call on a command or status question and did not change their
     tool choice or latency (#907), so it is always bound. Appended outside the
@@ -1586,19 +1608,25 @@ async def _append_history_tool(
     selection. The lookup is pinned to ``hga_local``: dispatch routes this
     name to the local implementation, so the bind must not pull in another
     API's same-named tool. A same-named tool that ranking already bound is
-    left as is.
+    left as is. All of this holds for ``upsert_memory`` too, and an exclusion
+    stored for either tool still keeps it out.
     """
     opts = config.get("configurable", {}).get("options", {})
-    # An exclusion wins even when the live filter is fail-open and the lookup
-    # reads the raw index, as in ``_append_included_tools``.
-    if _has_local_tool(
-        candidates, _remote_ids(config), lambda name: name == _HISTORY_TOOL
-    ) or is_tool_excluded(_HISTORY_TOOL, tool_exclusions(opts).get("hga_local", ())):
-        return candidates
-    fetched = await _get_tool_by_name(
-        store, config, _HISTORY_TOOL, {"hga_local"}, live_tool_ids
-    )
-    return candidates if fetched is None else [*candidates, fetched]
+    excluded = tool_exclusions(opts).get("hga_local", ())
+    remote_ids = _remote_ids(config)
+    for tool_name in _always_bound_local_tools(config):
+        # An exclusion wins even when the live filter is fail-open and the
+        # lookup reads the raw index, as in ``_append_included_tools``.
+        if _has_local_tool(
+            candidates, remote_ids, lambda name, wanted=tool_name: name == wanted
+        ) or is_tool_excluded(tool_name, excluded):
+            continue
+        fetched = await _get_tool_by_name(
+            store, config, tool_name, {"hga_local"}, live_tool_ids
+        )
+        if fetched is not None:
+            candidates = [*candidates, fetched]
+    return candidates
 
 
 _TURN_ON_TOOL = "HassTurnOn"
@@ -3061,12 +3089,6 @@ async def _append_included_tools(
     """
     Append the user's always-included tools to the candidate list.
 
-    HGA's long-term memory tool is appended the same way on every turn
-    (``_ALWAYS_OFFERED_LOCAL_TOOLS``): the pinning form lists only Home
-    Assistant's tools, and tool search often misses a "remember this" request.
-    It is not counted against TOOL_INCLUSIONS_MAX_PER_TURN, and an exclusion
-    stored for it still removes it.
-
     Three filters still apply to an inclusion — the API must be active this
     turn, the live-tool filter (via ``_get_tool_by_name``) must know the tool,
     and an exclusion beats an inclusion. The exclusion check looks redundant
@@ -3098,7 +3120,7 @@ async def _append_included_tools(
             len(inclusions),
         )
         inclusions = inclusions[:TOOL_INCLUSIONS_MAX_PER_TURN]
-    for api_id, name in [*_ALWAYS_OFFERED_LOCAL_TOOLS, *inclusions]:
+    for api_id, name in inclusions:
         if api_id not in allowed_api_ids or is_tool_excluded(
             name, excluded_names.get(api_id, ())
         ):
@@ -3184,10 +3206,14 @@ async def _retrieve_tools(  # noqa: PLR0915
         _filter_live_candidates(config, rag_tools, safety_tools, live_tool_ids)
     )
     live_filter_dropped += rag_dropped_not_live
-    # 1c. Step 3g binds HGA's own history tool on every turn, outside the
-    # limit, so a ranked copy would only take a slot from another tool (#907).
-    # A remote server's namesake is another tool and still ranks.
-    rag_tools = [t for t in rag_tools if not _is_local_history_tool(t)]
+    # 1c. Step 3g binds HGA's own every-turn tools (the history tool, #907,
+    # and the memory tool when the turn has a memory user) outside the limit,
+    # so a ranked copy would only take a slot from another tool. A remote
+    # server's namesake is another tool and still ranks.
+    always_bound = _always_bound_local_tools(config)
+    rag_tools = [
+        t for t in rag_tools if not _is_always_bound_local_tool(t, always_bound)
+    ]
 
     # 2. Merge: safety tools take priority; RAG fills remaining slots.
     #
@@ -3230,7 +3256,7 @@ async def _retrieve_tools(  # noqa: PLR0915
         fallback = [
             t
             for t in _get_fallback_tools(config, allowed_api_ids)
-            if not _is_local_history_tool(t)
+            if not _is_always_bound_local_tool(t, always_bound)
         ]
         (
             fallback_reason,
@@ -3349,9 +3375,9 @@ async def _retrieve_tools(  # noqa: PLR0915
         all_candidates, store, config, query, allowed_api_ids, live_tool_ids
     )
 
-    # 3g. Bind get_entity_history on every turn (#907). Before 3e so
-    # inclusions dedupe against it.
-    all_candidates = await _append_history_tool(
+    # 3g. Bind HGA's every-turn tools: get_entity_history (#907) and, with a
+    # memory user, upsert_memory. Before 3e so inclusions dedupe against them.
+    all_candidates = await _append_always_bound_tools(
         all_candidates, store, config, live_tool_ids
     )
 
