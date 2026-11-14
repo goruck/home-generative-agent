@@ -467,6 +467,18 @@ v3.41.1 rather than deferred; see the TODO above.
 **Priority:** P3
 **Depends on:** None
 
+### parse_tool_response reads an alarm intent's disarm as a failed arm
+
+**What:** In `parse_tool_response` (`agent/helpers.py`), the alarm branch tests `"arm" in service`, which is also true for `alarm_disarm`, so a successful disarm (`inferred_state` "disarmed") is set to `status="error"` by the arm check, and the disarm check cannot clear it. An intent call with domain `alarm_control_panel` never sets `inferred_state` at all, so any arm or disarm read there is an error, which also hides a partial result (#948).
+
+**Why:** Claude adversarial pass, #948 review cycle 1 (2026-11-13). Not reachable in practice today: the agent's own alarm tool does not go through `parse_tool_response`, and `_route_alarm_intent_to_tool` (`agent/graph.py`) redirects intent alarm calls to it. Lindo chose TODOS over an issue.
+
+**How to apply:** Check disarm first (`service.endswith("disarm")`), or match the service name exactly against the arm and disarm service sets. Add a classifier row in `test_pin_action_line.py::test_the_shared_reply_classifier` for a disarm that reached "disarmed".
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
 ### Mixed-provider fallback chains: lossy schema for capable fallbacks, schema 400s do not advance the chain
 
 **What:** `_bind_model_tools` now re-runs the provider-gated schema passes per chain member (`_tools_for_chain_member`, `agent/graph.py`), which fixed the field failure (Ollama primary, Gemini fallback, `any_of[0].required` 400, 2026-10-03). Two leftovers: (1) the passes are subtractive and run on the primary's already-shaped list, so an OpenAI/Anthropic/Gemini primary still hands its lossy flattened or sanitized schema to a union-capable fallback (Ollama); (2) `_is_retryable` (`core/fallback.py`) does not classify an invalid-function-schema 400 as a chain-advance error, so a novel rejected shape on a middle member hard-fails the wrapper and relies on the graph-level drop-and-retry, which re-walks the chain from the primary.

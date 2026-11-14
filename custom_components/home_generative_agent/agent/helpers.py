@@ -10,6 +10,7 @@ import logging
 import re
 import unicodedata
 import weakref
+from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from functools import partial
@@ -18,7 +19,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict
 
 import homeassistant.util.dt as dt_util
 import voluptuous as vol
-from homeassistant.const import CONF_LLM_HASS_API
+from homeassistant.const import CONF_LLM_HASS_API, MAJOR_VERSION, MINOR_VERSION
 from homeassistant.helpers import intent, llm
 from homeassistant.util import ulid
 from pydantic import PydanticInvalidForJsonSchema
@@ -506,6 +507,10 @@ class PinReply:
     # in words the model did not choose, and how it ended (`outcome`).
     confirmed: str = ""
     outcome: str = ""
+    # For PIN_OUTCOME_PARTIAL: how many targets Home Assistant reported
+    # failed, and those it named reliably, for the fixed line (#948).
+    failed_count: int = 0
+    failed_targets: tuple[str, ...] = ()
     # Why `register_pending_action` refused this turn's protected request
     # (a PIN_REFUSED_* value, "" when none was), so the tool result and the
     # reply's fixed line say so without working it out again.
@@ -550,6 +555,11 @@ PIN_OUTCOME_DONE = "done"
 PIN_OUTCOME_FAILED = "failed"
 # An error or timeout after the claim: the device may have acted.
 PIN_OUTCOME_UNKNOWN = "unknown"
+# Some targets acted and Home Assistant reported the rest failed (#948).
+PIN_OUTCOME_PARTIAL = "partial"
+
+# `parse_tool_response`'s status for a call that acted on some targets only.
+TOOL_STATUS_PARTIAL = "partial"
 
 
 # How long a pending PIN confirmation stays valid, used by the sweep here and
@@ -1898,6 +1908,136 @@ def minimal_payload_for_domain(
 INTENT_NAME_ALL = "all"
 
 
+# How long one failed target's name may be, as the fixed line shows it: a
+# longer one is cut, the cut shown (#948 review).
+FAILED_TARGET_MAX_LEN = 80
+
+# Quote marks a device's own name may carry, read in a fixed line as its end:
+# shown as apostrophes. The lines' own marks (" „ “ ”), the fullwidth one,
+# and the marks that look like them in common fonts (#948 review).
+QUOTE_MARKS = str.maketrans(
+    dict.fromkeys(
+        '"\u201c\u201d\u201e\u201f\uff02\u2033\u2036\u02ba\u02dd\u3003'
+        "\u05f4\u275d\u275e\u301d\u301e\u301f\U0001f676\U0001f677\U0001f678",
+        "'",
+    )
+)
+
+# Before 2026.11, HA paired each call's result with the target in the order
+# the calls finished (`zip(states, asyncio.as_completed(...))`), so a failed
+# list could name the device that acted. Its count was right (#948 review).
+INTENT_RESULTS_NAME_THEIR_TARGETS = (MAJOR_VERSION, MINOR_VERSION) >= (2026, 11)
+
+
+class IntentResults(NamedTuple):
+    """What an action intent reports it did (#948)."""
+
+    acted: int
+    failed: int
+    # The failed devices by name, when HA's names can be trusted; may be
+    # fewer than `failed`.
+    names: tuple[str, ...]
+
+
+def intent_results(response: Any) -> IntentResults | None:
+    """
+    Return what an action intent's response reports it did, or None.
+
+    Home Assistant's action intents succeed when at least one target acted
+    and list the rest in ``data.failed``, so a call can have half worked
+    (#948). Only that shape counts (``response_type`` "action_done" with
+    ``success`` and ``failed`` lists): a script's or service's own result
+    carrying a ``failed`` field is not read as one. Only entity successes
+    count as acting: HA lists a matched area or floor as a success before
+    any device is called, so a call whose every device failed still reads as
+    succeeded (#948 review). Names are one line, bounded; a blank name, or
+    one another device of the call shares (failed or not), gives way to the
+    entity id, so the failed device can be told apart. No names on a Home
+    Assistant that may have paired them wrongly.
+    """
+    if isinstance(response, str):
+        try:
+            response = json.loads(response)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(response, dict) or response.get("response_type") != (
+        "action_done"
+    ):
+        return None
+    data = response.get("data")
+    if not isinstance(data, dict):
+        return None
+    success, failed = data.get("success"), data.get("failed")
+    if not isinstance(success, list) or not isinstance(failed, list):
+        return None
+    acted = [t for t in success if isinstance(t, dict) and t.get("type") == "entity"]
+    if not INTENT_RESULTS_NAME_THEIR_TARGETS:
+        return IntentResults(len(acted), len(failed), ())
+
+    def _label(value: Any) -> str:
+        # As the fixed line shows it, so two names that read alike there are
+        # told apart here (#948 review).
+        text = " ".join(str(value or "").split()).translate(QUOTE_MARKS)
+        if len(text) > FAILED_TARGET_MAX_LEN:
+            text = text[: FAILED_TARGET_MAX_LEN - 1] + "\u2026"
+        return sanitize_tool_text(text, limit=FAILED_TARGET_MAX_LEN)
+
+    entries = [
+        (_label(t.get("name")), _label(t.get("id")))
+        for t in failed
+        if isinstance(t, dict)
+    ]
+    # Across the call's devices, so a failed "Door" is not named like the
+    # "Door" that acted.
+    counts = Counter(name for name, _ in entries)
+    counts.update(_label(t.get("name")) for t in acted)
+    names = [
+        entity_id if entity_id and (not name or counts[name] > 1) else name
+        for name, entity_id in entries
+    ]
+    return IntentResults(len(acted), len(failed), tuple(n for n in names if n))
+
+
+def with_failure_note(
+    payload: Mapping[str, Any], results: IntentResults
+) -> dict[str, Any]:
+    """
+    Return an action intent's result with a fixed note on what failed (#948).
+
+    The note is fixed wording and the names stay data, in a list. On a Home
+    Assistant that may have paired each result with the wrong device, the
+    names are taken out of the result itself (its success and failed lists,
+    and the `action_performed` line built from them), and the note says
+    which devices failed is not known, so the model cannot name the wrong
+    one (#948 review).
+    """
+    out = dict(payload)
+    if not INTENT_RESULTS_NAME_THEIR_TARGETS:
+        out.pop("action_performed", None)
+        data = out.get("data")
+        if isinstance(data, dict):
+            out["data"] = {
+                **data,
+                "success": "withheld: may name the wrong devices",
+                "failed": "withheld: may name the wrong devices",
+            }
+    if not results.acted:
+        out["failure"] = "No device acted; tell the user the action failed."
+    elif results.names:
+        out["partial_failure"] = (
+            "Only part of the action ran; tell the user which devices failed."
+        )
+    else:
+        out["partial_failure"] = (
+            "Only part of the action ran; this Home Assistant cannot say which "
+            "devices failed. Tell the user how many, and to check them."
+        )
+    out["failed_count"] = results.failed
+    if results.names:
+        out["failed_devices"] = list(results.names)
+    return out
+
+
 def parse_tool_response(
     response: Any, tool_args: dict[str, Any]
 ) -> tuple[str, str | None]:
@@ -1906,7 +2046,10 @@ def parse_tool_response(
 
     Shared by the normal tool path and the PIN confirmation, so a tool that
     reports failure in its payload (`success: false`, a `warning`, an alarm
-    that did not change state) reads as a failure on both.
+    that did not change state) reads as a failure on both. An action intent
+    that acted on some devices only (``data.failed``) reads as
+    TOOL_STATUS_PARTIAL, and one where no device acted as a failure, each with
+    a note listing what failed (#948).
     """
     parsed: dict[str, Any] | None = None
     if isinstance(response, dict):
@@ -1964,6 +2107,11 @@ def parse_tool_response(
                 result_text
                 or f"Alarm did not change state (panel_state={inferred_state})."
             )
+
+    results = intent_results(parsed) if status is None else None
+    if results is not None and results.failed:
+        status = TOOL_STATUS_PARTIAL if results.acted else "error"
+        content_str = json.dumps(with_failure_note(parsed, results), default=str)
 
     return content_str, status
 

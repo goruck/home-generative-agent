@@ -635,7 +635,8 @@ async def _run_ha_tool(
         content=content_str,
         tool_call_id=tool_call.get("id"),
         name=tool_name,
-        status=status or "success",
+        # A partial run acted, so it is no error; its content names the rest.
+        status="error" if status == "error" else "success",
     )
 
 
