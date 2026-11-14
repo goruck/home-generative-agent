@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock
 
@@ -117,6 +118,31 @@ async def test_history_tool_refuses_a_hidden_entity_without_reading_it(
 
     assert result == {"error": "No 'lock' entity found with friendly name 'Front Door'"}
     fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_lookup_is_not_logged_as_an_error(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A hidden entity's refusal is an expected answer, not a fault (#952)."""
+    config: dict[str, Any] = {"configurable": {"hass": hass}}
+
+    with caplog.at_level(logging.DEBUG, logger=tools_module.LOGGER.name):
+        result = await get_entity_history.ainvoke(
+            {
+                "friendly_names": ["Front Door"],
+                "domains": ["lock"],
+                "local_start_time": "2026-10-04T00:00:00-0700",
+                "local_end_time": "2026-10-04T12:00:00-0700",
+            },
+            config=cast("Any", config),
+        )
+
+    assert "error" in result
+    own = [r for r in caplog.records if r.name == tools_module.LOGGER.name]
+    assert [r.levelno for r in own if r.levelno >= logging.WARNING] == []
+    assert all(r.exc_info is None for r in own)
+    assert any("No 'lock' entity found" in r.getMessage() for r in own)
 
 
 @pytest.mark.asyncio
