@@ -181,11 +181,13 @@ class HgaEnrollCard extends HTMLElement {
   }
 }
 
-customElements.define("hga-enroll-card", HgaEnrollCard);
-
-window.customCards = window.customCards || [];
-window.customCards.push({
-  type: "hga-enroll-card",
-  name: "HGA Enroll Person",
-  description: "Upload a face image and enroll a person.",
-});
+// HGA loads this file itself; a hand-added Resources entry would load it again.
+if (!customElements.get("hga-enroll-card")) {
+  customElements.define("hga-enroll-card", HgaEnrollCard);
+  window.customCards = window.customCards || [];
+  window.customCards.push({
+    type: "hga-enroll-card",
+    name: "HGA Enroll Person",
+    description: "Upload a face image and enroll a person.",
+  });
+}

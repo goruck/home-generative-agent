@@ -92,13 +92,7 @@ Install the Blueprints from the `blueprints/` directory to create automations th
 - Enable the `face_recognition` option (off by default) and set the face-service URL in the integration's options.
 - Enroll people via **Developer Tools → Actions → Enroll Person** in the HA UI.
 - Note: Sentinel's unknown-person rules key on face recognition and never fire while it is disabled.
-- To add the enrollment dashboard card, register the Lovelace resource:
-  - **Settings → Dashboards → Resources → Add**
-  - URL: `/hga-card/hga-enroll-card.js`
-  - Type: `JavaScript Module`
-- To add the Sentinel proposals card, register this resource as well:
-  - URL: `/hga-card/hga-proposals-card.js`
-  - Type: `JavaScript Module`
+- HGA loads its dashboard cards itself, so there is no resource to register. Add `custom:hga-enroll-card` for enrollment or `custom:hga-proposals-card` for Sentinel proposals to any dashboard.
 
 ---
 

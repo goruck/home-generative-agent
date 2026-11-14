@@ -756,7 +756,7 @@ content: |
 
 ## Proposals Dashboard Card
 
-If you install `hga-proposals-card.js`, the card drives the full review flow:
+The `custom:hga-proposals-card` card drives the full review flow:
 
 - Discovery candidates (with dedupe reasons)
 - Proposal drafts (pending)
@@ -767,17 +767,14 @@ If you install `hga-proposals-card.js`, the card drives the full review flow:
 
 The card's own labels follow the Home Assistant profile language (English and Czech today; any other language shows English). Candidate titles and summaries are shown as the discovery model wrote them, untranslated, and the GitHub rule-request prefill stays English.
 
-**Installation:**
-1. Go to **Settings → Dashboards → Resources → Add Resource**.
-2. Add URL: `/hga-card/hga-proposals-card.js`, Type: `JavaScript Module`.
-3. Add the card to a dashboard:
+HGA loads the card itself. Add it to a dashboard:
 
 ```yaml
 type: custom:hga-proposals-card
 title: Sentinel Proposals
 ```
 
-> If the card shows as unknown after adding the resource, hard-refresh the browser. Legacy resource URLs under `/hga-enroll-card/...` still work for backward compatibility. When updating card JS, bump the Lovelace resource query string (e.g. `?v=12`) to avoid stale browser cache.
+> If the card shows as unknown, hard-refresh the browser. A Resources entry added by hand for an HGA card, including a legacy `/hga-enroll-card/...` URL, still works and can be removed.
 
 ---
 
