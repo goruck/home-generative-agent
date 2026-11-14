@@ -12,6 +12,7 @@ The configuration UI is available in English, Czech, Simplified Chinese, and Tur
 - [Speech-to-Text (STT)](#speech-to-text-stt)
 - [Text-to-Speech (TTS)](#text-to-speech-tts)
 - [Speaker Recognition on Voice Satellites](#speaker-recognition-on-voice-satellites)
+- [Managing Long-term Memories](#managing-long-term-memories)
 - [Schema-first YAML Mode](#schema-first-yaml-mode)
 - [Critical Action PIN](#critical-action-pin)
 - [Global Options](#global-options)
@@ -235,6 +236,8 @@ It shares the exclusion picker's contract: empty is the default (nothing extra i
 - **The tool must exist this turn.** An inclusion is reconciled against the live tool universe like every other candidate; a tool the server no longer advertises is skipped, not invented.
 - **Inclusions survive the read-only strip.** On read-only state questions ("which doors are open?") the agent normally drops actuation tools from the turn's list; an always-included actuation tool stays bound anyway — always means always. The critical-action PIN still gates any critical call at execution time, and at most 16 inclusions are honoured per turn.
 
+HGA's own long-term memory tool (`upsert_memory`) is included on every turn without being ticked, so a "remember this" request can always be saved. Like HGA's other built-in tools, it is not listed in either picker.
+
 Each inclusion adds its schema and description to the prompt on every turn, so keep the list short — it is meant for the one or two fallback tools (typically web search) that similarity ranking systematically misses, not as a way around retrieval.
 
 A **Tool Index Status** diagnostic sensor (`sensor.tool_index_status`) shows the current index state:
@@ -435,6 +438,24 @@ Only the sensor on the device that sent the request counts, so a request typed i
 A satellite conversation holds one Critical Action PIN prompt across its voices, and the first request wins ([#974](https://github.com/goruck/home-generative-agent/issues/974)). While a voice's PIN prompt can still be answered, a protected request from another voice is not held, and the reply ends by saying so in fixed words that name the waiting request: "A request to unlock Front Door is waiting for a PIN. Ask again after it is answered." So the PIN said next confirms only the request its speaker was told about, whichever voice it is attributed to, and a PIN reply already in progress is never cut off, by another voice's request or by the next message of the voice that asked. Voices are told apart by the voice recognized, not the Home Assistant user, so two voices with no linked person still count as two. A prompt stops blocking as soon as it can no longer be answered: the turn that made it failed before naming it, its reply turn ended without keeping it, it expired, or its request is locked out after five wrong PINs; a locked-out request is then not held again, and a PIN is never followed to it. A voice's own new request still replaces its own prompt and keeps its failed attempts, as before. Every voice the satellite does not recognize shares one prompt, since they cannot be told apart: a newer request from an unrecognized voice replaces an older one's.
 
 Voice recognition can be wrong. When a voice is linked to a person, a misrecognized voice can hear that person's memories, so link only the people whose memories are fine to share with the household.
+
+---
+
+## Managing Long-term Memories
+
+The agent saves a fact when you ask it to ("remember that I drink tea without sugar"). Each person with a Home Assistant login has their own memories. Requests without a known user, such as an unrecognized voice on a satellite, share one store.
+
+**By voice:** ask what it remembers about you, or tell it to forget something. A voice only reaches its own memories.
+
+**On a dashboard:** add the resource `/hga-card/hga-memory-card.js` (JavaScript Module), then the card:
+
+```yaml
+type: custom:hga-memory-card
+```
+
+The card lists each person with their count, and lets an administrator search, edit, move and delete memories. The services behind it (`get_memories`, `update_memory`, `delete_memory`, `move_memory`) refuse non-administrators.
+
+**Limit:** set **Max memories per person** under **Configure**. `0`, the default, means unlimited. At the limit the agent says memory is full and saves nothing new, and nothing is deleted for you. Updating an existing memory still works. A move from the card is not limited.
 
 ---
 

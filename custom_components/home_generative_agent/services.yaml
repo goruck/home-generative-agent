@@ -370,3 +370,83 @@ run_network_audit:
     and finding cooldowns are untouched. Requires Sentinel with the network
     and Home Assistant security audit enabled.
   fields: {}
+
+get_memories:
+  name: Get memories
+  description: List who has long-term memories, and one person's memories. Admin only.
+  fields:
+    user:
+      name: User
+      description: Whose memories to return. Leave empty to list people only.
+      example: "Alice"
+      selector:
+        text:
+
+update_memory:
+  name: Update memory
+  description: Change the text of one long-term memory. Admin only.
+  fields:
+    user:
+      name: User
+      description: Whose memory it is.
+      required: true
+      selector:
+        text:
+    memory_id:
+      name: Memory ID
+      description: The memory to change.
+      required: true
+      selector:
+        text:
+    content:
+      name: Content
+      description: The new text of the memory.
+      required: true
+      selector:
+        text:
+          multiline: true
+    context:
+      name: Context
+      description: Optional background for the memory.
+      selector:
+        text:
+
+delete_memory:
+  name: Delete memory
+  description: Delete one long-term memory. Admin only.
+  fields:
+    user:
+      name: User
+      description: Whose memory it is.
+      required: true
+      selector:
+        text:
+    memory_id:
+      name: Memory ID
+      description: The memory to delete.
+      required: true
+      selector:
+        text:
+
+move_memory:
+  name: Move memory
+  description: Move one long-term memory to another person. Admin only.
+  fields:
+    user:
+      name: User
+      description: Whose memory it is now.
+      required: true
+      selector:
+        text:
+    memory_id:
+      name: Memory ID
+      description: The memory to move.
+      required: true
+      selector:
+        text:
+    to_user:
+      name: To user
+      description: Who should have the memory.
+      required: true
+      selector:
+        text:

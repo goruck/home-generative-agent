@@ -58,6 +58,7 @@ from ..const import (  # noqa: TID252
     CRITICAL_PIN_MIN_LEN,
     HISTORY_TOOL_CONTEXT_LIMIT,
     HISTORY_TOOL_PURGE_KEEP_DAYS,
+    MEMORY_LIST_MAX_SHOWN,
     NETWORK_AUDIT_REPORT_MAX_CHARS,
     NETWORK_AUDIT_REPORT_NOTIFICATION_ID,
     NETWORK_AUDIT_TOOL_DIGEST_NOTE,
@@ -79,6 +80,12 @@ from ..core.conversation_helpers import _resolve_entity_id  # noqa: TID252
 from ..core.fallback import (  # noqa: TID252
     ProviderRefusedError,
     ainvoke_dropping_unsupported_params,
+)
+from ..core.memories import (  # noqa: TID252
+    all_memories,
+    memories_full,
+    memory_limit,
+    memory_namespace,
 )
 from ..core.utils import extract_final, verify_pin  # noqa: TID252
 from ..sentinel.network_audit import (  # noqa: TID252
@@ -730,12 +737,72 @@ async def upsert_memory(  # noqa: D417
     mem_id = memory_id or ulid.ulid_now()
 
     user_id = config["configurable"]["user_id"]
+    namespace = memory_namespace(user_id)
+    limit = memory_limit(config["configurable"].get("options", {}))
+    is_update = bool(memory_id) and await store.aget(namespace, memory_id) is not None
+    if not is_update and await memories_full(store, user_id, limit):
+        return (
+            f"Not stored: this person's memory is full ({limit} of {limit}). "
+            "Tell the user nothing was saved, and that they can ask you to "
+            "forget something first."
+        )
     await store.aput(
-        namespace=(user_id, "memories"),
+        namespace=namespace,
         key=str(mem_id),
         value={"content": content, "context": context},
     )
     return f"Stored memory {mem_id}"
+
+
+@tool
+async def list_memories(
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+    store: Annotated[BaseStore, InjectedStore()],
+) -> str:
+    """
+    List what you remember about the current user, newest first, with memory ids.
+
+    Use when the user asks what you remember about them, and to find the id of a
+    memory the user wants changed or forgotten.
+
+    """
+    if "configurable" not in config:
+        return "Configuration not found. Please check your setup."
+    found = await all_memories(store, config["configurable"]["user_id"])
+    if not found:
+        return "You have no memories about this user."
+    shown = found[:MEMORY_LIST_MAX_SHOWN]
+    lines = [f"[{item.key}]: {item.value.get('content', '')}" for item in shown]
+    if len(found) > len(shown):
+        lines.append(f"({len(found) - len(shown)} older memories are not shown.)")
+    return "\n".join(lines)
+
+
+@tool(parse_docstring=True)
+async def forget_memory(  # noqa: D417
+    memory_id: str,
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+    store: Annotated[BaseStore, InjectedStore()],
+) -> str:
+    """
+    Delete one memory about the current user.
+
+    Use when the user asks you to forget something. If you do not know the
+    memory's id, call list_memories first. Never guess an id.
+
+    Args:
+        memory_id: The id of the memory to delete.
+
+    """
+    if "configurable" not in config:
+        return "Configuration not found. Please check your setup."
+    namespace = memory_namespace(config["configurable"]["user_id"])
+    if await store.aget(namespace, memory_id) is None:
+        return f"No memory with id {memory_id}. Nothing was deleted."
+    await store.adelete(namespace, memory_id)
+    return f"Deleted memory {memory_id}"
 
 
 @tool(parse_docstring=True)
