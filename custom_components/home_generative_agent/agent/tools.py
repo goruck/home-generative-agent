@@ -2068,7 +2068,9 @@ async def get_entity_history(  # noqa: D417
             for n, d in zip(friendly_names, domains, strict=False)
         ]
     except ValueError as e:
-        LOGGER.exception("Invalid name %s or domain: %s", friendly_names, domains)
+        # The usual answer for a misheard name or one hidden from Assist (#952),
+        # and the model is told: not a fault, so no ERROR line or traceback.
+        LOGGER.debug("get_entity_history: %s", e)
         return {"error": str(e)}
 
     now = dt_util.utcnow()
