@@ -30,6 +30,18 @@
 **Priority:** P3
 **Depends on:** None
 
+### A cloud fallback running the primary's model drops the primary's flat thinking setting
+
+**What:** Since #1022 a second OpenAI, Gemini or Anthropic account behind a primary of its type runs the primary's model. Its thinking settings still come from `_chat_thinking_for_model(..., default_to_flat=False)` (`__init__.py`, `_configured_cloud_model` and the Anthropic branch), so the Conversation feature's flat reasoning setting and budget are not sent unless a per-model entry is stored: the fallback answers without reasoning while the primary reasons.
+
+**Why:** Claude adversarial pass, review of #1022 (2026-11-15). Low: it needs two accounts of one cloud type and a failover; the answer still comes.
+
+**How to apply:** Pass `default_to_flat=True` when the fallback's model is the inherited primary model (mark it when `_with_primary_settings` fills `{category}_model`). Test: an Anthropic primary with reasoning on and a second Anthropic account; the fallback's configurable carries the thinking block.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
 ### alarm_control's plain-text error loses its text
 
 **What:** `_run_langchain_tool` (`agent/graph.py`) sets `status = None` when `alarm_control` returns text that is not JSON ("Error controlling alarm: …", "Configuration not found…"), and `ToolMessage(status=None)` fails validation. The `except ValidationError` then turns it into the generic tool error, so the model gets `ValidationError(...)` instead of the alarm's own message.
