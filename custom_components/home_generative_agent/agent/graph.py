@@ -93,7 +93,7 @@ from ..core.prompt_cache import (  # noqa: TID252
 from ..core.provider_stall import model_call_budget  # noqa: TID252
 from ..core.utils import extract_final  # noqa: TID252
 from .automation_pin import STEP_TARGET_KEYS
-from .automation_targets import AUTOMATION_REFUSAL_PREFIX
+from .automation_targets import AUTOMATION_ADDED_PREFIX, AUTOMATION_REFUSAL_PREFIX
 from .helpers import (
     ALARM_DOMAIN,
     CONFIRM_TOOL_NAME,
@@ -116,6 +116,7 @@ from .helpers import (
     is_on_off_intent,
     is_tool_excluded,
     langchain_tool_parameters_json,
+    loads_or_none,
     matches_critical_rule,
     maybe_fill_lock_entity,
     minimal_payload_for_domain,
@@ -3824,18 +3825,19 @@ def _result_succeeded(msg: ToolMessage) -> bool:
         return False
     if not isinstance(msg.content, str):
         return True
-    try:
-        data = json.loads(msg.content)
-    except (ValueError, RecursionError):
-        return True
+    if base_tool_name(msg.name or "") == "add_automation":
+        # It reports a refusal, an invalid config or a PIN it needs in plain
+        # text; only an installed automation reads as done (#1013 review).
+        return msg.content.startswith(AUTOMATION_ADDED_PREFIX)
+    data = loads_or_none(msg.content)
     if not isinstance(data, dict):
         return True
     if any(data.get(key) for key in _RESULT_FAILURE_KEYS):
         return False
-    return data.get("success") is not False and data.get("status") not in {
-        "error",
-        "requires_pin",
-    }
+    # A tool's own JSON can hold a dict or list under "status" (#1013 review).
+    status = data.get("status")
+    held = isinstance(status, str) and status in {"error", "requires_pin"}
+    return data.get("success") is not False and not held
 
 
 def _empty_reply_fallback(
@@ -3855,7 +3857,10 @@ def _empty_reply_fallback(
     None when a fixed PIN line will be the reply (conversation.py): the turn
     then ends on the tool round, as the round-limit guard's does, and the
     line alone is the reply, asking for the PIN when a prompt waits.
-    "Done." next to "say your PIN to unlock" said both (#1013).
+    "Done." next to "say your PIN to unlock" said both (#1013). The other
+    results of that round then go unsaid, a failure among them: the reply
+    must end on the PIN question for a satellite to keep listening, and
+    saying more needs a fixed line of its own (TODOS.md).
     """
     last_message = messages[-1] if messages else None
     if not isinstance(last_message, ToolMessage):
@@ -3867,7 +3872,10 @@ def _empty_reply_fallback(
     if all(_result_succeeded(msg) for msg in _last_round_responses(messages)):
         LOGGER.debug("Empty model response after tool execution; injecting fallback.")
         return "Done."
-    LOGGER.warning("Model returned an empty reply after a tool failed; apologizing.")
+    LOGGER.warning(
+        "Model returned an empty reply after a tool round that did not fully "
+        "act; apologizing."
+    )
     return NO_REPLY_APOLOGY
 
 
@@ -3977,9 +3985,9 @@ async def _call_model(
 
     tool_calls = getattr(raw_response, "tool_calls", []) or []
 
+    # Create AI message, no need to include tool call metadata if there's none.
     ai_response: AIMessage | None
     if tool_calls:
-        # Create AI message, no need to include tool call metadata if there's none.
         ai_response = AIMessage(content=response, tool_calls=tool_calls)
     elif response.strip():
         ai_response = AIMessage(content=response)

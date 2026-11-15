@@ -140,6 +140,9 @@ _GENERIC_SERVICE_DOMAINS = frozenset({"automation", "script"})
 # Every refusal this module (or the blueprint guard) returns starts with
 # this, so the graph can tell a refused automation from an executed action.
 AUTOMATION_REFUSAL_PREFIX = "Automation not added"
+# And every installed automation's result starts with this: the one result of
+# add_automation that means it acted (#1013).
+AUTOMATION_ADDED_PREFIX = "Added automation "
 
 # Report kinds. "automation" is a whole-config finding with no name.
 KIND_ENTITY = "entity"

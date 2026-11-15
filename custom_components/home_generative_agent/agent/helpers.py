@@ -1944,7 +1944,7 @@ class IntentResults(NamedTuple):
     names_known: bool = True
 
 
-def _loads_or_none(text: str) -> Any | None:
+def loads_or_none(text: str) -> Any | None:
     """
     Return the JSON in a tool's text, or None if it cannot be decoded.
 
@@ -1981,7 +1981,7 @@ def _mcp_text_json(response: Any) -> Any | None:
     # GetLiveContext) is not decoded on every call.
     if not isinstance(text, str) or '"action_done"' not in text:
         return None
-    decoded = _loads_or_none(text)
+    decoded = loads_or_none(text)
     try:
         # What is read here is sent on re-encoded; what cannot be is not read.
         json.dumps(decoded, default=str)
@@ -1999,7 +1999,7 @@ def _action_intent_response(response: Any) -> tuple[dict[str, Any], bool] | None
     tool's arbitrary result is never taken for one.
     """
     if isinstance(response, str):
-        response = _loads_or_none(response)
+        response = loads_or_none(response)
     remote = False
     inner = _mcp_text_json(response)
     if inner is not None:
@@ -2128,7 +2128,7 @@ def parse_tool_response(
     if isinstance(response, dict):
         parsed = response
     elif isinstance(response, str):
-        decoded = _loads_or_none(response)
+        decoded = loads_or_none(response)
         # A JSON list, number or bool carries no status fields.
         parsed = decoded if isinstance(decoded, dict) else None
 

@@ -18,6 +18,10 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 import custom_components.home_generative_agent.agent.graph as agent_graph
+from custom_components.home_generative_agent.agent.automation_targets import (
+    AUTOMATION_ADDED_PREFIX,
+    AUTOMATION_REFUSAL_PREFIX,
+)
 from custom_components.home_generative_agent.agent.graph import _should_continue
 from custom_components.home_generative_agent.agent.helpers import (
     register_pending_action,
@@ -33,9 +37,11 @@ def _call(call_id: str, name: str = "HassTurnOff") -> dict[str, Any]:
     return {"name": name, "args": {}, "id": call_id, "type": "tool_call"}
 
 
-def _result(content: Any, call_id: str = "c1", **kwargs: Any) -> ToolMessage:
+def _result(
+    content: Any, call_id: str = "c1", name: str = "HassTurnOff", **kwargs: Any
+) -> ToolMessage:
     text = content if isinstance(content, str) else json.dumps(content)
-    return ToolMessage(content=text, tool_call_id=call_id, name="HassTurnOff", **kwargs)
+    return ToolMessage(content=text, tool_call_id=call_id, name=name, **kwargs)
 
 
 def _state(*results: ToolMessage) -> dict[str, Any]:
@@ -101,9 +107,15 @@ async def _reply(
 @pytest.mark.parametrize(
     "results",
     [
-        pytest.param([_result("action_done")], id="plain_text"),
         pytest.param([_result({"success": True})], id="success_true"),
         pytest.param([_result(["a", "b"])], id="json_list"),
+        # A tool's own status object is not one of ours, and must not raise.
+        pytest.param([_result({"status": {"state": "on"}})], id="status_object"),
+        pytest.param([_result({"status": []})], id="status_list"),
+        pytest.param(
+            [_result(f"{AUTOMATION_ADDED_PREFIX}01X", name="add_automation")],
+            id="automation_added",
+        ),
         pytest.param(
             [_result({"success": True}), _result("ok", call_id="c2")], id="two_ok"
         ),
@@ -139,6 +151,19 @@ async def test_done_after_a_round_that_acted(
         pytest.param(
             [_result({"success": True}), _result({"error": "x"}, call_id="c2")],
             id="one_of_two_failed",
+        ),
+        # add_automation says it did not act in plain text (#1013 review).
+        pytest.param(
+            [_result(f"{AUTOMATION_REFUSAL_PREFIX}: x", name="add_automation")],
+            id="automation_refused",
+        ),
+        pytest.param(
+            [_result("Invalid automation configuration x", name="add_automation")],
+            id="automation_invalid",
+        ),
+        pytest.param(
+            [_result("No PIN is set.", name="mcp__add_automation")],
+            id="automation_needs_a_pin",
         ),
         pytest.param(
             # Held for the PIN, with no fixed line to follow (the prompt is gone).

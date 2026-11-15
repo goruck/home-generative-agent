@@ -1898,9 +1898,11 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             if isinstance(last, ToolMessage):
                 # A turn ends on a tool round by design: a confirmation
                 # refused before the user was asked for the PIN (graph.py,
-                # `_after_tools`), or the round-limit guard with a PIN line
-                # to follow. _async_finish_reply adds the reply: the PIN
-                # lines, or an apology when there are none.
+                # `_after_tools`), the round-limit guard with a PIN line to
+                # follow, or an empty model reply with a PIN line to follow
+                # (`_empty_reply_fallback`, #1013). _async_finish_reply
+                # adds the reply: the PIN lines, or an apology when there
+                # are none.
                 _LOGGER.debug("Turn ended on a tool round (%s).", last.name)
             else:
                 _LOGGER.error(
