@@ -597,14 +597,21 @@ async def test_markdown_wrapped_json_is_parsed_correctly() -> None:
 
 
 @pytest.mark.asyncio
-async def test_think_block_before_json_is_stripped() -> None:
+@pytest.mark.parametrize(
+    "reasoning",
+    [
+        "<think>evaluating risk level for open entry</think>\n",
+        # The template opened <think>, so only the close is in the output (#1017).
+        "evaluating risk level for open entry\n</think>\n",
+    ],
+)
+async def test_think_block_before_json_is_stripped(reasoning: str) -> None:
     """<think> block preceding JSON (qwen3/qwen3.5 output) must be stripped before parsing."""
     finding = _finding()
     snapshot = _snapshot()
 
     think_content = (
-        "<think>evaluating risk level for open entry</think>\n"
-        '{"decision": "suppress", "reason_code": "routine_state", '
+        reasoning + '{"decision": "suppress", "reason_code": "routine_state", '
         '"triage_confidence": 0.9, "summary": "Routine door open."}'
     )
 

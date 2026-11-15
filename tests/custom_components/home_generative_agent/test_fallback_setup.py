@@ -54,6 +54,7 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_GEMINI_CHAT_MODEL,
     VIDEO_ANALYZER_MODE_DISABLE,
 )
+from custom_components.home_generative_agent.core import utils
 from custom_components.home_generative_agent.core.embedding_store import (
     EmbeddingsUnavailableError,
     UnavailableEmbeddings,
@@ -2670,3 +2671,48 @@ async def test_an_openai_compatible_feature_sends_only_its_own_set_top_p(  # noq
             assert "top_p" not in configurable
         else:
             assert configurable["top_p"] == top_p
+
+
+@pytest.mark.asyncio
+async def test_an_unconfigured_provider_type_logs_no_startup_warning(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """
+    No Gemini key and no OpenAI-compatible URL: nothing to warn about.
+
+    Each type's check warned about its missing setting on every startup, which
+    read as a misconfiguration on an install that never used the type (#1018).
+    """
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    # The real checks, which return early on a missing setting.
+    monkeypatch.setattr(hga_component, "gemini_healthy", utils.gemini_healthy)
+    monkeypatch.setattr(
+        hga_component, "openai_compatible_healthy", utils.openai_compatible_healthy
+    )
+    caplog.set_level("DEBUG")
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    skipped = [r for r in caplog.records if "health check skipped" in r.message]
+    assert len(skipped) == 2
+    assert all(r.levelname == "DEBUG" for r in skipped)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "check",
+    [utils.openai_healthy, utils.gemini_healthy, utils.openai_compatible_healthy],
+)
+async def test_a_check_with_nothing_configured_logs_at_debug(
+    hass: Any, caplog: pytest.LogCaptureFixture, check: Any
+) -> None:
+    """A type nobody set up is not a warning (#1018)."""
+    caplog.set_level("DEBUG")
+
+    assert await check(hass, "") is False
+
+    assert [r.levelname for r in caplog.records] == ["DEBUG"]

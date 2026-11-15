@@ -777,6 +777,12 @@ class _ThinkStreamFilter:
     possible tag prefix at the end of a delta is held until the next one.
     An unclosed block runs to the end of the model turn, like extract_final.
 
+    A bare ``</think>`` before any ``<think>`` (the opening tag was in the
+    prompt, as with Qwen3 templates) drops whatever text is still held before
+    it. Text already sent cannot be taken back: a voice satellite may have
+    spoken it, and the cleaned final reply replaces it in the chat only on a
+    turn that ends in text.
+
     Whitespace follows extract_final(collapse_whitespace=False): once a block
     has been removed, the reply's outer whitespace is stripped and nothing
     inside it is touched. Leading whitespace is dropped until the first
@@ -794,6 +800,9 @@ class _ThinkStreamFilter:
         self._removed = False
         self._emitted = False
         self._held_space = ""
+        # A bare </think> ends prompt-opened reasoning only before any <think>
+        # and only once, as in extract_final.
+        self._bare_close_possible = True
 
     def _visible(self, text: str) -> str:
         """Apply the outer-whitespace rule to text outside any block."""
@@ -824,13 +833,30 @@ class _ThinkStreamFilter:
                 self._inside = False
                 continue
             opening = _THINK_OPEN_RE.search(self._pending)
+            closing = (
+                _THINK_CLOSE_RE.search(self._pending)
+                if self._bare_close_possible
+                else None
+            )
+            if closing is not None and (
+                opening is None or closing.start() < opening.start()
+            ):
+                # A bare </think> ends reasoning whose <think> was in the
+                # prompt (Qwen3 templates, #1017): drop what is still held.
+                self._pending = self._pending[closing.end() :]
+                self._removed = True
+                self._bare_close_possible = False
+                continue
             if opening is not None:
                 out.append(self._visible(self._pending[: opening.start()]))
                 self._pending = self._pending[opening.end() :]
                 self._inside = True
                 self._removed = True
+                self._bare_close_possible = False
                 continue
             keep = _partial_tag_len(self._pending, _THINK_OPEN)
+            if self._bare_close_possible:
+                keep = max(keep, _partial_tag_len(self._pending, _THINK_CLOSE))
             out.append(self._visible(self._pending[: len(self._pending) - keep]))
             self._pending = self._pending[len(self._pending) - keep :]
             break
