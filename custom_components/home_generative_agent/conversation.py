@@ -1691,6 +1691,24 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             return user_name
         return speaker.user if speaker else None
 
+    @classmethod
+    def _memory_namespace(
+        cls, user_name: str | None, speaker: Speaker | None
+    ) -> tuple[str, bool]:
+        """
+        Return the turn's memory namespace label and whether it is a user's own.
+
+        A turn with no memory user (an automation, an unrecognized voice) runs
+        as "robot", whose memories everyone shares. A user name that cleans to
+        "robot" or to nothing is not a memory user of its own either (#1015).
+        """
+        memory_user = cls._memory_user(user_name, speaker)
+        # Memory namespace labels cannot contain punctuation.
+        clean = (memory_user or "").translate(str.maketrans("", "", string.punctuation))
+        if clean in {"", "robot"}:
+            return "robot", False
+        return clean, True
+
     @staticmethod
     def _pin_owner(
         user_name: str | None, waiting_prompt: Mapping[str, Any] | None
@@ -2470,13 +2488,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 response=intent_response, conversation_id=conversation_id
             )
 
-        # A user name of None indicates an automation is being run.
-        memory_user = self._memory_user(user_name, speaker)
-        clean_user_name = "robot" if memory_user is None else memory_user
-        # Remove special characters since memory namespace labels cannot contain them.
-        clean_user_name = clean_user_name.translate(
-            str.maketrans("", "", string.punctuation)
-        )
+        clean_user_name, has_memory_user = self._memory_namespace(user_name, speaker)
 
         app_config: RunnableConfig = {
             "configurable": {
@@ -2491,6 +2503,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     self._thread_id(conversation_id, speaker) if speaker else None
                 ),
                 "user_id": clean_user_name,
+                "has_memory_user": has_memory_user,
                 "pin_owner": self._pin_owner(user_name, waiting_prompt),
                 "pin_reply": pin_reply,
                 "requester_is_admin": requester_is_admin,

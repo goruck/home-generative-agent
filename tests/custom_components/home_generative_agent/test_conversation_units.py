@@ -4279,7 +4279,10 @@ def test_handler_passes_the_speaker_to_thread_memory_and_prompt() -> None:
     """The resolved speaker has to reach everything it is meant to change."""
     src = inspect.getsource(HGAConversationEntity._async_handle_message_active)
     assert "conversation_id, speaker, user_input.text" in src
-    assert "self._memory_user(user_name, speaker)" in src
+    assert "self._memory_namespace(user_name, speaker)" in src
+    # The every-turn memory tool keys on this flag (#1015).
+    assert '"has_memory_user": has_memory_user,' in src
+    assert '"user_id": clean_user_name,' in src
     assert "self._pin_owner(user_name, waiting_prompt)" in src
     assert "self._speaker_prompt(speaker)" in src
 
@@ -4668,3 +4671,27 @@ def test_no_quote_mark_in_a_failed_name_reaches_the_line(
     (line,) = _pin_entity(language)._pin_lines({}, reply)
 
     assert mark not in line.split("Back", 1)[1].split("failed. All locked", 1)[0]
+
+
+@pytest.mark.parametrize(
+    ("user_name", "speaker", "expected"),
+    [
+        # A logged-in user has their own memories.
+        ("Alice", None, ("Alice", True)),
+        ("Mary-Ann", Speaker(name="Мария", user="Mary"), ("MaryAnn", True)),
+        # A voice linked to a user uses that user's memories.
+        (None, Speaker(name="Мария", user="Mary"), ("Mary", True)),
+        # An unrecognized voice or an automation shares "robot" (#1015).
+        (None, Speaker(name=None), ("robot", False)),
+        (None, Speaker(name="Гость"), ("robot", False)),
+        (None, None, ("robot", False)),
+        # A name that cleans to the shared label, or to nothing, is not its own.
+        ("robot.", None, ("robot", False)),
+        ("...", None, ("robot", False)),
+    ],
+)
+def test_memory_namespace_marks_only_a_users_own_memories(
+    user_name: str | None, speaker: Speaker | None, expected: tuple[str, bool]
+) -> None:
+    """The every-turn memory tool keys on this flag; "robot" must never get it."""
+    assert HGAConversationEntity._memory_namespace(user_name, speaker) == expected

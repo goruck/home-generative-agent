@@ -507,6 +507,117 @@ async def test_retrieve_tools_appends_an_included_tool_rag_missed() -> None:
     assert "HassBroadcast" in result["tool_routing_map"]
 
 
+def _memory_config(
+    options: dict[str, Any], *, has_memory_user: bool = True
+) -> RunnableConfig:
+    config: Any = _config(options=options, live={"assist": ["HassBroadcast"]})
+    config["configurable"]["langchain_tools"] = {"upsert_memory": MagicMock()}
+    config["configurable"]["has_memory_user"] = has_memory_user
+    return config
+
+
+_MEMORY_ROW = {"hga_local::upsert_memory": _index_row("upsert_memory", "hga_local")}
+_REMEMBER = "Запомни, что я покормил рыб"
+
+
+@pytest.mark.asyncio
+async def test_memory_tool_is_offered_when_rag_misses_it() -> None:
+    """A request to remember something must be able to save it on every turn."""
+    store = _store([_search_item("HassBroadcast", score=0.6)], _MEMORY_ROW)
+
+    result = await _retrieve_tools(
+        _state(_REMEMBER),
+        _memory_config({"llm_hass_api": ["assist"], "tool_retrieval_limit": 1}),
+        store=store,
+    )
+
+    assert result["tool_routing_map"].get("upsert_memory") == "hga_local"
+    assert "HassBroadcast" in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_a_ranked_memory_tool_takes_no_retrieval_slot() -> None:
+    """
+    Step 1c drops the ranked copy, so it cannot crowd out a tool (#994 review).
+
+    With a limit of one, "remember I like it warm and turn on the heater"
+    must keep the tool ranking picked for the second half.
+    """
+    store = _store(
+        [
+            _search_item("upsert_memory", score=0.9, api_id="hga_local"),
+            _search_item("HassBroadcast", score=0.6),
+        ],
+        _MEMORY_ROW,
+    )
+
+    result = await _retrieve_tools(
+        _state(_REMEMBER),
+        _memory_config({"llm_hass_api": ["assist"], "tool_retrieval_limit": 1}),
+        store=store,
+    )
+
+    assert result["tool_routing_map"].get("upsert_memory") == "hga_local"
+    assert "HassBroadcast" in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_with_no_memory_user_is_not_offered_the_memory_tool() -> None:
+    """
+    An unrecognized voice or an automation writes to the shared "robot" space.
+
+    So the tool is not bound on every such turn (#994 review).
+    """
+    store = _store([_search_item("HassBroadcast", score=0.6)], _MEMORY_ROW)
+
+    result = await _retrieve_tools(
+        _state(_REMEMBER),
+        _memory_config({"llm_hass_api": ["assist"]}, has_memory_user=False),
+        store=store,
+    )
+
+    assert "upsert_memory" not in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_ranking_still_binds_the_memory_tool_with_no_memory_user() -> None:
+    """Without a memory user the tool is bound as before: when ranking picks it."""
+    store = _store(
+        [
+            _search_item("upsert_memory", score=0.9, api_id="hga_local"),
+            _search_item("HassBroadcast", score=0.6),
+        ],
+        _MEMORY_ROW,
+    )
+
+    result = await _retrieve_tools(
+        _state(_REMEMBER),
+        _memory_config({"llm_hass_api": ["assist"]}, has_memory_user=False),
+        store=store,
+    )
+
+    assert result["tool_routing_map"].get("upsert_memory") == "hga_local"
+
+
+@pytest.mark.asyncio
+async def test_excluded_memory_tool_is_not_offered() -> None:
+    """An exclusion still beats the built-in offer."""
+    store = _store([_search_item("HassBroadcast", score=0.6)], _MEMORY_ROW)
+
+    result = await _retrieve_tools(
+        _state(_REMEMBER),
+        _memory_config(
+            {
+                "llm_hass_api": ["assist"],
+                CONF_TOOL_EXCLUSIONS: {"hga_local": ["upsert_memory"]},
+            }
+        ),
+        store=store,
+    )
+
+    assert "upsert_memory" not in result["tool_routing_map"]
+
+
 @pytest.mark.asyncio
 async def test_included_tool_binds_outside_the_retrieval_limit() -> None:
     """A limit already consumed by RAG selections cannot squeeze the inclusion out."""
