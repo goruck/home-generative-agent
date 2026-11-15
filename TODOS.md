@@ -14,6 +14,22 @@
 **Priority:** P3
 **Depends on:** None
 
+### Empty-reply fallback: review findings left unfixed (#1013)
+
+**What:** Four findings from the third review cycle of #1013, all in `_empty_reply_fallback` / `_result_succeeded` (`agent/graph.py`):
+1. A read-only result (GetLiveContext, history) counts as "acted", so a read plus a failed action gets the partial line ("Some of that may not have worked") when nothing acted. Counting only actuation results was left out: `is_actuation_tool` matches name prefixes and may miss scripts or remote tools, which would then get "Please try again" and run twice.
+2. The graph decides a PIN line is the reply from `pending_actions` at the model call; conversation.py reads it again after the summarize node. A prompt evicted in between leaves the turn with the streaming failure text ("try again") after tools that may have acted. The round-limit guard has the same window.
+3. An HA intent result with `response_type: "error"` that a handler returns rather than raises reads as success. Not confirmed that any handler does.
+4. Pre-existing: an add_automation that times out (`_LC_TOOL_TIMEOUT_S`) after `_async_write_automation` appended to automations.yaml reads as failed, and the apology's "try again" can add it twice.
+
+**Why:** Claude adversarial pass and Codex, review cycle 3 of #1013 (2026-11-15). Each needs an empty model reply first; none fails a test or loses data.
+
+**How to apply:** (1) Mark read-only tools by their `read_only` annotation or tool kind and leave them out of the any/all choice. (2) Pass the graph's decision to conversation.py on the config, as `pin_reply` is, instead of re-reading the store. (3) Treat `response_type == "error"` as failed in `_result_succeeded` once a returning handler is found. (4) Make the write idempotent per call, or have the timeout result say the automation may have been added.
+
+**Effort:** S each
+**Priority:** P3
+**Depends on:** None
+
 ### alarm_control's plain-text error loses its text
 
 **What:** `_run_langchain_tool` (`agent/graph.py`) sets `status = None` when `alarm_control` returns text that is not JSON ("Error controlling alarm: …", "Configuration not found…"), and `ToolMessage(status=None)` fails validation. The `except ValidationError` then turns it into the generic tool error, so the model gets `ValidationError(...)` instead of the alarm's own message.
