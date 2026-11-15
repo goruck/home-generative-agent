@@ -1608,8 +1608,11 @@ async def _append_always_bound_tools(
     selection. The lookup is pinned to ``hga_local``: dispatch routes this
     name to the local implementation, so the bind must not pull in another
     API's same-named tool. A same-named tool that ranking already bound is
-    left as is. All of this holds for ``upsert_memory`` too, and an exclusion
-    stored for either tool still keeps it out.
+    left as is. The binding works the same way for ``upsert_memory`` (outside
+    the limit, pinned to ``hga_local``), and an exclusion stored for either
+    tool still keeps it out. The #907 eval covered only the read-only history
+    tool; for the memory tool, a run on Gemma 4 12B over 40 commands and
+    status questions found no stray calls (#994).
     """
     opts = config.get("configurable", {}).get("options", {})
     excluded = tool_exclusions(opts).get("hga_local", ())

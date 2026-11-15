@@ -714,11 +714,12 @@ async def upsert_memory(  # noqa: D417
     """
     INSERT or UPDATE a memory about users in the database.
 
-    Use this when the user asks you to remember something, or states a
-    lasting preference. Do not use it for commands or questions. If a memory
-    conflicts with an existing one then just UPDATE the existing one by
-    passing in "memory_id" and DO NOT create two memories that are the same.
-    If the user corrects a memory then UPDATE it.
+    Use this when the user asks you to remember something, or tells you a
+    lasting fact or preference about themselves (a routine, a schedule, how
+    they like things). Do not save the request itself, or a one-off command
+    or question. If a memory conflicts with an existing one then just UPDATE
+    the existing one by passing in "memory_id" and DO NOT create two memories
+    that are the same. If the user corrects a memory then UPDATE it.
 
     Args:
         content: The main content of the memory.
