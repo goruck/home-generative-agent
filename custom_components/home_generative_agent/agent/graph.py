@@ -3812,21 +3812,62 @@ async def _search_memories(store: BaseStore, user_id: str, query: str | None) ->
     return await _recent_memories(store, user_id)
 
 
-def _empty_reply_fallback(last_message: AnyMessage) -> str:
+# Keys of a tool result that say it did not act, or not fully: the error and
+# status fields tools return, and the notes `with_failure_note` (helpers.py)
+# adds to a half-done or failed action intent.
+_RESULT_FAILURE_KEYS = ("error", "warning", "failure", "partial_failure")
+
+
+def _result_succeeded(msg: ToolMessage) -> bool:
+    """Return True when a tool result says nothing failed or is still held."""
+    if msg.status == "error":
+        return False
+    if not isinstance(msg.content, str):
+        return True
+    try:
+        data = json.loads(msg.content)
+    except (ValueError, RecursionError):
+        return True
+    if not isinstance(data, dict):
+        return True
+    if any(data.get(key) for key in _RESULT_FAILURE_KEYS):
+        return False
+    return data.get("success") is not False and data.get("status") not in {
+        "error",
+        "requires_pin",
+    }
+
+
+def _empty_reply_fallback(
+    messages: Sequence[AnyMessage], config: RunnableConfig
+) -> str | None:
     """
     Return the text for a model reply with no text and no tool call.
 
     Qwen3 extended-thinking: Ollama strips <think>…</think> tokens from
     content, leaving content='' when all output was reasoning. After a tool
-    round a minimal acknowledgement keeps the conversation from going
-    silent. A first reply gets the apology instead: "Done." would claim an
-    action that never ran, and an empty AIMessage would stay in the
-    checkpoint for every later turn to read (#946).
+    round whose every result succeeded, a minimal acknowledgement keeps the
+    conversation from going silent. Otherwise the apology: "Done." would
+    claim an action that never ran (a first reply, #946), failed, or waits
+    for the PIN (#1013). An empty AIMessage would stay in the checkpoint for
+    every later turn to read.
+
+    None when a fixed PIN line will be the reply (conversation.py): the turn
+    then ends on the tool round, as the round-limit guard's does, and the
+    line alone is the reply, asking for the PIN when a prompt waits.
+    "Done." next to "say your PIN to unlock" said both (#1013).
     """
-    if isinstance(last_message, ToolMessage):
+    last_message = messages[-1] if messages else None
+    if not isinstance(last_message, ToolMessage):
+        LOGGER.warning("Model returned an empty reply; apologizing.")
+        return NO_REPLY_APOLOGY
+    if _pin_line_is_the_reply(config):
+        LOGGER.debug("Empty model response after tools; the PIN line is the reply.")
+        return None
+    if all(_result_succeeded(msg) for msg in _last_round_responses(messages)):
         LOGGER.debug("Empty model response after tool execution; injecting fallback.")
         return "Done."
-    LOGGER.warning("Model returned an empty reply; apologizing.")
+    LOGGER.warning("Model returned an empty reply after a tool failed; apologizing.")
     return NO_REPLY_APOLOGY
 
 
@@ -3936,14 +3977,15 @@ async def _call_model(
 
     tool_calls = getattr(raw_response, "tool_calls", []) or []
 
-    if not response.strip() and not tool_calls:
-        response = _empty_reply_fallback(state["messages"][-1])
-
-    # Create AI message, no need to include tool call metadata if there's none.
+    ai_response: AIMessage | None
     if tool_calls:
+        # Create AI message, no need to include tool call metadata if there's none.
         ai_response = AIMessage(content=response, tool_calls=tool_calls)
-    else:
+    elif response.strip():
         ai_response = AIMessage(content=response)
+    else:
+        fallback = _empty_reply_fallback(state["messages"], config)
+        ai_response = None if fallback is None else AIMessage(content=fallback)
     LOGGER.debug("AI response: %s", ai_response)
 
     metadata: dict[str, str] = (
@@ -3955,7 +3997,7 @@ async def _call_model(
     LOGGER.debug("Messages to remove: %s", messages_to_remove)
 
     return {
-        "messages": ai_response,
+        "messages": [] if ai_response is None else ai_response,
         "chat_model_usage_metadata": metadata,
         "messages_to_remove": messages_to_remove,
         "turn_memories": memo,
