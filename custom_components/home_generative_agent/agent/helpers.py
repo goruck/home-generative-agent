@@ -1939,6 +1939,83 @@ class IntentResults(NamedTuple):
     # The failed devices by name, when HA's names can be trusted; may be
     # fewer than `failed`.
     names: tuple[str, ...]
+    # False when HA's success and failed lists may name the wrong devices,
+    # so neither the names nor the lists reach the model.
+    names_known: bool = True
+
+
+def _loads_or_none(text: str) -> Any | None:
+    """
+    Return the JSON in a tool's text, or None if it cannot be decoded.
+
+    Not only malformed JSON: a number past Python's digit limit raises a
+    plain ValueError and deep nesting a RecursionError, and a tool's
+    unreadable text must not fail a call that ran (#1007 review).
+    """
+    try:
+        return json.loads(text)
+    except (ValueError, RecursionError):
+        return None
+
+
+def _mcp_text_json(response: Any) -> Any | None:
+    """
+    Return the JSON a remote MCP tool sent as its only text item, or None.
+
+    Home Assistant's MCP server sends an intent response as JSON text, and its
+    MCP client hands it on nested, as ``{"content": [{"type": "text", "text":
+    "{...}"}], "isError": false}`` (#1007). Its other keys differ by release
+    (``_meta`` from 2026.11, ``meta`` before), so they are not checked: the
+    text must still read as an action intent to count.
+    """
+    if not isinstance(response, dict):
+        return None
+    content = response.get("content")
+    if not isinstance(content, list) or len(content) != 1:
+        return None
+    item = content[0]
+    if not isinstance(item, dict) or item.get("type") != "text":
+        return None
+    text = item.get("text")
+    # Only an intent response is read, so a large result (a remote
+    # GetLiveContext) is not decoded on every call.
+    if not isinstance(text, str) or '"action_done"' not in text:
+        return None
+    decoded = _loads_or_none(text)
+    try:
+        # What is read here is sent on re-encoded; what cannot be is not read.
+        json.dumps(decoded, default=str)
+    except (ValueError, RecursionError):
+        return None
+    return decoded
+
+
+def _action_intent_response(response: Any) -> tuple[dict[str, Any], bool] | None:
+    """
+    Return an action intent's response and whether it came over MCP, or None.
+
+    Only that shape counts (``response_type`` "action_done" with ``success``
+    and ``failed`` lists), here or inside a remote MCP tool's text, so a
+    tool's arbitrary result is never taken for one.
+    """
+    if isinstance(response, str):
+        response = _loads_or_none(response)
+    remote = False
+    inner = _mcp_text_json(response)
+    if inner is not None:
+        response, remote = inner, True
+    if not isinstance(response, dict) or response.get("response_type") != (
+        "action_done"
+    ):
+        return None
+    data = response.get("data")
+    if not isinstance(data, dict):
+        return None
+    if not isinstance(data.get("success"), list) or not isinstance(
+        data.get("failed"), list
+    ):
+        return None
+    return response, remote
 
 
 def intent_results(response: Any) -> IntentResults | None:
@@ -1955,26 +2032,17 @@ def intent_results(response: Any) -> IntentResults | None:
     succeeded (#948 review). Names are one line, bounded; a blank name, or
     one another device of the call shares (failed or not), gives way to the
     entity id, so the failed device can be told apart. No names on a Home
-    Assistant that may have paired them wrongly.
+    Assistant that may have paired them wrongly, which includes a remote one
+    reached over MCP: its version is not known here (#1007).
     """
-    if isinstance(response, str):
-        try:
-            response = json.loads(response)
-        except json.JSONDecodeError:
-            return None
-    if not isinstance(response, dict) or response.get("response_type") != (
-        "action_done"
-    ):
+    found = _action_intent_response(response)
+    if found is None:
         return None
-    data = response.get("data")
-    if not isinstance(data, dict):
-        return None
-    success, failed = data.get("success"), data.get("failed")
-    if not isinstance(success, list) or not isinstance(failed, list):
-        return None
+    payload, remote = found
+    success, failed = payload["data"]["success"], payload["data"]["failed"]
     acted = [t for t in success if isinstance(t, dict) and t.get("type") == "entity"]
-    if not INTENT_RESULTS_NAME_THEIR_TARGETS:
-        return IntentResults(len(acted), len(failed), ())
+    if remote or not INTENT_RESULTS_NAME_THEIR_TARGETS:
+        return IntentResults(len(acted), len(failed), (), names_known=False)
 
     def _label(value: Any) -> str:
         # As the fixed line shows it, so two names that read alike there are
@@ -2000,9 +2068,7 @@ def intent_results(response: Any) -> IntentResults | None:
     return IntentResults(len(acted), len(failed), tuple(n for n in names if n))
 
 
-def with_failure_note(
-    payload: Mapping[str, Any], results: IntentResults
-) -> dict[str, Any]:
+def with_failure_note(response: Any, results: IntentResults) -> dict[str, Any]:
     """
     Return an action intent's result with a fixed note on what failed (#948).
 
@@ -2011,10 +2077,15 @@ def with_failure_note(
     names are taken out of the result itself (its success and failed lists,
     and the `action_performed` line built from them), and the note says
     which devices failed is not known, so the model cannot name the wrong
-    one (#948 review).
+    one (#948 review). A remote Home Assistant's result is read out of the
+    MCP text it came in (#1007).
     """
-    out = dict(payload)
-    if not INTENT_RESULTS_NAME_THEIR_TARGETS:
+    found = _action_intent_response(response)
+    if found is not None:
+        out = dict(found[0])
+    else:  # Not reached: callers pass what intent_results read.
+        out = dict(response) if isinstance(response, dict) else {}
+    if not results.names_known:
         out.pop("action_performed", None)
         data = out.get("data")
         if isinstance(data, dict):
@@ -2057,10 +2128,7 @@ def parse_tool_response(
     if isinstance(response, dict):
         parsed = response
     elif isinstance(response, str):
-        try:
-            decoded = json.loads(response)
-        except json.JSONDecodeError:
-            decoded = None
+        decoded = _loads_or_none(response)
         # A JSON list, number or bool carries no status fields.
         parsed = decoded if isinstance(decoded, dict) else None
 
@@ -2068,6 +2136,10 @@ def parse_tool_response(
     content_str = json.dumps(response, default=str)
     if parsed is None:
         return content_str, status
+    # Before 2026.10 Home Assistant hands on a remote MCP result as a dict with
+    # its error flag in it, not as ToolResult.error (#1007 review).
+    if parsed.get("isError") is True and isinstance(parsed.get("content"), list):
+        return content_str, "error"
 
     warning = parsed.get("warning")
     success_val = parsed.get("success", True)
