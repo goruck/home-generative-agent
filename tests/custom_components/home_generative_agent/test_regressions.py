@@ -25,6 +25,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import ConfigurableField
+from langchain_ollama import ChatOllama
 
 import custom_components.home_generative_agent as hga_component
 import custom_components.home_generative_agent.agent.graph as agent_graph
@@ -399,8 +400,6 @@ def test_ollama_clients_limit_only_the_connect() -> None:
     for its whole 90 s share. Reading stays unlimited: a model load happens
     after the connection is open.
     """
-    from langchain_ollama import ChatOllama  # noqa: PLC0415
-
     kwargs = cast("Any", hga_component)._ollama_httpx_client_kwargs()
     timeout = kwargs["timeout"]
     assert timeout.connect == hga_component.OLLAMA_CONNECT_TIMEOUT_S
