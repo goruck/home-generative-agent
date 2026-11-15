@@ -32,6 +32,8 @@ from custom_components.home_generative_agent.const import (
     CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
     CONF_OLLAMA_SUMMARIZATION_MODEL,
     CONF_OLLAMA_URL,
+    CONF_OLLAMA_VLM,
+    CONF_OLLAMA_VLM_CONTEXT_SIZE,
     CONF_OPENAI_CHAT_MODEL,
     CONF_OPENAI_COMPATIBLE_API_KEY,
     CONF_OPENAI_COMPATIBLE_BASE_URL,
@@ -842,6 +844,136 @@ async def test_a_fallbacks_own_model_setting_still_comes_first(
     assert chat["model"] == "llama-own"
     assert chat["num_ctx"] == 2048
     assert chat["keep_alive"] == "10m"
+
+
+@pytest.mark.asyncio
+async def test_with_the_primary_down_at_setup_the_backup_runs_its_model(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The reporter's case: the laptop is away when Home Assistant starts (#1022).
+
+    The primary is then a placeholder, which used to drop the config it was
+    given, so the backup that answers was asked for gpt-oss at 32K again.
+    """
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _ollama_primary_with_a_second_server()
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    _capture_recheck(monkeypatch)
+
+    async def _laptop_away(_hass: Any, url: str, **_kwargs: Any) -> bool:
+        return "mac-mini" in url
+
+    monkeypatch.setattr(hga_component, "ollama_healthy", _laptop_away)
+    monkeypatch.setattr(
+        hga_component,
+        "configured_ollama_urls",
+        lambda *_args, **_kwargs: ["http://ollama", "http://mac-mini:11434"],
+    )
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    backup = cast("FakeConfiguredModel", _only_member(entry.runtime_data.chat_model))
+    assert backup.config["configurable"]["model"] == "qwen3.5:4b-q4_K_M"
+    assert backup.config["configurable"]["num_ctx"] == 8192
+
+
+@pytest.mark.asyncio
+async def test_a_second_ollama_server_sees_with_the_primarys_vision_model(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """VLM reads its own primary, not the chat one."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _ollama_primary_with_a_second_server()
+    data.options.update(
+        {
+            CONF_VLM_PROVIDER: "ollama",
+            CONF_OLLAMA_VLM: "qwen2.5vl:7b",
+            CONF_OLLAMA_VLM_CONTEXT_SIZE: 6144,
+        }
+    )
+    second = data.providers["ollama2"]
+    second.capabilities.add("vlm")
+    data.fallback_chains["vlm"] = [data.providers["ollama1"], second]
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    _capture_recheck(monkeypatch)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    vision_model = entry.runtime_data.vision_model
+    assert isinstance(vision_model, FallbackVLM)
+    vlm = cast("FakeConfiguredModel", vision_model.chain[1][0]).config["configurable"]
+    assert vlm["model"] == "qwen2.5vl:7b"
+    assert vlm["num_ctx"] == 6144
+
+
+@pytest.mark.asyncio
+async def test_a_second_openai_account_runs_the_primarys_model(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OpenAI names its model `model_name`; the second account runs it too."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    second = ModelProviderConfig(
+        entry_id="openai2",
+        name="OpenAI second account",
+        provider_type="openai",
+        capabilities={"chat"},
+        data={"settings": {"api_key": "sk-second"}},
+        deployment="cloud",
+    )
+    data.providers[second.entry_id] = second
+    data.fallback_chains["chat"] = [data.providers["openai1"], second]
+    _patch_setup_dependencies(hass, monkeypatch, data)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    chat_model = entry.runtime_data.chat_model
+    assert isinstance(chat_model, FallbackChatModel)
+    fallback = cast("FakeConfiguredModel", chat_model.chain[1][0])
+    assert fallback.config["configurable"]["model_name"] == "gpt-primary-chat"
+
+
+@pytest.mark.asyncio
+async def test_another_compatible_server_keeps_its_own_model(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each OpenAI-compatible server serves its own models (#1022 review)."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    server_a = _compatible("a", "http://a/v1", "key-a", {"chat"})
+    server_b = _compatible("b", "http://b/v1", "key-b", {"chat"})
+    data.providers = {server_a.entry_id: server_a, server_b.entry_id: server_b}
+    data.fallback_chains = {"chat": [server_a, server_b]}
+    data.options.update(
+        {
+            CONF_CHAT_MODEL_PROVIDER: "openai_compatible",
+            CONF_OPENAI_COMPATIBLE_BASE_URL: "http://a/v1",
+            CONF_OPENAI_COMPATIBLE_API_KEY: "key-a",
+            CONF_OPENAI_COMPATIBLE_CHAT_MODEL: "local-only-model",
+        }
+    )
+    _patch_setup_dependencies(hass, monkeypatch, data)
+
+    async def _healthy(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(hga_component, "openai_compatible_healthy", _healthy)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    chat_model = entry.runtime_data.chat_model
+    assert isinstance(chat_model, FallbackChatModel)
+    fallback = cast("FakeConfiguredModel", chat_model.chain[1][0])
+    assert fallback.config["configurable"]["model_name"] != "local-only-model"
 
 
 @pytest.mark.asyncio

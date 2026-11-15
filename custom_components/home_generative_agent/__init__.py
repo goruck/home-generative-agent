@@ -1801,9 +1801,27 @@ class NullChat:
         """Return self, as tool binding is a no-op for the fallback model."""
         return self
 
-    def with_config(self, _config: Any = None, **_cfg: Any) -> NullChat:
-        """Return self, as this is a no-op."""
-        return self
+    def __init__(self, config: Mapping[str, Any] | None = None) -> None:
+        """Initialize the placeholder with the config it was given, if any."""
+        self.config: dict[str, Any] = dict(config or {})
+
+    def with_config(self, config: Any = None, **kwargs: Any) -> NullChat:
+        """
+        Return a placeholder that keeps the config, as a bound model does.
+
+        It runs nothing, but a fallback of the primary's type reads the
+        primary's model and context from it: with the primary down at setup,
+        the fallback is the one that answers (#1022).
+        """
+        new = {**dict(config or {}), **kwargs}
+        configurable = {
+            **dict(self.config.get("configurable") or {}),
+            **dict(new.get("configurable") or {}),
+        }
+        merged = {**self.config, **new}
+        if configurable:
+            merged["configurable"] = configurable
+        return NullChat(merged)
 
 
 class NullStore:
@@ -4265,9 +4283,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         it may not have, with a context that may not fit (#1022). A fallback of
         the primary's type runs the primary's model instead, and for Ollama its
         context size and keep-alive. Settings the provider stores itself (a
-        legacy provider's) still come first.
+        legacy provider's) still come first. The primary's model is read from
+        its bound config, which a placeholder for a primary down at setup
+        keeps too (`NullChat.with_config`).
         """
-        if provider.provider_type != primary.provider_type:
+        # An OpenAI-compatible server's models are its own: another server
+        # need not serve the primary's (#1022 review).
+        if (
+            provider.provider_type != primary.provider_type
+            or provider.provider_type == "openai_compatible"
+        ):
             return provider
         config = getattr(primary_model, "config", None)
         configurable = (
