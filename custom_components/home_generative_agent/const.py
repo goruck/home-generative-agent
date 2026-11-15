@@ -1771,3 +1771,7 @@ ACTUATION_LANGCHAIN_TOOLS = ("alarm_control",)
 # Said when a turn ends with nothing to say: a model reply with no text and no
 # tool call, or a turn that committed no reply at all (#946).
 NO_REPLY_APOLOGY = "I'm sorry, I was unable to respond. Please try again."
+# Said instead for an empty reply after a tool round where some calls acted
+# and some did not: "try again" would repeat what already ran, such as an
+# automation that would then be added twice (#1013 review).
+NO_REPLY_PARTIAL = "Some of that may not have worked. Please check before asking again."

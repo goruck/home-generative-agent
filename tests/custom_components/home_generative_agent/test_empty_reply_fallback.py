@@ -27,7 +27,10 @@ from custom_components.home_generative_agent.agent.helpers import (
     register_pending_action,
     start_pin_turn,
 )
-from custom_components.home_generative_agent.const import NO_REPLY_APOLOGY
+from custom_components.home_generative_agent.const import (
+    NO_REPLY_APOLOGY,
+    NO_REPLY_PARTIAL,
+)
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -116,6 +119,12 @@ async def _reply(
             [_result(f"{AUTOMATION_ADDED_PREFIX}01X", name="add_automation")],
             id="automation_added",
         ),
+        # Another server's tool of the name is read like any other.
+        pytest.param(
+            [_result({"success": True}, name="srv__add_automation")],
+            id="namesake_add_automation",
+        ),
+        pytest.param([_result(json.dumps(json.dumps({"ok": 1})))], id="json_string"),
         pytest.param(
             [_result({"success": True}), _result("ok", call_id="c2")], id="two_ok"
         ),
@@ -148,10 +157,6 @@ async def test_done_after_a_round_that_acted(
             [_result({"response_type": "action_done", "failure": "No device acted"})],
             id="none_acted",
         ),
-        pytest.param(
-            [_result({"success": True}), _result({"error": "x"}, call_id="c2")],
-            id="one_of_two_failed",
-        ),
         # add_automation says it did not act in plain text (#1013 review).
         pytest.param(
             [_result(f"{AUTOMATION_REFUSAL_PREFIX}: x", name="add_automation")],
@@ -162,8 +167,21 @@ async def test_done_after_a_round_that_acted(
             id="automation_invalid",
         ),
         pytest.param(
-            [_result("No PIN is set.", name="mcp__add_automation")],
+            [_result("No PIN is set.", name="add_automation")],
             id="automation_needs_a_pin",
+        ),
+        pytest.param(
+            [_result(f"{AUTOMATION_REFUSAL_PREFIX}: x", name="Add_Automation")],
+            id="automation_refused_any_case",
+        ),
+        # An HA API tool's JSON-string result arrives encoded twice.
+        pytest.param(
+            [_result(json.dumps(json.dumps({"error": "Lock jammed"})))],
+            id="json_string_error",
+        ),
+        pytest.param(
+            [_result(json.dumps(json.dumps({"status": "error"})))],
+            id="json_string_status_error",
         ),
         pytest.param(
             # Held for the PIN, with no fixed line to follow (the prompt is gone).
@@ -180,6 +198,34 @@ async def test_apology_after_a_round_that_did_not_act(
 
     assert isinstance(reply, AIMessage)
     assert reply.content == NO_REPLY_APOLOGY
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "results",
+    [
+        pytest.param(
+            [_result({"success": True}), _result({"error": "x"}, call_id="c2")],
+            id="one_of_two_failed",
+        ),
+        pytest.param(
+            [
+                _result(f"{AUTOMATION_ADDED_PREFIX}01X", name="add_automation"),
+                _result(f"{AUTOMATION_REFUSAL_PREFIX}: x", "c2", "add_automation"),
+            ],
+            id="one_automation_added_one_refused",
+        ),
+    ],
+)
+async def test_a_round_that_partly_acted_does_not_ask_to_try_again(
+    hass: HomeAssistant, empty_model: MagicMock, results: list[ToolMessage]
+) -> None:
+    """Asking to try again would repeat what ran: an automation added twice."""
+    reply = await _reply(_state(*results), _config(hass), empty_model)
+
+    assert isinstance(reply, AIMessage)
+    assert reply.content == NO_REPLY_PARTIAL
+    assert "try again" not in str(reply.content).lower()
 
 
 @pytest.mark.asyncio

@@ -62,6 +62,7 @@ from custom_components.home_generative_agent.const import (
     MAX_AFFIRMATIVE_FOLLOW_UP_WORDS,
     MAX_REFERENTIAL_FOLLOW_UP_WORDS,
     NO_REPLY_APOLOGY,
+    NO_REPLY_PARTIAL,
     NON_OPEN_ACTUATION_KEYWORDS_REGEX,
     OPEN_AS_STATE_REGEX,
     OPEN_COMMAND_CLAUSE_REGEX,
@@ -3825,11 +3826,17 @@ def _result_succeeded(msg: ToolMessage) -> bool:
         return False
     if not isinstance(msg.content, str):
         return True
-    if base_tool_name(msg.name or "") == "add_automation":
+    if (msg.name or "").lower() == "add_automation":
+        # Ours, which runs by its bare name in any case (`_run_langchain_tool`).
         # It reports a refusal, an invalid config or a PIN it needs in plain
         # text; only an installed automation reads as done (#1013 review).
+        # Another server's tool of that name is read like any other.
         return msg.content.startswith(AUTOMATION_ADDED_PREFIX)
     data = loads_or_none(msg.content)
+    if isinstance(data, str):
+        # An HA API tool's JSON-string result, encoded once more on the way
+        # (`parse_tool_response`).
+        data = loads_or_none(data)
     if not isinstance(data, dict):
         return True
     if any(data.get(key) for key in _RESULT_FAILURE_KEYS):
@@ -3851,8 +3858,9 @@ def _empty_reply_fallback(
     round whose every result succeeded, a minimal acknowledgement keeps the
     conversation from going silent. Otherwise the apology: "Done." would
     claim an action that never ran (a first reply, #946), failed, or waits
-    for the PIN (#1013). An empty AIMessage would stay in the checkpoint for
-    every later turn to read.
+    for the PIN (#1013). A round where some calls acted gets a line that
+    does not ask to try again, which would repeat them. An empty AIMessage
+    would stay in the checkpoint for every later turn to read.
 
     None when a fixed PIN line will be the reply (conversation.py): the turn
     then ends on the tool round, as the round-limit guard's does, and the
@@ -3869,9 +3877,16 @@ def _empty_reply_fallback(
     if _pin_line_is_the_reply(config):
         LOGGER.debug("Empty model response after tools; the PIN line is the reply.")
         return None
-    if all(_result_succeeded(msg) for msg in _last_round_responses(messages)):
+    acted = [_result_succeeded(msg) for msg in _last_round_responses(messages)]
+    if all(acted):
         LOGGER.debug("Empty model response after tool execution; injecting fallback.")
         return "Done."
+    if any(acted):
+        LOGGER.warning(
+            "Model returned an empty reply after a tool round that partly "
+            "acted; saying so."
+        )
+        return NO_REPLY_PARTIAL
     LOGGER.warning(
         "Model returned an empty reply after a tool round that did not fully "
         "act; apologizing."

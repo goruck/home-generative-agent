@@ -2998,6 +2998,41 @@ async def test_a_turn_that_ends_on_a_refused_confirmation_gets_no_failure_text()
     assert len(chat_log.content) == 3
 
 
+async def test_streamed_text_the_graph_dropped_is_not_kept_before_the_pin_line() -> (
+    None
+):
+    """
+    A reply streamed after the tool round, which the graph did not keep (#1013).
+
+    A reasoning-only reply whose stray text streamed before a bare `</think>`
+    is empty once cleaned, and with a PIN line to follow the graph ends the
+    turn on the tool round. The streamed text must not stay as the reply, or
+    the PIN line goes in front of it: "...unlock... Unlocked. What is your PIN?".
+    """
+    from langchain_core.messages import ToolMessage  # noqa: PLC0415
+
+    chat_log = _refusal_turn_chat_log()
+    chat_log.content.append(
+        _mk_content(
+            ha_conversation.AssistantContent,
+            agent_id=HGA_AGENT_ID,
+            content="Unlocked.",
+            tool_calls=None,
+        )
+    )
+    held = ToolMessage(
+        content='{"status": "requires_pin", "action_id": "a1"}',
+        name="HassTurnOff",
+        tool_call_id="c1",
+    )
+
+    await _run_astream(chat_log, _ended_app(held), lambda: True)
+
+    assert len(chat_log.content) == 3
+    assert all(getattr(c, "content", None) != "Unlocked." for c in chat_log.content)
+    assert chat_log.heard == []
+
+
 async def test_a_turn_that_ends_on_a_tool_call_without_a_pin_line_still_fails_aloud() -> (
     None
 ):
