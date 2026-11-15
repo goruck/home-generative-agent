@@ -2670,3 +2670,68 @@ async def test_an_openai_compatible_feature_sends_only_its_own_set_top_p(  # noq
             assert "top_p" not in configurable
         else:
             assert configurable["top_p"] == top_p
+
+
+@pytest.mark.asyncio
+async def test_an_unconfigured_provider_type_is_not_health_checked(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    No Gemini key or OpenAI-compatible URL: no check, so no startup warning.
+
+    Each check warns about its missing setting, which read as a
+    misconfiguration on every boot of an install that never used it (#1018).
+    """
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    checked: list[str] = []
+
+    def _recorder(name: str) -> Any:
+        async def _check(*_args: Any, **_kwargs: Any) -> bool:
+            checked.append(name)
+            return False
+
+        return _check
+
+    monkeypatch.setattr(hga_component, "gemini_healthy", _recorder("gemini"))
+    monkeypatch.setattr(
+        hga_component, "openai_compatible_healthy", _recorder("openai_compatible")
+    )
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert checked == []
+
+
+@pytest.mark.asyncio
+async def test_a_configured_provider_type_is_still_health_checked(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    data.options[CONF_GEMINI_API_KEY] = "gem-key"
+    data.options[CONF_OPENAI_COMPATIBLE_BASE_URL] = "http://oc/v1"
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    checked: list[str] = []
+
+    def _recorder(name: str) -> Any:
+        async def _check(*_args: Any, **_kwargs: Any) -> bool:
+            checked.append(name)
+            return False
+
+        return _check
+
+    monkeypatch.setattr(hga_component, "gemini_healthy", _recorder("gemini"))
+    monkeypatch.setattr(
+        hga_component, "openai_compatible_healthy", _recorder("openai_compatible")
+    )
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert "gemini" in checked
+    assert "openai_compatible" in checked

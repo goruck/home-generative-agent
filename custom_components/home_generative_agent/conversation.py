@@ -777,6 +777,10 @@ class _ThinkStreamFilter:
     possible tag prefix at the end of a delta is held until the next one.
     An unclosed block runs to the end of the model turn, like extract_final.
 
+    A bare ``</think>`` (its ``<think>`` was in the prompt, as with Qwen3
+    templates) drops whatever text is still held before it; text already
+    sent cannot be taken back, and the cleaned final reply replaces it.
+
     Whitespace follows extract_final(collapse_whitespace=False): once a block
     has been removed, the reply's outer whitespace is stripped and nothing
     inside it is touched. Leading whitespace is dropped until the first
@@ -824,13 +828,25 @@ class _ThinkStreamFilter:
                 self._inside = False
                 continue
             opening = _THINK_OPEN_RE.search(self._pending)
+            closing = _THINK_CLOSE_RE.search(self._pending)
+            if closing is not None and (
+                opening is None or closing.start() < opening.start()
+            ):
+                # A bare </think> ends reasoning whose <think> was in the
+                # prompt (Qwen3 templates, #1017): drop what is still held.
+                self._pending = self._pending[closing.end() :]
+                self._removed = True
+                continue
             if opening is not None:
                 out.append(self._visible(self._pending[: opening.start()]))
                 self._pending = self._pending[opening.end() :]
                 self._inside = True
                 self._removed = True
                 continue
-            keep = _partial_tag_len(self._pending, _THINK_OPEN)
+            keep = max(
+                _partial_tag_len(self._pending, _THINK_OPEN),
+                _partial_tag_len(self._pending, _THINK_CLOSE),
+            )
             out.append(self._visible(self._pending[: len(self._pending) - keep]))
             self._pending = self._pending[len(self._pending) - keep :]
             break

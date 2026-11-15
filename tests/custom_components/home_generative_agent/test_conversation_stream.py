@@ -1013,6 +1013,39 @@ async def test_stream_drops_unclosed_think_block() -> None:
     assert streamed == "Sure. "
 
 
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        ("The user wants the light.\n</think>\n\nIt is on.",),
+        ("The user wants the light.\n</think>", "\n\nIt is ", "on."),
+        (
+            "<",
+            "/think>It is on.",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_stream_drops_reasoning_held_before_a_bare_close(
+    chunks: tuple[str, ...],
+) -> None:
+    """A bare </think> (Qwen3 templates open the tag in the prompt, #1017)."""
+    streamed = await _streamed_text(_replay(_chunked_turn(*chunks)))
+
+    assert streamed == "It is on."
+    assert streamed == extract_final("".join(chunks), collapse_whitespace=False)
+
+
+@pytest.mark.asyncio
+async def test_stream_cannot_recall_reasoning_sent_before_a_bare_close() -> None:
+    """Text already sent stays sent; the tag itself never reaches the chat_log."""
+    streamed = await _streamed_text(
+        _replay(_chunked_turn("Draft answer. ", "</think>Final answer."))
+    )
+
+    assert streamed == "Draft answer. Final answer."
+    assert "</think>" not in streamed
+
+
 @pytest.mark.asyncio
 async def test_stream_keeps_angle_brackets_that_are_not_tags() -> None:
     """A held tag prefix that never completes is released at the end of the turn."""

@@ -52,6 +52,30 @@ def test_extract_final_strips_think_block() -> None:
     assert extract_final("<think>reasoning</think>answer") == "answer"
 
 
+# The reply seen on Ollama qwen3.8 with thinking off (#1017): the template put
+# <think> in the prompt, so the output holds only the close.
+_BARE_CLOSE_REPLY = (
+    "I don't see a thermostat for the living room in this home.\n"
+    "</think>\n\n"
+    "There isn't a living room thermostat in this home.\n"
+)
+
+
+@pytest.mark.parametrize("collapse", [True, False])
+def test_extract_final_drops_reasoning_before_a_bare_close(*, collapse: bool) -> None:
+    final = extract_final(_BARE_CLOSE_REPLY, collapse_whitespace=collapse)
+    assert final == "There isn't a living room thermostat in this home."
+
+
+def test_extract_final_bare_close_then_a_full_block() -> None:
+    assert extract_final("plan</think>Yes. <think>more</think>Done.") == "Yes. Done."
+
+
+def test_extract_final_keeps_a_close_after_a_full_block() -> None:
+    """Only a close with no <think> before it ends prompt-opened reasoning."""
+    assert extract_final("<think>a</think>Answer") == "Answer"
+
+
 def test_extract_final_no_max_chars_returns_full() -> None:
     text = "word " * 50
     assert extract_final(text.strip()) == text.strip()

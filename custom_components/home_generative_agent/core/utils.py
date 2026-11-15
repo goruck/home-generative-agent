@@ -79,6 +79,10 @@ LOGGER = logging.getLogger(__name__)
 
 
 _THINK_BLOCK = re.compile(r"<think>.*?(?:</think>|$)", re.IGNORECASE | re.DOTALL)
+# Reasoning that ends in a </think> with no <think> before it. Qwen3 chat
+# templates put the opening tag in the prompt, so the model's own output is the
+# reasoning, a bare </think>, then the answer (#1017).
+_ORPHAN_THINK = re.compile(r"\A(?:(?!<think>).)*?</think>", re.IGNORECASE | re.DOTALL)
 
 # The last whitespace character of a string: the word boundary extract_final
 # truncates on. A plain rfind(" ") misses it when newlines are preserved.
@@ -2140,8 +2144,10 @@ def extract_final(
             for part in raw
             if isinstance(part, dict) and isinstance(part.get("text"), str)
         )
-    # Remove any leaked reasoning
-    s, think_blocks_removed = _THINK_BLOCK.subn("", raw)
+    # Remove any leaked reasoning, a bare </think> first (#1017).
+    s, orphan_removed = _ORPHAN_THINK.subn("", raw)
+    s, think_blocks_removed = _THINK_BLOCK.subn("", s)
+    think_blocks_removed += orphan_removed
     if collapse_whitespace:
         s = re.sub(r"\s+", " ", s).strip()
     elif think_blocks_removed:

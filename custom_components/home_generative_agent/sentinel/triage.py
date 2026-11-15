@@ -54,7 +54,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -99,8 +98,6 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 _PARSE_LOG_LIMITER = RepeatingLogLimiter(LOGGER)
-
-_THINK_BLOCK = re.compile(r"<think>.*?(?:</think>|$)", re.IGNORECASE | re.DOTALL)
 
 # Triage decision tokens.
 TRIAGE_NOTIFY = "notify"
@@ -518,10 +515,10 @@ def _parse_response(result: Any, elapsed_ms: int) -> TriageDecision:  # noqa: AR
 
     Fails-open to ``notify`` on any parse error.
     """
+    # extract_final drops reasoning, a bare </think> included (#1017).
     content = extract_final(getattr(result, "content", None) or "")
 
-    # Strip think blocks, then markdown fences if the model wrapped the JSON.
-    content = _THINK_BLOCK.sub("", content).strip()
+    # Strip markdown fences if the model wrapped the JSON.
     if content.startswith("```"):
         content = content.split("```")[1].lstrip("json").strip()
 
