@@ -43,7 +43,7 @@ This document covers the named constants that affect integration behaviour, orga
 
 | Constant | File | Value | Purpose |
 |---|---|---|---|
-| `CHAT_MODEL_TOP_P` | `const.py` | `1.0` | nucleus sampling p for chat |
+| `CHAT_MODEL_TOP_P` | `const.py` | `1.0` | Top P for chat when the feature's **Top P** is empty, on OpenAI, Gemini and Ollama. An OpenAI-compatible server then gets none and keeps the model's own value |
 | `GEMINI_3_RECOMMENDED_TEMPERATURE` | `const.py` | `1.0` | Temperature bound to Gemini 3-family models (all features) when the feature temperature is still the recommended default; `top_p` is left unset in that case. An explicitly customized temperature is honored, with a logged warning |
 | `CHAT_MODEL_MAX_TOKENS` | `const.py` | `None` | Ollama max tokens. `None` is dropped by langchain-ollama/ollama, so the server applies its own default (local: fill-context; Cloud: model default). Was `-2`, rejected by Ollama Cloud (issue #614). |
 | `CHAT_MODEL_REPEAT_PENALTY` | `const.py` | `1.05` | Ollama repeat penalty |
@@ -82,7 +82,7 @@ This document covers the named constants that affect integration behaviour, orga
 
 | Constant | File | Value | Purpose |
 |---|---|---|---|
-| `VLM_TOP_P` | `const.py` | `1.0` | Nucleus sampling p for VLM |
+| `VLM_TOP_P` | `const.py` | `1.0` | Top P for camera image analysis when the feature's **Top P** is empty, on OpenAI, Gemini and Ollama (not OpenAI-compatible) |
 | `VLM_NUM_PREDICT` | `const.py` | `None` | Ollama token budget for agent image analysis. `None` lets the server apply its own default. Was `-2`, rejected by Ollama Cloud (issue #614). |
 | `VIDEO_VLM_NUM_PREDICT` | `const.py` | `256` | Token budget for proactive video frame descriptions. Capped intentionally to prevent video from monopolizing context. |
 | `VLM_REPEAT_PENALTY` | `const.py` | `1.05` | Ollama repeat penalty |
@@ -120,7 +120,7 @@ This document covers the named constants that affect integration behaviour, orga
 
 | Constant | File | Value | Purpose |
 |---|---|---|---|
-| `SUMMARIZATION_MODEL_TOP_P` | `const.py` | `1.0` | Nucleus sampling p |
+| `SUMMARIZATION_MODEL_TOP_P` | `const.py` | `1.0` | Top P for summarization when the feature's **Top P** is empty, on OpenAI, Gemini and Ollama (not OpenAI-compatible) |
 | `SUMMARIZATION_MODEL_PREDICT` | `const.py` | `None` | Ollama token budget for conversation summaries. `None` lets the server apply its own default. Was `-2`, rejected by Ollama Cloud (issue #614). |
 | `VIDEO_SUMMARY_NUM_PREDICT` | `const.py` | `128` | Token budget for video batch summaries. Capped to prevent video from blocking other callers. |
 | `SUMMARIZATION_MODEL_REPEAT_PENALTY` | `const.py` | `1.05` | Ollama repeat penalty |
@@ -152,7 +152,7 @@ The model Sentinel's triage, discovery and explanation calls run on when a **Sen
 | `RECOMMENDED_SENTINEL_MODEL_TEMPERATURE` | `sentinel_model_temperature` | `0.2` | Sampling temperature |
 | `RECOMMENDED_OLLAMA_SENTINEL_KEEPALIVE` | `ollama_sentinel_keepalive` | `300` (s) | Ollama keep-alive |
 | `RECOMMENDED_OLLAMA_SENTINEL_URL` | `ollama_sentinel_url` | `http://localhost:11434` | The feature's Ollama server, written from its provider |
-| `SENTINEL_MODEL_TOP_P` | — | `1.0` | Nucleus sampling |
+| `SENTINEL_MODEL_TOP_P` | — | `1.0` | Top P for Sentinel when the feature's **Top P** is empty, on OpenAI, Gemini and Ollama (not OpenAI-compatible) |
 | `SENTINEL_MODEL_PREDICT` / `SENTINEL_MODEL_REPEAT_PENALTY` / `SENTINEL_MIRO_STAT` | — | `None` / `1.05` / `0` | Ollama generation settings, as for summarization |
 
 ## Embeddings

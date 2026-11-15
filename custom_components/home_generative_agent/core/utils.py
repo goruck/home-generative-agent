@@ -1854,6 +1854,8 @@ _GPT5_MINOR_RE = re.compile(r"gpt-5\.(\d+)")
 # OpenAI: "Starting with GPT-5.4, Chat Completions does not support tool calling
 # with reasoning_effort values other than none."
 _FIRST_GPT5_MINOR_ON_RESPONSES = 4
+# OpenAI's o-series reasoning models: o1, o3, o4-mini and so on.
+_O_SERIES_RE = re.compile(r"o\d")
 
 
 def openai_uses_responses_api(model: Any) -> bool:
@@ -1873,15 +1875,33 @@ def openai_uses_responses_api(model: Any) -> bool:
     return bool(match and int(match.group(1)) >= _FIRST_GPT5_MINOR_ON_RESPONSES)
 
 
+def _openai_takes_only_default_top_p(model: Any) -> bool:
+    """
+    Return True for an OpenAI reasoning model on Chat Completions.
+
+    GPT-5 (but not `gpt-5-chat`) and the o-series accept only the default
+    top_p and answer any other value with HTTP 400. langchain-openai drops a
+    non-default temperature for GPT-5, but not top_p.
+    """
+    name = str(model or "").lower()
+    if name.startswith("gpt-5"):
+        return "chat" not in name
+    return bool(_O_SERIES_RE.match(name))
+
+
 def openai_api_configurable(model: Any) -> dict[str, Any]:
     """
     Return the per-call configurable entries that pick the OpenAI API for a model.
 
     A Responses model also gets no temperature or top_p: OpenAI's reasoning
     models accept only the default, and langchain-openai drops them for GPT-5
-    only. A model on Chat Completions keeps the caller's sampling values.
+    only. A reasoning model on Chat Completions gets no top_p either
+    (`_openai_takes_only_default_top_p`); other models keep the caller's
+    sampling values.
     """
     if not openai_uses_responses_api(model):
+        if _openai_takes_only_default_top_p(model):
+            return {"use_responses_api": False, "top_p": None}
         return {"use_responses_api": False}
     return {"use_responses_api": True, "temperature": None, "top_p": None}
 

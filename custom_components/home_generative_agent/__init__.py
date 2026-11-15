@@ -87,6 +87,7 @@ from .const import (
     CONF_AUDIT_HOT_MAX_RECORDS,
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CHAT_MODEL_TEMPERATURE,
+    CONF_CHAT_MODEL_TOP_P,
     CONF_CHAT_REASONING,
     CONF_CHAT_REASONING_BUDGET,
     CONF_CHAT_REASONING_BY_MODEL,
@@ -155,6 +156,7 @@ from .const import (
     CONF_SENTINEL_INTERVAL_SECONDS,
     CONF_SENTINEL_MODEL_PROVIDER,
     CONF_SENTINEL_MODEL_TEMPERATURE,
+    CONF_SENTINEL_MODEL_TOP_P,
     CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
     CONF_SENTINEL_RESPONSE_LANGUAGE,
     CONF_SENTINEL_TRIAGE_ENABLED,
@@ -162,12 +164,14 @@ from .const import (
     CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS,
     CONF_SUMMARIZATION_MODEL_PROVIDER,
     CONF_SUMMARIZATION_MODEL_TEMPERATURE,
+    CONF_SUMMARIZATION_MODEL_TOP_P,
     CONF_VECTORS_BOOTSTRAPPED,
     CONF_VIDEO_ANALYZER_MODE,
     CONF_VLM_PROMPT_EXTRA,
     CONF_VLM_PROVIDER,
     CONF_VLM_RESPONSE_LANGUAGE,
     CONF_VLM_TEMPERATURE,
+    CONF_VLM_TOP_P,
     CONFIG_ENTRY_MINOR_VERSION,
     CONFIG_ENTRY_VERSION,
     DEFAULT_FEATURE_TYPES,
@@ -1532,6 +1536,11 @@ async def _async_load_frontend_cards(hass: HomeAssistant) -> None:
     version = (await async_get_integration(hass, DOMAIN)).version
     for card in HGA_FRONTEND_CARDS:
         add_extra_js_url(hass, f"{HGA_CARD_STATIC_PATH}/{card}?v={version}")
+
+
+def _top_p_if_set(top_p: float | None) -> dict[str, float]:
+    """Return a configured top-p; without one the server keeps the model's own."""
+    return {} if top_p is None else {"top_p": top_p}
 
 
 def _resolve_www_dir() -> str | None:
@@ -3656,6 +3665,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     chat_temp = options.get(
         CONF_CHAT_MODEL_TEMPERATURE, RECOMMENDED_CHAT_MODEL_TEMPERATURE
     )
+    chat_top_p_setting = options.get(CONF_CHAT_MODEL_TOP_P)
+    chat_top_p = options.get(CONF_CHAT_MODEL_TOP_P, CHAT_MODEL_TOP_P)
     chat_reasoning = options.get(CONF_CHAT_REASONING)
     chat_reasoning_budget = options.get(CONF_CHAT_REASONING_BUDGET)
     chat_reasoning_by_model: dict[str, Any] = dict(
@@ -3705,7 +3716,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     )
     ollama_chat_model_options = {
         "temperature": chat_temp,
-        "top_p": CHAT_MODEL_TOP_P,
+        "top_p": chat_top_p,
         "num_predict": CHAT_MODEL_MAX_TOKENS,
         "num_ctx": ollama_chat_context_size,
         "repeat_penalty": CHAT_MODEL_REPEAT_PENALTY,
@@ -3720,7 +3731,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 "configurable": {
                     "model_name": openai_chat_model,
                     "temperature": chat_temp,
-                    "top_p": CHAT_MODEL_TOP_P,
+                    "top_p": chat_top_p,
                     **openai_api_configurable(openai_chat_model),
                     **_chat_thinking_for_model("openai", openai_chat_model),
                 }
@@ -3738,7 +3749,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 "configurable": {
                     "model_name": openai_compatible_chat_model,
                     "temperature": chat_temp,
-                    "top_p": CHAT_MODEL_TOP_P,
+                    **_top_p_if_set(chat_top_p_setting),
                     **_chat_thinking_for_model(
                         "openai_compatible", openai_compatible_chat_model
                     ),
@@ -3756,7 +3767,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     **gemini_sampling_configurable(
                         model=gemini_chat_model,
                         temperature=chat_temp,
-                        top_p=CHAT_MODEL_TOP_P,
+                        top_p=chat_top_p,
                         recommended_temperature=RECOMMENDED_CHAT_MODEL_TEMPERATURE,
                     ),
                     **_chat_thinking_for_model("gemini", gemini_chat_model),
@@ -3789,7 +3800,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 "configurable": {
                     "model": ollama_chat_model,
                     "temperature": chat_temp,
-                    "top_p": CHAT_MODEL_TOP_P,
+                    "top_p": chat_top_p,
                     "num_predict": CHAT_MODEL_MAX_TOKENS,
                     "num_ctx": ollama_chat_context_size,
                     "repeat_penalty": CHAT_MODEL_REPEAT_PENALTY,
@@ -3802,6 +3813,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     # VLM
     vlm_provider = options.get(CONF_VLM_PROVIDER, RECOMMENDED_VLM_PROVIDER)
     vlm_temp = options.get(CONF_VLM_TEMPERATURE, RECOMMENDED_VLM_TEMPERATURE)
+    vlm_top_p_setting = options.get(CONF_VLM_TOP_P)
+    vlm_top_p = options.get(CONF_VLM_TOP_P, VLM_TOP_P)
     if vlm_provider == "openai":
         openai_vlm = options.get(CONF_OPENAI_VLM, RECOMMENDED_OPENAI_VLM)
         vision_model = (_head_model("vlm", openai_provider) or NullChat()).with_config(
@@ -3809,7 +3822,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 "configurable": {
                     "model_name": openai_vlm,
                     "temperature": vlm_temp,
-                    "top_p": VLM_TOP_P,
+                    "top_p": vlm_top_p,
                     **openai_api_configurable(openai_vlm),
                 }
             }
@@ -3824,7 +3837,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                         CONF_OPENAI_COMPATIBLE_VLM, RECOMMENDED_OPENAI_COMPATIBLE_VLM
                     ),
                     "temperature": vlm_temp,
-                    "top_p": VLM_TOP_P,
+                    **_top_p_if_set(vlm_top_p_setting),
                 }
             }
         )
@@ -3837,7 +3850,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     **gemini_sampling_configurable(
                         model=gemini_vlm,
                         temperature=vlm_temp,
-                        top_p=VLM_TOP_P,
+                        top_p=vlm_top_p,
                         recommended_temperature=RECOMMENDED_VLM_TEMPERATURE,
                     ),
                 }
@@ -3862,7 +3875,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 "configurable": {
                     "model": ollama_vlm,
                     "temperature": vlm_temp,
-                    "top_p": VLM_TOP_P,
+                    "top_p": vlm_top_p,
                     "num_predict": VLM_NUM_PREDICT,
                     "num_ctx": options.get(
                         CONF_OLLAMA_VLM_CONTEXT_SIZE, RECOMMENDED_OLLAMA_CONTEXT_SIZE
@@ -3885,6 +3898,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         CONF_SUMMARIZATION_MODEL_TEMPERATURE,
         RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     )
+    sum_top_p_setting = options.get(CONF_SUMMARIZATION_MODEL_TOP_P)
+    sum_top_p = options.get(CONF_SUMMARIZATION_MODEL_TOP_P, SUMMARIZATION_MODEL_TOP_P)
     if sum_provider == "openai":
         openai_sum_model = options.get(
             CONF_OPENAI_SUMMARIZATION_MODEL, RECOMMENDED_OPENAI_SUMMARIZATION_MODEL
@@ -3896,7 +3911,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 "configurable": {
                     "model_name": openai_sum_model,
                     "temperature": sum_temp,
-                    "top_p": SUMMARIZATION_MODEL_TOP_P,
+                    "top_p": sum_top_p,
                     **openai_api_configurable(openai_sum_model),
                 }
             }
@@ -3912,7 +3927,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                         RECOMMENDED_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
                     ),
                     "temperature": sum_temp,
-                    "top_p": SUMMARIZATION_MODEL_TOP_P,
+                    **_top_p_if_set(sum_top_p_setting),
                 }
             }
         )
@@ -3930,7 +3945,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     **gemini_sampling_configurable(
                         model=gemini_sum_model,
                         temperature=sum_temp,
-                        top_p=SUMMARIZATION_MODEL_TOP_P,
+                        top_p=sum_top_p,
                         recommended_temperature=(
                             RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE
                         ),
@@ -3965,7 +3980,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 "configurable": {
                     "model": ollama_summarization_model,
                     "temperature": sum_temp,
-                    "top_p": SUMMARIZATION_MODEL_TOP_P,
+                    "top_p": sum_top_p,
                     "num_predict": SUMMARIZATION_MODEL_PREDICT,
                     "num_ctx": options.get(
                         CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
@@ -3990,6 +4005,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     sentinel_temp = options.get(
         CONF_SENTINEL_MODEL_TEMPERATURE, RECOMMENDED_SENTINEL_MODEL_TEMPERATURE
     )
+    sentinel_top_p_setting = options.get(CONF_SENTINEL_MODEL_TOP_P)
+    sentinel_top_p = options.get(CONF_SENTINEL_MODEL_TOP_P, SENTINEL_MODEL_TOP_P)
     if sentinel_provider == "openai":
         openai_sentinel_model = options.get(
             CONF_OPENAI_SENTINEL_MODEL, RECOMMENDED_OPENAI_SENTINEL_MODEL
@@ -4001,7 +4018,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 "configurable": {
                     "model_name": openai_sentinel_model,
                     "temperature": sentinel_temp,
-                    "top_p": SENTINEL_MODEL_TOP_P,
+                    "top_p": sentinel_top_p,
                     **openai_api_configurable(openai_sentinel_model),
                 }
             }
@@ -4017,7 +4034,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                         RECOMMENDED_OPENAI_COMPATIBLE_SENTINEL_MODEL,
                     ),
                     "temperature": sentinel_temp,
-                    "top_p": SENTINEL_MODEL_TOP_P,
+                    **_top_p_if_set(sentinel_top_p_setting),
                 }
             }
         )
@@ -4034,7 +4051,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     **gemini_sampling_configurable(
                         model=gemini_sentinel_model,
                         temperature=sentinel_temp,
-                        top_p=SENTINEL_MODEL_TOP_P,
+                        top_p=sentinel_top_p,
                         recommended_temperature=RECOMMENDED_SENTINEL_MODEL_TEMPERATURE,
                     ),
                 }
@@ -4063,7 +4080,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 "configurable": {
                     "model": ollama_sentinel_model,
                     "temperature": sentinel_temp,
-                    "top_p": SENTINEL_MODEL_TOP_P,
+                    "top_p": sentinel_top_p,
                     "num_predict": SENTINEL_MODEL_PREDICT,
                     "num_ctx": options.get(
                         CONF_OLLAMA_SENTINEL_CONTEXT_SIZE,
@@ -4093,14 +4110,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     def _category_top_p(category: str) -> float | None:
         """Return the top-p value for chat-like categories."""
         if category == "chat":
-            return CHAT_MODEL_TOP_P
+            return chat_top_p
         if category == "vlm":
-            return VLM_TOP_P
+            return vlm_top_p
         if category == "summarization":
-            return SUMMARIZATION_MODEL_TOP_P
+            return sum_top_p
         if category == "sentinel":
-            return SENTINEL_MODEL_TOP_P
+            return sentinel_top_p
         return None
+
+    def _category_top_p_setting(category: str) -> float | None:
+        """Return the top-p the user set for a category; None when left empty."""
+        return {
+            "chat": chat_top_p_setting,
+            "vlm": vlm_top_p_setting,
+            "summarization": sum_top_p_setting,
+            "sentinel": sentinel_top_p_setting,
+        }.get(category)
 
     def _configured_cloud_model(
         model: Any,
@@ -4116,7 +4142,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             else "model"
         )
         config = {model_key: model_name, "temperature": temperature}
-        if (top_p := _category_top_p(category)) is not None:
+        # An OpenAI-compatible server applies the model's own top_p default.
+        top_p = _category_top_p(category)
+        if provider.provider_type == "openai_compatible":
+            config.update(_top_p_if_set(_category_top_p_setting(category)))
+        elif top_p is not None:
             config["top_p"] = top_p
         if provider.provider_type == "openai":
             config.update(openai_api_configurable(model_name))
@@ -4161,7 +4191,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         if category == "chat":
             config.update(
                 {
-                    "top_p": CHAT_MODEL_TOP_P,
+                    "top_p": chat_top_p,
                     "num_predict": CHAT_MODEL_MAX_TOKENS,
                     "num_ctx": settings.get(
                         "chat_context", RECOMMENDED_OLLAMA_CONTEXT_SIZE
@@ -4175,7 +4205,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         elif category == "vlm":
             config.update(
                 {
-                    "top_p": VLM_TOP_P,
+                    "top_p": vlm_top_p,
                     "num_predict": VLM_NUM_PREDICT,
                     "num_ctx": settings.get(
                         "vlm_context", RECOMMENDED_OLLAMA_CONTEXT_SIZE
@@ -4190,7 +4220,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         elif category == "summarization":
             config.update(
                 {
-                    "top_p": SUMMARIZATION_MODEL_TOP_P,
+                    "top_p": sum_top_p,
                     "num_predict": SUMMARIZATION_MODEL_PREDICT,
                     "num_ctx": settings.get(
                         "summarization_context", RECOMMENDED_OLLAMA_CONTEXT_SIZE
@@ -4206,7 +4236,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         elif category == "sentinel":
             config.update(
                 {
-                    "top_p": SENTINEL_MODEL_TOP_P,
+                    "top_p": sentinel_top_p,
                     "num_predict": SENTINEL_MODEL_PREDICT,
                     "num_ctx": settings.get(
                         "sentinel_context", RECOMMENDED_OLLAMA_CONTEXT_SIZE
