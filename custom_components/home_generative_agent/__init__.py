@@ -4250,13 +4250,59 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             )
         return model.with_config(config={"configurable": config})
 
+    def _with_primary_settings(
+        provider: ModelProviderConfig,
+        category: str,
+        primary: ModelProviderConfig,
+        primary_model: Any,
+    ) -> ModelProviderConfig:
+        """
+        Return the provider, filling unset settings from the primary's model.
+
+        A model provider added in the UI stores only how to reach it, so as a
+        fallback it ran the provider type's recommended model at the
+        recommended context size: a second Ollama server was asked for a model
+        it may not have, with a context that may not fit (#1022). A fallback of
+        the primary's type runs the primary's model instead, and for Ollama its
+        context size and keep-alive. Settings the provider stores itself (a
+        legacy provider's) still come first.
+        """
+        if provider.provider_type != primary.provider_type:
+            return provider
+        config = getattr(primary_model, "config", None)
+        configurable = (
+            config.get("configurable") if isinstance(config, Mapping) else None
+        )
+        if not isinstance(configurable, Mapping):
+            return provider
+        inherited: dict[str, Any] = {}
+        model_name = configurable.get("model_name") or configurable.get("model")
+        if model_name:
+            inherited[f"{category}_model"] = model_name
+        if provider.provider_type == "ollama":
+            for key, setting in (("num_ctx", "context"), ("keep_alive", "keepalive")):
+                if configurable.get(key) is not None:
+                    inherited[f"{category}_{setting}"] = configurable[key]
+        if not inherited:
+            return provider
+        settings = provider.data.get("settings", {})
+        merged = {
+            **inherited,
+            **{k: v for k, v in settings.items() if v not in (None, "")},
+        }
+        return replace(provider, data={**provider.data, "settings": merged})
+
     def _configured_model_for_provider(
-        provider: ModelProviderConfig, category: str
+        provider: ModelProviderConfig,
+        category: str,
+        primary: tuple[ModelProviderConfig, Any] | None = None,
     ) -> Any:
         """Return a category-configured model instance for a fallback provider."""
         model = _model_instance_for_provider(provider)
         if model is None:
             return None
+        if primary is not None:
+            provider = _with_primary_settings(provider, category, *primary)
 
         model_name = _fallback_model_name(provider, category)
         spec = MODEL_CATEGORY_SPECS.get(category, {})
@@ -4399,7 +4445,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             "chat",
         )
         for p in _chat_fb[1:]:
-            m = _configured_model_for_provider(p, "chat")
+            m = _configured_model_for_provider(p, "chat", (_chat_fb[0], chat_model))
             if m is not None:
                 _append_available_model(
                     _chat_chain, m, p.deployment, p.entry_id, "chat"
@@ -4428,7 +4474,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             "vlm",
         )
         for p in _vlm_fb[1:]:
-            m = _configured_model_for_provider(p, "vlm")
+            m = _configured_model_for_provider(p, "vlm", (_vlm_fb[0], vision_model))
             if m is not None:
                 _append_available_model(_vlm_chain, m, p.deployment, p.entry_id, "vlm")
         vision_model = _finalize_model_chain(
@@ -4455,7 +4501,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             "summarization",
         )
         for p in _sum_fb[1:]:
-            m = _configured_model_for_provider(p, "summarization")
+            m = _configured_model_for_provider(
+                p, "summarization", (_sum_fb[0], summarization_model)
+            )
             if m is not None:
                 _append_available_model(
                     _sum_chain, m, p.deployment, p.entry_id, "summarization"
@@ -4484,7 +4532,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             "sentinel",
         )
         for p in _sent_fb[1:]:
-            m = _configured_model_for_provider(p, "sentinel")
+            m = _configured_model_for_provider(
+                p, "sentinel", (_sent_fb[0], sentinel_model)
+            )
             if m is not None:
                 _append_available_model(
                     _sent_chain, m, p.deployment, p.entry_id, "sentinel"
