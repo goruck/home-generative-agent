@@ -341,6 +341,7 @@ from .core.lifecycle import (
     async_watch_database_deletion,
     defer_start_until_hass_started,
 )
+from .core.memories import register_memory_services
 from .core.migrations import migrate_person_gallery
 from .core.openai_client import StatelessReasoningChatOpenAI
 from .core.openai_preload import preload_openai_resources
@@ -1799,6 +1800,10 @@ class NullChat:
 class NullStore:
     """Non-throwing fallback for memory store operations."""
 
+    # core.memories.store_available reads this: the memory services refuse
+    # to run on it, and the memory tools see an empty store.
+    is_null_store = True
+
     async def asearch(self, *_args: Any, **_kwargs: Any) -> list[Any]:
         """Return an empty result set."""
         return []
@@ -1806,6 +1811,18 @@ class NullStore:
     async def aput(self, *_args: Any, **_kwargs: Any) -> None:
         """No-op write."""
         return
+
+    async def aget(self, *_args: Any, **_kwargs: Any) -> None:
+        """Return no item."""
+        return
+
+    async def adelete(self, *_args: Any, **_kwargs: Any) -> None:
+        """No-op delete."""
+        return
+
+    async def alist_namespaces(self, *_args: Any, **_kwargs: Any) -> list[Any]:
+        """Return no namespaces."""
+        return []
 
 
 def _ollama_httpx_client_kwargs() -> dict[str, Any]:
@@ -2234,6 +2251,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     _utils_mod._sentinel_llm_tasks = set()  # noqa: SLF001
 
     _register_services(hass, entry)
+    register_memory_services(hass, entry, _register_entry_service)
     _ensure_default_feature_subentries(hass, entry)
     _assign_first_provider_if_needed(hass, entry)
 

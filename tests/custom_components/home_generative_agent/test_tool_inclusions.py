@@ -507,17 +507,78 @@ async def test_retrieve_tools_appends_an_included_tool_rag_missed() -> None:
     assert "HassBroadcast" in result["tool_routing_map"]
 
 
+_MEMORY_TOOLS = ("upsert_memory", "list_memories", "forget_memory")
+
+
 def _memory_config(
     options: dict[str, Any], *, has_memory_user: bool = True
 ) -> RunnableConfig:
     config: Any = _config(options=options, live={"assist": ["HassBroadcast"]})
-    config["configurable"]["langchain_tools"] = {"upsert_memory": MagicMock()}
+    # Real tools carry text, which the keyword fallback ranks on.
+    config["configurable"]["langchain_tools"] = {
+        name: MagicMock(description=f"The {name} tool.") for name in _MEMORY_TOOLS
+    }
     config["configurable"]["has_memory_user"] = has_memory_user
     return config
 
 
 _MEMORY_ROW = {"hga_local::upsert_memory": _index_row("upsert_memory", "hga_local")}
 _REMEMBER = "Запомни, что я покормил рыб"
+
+
+@pytest.mark.asyncio
+async def test_memory_list_tool_is_offered_when_rag_misses_it() -> None:
+    """Asking what is remembered must reach its tool every turn."""
+    store = _store(
+        [_search_item("HassBroadcast", score=0.6)],
+        {f"hga_local::{name}": _index_row(name, "hga_local") for name in _MEMORY_TOOLS},
+    )
+
+    result = await _retrieve_tools(
+        _state("What do you remember about me?"),
+        _memory_config({"llm_hass_api": ["assist"], "tool_retrieval_limit": 1}),
+        store=store,
+    )
+
+    assert result["tool_routing_map"].get("upsert_memory") == "hga_local"
+    assert result["tool_routing_map"].get("list_memories") == "hga_local"
+    # It deletes, and no eval shows models leave it alone on commands.
+    assert "forget_memory" not in result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_ranking_still_binds_the_forget_tool() -> None:
+    """A request to forget reaches the tool when tool search picks it."""
+    store = _store(
+        [_search_item("forget_memory", score=0.9, api_id="hga_local")],
+        {f"hga_local::{name}": _index_row(name, "hga_local") for name in _MEMORY_TOOLS},
+    )
+
+    result = await _retrieve_tools(
+        _state("Forget that I drink tea"),
+        _memory_config({"llm_hass_api": ["assist"]}),
+        store=store,
+    )
+
+    assert result["tool_routing_map"].get("forget_memory") == "hga_local"
+
+
+@pytest.mark.asyncio
+async def test_memory_tools_need_a_memory_user() -> None:
+    """On a "robot" turn they would read and delete everyone's shared memories."""
+    store = _store(
+        [_search_item("HassBroadcast", score=0.6)],
+        {f"hga_local::{name}": _index_row(name, "hga_local") for name in _MEMORY_TOOLS},
+    )
+
+    result = await _retrieve_tools(
+        _state("What do you remember about me?"),
+        _memory_config({"llm_hass_api": ["assist"]}, has_memory_user=False),
+        store=store,
+    )
+
+    for name in _MEMORY_TOOLS:
+        assert name not in result["tool_routing_map"]
 
 
 @pytest.mark.asyncio
