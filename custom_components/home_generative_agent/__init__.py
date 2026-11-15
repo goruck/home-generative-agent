@@ -2727,28 +2727,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             hass, credential[0], credential[1], timeout_s=health_timeout
         )
 
-    async def _not_configured() -> bool:
-        return False
-
-    # The type checks and every other credential's, in one batch. A type with
-    # no default credential is not checked: its check would only warn about
-    # a setting nobody uses (#1018).
+    # The type checks and every other credential's, in one batch.
     own_keys = list(own_credentials)
     health_results = await asyncio.gather(
-        openai_healthy(hass, api_key, timeout_s=health_timeout)
-        if api_key
-        else _not_configured(),
-        gemini_healthy(hass, gemini_key, timeout_s=health_timeout)
-        if gemini_key
-        else _not_configured(),
+        openai_healthy(hass, api_key, timeout_s=health_timeout),
+        gemini_healthy(hass, gemini_key, timeout_s=health_timeout),
         openai_compatible_healthy(
             hass,
             openai_compatible_base_url,
             openai_compatible_api_key,
             timeout_s=health_timeout,
-        )
-        if openai_compatible_base_url
-        else _not_configured(),
+        ),
         anthropic_healthy(hass, anthropic_key, timeout_s=health_timeout),
         *(_credential_healthy(t, c) for t, c in own_keys),
     )

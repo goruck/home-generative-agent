@@ -1123,7 +1123,7 @@ async def openai_healthy(
 ) -> bool:
     """Return True if OpenAI API is reachable, False otherwise."""
     if not api_key:
-        LOGGER.warning("OpenAI health check skipped: missing API key.")
+        LOGGER.debug("OpenAI health check skipped: not configured.")
         return False
     try:
         await validate_openai_key(hass, api_key, timeout_s)
@@ -1139,7 +1139,7 @@ async def gemini_healthy(
 ) -> bool:
     """Return True if Gemini API is reachable, False otherwise."""
     if not api_key:
-        LOGGER.warning("Gemini health check skipped: missing API key.")
+        LOGGER.debug("Gemini health check skipped: not configured.")
         return False
     try:
         await validate_gemini_key(hass, api_key, timeout_s)
@@ -1561,7 +1561,7 @@ async def openai_compatible_healthy(
 ) -> bool:
     """Return True if an OpenAI-compatible endpoint is reachable, False otherwise."""
     if not base_url:
-        LOGGER.warning("OpenAI-compatible health check skipped: missing base URL.")
+        LOGGER.debug("OpenAI-compatible health check skipped: not configured.")
         return False
     try:
         await validate_openai_compatible_url(

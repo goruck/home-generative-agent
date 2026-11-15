@@ -54,6 +54,7 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_GEMINI_CHAT_MODEL,
     VIDEO_ANALYZER_MODE_DISABLE,
 )
+from custom_components.home_generative_agent.core import utils
 from custom_components.home_generative_agent.core.embedding_store import (
     EmbeddingsUnavailableError,
     UnavailableEmbeddings,
@@ -2673,65 +2674,45 @@ async def test_an_openai_compatible_feature_sends_only_its_own_set_top_p(  # noq
 
 
 @pytest.mark.asyncio
-async def test_an_unconfigured_provider_type_is_not_health_checked(
-    hass: Any, monkeypatch: pytest.MonkeyPatch
+async def test_an_unconfigured_provider_type_logs_no_startup_warning(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """
-    No Gemini key or OpenAI-compatible URL: no check, so no startup warning.
+    No Gemini key and no OpenAI-compatible URL: nothing to warn about.
 
-    Each check warns about its missing setting, which read as a
-    misconfiguration on every boot of an install that never used it (#1018).
+    Each type's check warned about its missing setting on every startup, which
+    read as a misconfiguration on an install that never used the type (#1018).
     """
     entry = MockConfigEntry(domain=DOMAIN, data={})
     entry.add_to_hass(hass)
     hass.data.setdefault(DOMAIN, {})["http_registered"] = True
     data = _fallback_setup_data()
     _patch_setup_dependencies(hass, monkeypatch, data)
-    checked: list[str] = []
-
-    def _recorder(name: str) -> Any:
-        async def _check(*_args: Any, **_kwargs: Any) -> bool:
-            checked.append(name)
-            return False
-
-        return _check
-
-    monkeypatch.setattr(hga_component, "gemini_healthy", _recorder("gemini"))
+    # The real checks, which return early on a missing setting.
+    monkeypatch.setattr(hga_component, "gemini_healthy", utils.gemini_healthy)
     monkeypatch.setattr(
-        hga_component, "openai_compatible_healthy", _recorder("openai_compatible")
+        hga_component, "openai_compatible_healthy", utils.openai_compatible_healthy
     )
+    caplog.set_level("DEBUG")
 
     assert await cast("Any", hga_component).async_setup_entry(hass, entry)
 
-    assert checked == []
+    skipped = [r for r in caplog.records if "health check skipped" in r.message]
+    assert len(skipped) == 2
+    assert all(r.levelname == "DEBUG" for r in skipped)
 
 
 @pytest.mark.asyncio
-async def test_a_configured_provider_type_is_still_health_checked(
-    hass: Any, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "check",
+    [utils.openai_healthy, utils.gemini_healthy, utils.openai_compatible_healthy],
+)
+async def test_a_check_with_nothing_configured_logs_at_debug(
+    hass: Any, caplog: pytest.LogCaptureFixture, check: Any
 ) -> None:
-    entry = MockConfigEntry(domain=DOMAIN, data={})
-    entry.add_to_hass(hass)
-    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
-    data = _fallback_setup_data()
-    data.options[CONF_GEMINI_API_KEY] = "gem-key"
-    data.options[CONF_OPENAI_COMPATIBLE_BASE_URL] = "http://oc/v1"
-    _patch_setup_dependencies(hass, monkeypatch, data)
-    checked: list[str] = []
+    """A type nobody set up is not a warning (#1018)."""
+    caplog.set_level("DEBUG")
 
-    def _recorder(name: str) -> Any:
-        async def _check(*_args: Any, **_kwargs: Any) -> bool:
-            checked.append(name)
-            return False
+    assert await check(hass, "") is False
 
-        return _check
-
-    monkeypatch.setattr(hga_component, "gemini_healthy", _recorder("gemini"))
-    monkeypatch.setattr(
-        hga_component, "openai_compatible_healthy", _recorder("openai_compatible")
-    )
-
-    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
-
-    assert "gemini" in checked
-    assert "openai_compatible" in checked
+    assert [r.levelname for r in caplog.records] == ["DEBUG"]

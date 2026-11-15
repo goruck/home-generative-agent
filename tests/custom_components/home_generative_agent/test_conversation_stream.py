@@ -1249,6 +1249,10 @@ async def test_think_filter_survives_characters_that_lengthen_when_lowered() -> 
         ("<think>x</think>Answer\n",),
         ("<thi", "nk>x</think>\n\nLine one.\n\n", "Line two.\n"),
         ("Intro ", "<think>a</think>", " middle ", "<THINK>b</think>", " end\n"),
+        # A bare </think> counts only before any <think>, and only once (#1017).
+        ("<think>a</think>x</think>y",),
+        ("a</think>b</think>c",),
+        ("plan</think>Yes. <think>more</think>Done.",),
     ],
 )
 @pytest.mark.asyncio
