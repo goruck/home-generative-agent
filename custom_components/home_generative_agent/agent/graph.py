@@ -3847,6 +3847,12 @@ def _result_succeeded(msg: ToolMessage) -> bool:
     return data.get("success") is not False and not held
 
 
+def _result_partly_acted(msg: ToolMessage) -> bool:
+    """Return True for an action that acted on some of its devices only."""
+    data = loads_or_none(msg.content) if isinstance(msg.content, str) else None
+    return isinstance(data, dict) and bool(data.get("partial_failure"))
+
+
 def _empty_reply_fallback(
     messages: Sequence[AnyMessage], config: RunnableConfig
 ) -> str | None:
@@ -3877,11 +3883,13 @@ def _empty_reply_fallback(
     if _pin_line_is_the_reply(config):
         LOGGER.debug("Empty model response after tools; the PIN line is the reply.")
         return None
-    acted = [_result_succeeded(msg) for msg in _last_round_responses(messages)]
+    responses = _last_round_responses(messages)
+    acted = [_result_succeeded(msg) for msg in responses]
     if all(acted):
         LOGGER.debug("Empty model response after tool execution; injecting fallback.")
         return "Done."
-    if any(acted):
+    # One call can act on some devices only: its note says so (#1013 review).
+    if any(acted) or any(_result_partly_acted(msg) for msg in responses):
         LOGGER.warning(
             "Model returned an empty reply after a tool round that partly "
             "acted; saying so."

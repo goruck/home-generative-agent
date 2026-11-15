@@ -3033,6 +3033,37 @@ async def test_streamed_text_the_graph_dropped_is_not_kept_before_the_pin_line()
     assert chat_log.heard == []
 
 
+@pytest.mark.parametrize("failed", [False, True], ids=["no_pin_line", "stream_failed"])
+async def test_streamed_text_is_kept_unless_a_pin_line_follows_a_clean_stream(
+    *, failed: bool
+) -> None:
+    """A partial answer streamed before a failure, or with no PIN line, stays."""
+    from langchain_core.messages import ToolMessage  # noqa: PLC0415
+
+    chat_log = _refusal_turn_chat_log()
+    partial = _mk_content(
+        ha_conversation.AssistantContent,
+        agent_id=HGA_AGENT_ID,
+        content="The kitchen light is",
+        tool_calls=None,
+    )
+    chat_log.content.append(partial)
+    result = ToolMessage(content="{}", name="GetLiveContext", tool_call_id="c1")
+    app = _ended_app(result)
+    if failed:
+
+        async def _boom(**_kwargs: Any) -> Any:
+            msg = "Model invocation failed: 503"
+            raise HomeAssistantError(msg)
+            yield  # pragma: no cover - makes this an async generator
+
+        app.astream_events = _boom
+
+    await _run_astream(chat_log, app, (lambda: True) if failed else None)
+
+    assert partial in chat_log.content
+
+
 async def test_a_turn_that_ends_on_a_tool_call_without_a_pin_line_still_fails_aloud() -> (
     None
 ):

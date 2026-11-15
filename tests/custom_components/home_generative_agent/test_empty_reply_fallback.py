@@ -150,10 +150,6 @@ async def test_done_after_a_round_that_acted(
         pytest.param([_result({"warning": "Alarm did not arm."})], id="warning"),
         pytest.param([_result({"status": "error", "reason": "x"})], id="status_error"),
         pytest.param(
-            [_result({"response_type": "action_done", "partial_failure": "1 failed"})],
-            id="half_done",
-        ),
-        pytest.param(
             [_result({"response_type": "action_done", "failure": "No device acted"})],
             id="none_acted",
         ),
@@ -214,6 +210,11 @@ async def test_apology_after_a_round_that_did_not_act(
                 _result(f"{AUTOMATION_REFUSAL_PREFIX}: x", "c2", "add_automation"),
             ],
             id="one_automation_added_one_refused",
+        ),
+        # One call that acted on some of its devices only (#1013 review).
+        pytest.param(
+            [_result({"response_type": "action_done", "partial_failure": "1 failed"})],
+            id="half_done",
         ),
     ],
 )

@@ -2052,11 +2052,19 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 and not last_chat_content.tool_calls
                 else None
             )
-            if reply is not None and isinstance(last_message, ToolMessage):
+            if (
+                reply is not None
+                and isinstance(last_message, ToolMessage)
+                and stream_error is None
+                and pin_lines_pending is not None
+                and pin_lines_pending()
+            ):
                 # Text streamed after the turn's last tool round, while the
                 # graph ended on that round: a reply the graph dropped (one
                 # left empty once its reasoning was removed, with a PIN line
-                # to follow, #1013). It must not stay next to the PIN line.
+                # to follow, #1013). It must not stay next to the PIN line. Not
+                # after a failed stream: the text is then a partial answer the
+                # user already has, and the model call never committed.
                 chat_log.content.pop()
                 reply = None
                 _LOGGER.debug("Dropped streamed text the graph did not keep.")
