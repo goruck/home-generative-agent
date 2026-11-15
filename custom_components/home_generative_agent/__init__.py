@@ -1857,9 +1857,27 @@ class NullStore:
         return []
 
 
+# How long an Ollama server may take to accept the connection (#1026). The
+# ollama client sets no timeout at all, so a server whose address takes the
+# connection attempt and never answers (a sleeping Mac behind a sleep proxy, a
+# firewall that drops packets) held each call for its whole share of the
+# budget, 90 s of a conversation turn, before the fallback was tried. Reading
+# the reply stays unlimited, bounded by the caller's budget: loading a model
+# into memory happens after the connection is open, and can take minutes.
+OLLAMA_CONNECT_TIMEOUT_S = 5.0
+
+
 def _ollama_httpx_client_kwargs() -> dict[str, Any]:
-    """Return httpx kwargs that avoid creating SSL contexts in the event loop."""
-    return {"verify": client_context(alpn_protocols=SSL_ALPN_HTTP11)}
+    """
+    Return httpx kwargs for an Ollama client.
+
+    The SSL context is built here, off the event loop. The timeout limits only
+    the connect (#1026).
+    """
+    return {
+        "verify": client_context(alpn_protocols=SSL_ALPN_HTTP11),
+        "timeout": httpx.Timeout(None, connect=OLLAMA_CONNECT_TIMEOUT_S),
+    }
 
 
 async def _async_require_admin(
