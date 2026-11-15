@@ -2,6 +2,46 @@
 
 ## Agent
 
+### An empty reply with a PIN line leaves the round's other results unsaid
+
+**What:** When the model's reply after a tool round is empty and a fixed PIN line will be the reply, `_empty_reply_fallback` (`agent/graph.py`) adds nothing, so the line alone is the reply. The round's other results go unmentioned: in "turn on the porch light and unlock the front door", a failed light is never told, only "say your PIN to unlock the front door".
+
+**Why:** Claude adversarial, Codex and red team, review of #1013 (2026-11-15). Kept by Lindo's choice: the reply must end on the PIN question for a satellite to keep listening, and the apology ("Please try again") next to a PIN prompt contradicts it. Before #1013 the reply said "Done." for all of it. Needs both an empty model reply and a mixed round.
+
+**How to apply:** Add a fixed, translated line to `pin_messages.py` ("Part of that request did not work.") and have `_pin_lines` (`conversation.py`) put it before the prompt's line when a non-PIN result of the turn's last round failed; the graph would pass that fact on through the config, as `pin_reply` does. Test the mixed round for a waiting prompt, a confirmed action and a refusal line.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** None
+
+### Empty-reply fallback: review findings left unfixed (#1013)
+
+**What:** Four findings from the third review cycle of #1013, all in `_empty_reply_fallback` / `_result_succeeded` (`agent/graph.py`):
+1. A read-only result (GetLiveContext, history) counts as "acted", so a read plus a failed action gets the partial line ("Some of that may not have worked") when nothing acted. Counting only actuation results was left out: `is_actuation_tool` matches name prefixes and may miss scripts or remote tools, which would then get "Please try again" and run twice.
+2. The graph decides a PIN line is the reply from `pending_actions` at the model call; conversation.py reads it again after the summarize node. A prompt evicted in between leaves the turn with the streaming failure text ("try again") after tools that may have acted. The round-limit guard has the same window.
+3. An HA intent result with `response_type: "error"` that a handler returns rather than raises reads as success. Not confirmed that any handler does.
+4. Pre-existing: an add_automation that times out (`_LC_TOOL_TIMEOUT_S`) after `_async_write_automation` appended to automations.yaml reads as failed, and the apology's "try again" can add it twice.
+
+**Why:** Claude adversarial pass and Codex, review cycle 3 of #1013 (2026-11-15). Each needs an empty model reply first; none fails a test or loses data.
+
+**How to apply:** (1) Mark read-only tools by their `read_only` annotation or tool kind and leave them out of the any/all choice. (2) Pass the graph's decision to conversation.py on the config, as `pin_reply` is, instead of re-reading the store. (3) Treat `response_type == "error"` as failed in `_result_succeeded` once a returning handler is found. (4) Make the write idempotent per call, or have the timeout result say the automation may have been added.
+
+**Effort:** S each
+**Priority:** P3
+**Depends on:** None
+
+### alarm_control's plain-text error loses its text
+
+**What:** `_run_langchain_tool` (`agent/graph.py`) sets `status = None` when `alarm_control` returns text that is not JSON ("Error controlling alarm: …", "Configuration not found…"), and `ToolMessage(status=None)` fails validation. The `except ValidationError` then turns it into the generic tool error, so the model gets `ValidationError(...)` instead of the alarm's own message.
+
+**Why:** Claude adversarial pass, review of #1013 (2026-11-15). Pre-existing; the result still reads as an error, so nothing claims the alarm changed.
+
+**How to apply:** On `json.JSONDecodeError` set `status = "error"` and keep `result_str`. Test: a stub `alarm_control` returning "Error controlling alarm: x" gives an error ToolMessage whose content is that text.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
 ### No test proves the handler passes a followed PIN prompt's owner into the run
 
 **What:** `_async_handle_message_active` (`conversation.py`) sets `user_id` to the speaker's memory user and `pin_owner` to the prompt's owner, but no test runs the handler: the check only searches the source text. Renaming the config key, or setting `user_id` from the prompt's owner (the leak #941's review closed), would still pass every test.

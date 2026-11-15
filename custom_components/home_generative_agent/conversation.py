@@ -1898,9 +1898,11 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             if isinstance(last, ToolMessage):
                 # A turn ends on a tool round by design: a confirmation
                 # refused before the user was asked for the PIN (graph.py,
-                # `_after_tools`), or the round-limit guard with a PIN line
-                # to follow. _async_finish_reply adds the reply: the PIN
-                # lines, or an apology when there are none.
+                # `_after_tools`), the round-limit guard with a PIN line to
+                # follow, or an empty model reply with a PIN line to follow
+                # (`_empty_reply_fallback`, #1013). _async_finish_reply
+                # adds the reply: the PIN lines, or an apology when there
+                # are none.
                 _LOGGER.debug("Turn ended on a tool round (%s).", last.name)
             else:
                 _LOGGER.error(
@@ -2050,6 +2052,22 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 and not last_chat_content.tool_calls
                 else None
             )
+            if (
+                reply is not None
+                and isinstance(last_message, ToolMessage)
+                and stream_error is None
+                and pin_lines_pending is not None
+                and pin_lines_pending()
+            ):
+                # Text streamed after the turn's last tool round, while the
+                # graph ended on that round: a reply the graph dropped (one
+                # left empty once its reasoning was removed, with a PIN line
+                # to follow, #1013). It must not stay next to the PIN line. Not
+                # after a failed stream: the text is then a partial answer the
+                # user already has, and the model call never committed.
+                chat_log.content.pop()
+                reply = None
+                _LOGGER.debug("Dropped streamed text the graph did not keep.")
             has_reply = reply is not None
             replace_partial = (
                 reply is not None

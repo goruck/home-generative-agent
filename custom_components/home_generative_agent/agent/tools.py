@@ -104,6 +104,7 @@ from ..sentinel.notifier_messages import notif_msg  # noqa: TID252
 from ..sentinel.redaction import redact_network_identifiers  # noqa: TID252
 from .automation_pin import find_critical_automation_calls
 from .automation_targets import (
+    AUTOMATION_ADDED_PREFIX,
     AUTOMATION_REFUSAL_PREFIX,
     describe_missing_targets,
     exposed_to_assist,
@@ -1094,7 +1095,7 @@ async def _async_write_automation(
         },
     )
 
-    return f"Added automation {ha_automation_config['id']}"
+    return f"{AUTOMATION_ADDED_PREFIX}{ha_automation_config['id']}"
 
 
 @tool(parse_docstring=True)
