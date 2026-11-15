@@ -67,6 +67,7 @@ except ImportError:
 _HTTP_TRANSPORT_ERRORS: tuple[type[Exception], ...] = ()
 _HTTP_TIMEOUTS: tuple[type[Exception], ...] = ()
 _HTTP_POOL_TIMEOUTS: tuple[type[Exception], ...] = ()
+_HTTP_CONNECT_TIMEOUTS: tuple[type[Exception], ...] = ()
 for _http_module in ("httpx", "httpx2"):
     try:
         _http = importlib.import_module(_http_module)
@@ -75,6 +76,7 @@ for _http_module in ("httpx", "httpx2"):
     _HTTP_TRANSPORT_ERRORS += (_http.TransportError,)
     _HTTP_TIMEOUTS += (_http.TimeoutException,)
     _HTTP_POOL_TIMEOUTS += (_http.PoolTimeout,)
+    _HTTP_CONNECT_TIMEOUTS += (_http.ConnectTimeout,)
 FALLBACK_RETRYABLE_EXCEPTIONS += _HTTP_TRANSPORT_ERRORS
 
 try:
@@ -291,6 +293,25 @@ def is_timeout_error(err: BaseException) -> bool:
         ):
             return True
         if isinstance(seen, _HTTP_TIMEOUTS):
+            return True
+        seen = seen.__cause__
+    return False
+
+
+def _is_connect_timeout(err: BaseException) -> bool:
+    """
+    Return True if the provider never took the connection (#1026).
+
+    Ollama connections give up after a few seconds, far below the wait that
+    counts as stall evidence, so a server whose address swallows the
+    connection (a sleeping Mac) would cost every turn those seconds and never
+    be skipped. Not having taken the connection is evidence enough.
+    """
+    seen: BaseException | None = err
+    for _ in range(_MAX_CAUSE_DEPTH):
+        if seen is None:
+            return False
+        if isinstance(seen, _HTTP_CONNECT_TIMEOUTS):
             return True
         seen = seen.__cause__
     return False
@@ -1033,12 +1054,13 @@ def _handle_member_failure(  # noqa: PLR0913
         wrapper.circuit_breaker.record_failure(provider_id)
     # Only a long wait is evidence of a hang: a slow model missing a short
     # Sentinel deadline, or our own connection pool timing out, is not a
-    # stalled provider.
+    # stalled provider. A connection the server never took is, however short
+    # the wait (#1026).
     if (
         wrapper.stall_tracker is not None
         and is_timeout_error(err)
         and not _is_client_pool_timeout(err)
-        and counts_as_stall_evidence(now - started)
+        and (counts_as_stall_evidence(now - started) or _is_connect_timeout(err))
     ):
         wrapper.stall_tracker.record_timeout(
             provider_id, _probe_call(_probe_model(wrapper, i))

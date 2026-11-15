@@ -25,7 +25,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import ConfigurableField
-from langchain_ollama import ChatOllama
+from langchain_ollama import ChatOllama, OllamaEmbeddings
 
 import custom_components.home_generative_agent as hga_component
 import custom_components.home_generative_agent.agent.graph as agent_graph
@@ -413,6 +413,17 @@ def test_ollama_clients_limit_only_the_connect() -> None:
         async_client_kwargs=kwargs,
     )
     for client in (chat._client, chat._async_client):
+        assert client is not None
+        assert client._client.timeout.connect == hga_component.OLLAMA_CONNECT_TIMEOUT_S
+        assert client._client.timeout.read is None
+
+    embeddings = OllamaEmbeddings(
+        model="m",
+        base_url="http://ollama:11434",
+        sync_client_kwargs=kwargs,
+        async_client_kwargs=kwargs,
+    )
+    for client in (embeddings._client, embeddings._async_client):
         assert client is not None
         assert client._client.timeout.connect == hga_component.OLLAMA_CONNECT_TIMEOUT_S
         assert client._client.timeout.read is None

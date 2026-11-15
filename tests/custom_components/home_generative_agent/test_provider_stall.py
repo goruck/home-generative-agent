@@ -716,6 +716,36 @@ async def test_quick_or_client_side_timeouts_are_not_a_stall(
     assert not tracker.is_stalled("p0")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [httpx.ConnectTimeout("timed out"), httpx2.ConnectTimeout("timed out")],
+    ids=["httpx", "httpx2"],
+)
+async def test_a_server_that_never_takes_the_connection_is_a_stall(
+    error: Exception,
+) -> None:
+    """
+    A sleeping Mac is skipped after three turns, not paid for on every one.
+
+    The connect gives up within seconds (#1026), far below the wait that is
+    stall evidence, so it would never be skipped: each turn would wait the
+    connect timeout out before the fallback answered.
+    """
+    tracker = _tracker()
+    asleep = _FailsWith(error, 0.0)
+    chain = FallbackChatModel(
+        [(asleep, "edge", "p0"), (_Model("ok"), "edge", "p1")],
+        stall_tracker=tracker,
+    )
+
+    for _ in range(provider_stall.STALL_TIMEOUT_THRESHOLD):
+        with model_call_budget(180.0):
+            await chain.ainvoke(_MESSAGES)
+
+    assert tracker.is_stalled("p0")
+
+
 def test_a_tool_bound_member_is_probed_through_its_unbound_source() -> None:
     """Parameters baked into a tool binding cannot be dropped by the probe."""
     source = MagicMock()

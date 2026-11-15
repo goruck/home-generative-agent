@@ -1861,10 +1861,12 @@ class NullStore:
 # ollama client sets no timeout at all, so a server whose address takes the
 # connection attempt and never answers (a sleeping Mac behind a sleep proxy, a
 # firewall that drops packets) held each call for its whole share of the
-# budget, 90 s of a conversation turn, before the fallback was tried. Reading
-# the reply stays unlimited, bounded by the caller's budget: loading a model
-# into memory happens after the connection is open, and can take minutes.
-OLLAMA_CONNECT_TIMEOUT_S = 5.0
+# budget, 90 s of a conversation turn, before the fallback was tried. 8 s lets
+# the kernel's connection retries at 1, 3 and 7 s through, which a Mac waking
+# for the request or a VPN redoing its handshake may need. Reading the reply
+# stays unlimited, bounded by the caller's budget: loading a model into memory
+# happens after the connection is open, and can take minutes.
+OLLAMA_CONNECT_TIMEOUT_S = 8.0
 
 
 def _ollama_httpx_client_kwargs() -> dict[str, Any]:
