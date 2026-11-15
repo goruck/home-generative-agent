@@ -60,6 +60,7 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_GEMINI_CHAT_MODEL,
     RECOMMENDED_OLLAMA_CHAT_MODEL,
     RECOMMENDED_OLLAMA_CONTEXT_SIZE,
+    RECOMMENDED_OPENAI_CHAT_MODEL,
     VIDEO_ANALYZER_MODE_DISABLE,
 )
 from custom_components.home_generative_agent.core import utils
@@ -912,8 +913,17 @@ async def test_a_second_ollama_server_sees_with_the_primarys_vision_model(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("primary_model", "expected"),
+    [
+        ("gpt-primary-chat", "gpt-primary-chat"),
+        # A fine-tune is the primary account's own (#1022 review).
+        ("ft:gpt-4o:acme::abc123", RECOMMENDED_OPENAI_CHAT_MODEL),
+    ],
+    ids=["public_model", "fine_tune"],
+)
 async def test_a_second_openai_account_runs_the_primarys_model(
-    hass: Any, monkeypatch: pytest.MonkeyPatch
+    hass: Any, monkeypatch: pytest.MonkeyPatch, primary_model: str, expected: str
 ) -> None:
     """OpenAI names its model `model_name`; the second account runs it too."""
     entry = MockConfigEntry(domain=DOMAIN, data={})
@@ -930,6 +940,7 @@ async def test_a_second_openai_account_runs_the_primarys_model(
     )
     data.providers[second.entry_id] = second
     data.fallback_chains["chat"] = [data.providers["openai1"], second]
+    data.options[CONF_OPENAI_CHAT_MODEL] = primary_model
     _patch_setup_dependencies(hass, monkeypatch, data)
 
     assert await cast("Any", hga_component).async_setup_entry(hass, entry)
@@ -937,7 +948,7 @@ async def test_a_second_openai_account_runs_the_primarys_model(
     chat_model = entry.runtime_data.chat_model
     assert isinstance(chat_model, FallbackChatModel)
     fallback = cast("FakeConfiguredModel", chat_model.chain[1][0])
-    assert fallback.config["configurable"]["model_name"] == "gpt-primary-chat"
+    assert fallback.config["configurable"]["model_name"] == expected
 
 
 @pytest.mark.asyncio

@@ -1784,6 +1784,11 @@ async def _async_rebuild_tables(
         )
 
 
+# Model names that only one account can run: OpenAI fine-tunes and Gemini
+# tuned models (#1022 review).
+_ACCOUNT_MODEL_PREFIXES = ("ft:", "tunedModels/")
+
+
 class NullChat:
     """Non-throwing fallback implementing common chat model methods."""
 
@@ -4302,7 +4307,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             return provider
         inherited: dict[str, Any] = {}
         model_name = configurable.get("model_name") or configurable.get("model")
-        if model_name:
+        # A fine-tuned OpenAI or tuned Gemini model belongs to one account, so
+        # another account keeps its recommended model (#1022 review).
+        if model_name and not str(model_name).startswith(_ACCOUNT_MODEL_PREFIXES):
             inherited[f"{category}_model"] = model_name
         if provider.provider_type == "ollama":
             for key, setting in (("num_ctx", "context"), ("keep_alive", "keepalive")):
@@ -4311,9 +4318,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         if not inherited:
             return provider
         settings = provider.data.get("settings", {})
+        # Only an inherited key replaces an empty stored value; the provider's
+        # other settings stay exactly as stored.
         merged = {
-            **inherited,
-            **{k: v for k, v in settings.items() if v not in (None, "")},
+            **settings,
+            **{k: v for k, v in inherited.items() if settings.get(k) in (None, "")},
         }
         return replace(provider, data={**provider.data, "settings": merged})
 
