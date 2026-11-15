@@ -82,7 +82,6 @@ from ..core.fallback import (  # noqa: TID252
     ainvoke_dropping_unsupported_params,
 )
 from ..core.memories import (  # noqa: TID252
-    all_memories,
     memories_full,
     memory_limit,
     memory_namespace,
@@ -775,13 +774,17 @@ async def list_memories(
     """
     if "configurable" not in config:
         return "Configuration not found. Please check your setup."
-    found = await all_memories(store, config["configurable"]["user_id"])
+    # One row past what is shown says whether older memories were left out.
+    found = await store.asearch(
+        memory_namespace(config["configurable"]["user_id"]),
+        limit=MEMORY_LIST_MAX_SHOWN + 1,
+    )
     if not found:
         return "You have no memories about this user."
     shown = found[:MEMORY_LIST_MAX_SHOWN]
     lines = [f"[{item.key}]: {item.value.get('content', '')}" for item in shown]
     if len(found) > len(shown):
-        lines.append(f"({len(found) - len(shown)} older memories are not shown.)")
+        lines.append("(Older memories are not shown.)")
     return "\n".join(lines)
 
 
@@ -808,7 +811,11 @@ async def forget_memory(  # noqa: D417
     if await store.aget(namespace, memory_id) is None:
         return f"No memory with id {memory_id}. Nothing was deleted."
     await store.adelete(namespace, memory_id)
-    return f"Deleted memory {memory_id}"
+    # The memories shown to you this turn were read before the delete.
+    return (
+        f"Deleted memory {memory_id}. It may still appear in your memories "
+        "until the next request; do not save it again."
+    )
 
 
 @tool(parse_docstring=True)

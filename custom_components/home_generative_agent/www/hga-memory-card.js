@@ -235,11 +235,14 @@ class HgaMemoryCard extends HTMLElement {
     );
   }
 
-  async _guard(action) {
+  async _guard(action, current = () => true) {
     this._error.textContent = "";
     try {
       await action();
     } catch (err) {
+      if (!current()) {
+        return;
+      }
       this._error.textContent =
         err?.code === "unauthorized"
           ? this._t("admin_only")
@@ -247,11 +250,11 @@ class HgaMemoryCard extends HTMLElement {
     }
   }
 
-  _pickUser(people) {
+  _pickUser(people, wanted) {
     const selectable = (user) =>
       people.some((p) => p.user === user && (p.count || this._config.show_empty));
-    if (selectable(this._user)) {
-      return this._user;
+    if (selectable(wanted)) {
+      return wanted;
     }
     if (selectable(this._config.person)) {
       return this._config.person;
@@ -260,21 +263,36 @@ class HgaMemoryCard extends HTMLElement {
     return first ? first.user : undefined;
   }
 
-  async _load() {
+  async _load(wanted = this._user) {
+    // A reply from an older load must not replace a newer one: the list
+    // would show one person while edits and deletes go to another. So the
+    // person changes only when their memories arrive, and only the newest
+    // load clears the spinner or shows an error.
+    const load = (this._loadSeq = (this._loadSeq || 0) + 1);
+    const current = () => load === this._loadSeq;
     this._refresh.classList.add("busy");
     await this._guard(async () => {
       let data = await this._call("get_memories", {});
-      this._user = this._pickUser(data.people);
-      if (this._user) {
-        data = await this._call("get_memories", { user: this._user });
+      if (!current()) {
+        return;
       }
+      const user = this._pickUser(data.people, wanted);
+      if (user) {
+        data = await this._call("get_memories", { user });
+      }
+      if (!current()) {
+        return;
+      }
+      this._user = user;
       this._data = data;
       this._editing = null;
       this._confirming = null;
       this._renderPeople();
       this._renderList();
-    });
-    this._refresh.classList.remove("busy");
+    }, current);
+    if (current()) {
+      this._refresh.classList.remove("busy");
+    }
   }
 
   _renderPeople() {
@@ -290,10 +308,7 @@ class HgaMemoryCard extends HTMLElement {
           {
             className: `chip ${person.user === this._user ? "active" : ""}`,
             ariaPressed: String(person.user === this._user),
-            onclick: () => {
-              this._user = person.user;
-              this._load();
-            },
+            onclick: () => this._load(person.user),
           },
           this._el("span", {
             className: "name",

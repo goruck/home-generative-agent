@@ -236,7 +236,7 @@ It shares the exclusion picker's contract: empty is the default (nothing extra i
 - **The tool must exist this turn.** An inclusion is reconciled against the live tool universe like every other candidate; a tool the server no longer advertises is skipped, not invented.
 - **Inclusions survive the read-only strip.** On read-only state questions ("which doors are open?") the agent normally drops actuation tools from the turn's list; an always-included actuation tool stays bound anyway — always means always. The critical-action PIN still gates any critical call at execution time, and at most 16 inclusions are honoured per turn.
 
-HGA's own memory tools (`upsert_memory`, `list_memories` and `forget_memory`) are included on every turn without being ticked when the turn has a memory user (a logged-in user, or a recognized voice linked to a person), so a "remember this", "what do you remember about me?" or "forget that" request always reaches its tool. Like HGA's other built-in tools, they are not listed in either picker.
+HGA's own memory tools `upsert_memory` and `list_memories` are included on every turn without being ticked when the turn has a memory user (a logged-in user, or a recognized voice linked to a person), so a "remember this" or "what do you remember about me?" request always reaches its tool. `forget_memory` is offered only when tool search picks it. Like HGA's other built-in tools, they are not listed in either picker.
 
 Each inclusion adds its schema and description to the prompt on every turn, so keep the list short — it is meant for the one or two fallback tools (typically web search) that similarity ranking systematically misses, not as a way around retrieval.
 
@@ -445,7 +445,7 @@ Voice recognition can be wrong. When a voice is linked to a person, a misrecogni
 
 The agent saves a fact when you ask it to ("remember that I drink tea without sugar"). Each person with a Home Assistant login has their own memories. Requests without a known user, such as an unrecognized voice on a satellite, share one store.
 
-**By voice:** ask what it remembers about you, or tell it to forget something. A voice only reaches its own memories. On a turn without a known user the agent has these tools, and the one that saves a memory, only when tool search picks them.
+**By voice:** ask what it remembers about you, or tell it to forget something. A voice only reaches its own memories. The tools for saving a memory and for listing them are offered on every turn with a known user; the one that forgets is offered only when tool search picks it, so a plain command never carries it. Tool search can miss a "forget that" request, above all in a language other than English; the card can always delete a memory. On a turn without a known user the agent has all three only when tool search picks them.
 
 **On a dashboard:** HGA loads the card itself. Add it to any dashboard:
 
@@ -453,9 +453,9 @@ The agent saves a fact when you ask it to ("remember that I drink tea without su
 type: custom:hga-memory-card
 ```
 
-The card lists each person with their count, and lets an administrator search, edit, move and delete memories. The services behind it (`get_memories`, `update_memory`, `delete_memory`, `move_memory`) refuse non-administrators.
+The card lists each person with their count, and lets an administrator search, edit, move and delete memories. The services behind it (`get_memories`, `update_memory`, `delete_memory`, `move_memory`) refuse non-administrators, and calls with no user, such as an automation. They need the database: without one they report that the memory store is not available.
 
-**Limit:** set **Max memories per person** under **Configure**. `0`, the default, means unlimited. At the limit the agent says memory is full and saves nothing new, and nothing is deleted for you. Updating an existing memory still works. A move from the card is not limited.
+**Limit:** set **Max memories per person** under **Configure**. `0`, the default, means unlimited. At the limit the agent says memory is full and saves nothing new, and nothing is deleted for you. Updating an existing memory still works. A move to a person who is at the limit is refused, and so is a move to a person who already has a memory with the same id.
 
 ---
 

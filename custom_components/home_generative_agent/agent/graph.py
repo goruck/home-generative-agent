@@ -83,6 +83,7 @@ from ..core.fallback import (  # noqa: TID252
     ainvoke_dropping_unsupported_params,
     unsupported_sampling_param_in_chain,
 )
+from ..core.memories import memory_namespace  # noqa: TID252
 from ..core.prompt_cache import (  # noqa: TID252
     ANTHROPIC_LLM_TYPE,
     adapt_system_message_for_model,
@@ -1557,21 +1558,16 @@ _HISTORY_TOOL = "get_entity_history"
 # Tool search misses "remember this" requests, above all in languages other than
 # English, and a memory the model cannot save is simply lost.
 _MEMORY_TOOL = "upsert_memory"
-# "What do you remember about me?" and "forget that" (#997).
+# "What do you remember about me?" (#997). forget_memory deletes, so it is
+# left to ranking: nothing has shown models leave it alone on commands.
 _MEMORY_LIST_TOOL = "list_memories"
-_MEMORY_FORGET_TOOL = "forget_memory"
 # HGA's own tools that step 3g binds on every turn, outside the limit.
-_ALWAYS_BOUND_LOCAL_TOOLS = (
-    _HISTORY_TOOL,
-    _MEMORY_TOOL,
-    _MEMORY_LIST_TOOL,
-    _MEMORY_FORGET_TOOL,
-)
+_ALWAYS_BOUND_LOCAL_TOOLS = (_HISTORY_TOOL, _MEMORY_TOOL, _MEMORY_LIST_TOOL)
 # Of those, the tools that read or write the turn's user's memories. A turn
 # with no memory user (an unrecognized voice, an automation) runs as "robot",
 # whose memories everyone shares, so these are bound only when ranking picks
 # them.
-_MEMORY_USER_TOOLS = frozenset({_MEMORY_TOOL, _MEMORY_LIST_TOOL, _MEMORY_FORGET_TOOL})
+_MEMORY_USER_TOOLS = frozenset({_MEMORY_TOOL, _MEMORY_LIST_TOOL})
 
 
 def _always_bound_local_tools(config: RunnableConfig) -> tuple[str, ...]:
@@ -1601,9 +1597,8 @@ async def _append_always_bound_tools(
     ``upsert_memory``: a request to remember something ("remember that I take
     my tea without sugar") shares few words with the tool's description,
     above all in another language, so ranking often left it out and the fact
-    was lost. ``list_memories`` and ``forget_memory`` answer "what do you
-    remember about me?" and "forget that" (#997). The three are bound only on
-    a turn with a memory user.
+    was lost. ``list_memories`` answers "what do you remember about me?"
+    (#997). Both are bound only on a turn with a memory user.
 
     ``get_entity_history``: a history question phrased around the device
     ("when did the mudroom lights turn off today?") ranks entity-control and
@@ -1619,11 +1614,12 @@ async def _append_always_bound_tools(
     selection. The lookup is pinned to ``hga_local``: dispatch routes this
     name to the local implementation, so the bind must not pull in another
     API's same-named tool. A same-named tool that ranking already bound is
-    left as is. The binding works the same way for ``upsert_memory`` (outside
-    the limit, pinned to ``hga_local``), and an exclusion stored for either
-    tool still keeps it out. The #907 eval covered only the read-only history
-    tool; for the memory tool, a run on Gemma 4 12B over 40 commands and
-    status questions found no stray calls (#994).
+    left as is. The binding works the same way for the memory tools (outside
+    the limit, pinned to ``hga_local``), and an exclusion stored for any of
+    them still keeps it out. The #907 eval covered only the read-only history
+    tool; for ``upsert_memory``, a run on Gemma 4 12B over 40 commands and
+    status questions found no stray calls (#994). ``list_memories`` only
+    reads; ``forget_memory`` is not bound here.
     """
     opts = config.get("configurable", {}).get("options", {})
     excluded = tool_exclusions(opts).get("hga_local", ())
@@ -3390,7 +3386,8 @@ async def _retrieve_tools(  # noqa: PLR0915
     )
 
     # 3g. Bind HGA's every-turn tools: get_entity_history (#907) and, with a
-    # memory user, upsert_memory. Before 3e so inclusions dedupe against them.
+    # memory user, upsert_memory and list_memories. Before 3e so inclusions
+    # dedupe against them.
     all_candidates = await _append_always_bound_tools(
         all_candidates, store, config, live_tool_ids
     )
@@ -3775,7 +3772,7 @@ def _bind_model_tools(
 async def _recent_memories(store: BaseStore, user_id: str) -> list:
     """Return the most recent memories, without semantic search."""
     try:
-        return await store.asearch((user_id, "memories"), limit=10)
+        return await store.asearch(memory_namespace(user_id), limit=10)
     except Exception:
         LOGGER.exception("Memory recency search also failed; no memories injected")
         return []
@@ -3784,7 +3781,7 @@ async def _recent_memories(store: BaseStore, user_id: str) -> list:
 async def _search_memories(store: BaseStore, user_id: str, query: str | None) -> list:
     """Search the memory store, falling back gracefully on embedding errors."""
     try:
-        return await store.asearch((user_id, "memories"), query=query, limit=10)
+        return await store.asearch(memory_namespace(user_id), query=query, limit=10)
     except AttributeError:
         # Some OpenAI-compatible servers (e.g. llama-server) return a raw JSON
         # list from /v1/embeddings instead of {"data": [...]}, which causes the

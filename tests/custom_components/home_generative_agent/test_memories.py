@@ -8,9 +8,11 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from homeassistant.exceptions import Unauthorized
+import voluptuous as vol
+from homeassistant.exceptions import HomeAssistantError, Unauthorized
 from langgraph.store.memory import InMemoryStore
 
+import custom_components.home_generative_agent as hga_component
 from custom_components.home_generative_agent.agent.tools import (
     forget_memory,
     list_memories,
@@ -21,6 +23,10 @@ from custom_components.home_generative_agent.const import (
     MEMORY_LIST_MAX_SHOWN,
 )
 from custom_components.home_generative_agent.core.memories import (
+    DELETE_MEMORY_SCHEMA,
+    GET_MEMORIES_SCHEMA,
+    all_memories,
+    memories_full,
     memory_limit,
     memory_user,
     register_memory_services,
@@ -121,7 +127,7 @@ async def test_list_memories_with_none_and_with_too_many() -> None:
         await store.aput(("Anna", "memories"), str(number), {"content": "x"})
     listed = await list_memories.coroutine(**args)  # type: ignore[misc]
     assert listed.count("]: x") == MEMORY_LIST_MAX_SHOWN
-    assert "2 older memories" in listed
+    assert "Older memories are not shown" in listed
 
 
 async def test_forget_memory_deletes_only_your_own() -> None:
@@ -143,8 +149,17 @@ async def test_forget_memory_deletes_only_your_own() -> None:
 def _services(store: Any, *, admin: bool = True) -> tuple[dict[str, Any], Any]:
     handlers: dict[str, Any] = {}
 
-    def register(_hass: Any, _entry: Any, name: str, handler: Any, **_: Any) -> None:
-        handlers[name] = handler
+    def register(
+        _hass: Any, _entry: Any, name: str, handler: Any, *, schema: Any, **_: Any
+    ) -> None:
+        # Home Assistant validates the call's data with the schema first.
+        # The shared test calls pass every field, so keep each schema's own.
+        async def validated(call: Any) -> Any:
+            keys = {str(key) for key in schema.schema}
+            data = schema({k: v for k, v in call.data.items() if k in keys})
+            return await handler(SimpleNamespace(data=data, context=call.context))
+
+        handlers[name] = validated
 
     hass = MagicMock()
     hass.auth.async_get_user = AsyncMock(return_value=SimpleNamespace(is_admin=admin))
@@ -251,3 +266,147 @@ async def test_services_refuse_a_non_admin(service: str) -> None:
     call = _call(user="Anna", memory_id="a", content="x", context="", to_user="y")
     with pytest.raises(Unauthorized):
         await handlers[service](call)
+
+
+@pytest.mark.parametrize(
+    "service", ["get_memories", "update_memory", "delete_memory", "move_memory"]
+)
+async def test_services_refuse_a_call_with_no_user(service: str) -> None:
+    """An automation the agent wrote from anyone's request runs with no user."""
+    handlers, _ = _services(InMemoryStore())
+    call = _call(None, user="Anna", memory_id="a", content="x", context="", to_user="y")
+    with pytest.raises(Unauthorized):
+        await handlers[service](call)
+
+
+async def test_services_refuse_a_user_id_with_no_user() -> None:
+    """A deleted or unknown user is not an administrator."""
+    handlers, hass = _services(InMemoryStore())
+    hass.auth.async_get_user = AsyncMock(return_value=None)
+    with pytest.raises(Unauthorized):
+        await handlers["get_memories"](_call(user="Anna"))
+
+
+@pytest.mark.parametrize(
+    "service", ["get_memories", "update_memory", "delete_memory", "move_memory"]
+)
+async def test_services_say_so_without_a_database(service: str) -> None:
+    """Without a database the store is a NullStore, which keeps nothing."""
+    handlers, _ = _services(hga_component.NullStore())
+    call = _call(user="Anna", memory_id="a", content="x", context="", to_user="y")
+    with pytest.raises(HomeAssistantError, match="no database"):
+        await handlers[service](call)
+
+
+async def test_memory_tools_run_without_a_database() -> None:
+    """Saving with an id, listing and forgetting do not raise on a NullStore."""
+    args = {"config": _config(limit=1), "store": hga_component.NullStore()}
+    saved = await upsert_memory.coroutine(content="x", memory_id="a", **args)  # type: ignore[misc]
+    assert saved.startswith("Stored")
+    assert "no memories" in await list_memories.coroutine(**args)  # type: ignore[misc]
+    forgot = await forget_memory.coroutine(memory_id="a", **args)  # type: ignore[misc]
+    assert "Nothing was deleted" in forgot
+
+
+async def test_a_move_onto_an_existing_id_keeps_both_memories() -> None:
+    """The target's memory with the same id must not be overwritten."""
+    store = InMemoryStore()
+    await store.aput(("Anna", "memories"), "k", {"content": "hers"})
+    await store.aput(("Boris", "memories"), "k", {"content": "his"})
+    handlers, _ = _services(store)
+
+    with pytest.raises(HomeAssistantError, match="already has"):
+        await handlers["move_memory"](
+            _call(user="Anna", memory_id="k", to_user="Boris")
+        )
+
+    anna = await store.aget(("Anna", "memories"), "k")
+    boris = await store.aget(("Boris", "memories"), "k")
+    assert anna is not None
+    assert anna.value["content"] == "hers"
+    assert boris is not None
+    assert boris.value["content"] == "his"
+
+
+async def test_a_move_to_a_full_person_is_refused() -> None:
+    """The limit holds for a move too."""
+    store = InMemoryStore()
+    await store.aput(("Anna", "memories"), "a", {"content": "x"})
+    for key in "xyz":
+        await store.aput(("Boris", "memories"), key, {"content": key})
+    handlers, _ = _services(store)  # limit 3
+
+    with pytest.raises(HomeAssistantError, match="full"):
+        await handlers["move_memory"](
+            _call(user="Anna", memory_id="a", to_user="Boris")
+        )
+    assert await _keys(store) == ["a"]
+
+
+@pytest.mark.parametrize("to_user", ["", "!!!", " "])
+async def test_a_move_to_no_name_is_refused(to_user: str) -> None:
+    """A name with nothing left after cleaning must not land in the shared store."""
+    store = InMemoryStore()
+    await store.aput(("Anna", "memories"), "a", {"content": "private"})
+    handlers, _ = _services(store)
+
+    with pytest.raises(vol.Invalid):
+        await handlers["move_memory"](
+            _call(user="Anna", memory_id="a", to_user=to_user)
+        )
+    assert await _keys(store) == ["a"]
+    assert await _keys(store, "robot") == []
+
+
+def test_service_user_fields_are_cleaned() -> None:
+    """A typed name reaches the agent's namespace, and "%" is never a wildcard."""
+    cleaned = DELETE_MEMORY_SCHEMA({"user": " Mary-Jane ", "memory_id": "k"})
+    assert cleaned["user"] == "MaryJane"
+    for name in ("%", "", "  "):
+        with pytest.raises(vol.Invalid):
+            DELETE_MEMORY_SCHEMA({"user": name, "memory_id": "k"})
+    with pytest.raises(vol.Invalid):
+        GET_MEMORIES_SCHEMA({"user": "%"})
+
+
+async def test_an_empty_user_lists_people_only() -> None:
+    """A cleared text field in the action form must not read the shared store."""
+    store = InMemoryStore()
+    await store.aput(("robot", "memories"), "r", {"content": "shared"})
+    handlers, _ = _services(store)
+    result = await handlers["get_memories"](_call(user=""))
+    assert "memories" not in result
+
+
+@pytest.mark.parametrize("count", [100, 150])
+async def test_all_memories_reads_every_page(count: int) -> None:
+    """Each memory comes back exactly once past the first page."""
+    store = InMemoryStore()
+    for number in range(count):
+        await store.aput(("Anna", "memories"), str(number), {"content": "x"})
+    keys = [item.key for item in await all_memories(store, "Anna")]
+    assert sorted(keys) == sorted(str(number) for number in range(count))
+
+
+async def test_memories_full_at_the_limit_only() -> None:
+    """One below the limit has room; at the limit there is none."""
+    store = InMemoryStore()
+    for key in "ab":
+        await store.aput(("Anna", "memories"), key, {"content": key})
+    assert not await memories_full(store, "Anna", 3)
+    assert await memories_full(store, "Anna", 2)
+
+
+async def test_people_lists_owners_past_the_first_page_only_once() -> None:
+    """Every owner is listed, and a deeper namespace is not a person."""
+    store = InMemoryStore()
+    for number in range(120):
+        await store.aput((f"user{number}", "memories"), "k", {"content": "x"})
+    await store.aput(("Anna", "notes", "memories"), "k", {"content": "x"})
+    handlers, _ = _services(store)
+
+    people = [p["user"] for p in (await handlers["get_memories"](_call()))["people"]]
+
+    assert "user119" in people
+    assert "Anna" not in people
+    assert len(people) == len(set(people))

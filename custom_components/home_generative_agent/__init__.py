@@ -1800,6 +1800,10 @@ class NullChat:
 class NullStore:
     """Non-throwing fallback for memory store operations."""
 
+    # core.memories.store_available reads this: the memory services refuse
+    # to run on it, and the memory tools see an empty store.
+    is_null_store = True
+
     async def asearch(self, *_args: Any, **_kwargs: Any) -> list[Any]:
         """Return an empty result set."""
         return []
@@ -1807,6 +1811,18 @@ class NullStore:
     async def aput(self, *_args: Any, **_kwargs: Any) -> None:
         """No-op write."""
         return
+
+    async def aget(self, *_args: Any, **_kwargs: Any) -> None:
+        """Return no item."""
+        return
+
+    async def adelete(self, *_args: Any, **_kwargs: Any) -> None:
+        """No-op delete."""
+        return
+
+    async def alist_namespaces(self, *_args: Any, **_kwargs: Any) -> list[Any]:
+        """Return no namespaces."""
+        return []
 
 
 def _ollama_httpx_client_kwargs() -> dict[str, Any]:
