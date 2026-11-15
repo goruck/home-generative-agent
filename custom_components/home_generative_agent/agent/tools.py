@@ -1529,9 +1529,8 @@ def _completed_reply(
     )
     result = data
     if partial and results is not None:
-        payload = json.loads(data) if isinstance(data, str) else data
         # The same note, names withheld the same way, as the normal path's.
-        result = with_failure_note(payload, results)
+        result = with_failure_note(data, results)
     # default=str: a result the JSON encoder cannot take must not raise after
     # the action ran.
     return json.dumps(

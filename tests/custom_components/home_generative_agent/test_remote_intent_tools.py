@@ -31,6 +31,8 @@ from custom_components.home_generative_agent.agent.graph import (
 )
 from custom_components.home_generative_agent.agent.helpers import (
     BUILTIN_INTENT,
+    PIN_OUTCOME_FAILED,
+    PIN_OUTCOME_PARTIAL,
     REMOTE_TOOL,
     PinReply,
 )
@@ -97,10 +99,11 @@ class _Instance:
         self.api = SimpleNamespace(name=name, id=name)
         self.tools = tools
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.result: Any = {"success": True}
 
-    async def async_call_tool(self, tool_input: Any) -> dict[str, object]:
+    async def async_call_tool(self, tool_input: Any) -> Any:
         self.calls.append((tool_input.tool_name, dict(tool_input.tool_args)))
-        return {"success": True}
+        return self.result
 
 
 class _Wrapper:
@@ -168,7 +171,9 @@ def _ctx(hass: HomeAssistant, api: Any) -> Any:
     )
 
 
-async def _answer_pin(home: HomeAssistant, ctx: Any, api: Any) -> str:
+async def _answer_pin(
+    home: HomeAssistant, ctx: Any, api: Any, reply: PinReply | None = None
+) -> str:
     """Answer the one held action with the right PIN."""
     ((action_id, action),) = ctx.pending_actions.items()
     action.update(user="u1", thread_id="conv1", reply_turn="turn2")
@@ -182,7 +187,7 @@ async def _answer_pin(home: HomeAssistant, ctx: Any, api: Any) -> str:
             "pending_actions": ctx.pending_actions,
             "user_id": "u1",
             "thread_id": "conv1",
-            "pin_reply": PinReply("1234", turn_id="turn2"),
+            "pin_reply": reply or PinReply("1234", turn_id="turn2"),
             "ha_llm_api": api,
             "hass": home,
         }
@@ -582,3 +587,63 @@ async def test_an_unrouted_name_here_and_there_is_held(home: HomeAssistant) -> N
     ctx = _ctx(home, api)
     redirect, _ = _prepare_tool_args(name, {}, ctx, {"id": "c1"})
     assert redirect is not None
+
+
+def _over_mcp(response: dict[str, Any]) -> llm.ToolResult:
+    """Return an intent response as HA's MCP client hands on a remote one."""
+    text = json.dumps(response, ensure_ascii=False)
+    return llm.ToolResult(
+        data={"content": [{"type": "text", "text": text}], "isError": False}
+    )
+
+
+async def test_a_remote_half_done_action_says_how_many_failed(
+    home: HomeAssistant,
+) -> None:
+    """One remote lock failed: not "PIN accepted: …" alone (#1007)."""
+    api = _api(["intent__HassTurnOff"])
+    ctx = _ctx(home, api)
+    _prepare_tool_args("intent__HassTurnOff", {"name": "Doors"}, ctx, {"id": "c1"})
+    api.apis[REMOTE].result = _over_mcp(
+        {
+            "speech": {},
+            "response_type": "action_done",
+            "data": {
+                "targets": [],
+                "success": [{"type": "entity", "name": "Front", "id": "lock.front"}],
+                "failed": [{"type": "entity", "name": "Back", "id": "lock.back"}],
+            },
+        }
+    )
+    reply = PinReply("1234", turn_id="turn2")
+
+    result = json.loads(await _answer_pin(home, ctx, api, reply))
+
+    assert result["status"] == "completed"
+    assert reply.outcome == PIN_OUTCOME_PARTIAL
+    assert reply.failed_count == 1
+    # The remote house's version is unknown, so its names are not trusted.
+    assert reply.failed_targets == ()
+    assert result["result"]["failed_count"] == 1
+    assert "cannot say which" in result["result"]["partial_failure"]
+    assert "Back" not in json.dumps(result)
+    assert "Front" not in json.dumps(result)
+
+
+async def test_a_remote_error_before_tool_results_is_not_accepted(
+    home: HomeAssistant,
+) -> None:
+    """HA 2026.8 and 2026.9 return the MCP result as a dict, error flag in it."""
+    api = _api(["intent__HassTurnOff"])
+    ctx = _ctx(home, api)
+    _prepare_tool_args("intent__HassTurnOff", {"name": "Doors"}, ctx, {"id": "c1"})
+    api.apis[REMOTE].result = {
+        "content": [{"type": "text", "text": "Error calling tool: lock jammed"}],
+        "isError": True,
+    }
+    reply = PinReply("1234", turn_id="turn2")
+
+    result = await _answer_pin(home, ctx, api, reply)
+
+    assert "completed" not in result
+    assert reply.outcome == PIN_OUTCOME_FAILED

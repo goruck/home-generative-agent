@@ -991,6 +991,133 @@ def test_only_an_action_intents_failed_list_counts(response: Any) -> None:
     assert intent_results(response) is None
 
 
+def _over_mcp(response: Any, **extra: Any) -> dict[str, Any]:
+    """Return a result as HA's MCP client hands on a remote one (#1007)."""
+    text = response if isinstance(response, str) else json.dumps(response)
+    return {"content": [{"type": "text", "text": text}], "isError": False, **extra}
+
+
+def test_a_remote_half_done_action_is_partial_without_names() -> None:
+    """A remote HA's result comes as MCP text; its version is unknown (#1007)."""
+    content, status = parse_tool_response(
+        _over_mcp(_half_done(BACK)), {"domain": ["lock"]}
+    )
+
+    assert status == "partial"
+    note = json.loads(content)
+    assert note["failed_count"] == 1
+    assert "failed_devices" not in note
+    assert "cannot say which" in note["partial_failure"]
+    assert "Back Lock" not in content
+    assert "Front Lock" not in content
+
+
+def test_a_remote_action_where_no_device_acted_is_an_error() -> None:
+    _, status = parse_tool_response(
+        _over_mcp(_half_done(BACK, success=(KITCHEN,))), {"domain": ["lock"]}
+    )
+
+    assert status == "error"
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        # Two items, or one that is not text, is not one intent response.
+        {
+            "content": [
+                {"type": "text", "text": json.dumps(_half_done(BACK))},
+                {"type": "text", "text": "more"},
+            ]
+        },
+        {"content": [{"type": "image", "text": json.dumps(_half_done(BACK))}]},
+        # A remote tool's own text, JSON or not, with a failed field.
+        _over_mcp("Back Lock failed"),
+        _over_mcp({"success": True, "data": {"failed": ["backup"]}}),
+        _over_mcp({"response_type": "query_answer", "data": _half_done(BACK)["data"]}),
+    ],
+)
+def test_only_an_mcp_intent_response_counts(response: Any) -> None:
+    """A remote tool's arbitrary result is never a half-done action (#1007)."""
+    assert parse_tool_response(response, {})[1] is None
+    assert intent_results(response) is None
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        # HA 2026.11 dumps by alias; 2026.8 to 2026.10 by field name.
+        {"structuredContent": {"a": 1}, "_meta": {"k": 1}},
+        {"meta": {"k": 1}},
+        # A field a later MCP release adds must not undo the fix.
+        {"someNewField": True},
+    ],
+)
+def test_a_remote_result_with_other_mcp_fields_is_still_read(
+    extra: dict[str, Any],
+) -> None:
+    content, status = parse_tool_response(
+        _over_mcp(_half_done(BACK), **extra), {"domain": ["lock"]}
+    )
+
+    assert status == "partial"
+    assert json.loads(content)["failed_count"] == 1
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "9" * 5000,  # past Python's integer digit limit: ValueError
+        "[" * 100_000,  # nested too deep: RecursionError
+    ],
+    ids=["digit_limit", "too_deep"],
+)
+def test_remote_text_that_cannot_be_decoded_is_left_as_it_is(text: str) -> None:
+    """The tool ran: unreadable text must not turn it into an error (#1007 review)."""
+    response = _over_mcp(text)
+
+    assert parse_tool_response(response, {})[1] is None
+    assert intent_results(response) is None
+    # Nor the same text as a tool's own string result.
+    assert parse_tool_response(text, {})[1] is None
+
+
+def _decode_limit() -> int:
+    """Return the deepest nesting json.loads decodes from here."""
+    low, high = 1, 1 << 20
+    while low < high:
+        mid = (low + high + 1) // 2
+        try:
+            json.loads("[" * mid + "]" * mid)
+        except RecursionError:
+            high = mid - 1
+        else:
+            low = mid
+    return low
+
+
+def test_a_remote_intent_nested_near_the_decode_limit_never_raises() -> None:
+    """Decoded, it is re-encoded deeper in the stack (#1007 review, cycle 2)."""
+    limit = _decode_limit()
+    for depth in range(max(limit - 400, 1), limit + 1, 10):
+        nested = "[" * depth + "]" * depth
+        text = (
+            '{"response_type": "action_done", "data": {"success": [], '
+            f'"failed": [{json.dumps(BACK)}]}}, "x": {nested}}}'
+        )
+        parse_tool_response(_over_mcp(text), {"domain": ["lock"]})
+
+
+@pytest.mark.parametrize(
+    "text", ["Error calling tool: lock jammed", json.dumps(_half_done(BACK))]
+)
+def test_a_remote_error_flag_in_the_result_is_a_failure(text: str) -> None:
+    """Before 2026.10 HA hands on the MCP error flag only in the dict (#1007)."""
+    response = _over_mcp(text, isError=True)
+
+    assert parse_tool_response(response, {"domain": ["lock"]})[1] == "error"
+
+
 def test_failed_names_are_bounded_and_told_apart() -> None:
     twin_a = {"type": "entity", "name": "Front Door", "id": "lock.front_a"}
     twin_b = {"type": "entity", "name": "Front Door", "id": "lock.front_b"}
