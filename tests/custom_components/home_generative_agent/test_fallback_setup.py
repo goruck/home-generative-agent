@@ -34,11 +34,15 @@ from custom_components.home_generative_agent.const import (
     CONF_OPENAI_COMPATIBLE_CHAT_MODEL,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_API_KEY,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_URL,
+    CONF_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
+    CONF_OPENAI_COMPATIBLE_VLM,
+    CONF_OPENAI_SENTINEL_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
     CONF_OPENAI_VLM,
     CONF_SENTINEL_DISCOVERY_ENABLED,
     CONF_SENTINEL_ENABLED,
     CONF_SENTINEL_MODEL_PROVIDER,
+    CONF_SENTINEL_MODEL_TOP_P,
     CONF_SENTINEL_TRIAGE_ENABLED,
     CONF_SUMMARIZATION_MODEL_PROVIDER,
     CONF_SUMMARIZATION_MODEL_TOP_P,
@@ -2560,6 +2564,108 @@ async def test_an_openai_compatible_chain_sends_only_a_set_top_p(
     assert len(chat_model.chain) == 2
     for index in (0, 1):
         configurable = _configurable(chat_model, index)
+        if top_p is None:
+            assert "top_p" not in configurable
+        else:
+            assert configurable["top_p"] == top_p
+
+
+@pytest.mark.asyncio
+async def test_the_sentinel_top_p_reaches_its_primary_and_fallback(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sentinel's own Top P, not Conversation's, reaches its models (#1000)."""
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _fallback_setup_data()
+    openai, ollama = data.fallback_chains["chat"]
+    data.fallback_chains["sentinel"] = [openai, ollama]
+    data.deployments["sentinel"] = "cloud"
+    data.options[CONF_SENTINEL_MODEL_PROVIDER] = "openai"
+    data.options[CONF_OPENAI_SENTINEL_MODEL] = "gpt-primary-sentinel"
+    data.options[CONF_EXPLAIN_ENABLED] = True
+    data.options[CONF_CHAT_MODEL_TOP_P] = 0.91
+    data.options[CONF_SENTINEL_MODEL_TOP_P] = 0.94
+    _patch_setup_dependencies(hass, monkeypatch, data)
+    explained: list[Any] = []
+
+    def _explainer(model: Any, *_args: Any, **_kwargs: Any) -> Any:
+        explained.append(model)
+        return MagicMock()
+
+    monkeypatch.setattr(hga_component, "LLMExplainer", _explainer)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    sentinel_model = explained[0]
+    assert _configurable(sentinel_model, 0)["model_name"] == "gpt-primary-sentinel"
+    assert _configurable(sentinel_model, 0)["top_p"] == 0.94
+    assert _configurable(sentinel_model, 1)["top_p"] == 0.94
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("category", "provider_key", "model_key", "top_p_key", "runtime_attr"),
+    [
+        (
+            "vlm",
+            CONF_VLM_PROVIDER,
+            CONF_OPENAI_COMPATIBLE_VLM,
+            CONF_VLM_TOP_P,
+            "vision_model",
+        ),
+        (
+            "summarization",
+            CONF_SUMMARIZATION_MODEL_PROVIDER,
+            CONF_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
+            CONF_SUMMARIZATION_MODEL_TOP_P,
+            "summarization_model",
+        ),
+    ],
+)
+@pytest.mark.parametrize("top_p", [None, 0.92])
+async def test_an_openai_compatible_feature_sends_only_its_own_set_top_p(  # noqa: PLR0913
+    hass: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    category: str,
+    provider_key: str,
+    model_key: str,
+    top_p_key: str,
+    runtime_attr: str,
+    top_p: float | None,
+) -> None:
+    """
+    Camera analysis and summarization on an OpenAI-compatible chain (#1000).
+
+    Conversation's Top P is set to another value, so a branch that read the
+    wrong feature's value, or the 1.0 default, fails.
+    """
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    data = _openai_compatible_chat_data()
+    data.fallback_chains[category] = list(data.fallback_chains["chat"])
+    data.deployments[category] = "edge"
+    data.options[provider_key] = "openai_compatible"
+    data.options[model_key] = f"local-{category}"
+    data.options[CONF_CHAT_MODEL_TOP_P] = 0.5
+    if top_p is not None:
+        data.options[top_p_key] = top_p
+    _patch_setup_dependencies(hass, monkeypatch, data)
+
+    async def _healthy(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(hga_component, "openai_compatible_healthy", _healthy)
+
+    assert await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    model = getattr(entry.runtime_data, runtime_attr)
+    assert len(model.chain) == 2
+    assert _configurable(model, 0)["model_name"] == f"local-{category}"
+    for index in (0, 1):
+        configurable = _configurable(model, index)
         if top_p is None:
             assert "top_p" not in configurable
         else:
