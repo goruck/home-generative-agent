@@ -1229,7 +1229,7 @@ def _refuse(
         )
 
 
-def register_pending_action(
+def register_pending_action(  # noqa: PLR0912
     pending_actions: dict[str, dict[str, Any]],
     action: dict[str, Any],
     *,
@@ -1273,11 +1273,19 @@ def register_pending_action(
     only announce an action no PIN can confirm, while no longer blocking
     another voice's), or of one another turn is still handling: its line not
     delivered yet, or its PIN reply in progress (#1001). Each refusal returns
-    None and records its reason on `pin_reply` (`PinReply.refusal`).
+    None and records its reason on `pin_reply` (`PinReply.refusal`). Every
+    prompt the request would replace is checked before any is dropped, so a
+    refusal leaves the store as it found it.
+
+    The same request re-issued keeps its prompt's id (#1004): a refusal that
+    names the prompt by id (`PinReply.waiting_action_id`) still finds it, and
+    a model holding the id still confirms the same request.
     """
     now = dt_util.utcnow()
     thread_id = action.get("thread_id")
     carried: dict[str, Any] = {}
+    replaced: list[str] = []
+    kept_id: str | None = None
     for key, existing in list(pending_actions.items()):
         if pending_action_expired(existing, now):
             pending_actions.pop(key, None)
@@ -1310,6 +1318,7 @@ def register_pending_action(
                 "voice_thread": existing.get("voice_thread"),
             }
             if _same_request(existing, action) and existing.get("turn_id"):
+                kept_id = key
                 reissued_in_reply = bool(
                     existing.get("reply_turn")
                     and existing.get("reply_turn") == action.get("turn_id")
@@ -1342,12 +1351,16 @@ def register_pending_action(
             # conversation agent's _async_turn_thread) are kept the same way,
             # so repeating the request does not give them a fresh budget.
             carried["sentence_checks"] = int(existing.get("sentence_checks", 0) or 0)
-            pending_actions.pop(key, None)
+            replaced.append(key)
 
+    for key in replaced:
+        pending_actions.pop(key, None)
     while len(pending_actions) >= MAX_PENDING_ACTIONS:
         pending_actions.pop(next(iter(pending_actions)), None)
 
-    action_id = ulid.ulid_now()
+    # Stored again at the end either way: the newest prompt is the one a PIN
+    # said next is followed to (`newest_pin_prompt`).
+    action_id = kept_id or ulid.ulid_now()
     pending_actions[action_id] = {
         **action,
         "attempts": 0,

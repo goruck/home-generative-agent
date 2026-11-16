@@ -1302,10 +1302,11 @@ async def test_another_conversations_id_never_runs_its_action() -> None:
 
 async def test_a_stale_action_id_resolves_to_the_only_pending_action() -> None:
     """
-    The old id from the model's context still confirms.
+    An id the store no longer holds still confirms the only pending action.
 
-    The model re-issued the request, which minted a new id; same conversation,
-    one action: it means that one.
+    The model re-issued the request, which keeps its id (#1004); an id from
+    older context (a request replaced since) falls back the same way: same
+    conversation, one action, it means that one.
     """
     pending: dict[str, Any] = {}
     api = _FakeAPI()
@@ -1315,7 +1316,7 @@ async def test_a_stale_action_id_resolves_to_the_only_pending_action() -> None:
         "HassTurnOff", dict(PLAYROOM), ctx, {"id": "c1"}
     )
     assert first is not None
-    stale_id = json.loads(cast("str", first.content))["action_id"]
+    first_id = json.loads(cast("str", first.content))["action_id"]
     disclose_pin_prompts(pending, reply)
 
     answer = start_pin_turn(pending, "conv1", PIN)
@@ -1324,9 +1325,9 @@ async def test_a_stale_action_id_resolves_to_the_only_pending_action() -> None:
         "HassTurnOff", dict(PLAYROOM), ctx, {"id": "c2"}
     )
     assert again is not None
-    assert json.loads(cast("str", again.content))["action_id"] != stale_id
+    assert json.loads(cast("str", again.content))["action_id"] == first_id
 
-    result = await confirm(stale_id, PIN, config=ctx.config, store=None)
+    result = await confirm("01STALEACTIONID", PIN, config=ctx.config, store=None)
 
     assert json.loads(result)["status"] == "completed"
     assert api.sent

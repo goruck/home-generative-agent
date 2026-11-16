@@ -1282,9 +1282,9 @@ def _resolve_action_id(
         action = pending_actions.get(requested_action_id)
         if action and action.get("thread_id") == thread_id:
             return requested_action_id
-    # Without an id, or with one this conversation no longer holds (a
-    # re-issued request replaces its action under a new id, and the model may
-    # still hold the old one), take the conversation's only pending action.
+    # Without an id, or with one this conversation no longer holds (a new
+    # request replaces its action under a new id, and the model may still
+    # hold the old one), take the conversation's only pending action.
     # The store is shared by every conversation, and satellites and
     # automations share one user, so another conversation's action must
     # never be picked up here: its id reads as missing like any other. This

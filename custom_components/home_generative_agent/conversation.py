@@ -2208,8 +2208,10 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         may be gone by then, or replaced. For another voice's prompt, the one
         a PIN would follow (`newest_pin_prompt`) is named; failing that, the
         one that refused it if it can still be answered; with neither, the
-        user is asked to make the request again. Nothing is said once this
-        turn's PIN ran an action, or about the prompt this turn is answering.
+        user is asked to make the request again. A prompt whose PIN reply
+        another turn is handling is named as in progress, not as waiting for
+        a PIN (#1004). Nothing is said once this turn's PIN ran an action, or
+        about the prompt this turn is answering.
         """
         if not refusal_line_due(pending_actions, pin_reply):
             return None
@@ -2228,6 +2230,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 else None
             )
             waiting, key = followed or refusing, "pin_other_voice_waiting_line"
+            if followed is None and refusing and refusing.get("reply_turn"):
+                key = "pin_in_progress_line"
         else:
             waiting, key = refusing, "pin_in_progress_line"
         if waiting is None:
