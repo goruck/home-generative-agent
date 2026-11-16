@@ -143,6 +143,10 @@ AUTOMATION_REFUSAL_PREFIX = "Automation not added"
 # And every installed automation's result starts with this: the one result of
 # add_automation that means it acted (#1013).
 AUTOMATION_ADDED_PREFIX = "Added automation "
+# In add_automation's reply when a safety alarm's pushes could not all be made
+# critical alerts (#869). The empty-reply fallback reads it (#1023): the
+# automation is installed, so the reply is neither "Done." nor "try again".
+AUTOMATION_PUSHES_LEFT_ORDINARY = "It is installed as written; do not add it again."
 
 # Report kinds. "automation" is a whole-config finding with no name.
 KIND_ENTITY = "entity"

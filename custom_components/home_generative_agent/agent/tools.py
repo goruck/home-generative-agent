@@ -106,6 +106,7 @@ from ..sentinel.redaction import redact_network_identifiers  # noqa: TID252
 from .automation_pin import find_critical_automation_calls
 from .automation_targets import (
     AUTOMATION_ADDED_PREFIX,
+    AUTOMATION_PUSHES_LEFT_ORDINARY,
     AUTOMATION_REFUSAL_PREFIX,
     describe_missing_targets,
     exposed_to_assist,
@@ -156,6 +157,7 @@ from .indirect_pin import (
 from .on_off_direction import with_action_performed
 from .pin_messages import describe_pending_action, pin_msg, refused_pin_request
 from .rule_entities import expand_critical_rules
+from .tool_failure import ToolFailure
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -669,7 +671,7 @@ async def get_and_analyze_camera_image(  # noqa: D417
 
     """
     if "configurable" not in config:
-        return "Configuration not found. Please check your setup."
+        return ToolFailure("Configuration not found. Please check your setup.")
 
     hass = config["configurable"]["hass"]
     vlm_model = config["configurable"]["vlm_model"]
@@ -681,13 +683,15 @@ async def get_and_analyze_camera_image(  # noqa: D417
         )
         available = _available_camera_names(hass)
         if available:
-            return (
+            return ToolFailure(
                 f"Camera '{camera_name}' was not found. Available cameras: {available}."
             )
-        return f"Camera '{camera_name}' was not found. No cameras are available."
+        return ToolFailure(
+            f"Camera '{camera_name}' was not found. No cameras are available."
+        )
     image = await _get_camera_image(hass, camera_entity_id)
     if image is None:
-        return "Error getting image from camera."
+        return ToolFailure("Error getting image from camera.")
     try:
         overrides = VLMPromptOverrides(
             response_language=options.get(
@@ -706,7 +710,7 @@ async def get_and_analyze_camera_image(  # noqa: D417
         else:
             # A timeout or a refused call: the reason, without a traceback.
             LOGGER.warning("%s %s", VLM_ERROR_CAPTION, err)
-        return VLM_ERROR_CAPTION
+        return ToolFailure(VLM_ERROR_CAPTION)
 
 
 # The memory tools' answer when no Database subentry is set up (#1016): the
@@ -749,9 +753,9 @@ async def upsert_memory(  # noqa: D417
 
     """
     if "configurable" not in config:
-        return "Configuration not found. Please check your setup."
+        return ToolFailure("Configuration not found. Please check your setup.")
     if not store_available(store):
-        return f"Not stored. {NO_MEMORY_DATABASE}"
+        return ToolFailure(f"Not stored. {NO_MEMORY_DATABASE}")
 
     mem_id = memory_id or ulid.ulid_now()
 
@@ -760,7 +764,7 @@ async def upsert_memory(  # noqa: D417
     limit = memory_limit(config["configurable"].get("options", {}))
     is_update = bool(memory_id) and await store.aget(namespace, memory_id) is not None
     if not is_update and await memories_full(store, user_id, limit):
-        return (
+        return ToolFailure(
             f"Not stored: this person's memory is full ({limit} of {limit}). "
             "Tell the user nothing was saved, and that they can ask you to "
             "forget something first."
@@ -787,9 +791,9 @@ async def list_memories(
 
     """
     if "configurable" not in config:
-        return "Configuration not found. Please check your setup."
+        return ToolFailure("Configuration not found. Please check your setup.")
     if not store_available(store):
-        return NO_MEMORY_DATABASE
+        return ToolFailure(NO_MEMORY_DATABASE)
     # One row past what is shown says whether older memories were left out.
     found = await store.asearch(
         memory_namespace(config["configurable"]["user_id"]),
@@ -822,12 +826,12 @@ async def forget_memory(  # noqa: D417
 
     """
     if "configurable" not in config:
-        return "Configuration not found. Please check your setup."
+        return ToolFailure("Configuration not found. Please check your setup.")
     if not store_available(store):
-        return f"Nothing was deleted. {NO_MEMORY_DATABASE}"
+        return ToolFailure(f"Nothing was deleted. {NO_MEMORY_DATABASE}")
     namespace = memory_namespace(config["configurable"]["user_id"])
     if await store.aget(namespace, memory_id) is None:
-        return f"No memory with id {memory_id}. Nothing was deleted."
+        return ToolFailure(f"No memory with id {memory_id}. Nothing was deleted.")
     await store.adelete(namespace, memory_id)
     # The memories shown to you this turn were read before the delete.
     return (
@@ -873,7 +877,7 @@ async def add_automation(  # noqa: D417
 
     """
     if "configurable" not in config:
-        return "Configuration not found. Please check your setup."
+        return ToolFailure("Configuration not found. Please check your setup.")
 
     hass = config["configurable"]["hass"]
     raw_push_service = config["configurable"]["options"].get(CONF_NOTIFY_SERVICE)
@@ -996,8 +1000,8 @@ def _critical_push_note(critical_push: CriticalPushResult) -> str:
         # in the automation, so the note names no editor.
         note += (
             ". This automation fires on a leak, smoke, gas, carbon monoxide or "
-            f"safety alarm, but {reason} critical alerts. It is installed as "
-            "written; do not add it again. Tell the user, who can switch those "
+            f"safety alarm, but {reason} critical alerts. "
+            f"{AUTOMATION_PUSHES_LEFT_ORDINARY} Tell the user, who can switch those "
             "notifications to a phone's notify.mobile_app_* service"
         )
     return f"{note}." if note else ""
@@ -1131,7 +1135,7 @@ async def write_yaml_file(  # noqa: D417
 
     """
     if "configurable" not in config:
-        return "Configuration not found. Please check your setup."
+        return ToolFailure("Configuration not found. Please check your setup.")
 
     hass = config["configurable"]["hass"]
     config_dir = Path(hass.config.config_dir)
@@ -1189,7 +1193,7 @@ async def confirm_sensitive_action(  # noqa: D417
 
     """
     if "configurable" not in config:
-        return "Configuration not found. Please check your setup."
+        return ToolFailure("Configuration not found. Please check your setup.")
 
     # The action must finish inside the graph's own tool timeout, counted from
     # here, so a slow device gets the "may have run" reply rather than a
@@ -1213,11 +1217,11 @@ async def confirm_sensitive_action(  # noqa: D417
         pending_actions, requested_action_id, cfg.get("thread_id")
     )
     if resolved_action_id is None:
-        return pin_msg(hass, "pending_action_not_found_or_expired")
+        return ToolFailure(pin_msg(hass, "pending_action_not_found_or_expired"))
 
     action, action_err = _load_pending_action(pending_actions, resolved_action_id, hass)
     if action_err or not action:
-        return action_err or pin_msg(hass, "pending_action_not_found")
+        return ToolFailure(action_err or pin_msg(hass, "pending_action_not_found"))
 
     refusal, pin_not_in_message = _confirmation_refusal(
         cfg, action, resolved_action_id, provided_pin
@@ -1250,12 +1254,14 @@ async def confirm_sensitive_action(  # noqa: D417
         else:
             # The request's last attempt: the prompt is gone with it.
             hint = "pin_request_again"
-        return f"{pin_err} {pin_msg(hass, hint)}"
+        return ToolFailure(f"{pin_err} {pin_msg(hass, hint)}")
 
     result, exec_err = await _execute_pending_action(
         resolved_action_id, action, cfg, deadline
     )
-    return result or exec_err or pin_msg(hass, "confirmation_unable_to_process")
+    return result or ToolFailure(
+        exec_err or pin_msg(hass, "confirmation_unable_to_process")
+    )
 
 
 def _resolve_action_id(
@@ -1366,12 +1372,12 @@ def _confirmation_refusal(
     """
     hass = cfg.get("hass")
     if _is_wrong_user(cfg, action):
-        return pin_msg(hass, "pending_action_wrong_user"), False
+        return ToolFailure(pin_msg(hass, "pending_action_wrong_user")), False
     thread_id = cfg.get("thread_id")
     if not thread_id or action.get("thread_id") != thread_id:
         # _resolve_action_id already refuses another conversation's action;
         # kept so this check never depends on how the id was resolved.
-        return pin_msg(hass, "pending_action_not_found_or_expired"), False
+        return ToolFailure(pin_msg(hass, "pending_action_not_found_or_expired")), False
     # Refused before the PIN is checked, so no attempt is counted.
     pin_reply = cfg.get("pin_reply")
     not_in_message = False
@@ -1727,7 +1733,7 @@ async def alarm_control(  # noqa: D417, PLR0913
 
     """
     if "configurable" not in config:
-        return "Configuration not found. Please check your setup."
+        return ToolFailure("Configuration not found. Please check your setup.")
 
     hass: HomeAssistant = config["configurable"]["hass"]
     tool_args: dict[str, Any] = {
@@ -1743,7 +1749,7 @@ async def alarm_control(  # noqa: D417, PLR0913
     try:
         result = await _perform_alarm_control(hass, "alarm_control", tool_args)
     except HomeAssistantError as err:
-        return f"Error controlling alarm: {err}"
+        return ToolFailure(f"Error controlling alarm: {err}")
     return json.dumps(result)
 
 
@@ -2296,7 +2302,7 @@ async def get_camera_last_events(  # noqa: D417
 
     """
     if "configurable" not in config:
-        return "Configuration not found. Please check your setup."
+        return ToolFailure("Configuration not found. Please check your setup.")
 
     hass = config["configurable"]["hass"]
     results = get_camera_last_events_from_states(hass, camera_entity_id)
@@ -2386,7 +2392,7 @@ async def audit_home_security(
     runtime_data = configurable.get("hga_runtime_data")
     sentinel = getattr(runtime_data, "sentinel", None)
     if sentinel is None:
-        return (
+        return ToolFailure(
             "Sentinel is not enabled, so no security checks can run. Enable "
             "Sentinel in the Home Generative Agent integration's Sentinel "
             "settings (Advanced setup) to audit this home."
@@ -2394,7 +2400,9 @@ async def audit_home_security(
     report = await sentinel.async_audit_network()
     if report["status"] != "ok":
         # The engine owns the wording for both "disabled" and "unavailable".
-        return "The security audit could not run: " + "; ".join(report["notes"])
+        return ToolFailure(
+            "The security audit could not run: " + "; ".join(report["notes"])
+        )
     # Fails closed: a sentinel object that cannot say details may be shared
     # (a wrapper, a renamed property) gets the digest, never the details.
     if getattr(sentinel, "network_audit_share_details", False) is not True:

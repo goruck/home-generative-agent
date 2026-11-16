@@ -94,11 +94,16 @@ from ..core.prompt_cache import (  # noqa: TID252
 from ..core.provider_stall import model_call_budget  # noqa: TID252
 from ..core.utils import extract_final  # noqa: TID252
 from .automation_pin import STEP_TARGET_KEYS
-from .automation_targets import AUTOMATION_ADDED_PREFIX, AUTOMATION_REFUSAL_PREFIX
+from .automation_targets import (
+    AUTOMATION_ADDED_PREFIX,
+    AUTOMATION_PUSHES_LEFT_ORDINARY,
+    AUTOMATION_REFUSAL_PREFIX,
+)
 from .helpers import (
     ALARM_DOMAIN,
     CONFIRM_TOOL_NAME,
     INTENT_NAME_ALL,
+    PIN_AWAITING_USER_REPLY,
     PIN_REFUSAL_ENDS_TURN,
     REMOTE_TOOL,
     active_llm_api_ids,
@@ -179,6 +184,7 @@ from .pin_messages import describe_pending_action, pin_msg, refused_pin_request
 from .rule_entities import expand_critical_rules
 from .template_actions import entities_of
 from .token_counter import count_tokens_cross_provider
+from .tool_failure import ToolFailure
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -415,6 +421,11 @@ async def _run_langchain_tool(
             raw_content = lc_result.content
             status = None
             result_str = _stringify(raw_content)
+        elif isinstance(lc_result, ToolFailure):
+            # Our tool's refusal in plain text (#1023): LangChain would call
+            # any string a success. A plain str for the checkpoint.
+            status = "error"
+            result_str = str(lc_result)
         elif isinstance(lc_result, str):
             status = None
             result_str = lc_result
@@ -422,20 +433,17 @@ async def _run_langchain_tool(
             status = None
             result_str = _stringify(lc_result)
 
-        if tool_name == "alarm_control":
-            try:
-                parsed = json.loads(result_str)
-                if isinstance(parsed, dict):
-                    warning = parsed.get("warning")
-                    success_val = bool(parsed.get("success", True))
-                    if warning or not success_val:
-                        status = "error"
-                        if parsed.get("result_text"):
-                            result_str = parsed["result_text"]
-                        elif warning:
-                            result_str = str(warning)
-            except json.JSONDecodeError:
-                status = None
+        # Plain text is not parsed: a ToolFailure keeps its error status.
+        parsed = loads_or_none(result_str) if tool_name == "alarm_control" else None
+        if isinstance(parsed, dict):
+            warning = parsed.get("warning")
+            success_val = bool(parsed.get("success", True))
+            if warning or not success_val:
+                status = "error"
+                if parsed.get("result_text"):
+                    result_str = parsed["result_text"]
+                elif warning:
+                    result_str = str(warning)
 
         return ToolMessage(
             content=result_str,
@@ -3831,7 +3839,10 @@ def _result_succeeded(msg: ToolMessage) -> bool:
         # It reports a refusal, an invalid config or a PIN it needs in plain
         # text; only an installed automation reads as done (#1013 review).
         # Another server's tool of that name is read like any other.
-        return msg.content.startswith(AUTOMATION_ADDED_PREFIX)
+        return (
+            msg.content.startswith(AUTOMATION_ADDED_PREFIX)
+            and AUTOMATION_PUSHES_LEFT_ORDINARY not in msg.content
+        )
     data = loads_or_none(msg.content)
     if isinstance(data, str):
         # An HA API tool's JSON-string result, encoded once more on the way
@@ -3843,12 +3854,24 @@ def _result_succeeded(msg: ToolMessage) -> bool:
         return False
     # A tool's own JSON can hold a dict or list under "status" (#1013 review).
     status = data.get("status")
-    held = isinstance(status, str) and status in {"error", "requires_pin"}
+    held = isinstance(status, str) and status in {
+        "error",
+        "requires_pin",
+        PIN_AWAITING_USER_REPLY,
+    }
     return data.get("success") is not False and not held
 
 
 def _result_partly_acted(msg: ToolMessage) -> bool:
     """Return True for an action that acted on some of its devices only."""
+    if (
+        (msg.name or "").lower() == "add_automation"
+        and isinstance(msg.content, str)
+        and msg.content.startswith(AUTOMATION_ADDED_PREFIX)
+    ):
+        # Installed, but a safety alarm's pushes stay ordinary (#869, #1023):
+        # not "Done.", and not "try again", which would install a second.
+        return AUTOMATION_PUSHES_LEFT_ORDINARY in msg.content
     data = loads_or_none(msg.content) if isinstance(msg.content, str) else None
     return isinstance(data, dict) and bool(data.get("partial_failure"))
 

@@ -42,18 +42,6 @@
 **Priority:** P3
 **Depends on:** None
 
-### alarm_control's plain-text error loses its text
-
-**What:** `_run_langchain_tool` (`agent/graph.py`) sets `status = None` when `alarm_control` returns text that is not JSON ("Error controlling alarm: …", "Configuration not found…"), and `ToolMessage(status=None)` fails validation. The `except ValidationError` then turns it into the generic tool error, so the model gets `ValidationError(...)` instead of the alarm's own message.
-
-**Why:** Claude adversarial pass, review of #1013 (2026-11-15). Pre-existing; the result still reads as an error, so nothing claims the alarm changed.
-
-**How to apply:** On `json.JSONDecodeError` set `status = "error"` and keep `result_str`. Test: a stub `alarm_control` returning "Error controlling alarm: x" gives an error ToolMessage whose content is that text.
-
-**Effort:** S
-**Priority:** P3
-**Depends on:** None
-
 ### No test proves the handler passes a followed PIN prompt's owner into the run
 
 **What:** `_async_handle_message_active` (`conversation.py`) sets `user_id` to the speaker's memory user and `pin_owner` to the prompt's owner, but no test runs the handler: the check only searches the source text. Renaming the config key, or setting `user_id` from the prompt's owner (the leak #941's review closed), would still pass every test.

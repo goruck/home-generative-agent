@@ -20,10 +20,12 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 import custom_components.home_generative_agent.agent.graph as agent_graph
 from custom_components.home_generative_agent.agent.automation_targets import (
     AUTOMATION_ADDED_PREFIX,
+    AUTOMATION_PUSHES_LEFT_ORDINARY,
     AUTOMATION_REFUSAL_PREFIX,
 )
 from custom_components.home_generative_agent.agent.graph import _should_continue
 from custom_components.home_generative_agent.agent.helpers import (
+    PIN_AWAITING_USER_REPLY,
     register_pending_action,
     start_pin_turn,
 )
@@ -184,6 +186,16 @@ async def test_done_after_a_round_that_acted(
             [_result({"status": "requires_pin", "action_id": "a1"})],
             id="held_without_a_prompt",
         ),
+        # A confirmation refused before the PIN was checked (#1023).
+        pytest.param(
+            [
+                _result(
+                    {"status": PIN_AWAITING_USER_REPLY, "action_id": "a1"},
+                    name="confirm_sensitive_action",
+                )
+            ],
+            id="pin_refused_unchecked",
+        ),
     ],
 )
 async def test_apology_after_a_round_that_did_not_act(
@@ -215,6 +227,17 @@ async def test_apology_after_a_round_that_did_not_act(
         pytest.param(
             [_result({"response_type": "action_done", "partial_failure": "1 failed"})],
             id="half_done",
+        ),
+        # Installed, but a safety alarm's pushes stay ordinary (#869, #1023).
+        pytest.param(
+            [
+                _result(
+                    f"{AUTOMATION_ADDED_PREFIX}01X. This automation fires on a "
+                    f"leak … {AUTOMATION_PUSHES_LEFT_ORDINARY} Tell the user.",
+                    name="add_automation",
+                )
+            ],
+            id="automation_added_pushes_left_ordinary",
         ),
     ],
 )

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta
 from functools import partial
@@ -64,6 +64,13 @@ from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.store.base import (
+    BaseStore,
+    ListNamespacesOp,
+    Op,
+    Result,
+    SearchOp,
+)
 from langgraph.store.postgres import AsyncPostgresStore
 from langgraph.store.postgres.base import PostgresIndexConfig
 from ollama import ResponseError as OllamaResponseError
@@ -1829,32 +1836,29 @@ class NullChat:
         return NullChat(merged)
 
 
-class NullStore:
-    """Non-throwing fallback for memory store operations."""
+class NullStore(BaseStore):
+    """
+    Non-throwing fallback for memory store operations.
+
+    A `BaseStore`, because the memory tools declare `store: BaseStore` and
+    LangChain checks it: a plain object failed that check before the tool
+    ran, so with no database every memory request got a validation error
+    asking the model to call the tool again (#1016).
+    """
 
     # core.memories.store_available reads this: the memory services refuse
-    # to run on it, and the memory tools see an empty store.
+    # to run on it, and the memory tools say no database is set up.
     is_null_store = True
 
-    async def asearch(self, *_args: Any, **_kwargs: Any) -> list[Any]:
-        """Return an empty result set."""
-        return []
+    def batch(self, ops: Iterable[Op]) -> list[Result]:
+        """Answer every operation as an empty store that keeps nothing."""
+        return [
+            [] if isinstance(op, (SearchOp, ListNamespacesOp)) else None for op in ops
+        ]
 
-    async def aput(self, *_args: Any, **_kwargs: Any) -> None:
-        """No-op write."""
-        return
-
-    async def aget(self, *_args: Any, **_kwargs: Any) -> None:
-        """Return no item."""
-        return
-
-    async def adelete(self, *_args: Any, **_kwargs: Any) -> None:
-        """No-op delete."""
-        return
-
-    async def alist_namespaces(self, *_args: Any, **_kwargs: Any) -> list[Any]:
-        """Return no namespaces."""
-        return []
+    async def abatch(self, ops: Iterable[Op]) -> list[Result]:
+        """Answer every operation as an empty store that keeps nothing."""
+        return self.batch(ops)
 
 
 # How long an Ollama server may take to accept the connection (#1026). The
