@@ -12,7 +12,7 @@ import json
 import logging
 import re
 from collections import deque
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -1229,6 +1229,17 @@ def _clean_speaker_name(value: str) -> str:
     return name[:SPEAKER_NAME_MAX_CHARS].strip()
 
 
+class TurnIdentity(TypedDict):
+    """Who a turn runs as: the run config's identity keys (_turn_identity)."""
+
+    thread_id: str
+    voice_conversation: str | None
+    voice_thread: str | None
+    user_id: str
+    has_memory_user: bool
+    pin_owner: str | None
+
+
 @dataclasses.dataclass(frozen=True)
 class Speaker:
     """Who a voice-recognizing satellite heard; name is None for an unknown voice."""
@@ -1755,35 +1766,38 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
     @classmethod
     def _turn_identity(
         cls,
+        *,
         conversation_id: str,
         speaker: Speaker | None,
         thread_id: str,
         waiting_prompt: Mapping[str, Any] | None,
         user_name: str | None,
-    ) -> dict[str, Any]:
+    ) -> TurnIdentity:
         """
         Return who the turn runs as: the run config's identity keys.
 
         ``user_id`` is the speaker's memory user, never a followed prompt's
         owner: that would hand the speaker the owner's memories (#941 review).
-        ``pin_owner`` is the owner, for the PIN owner check only.
+        ``pin_owner`` is the owner, for the PIN owner check only. Keyword-only:
+        the conversation and thread ids are both strings, and swapped they
+        would put every voice on one thread.
         """
         clean_user_name, has_memory_user = cls._memory_namespace(user_name, speaker)
-        return {
-            "thread_id": thread_id,
+        return TurnIdentity(
+            thread_id=thread_id,
             # The satellite conversation a voice's thread belongs to: it
             # holds one PIN prompt across its voices (#974).
-            "voice_conversation": conversation_id if speaker else None,
+            voice_conversation=conversation_id if speaker else None,
             # The thread of the voice that spoke, which a PIN-only reply
             # may have left for another voice's: voices are told apart by
             # it, since every voice with no linked person is "robot".
-            "voice_thread": (
+            voice_thread=(
                 cls._thread_id(conversation_id, speaker) if speaker else None
             ),
-            "user_id": clean_user_name,
-            "has_memory_user": has_memory_user,
-            "pin_owner": cls._pin_owner(user_name, waiting_prompt),
-        }
+            user_id=clean_user_name,
+            has_memory_user=has_memory_user,
+            pin_owner=cls._pin_owner(user_name, waiting_prompt),
+        )
 
     @staticmethod
     def _thread_id(conversation_id: str, speaker: Speaker | None) -> str:
@@ -2569,7 +2583,11 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         app_config: RunnableConfig = {
             "configurable": {
                 **self._turn_identity(
-                    conversation_id, speaker, thread_id, waiting_prompt, user_name
+                    conversation_id=conversation_id,
+                    speaker=speaker,
+                    thread_id=thread_id,
+                    waiting_prompt=waiting_prompt,
+                    user_name=user_name,
                 ),
                 "pin_reply": pin_reply,
                 "requester_is_admin": requester_is_admin,
