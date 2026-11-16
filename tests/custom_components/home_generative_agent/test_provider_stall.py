@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from pathlib import Path
 from time import monotonic
@@ -744,6 +745,39 @@ async def test_a_server_that_never_takes_the_connection_is_a_stall(
             await chain.ainvoke(_MESSAGES)
 
     assert tracker.is_stalled("p0")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("chain_of", "stalled"),
+    [
+        # Alone, a stall would refuse every call: a blip must not do that.
+        (["edge"], [False]),
+        # A cloud SDK's connect timeout keeps the old rule; the local server
+        # behind it stalls, sending calls on to the cloud.
+        (["cloud", "edge"], [False, True]),
+        # The last local server standing keeps the breaker's quick retries.
+        (["edge", "edge"], [True, False]),
+    ],
+    ids=["lone", "cloud_first", "two_local"],
+)
+async def test_a_quick_connect_timeout_stalls_only_where_calls_can_go_on(
+    chain_of: list[str], stalled: list[bool]
+) -> None:
+    """A quick connect timeout counts only when a stall sends calls elsewhere."""
+    tracker = _tracker()
+    error = httpx.ConnectTimeout("timed out")
+    members = [
+        (_FailsWith(error, 0.0), deployment, f"p{n}")
+        for n, deployment in enumerate(chain_of)
+    ]
+    chain = FallbackChatModel(members, stall_tracker=tracker)
+
+    for _ in range(provider_stall.STALL_TIMEOUT_THRESHOLD):
+        with model_call_budget(180.0), contextlib.suppress(Exception):
+            await chain.ainvoke(_MESSAGES)
+
+    assert [tracker.is_stalled(f"p{n}") for n in range(len(chain_of))] == stalled
 
 
 def test_a_tool_bound_member_is_probed_through_its_unbound_source() -> None:
