@@ -1411,14 +1411,7 @@ def _retrieval_query(messages: Sequence[BaseMessage]) -> str:
         # both in the agent's offer, so rank on it, the user's previous turn,
         # and the reply itself (each searched separately; best score wins).
         offer = _offer_text(messages[:-1])
-        previous = next(
-            (
-                _message_text(m).strip()
-                for m in reversed(messages[:-1])
-                if isinstance(m, HumanMessage)
-            ),
-            "",
-        )
+        previous = _previous_user_text(messages)
         parts = [p.rstrip(".!? ") for p in (previous, offer) if p]
         if parts:
             LOGGER.debug(
@@ -1429,18 +1422,14 @@ def _retrieval_query(messages: Sequence[BaseMessage]) -> str:
         return current
     if not _is_referential_follow_up(current):
         return current
-    for msg in reversed(messages[:-1]):
-        if not isinstance(msg, HumanMessage):
-            continue
-        previous = _message_text(msg).strip()
-        if not previous:
-            break
-        LOGGER.debug(
-            "Referential follow-up: widening the retrieval query with the "
-            "previous user turn (model input unchanged)"
-        )
-        return f"{previous.rstrip('.!?')}. {current}"
-    return current
+    previous = _previous_user_text(messages)
+    if not previous:
+        return current
+    LOGGER.debug(
+        "Referential follow-up: widening the retrieval query with the "
+        "previous user turn (model input unchanged)"
+    )
+    return f"{previous.rstrip('.!?')}. {current}"
 
 
 _MAX_ACTION_ROUNDS = 3
@@ -1776,6 +1765,16 @@ async def _append_turn_on_tool(  # noqa: PLR0913
 
 # At most this many of the previous turn's tools are kept bound (#920).
 _PRIOR_TURN_TOOLS_MAX = 3
+# At most this many of the tools the previous question ranks best (#1033).
+_PRIOR_QUESTION_TOOLS_MAX = 2
+
+
+def _previous_user_text(messages: Sequence[BaseMessage]) -> str:
+    """Return the user's message before the current one, or "" if none."""
+    for msg in reversed(messages[:-1]):
+        if isinstance(msg, HumanMessage):
+            return _message_text(msg).strip()
+    return ""
 
 
 def _prior_turn_tool_names(messages: Sequence[BaseMessage]) -> list[str]:
@@ -1863,6 +1862,89 @@ async def _append_prior_turn_tools(
     if added:
         LOGGER.debug(
             "Short follow-up: kept %d tool(s) the previous turn ran bound", added
+        )
+    return candidates
+
+
+def _prior_question(messages: Sequence[BaseMessage], *, widened: bool) -> str:
+    """
+    Return the previous question whose best tools a short follow-up binds.
+
+    Empty unless the current turn is short (the referential word cap) and its
+    ranking did not already search the previous question (a referential or
+    affirmative follow-up is widened by `_retrieval_query` instead).
+    """
+    if widened or not messages:
+        return ""
+    query = _message_text(messages[-1])
+    if not query.strip() or len(query.split()) > MAX_REFERENTIAL_FOLLOW_UP_WORDS:
+        return ""
+    return _previous_user_text(messages)
+
+
+async def _get_prior_question_tools(
+    store: BaseStore,
+    config: RunnableConfig,
+    question: str,
+    live_tool_ids: set[tuple[str, str]] | None,
+) -> list[RawTool]:
+    """
+    Rank the previous question's tools for a short follow-up (#1033).
+
+    Field report: "What do you see on the moon garden camera?" was answered
+    from the camera list in the prompt with no tool call, so the #920 carry
+    had nothing to keep, and "the backyard one then", ranked on its own
+    words, offered no camera tool: the agent said it could not look. The
+    camera tool ranked first on the previous question (0.580).
+
+    Read-only tools only: an actuation tool chosen by an earlier request is
+    never bound on a turn whose own words did not ask for one. This house's
+    own tools only, as in the #920 carry. Run beside the turn's own ranking,
+    so it adds no wait.
+    """
+    if not question:
+        return []
+    local_api_ids = _get_allowed_api_ids(config) - _remote_ids(config)
+    ranked, _dropped = await _get_rag_retrieved_tools(
+        store, config, question, local_api_ids, live_tool_ids
+    )
+    always_bound = _always_bound_local_tools(config)
+    return [
+        t
+        for t in ranked
+        if not t["is_actuation"] and not _is_always_bound_local_tool(t, always_bound)
+    ]
+
+
+def _append_prior_question_tools(
+    candidates: list[RawTool],
+    prior_question_tools: Sequence[RawTool],
+    facing: Callable[[str, str], str],
+) -> list[RawTool]:
+    """
+    Bind the previous question's best read-only tools (#1033).
+
+    Appended past the limit, like the #920 carry, so a tool this turn ranked
+    is never evicted. Nothing when ranking found no candidates: step 3's
+    keyword fallback then stands alone.
+    """
+    if not candidates:
+        return candidates
+    bound = {facing(t["api_id"], t["name"]) for t in candidates}
+    added = 0
+    for tool in prior_question_tools:
+        if added >= _PRIOR_QUESTION_TOOLS_MAX:
+            break
+        key = facing(tool["api_id"], tool["name"])
+        if key in bound:
+            continue
+        candidates = [*candidates, tool]
+        bound.add(key)
+        added += 1
+    if added:
+        LOGGER.debug(
+            "Short follow-up: bound %d tool(s) the previous question ranks best",
+            added,
         )
     return candidates
 
@@ -3219,12 +3301,14 @@ async def _retrieve_tools(  # noqa: PLR0915
     # drop dead rows *before* it cuts to the retrieval limit — step 1b below
     # runs after that cut and cannot give a stolen slot back.
     live_tool_ids = _get_live_tool_ids(config)
-    rag_result, safety_tools, pin_tools = await asyncio.gather(
+    prior_question = _prior_question(state["messages"], widened=ranking_query != query)
+    rag_result, safety_tools, pin_tools, prior_question_tools = await asyncio.gather(
         _get_rag_retrieved_tools(
             store, config, ranking_query, allowed_api_ids, live_tool_ids
         ),
         _get_actuation_safety_tools(store, config, ranking_query, allowed_api_ids),
         _get_pending_pin_tools(state["messages"], store, config),
+        _get_prior_question_tools(store, config, prior_question, live_tool_ids),
     )
     rag_tools, rag_dropped_not_live = rag_result
 
@@ -3277,6 +3361,14 @@ async def _retrieve_tools(  # noqa: PLR0915
     ]
     effective_limit = min(safety_cap + len(rag_only), safety_cap + limit)
     all_candidates = pin_tools + (safety_capped + rag_only)[:effective_limit]
+
+    # 2b. A short follow-up also gets the previous question's best read-only
+    # tools (#1033), before 3b and 3i so both still apply to them. Only when
+    # ranking found something: with no candidates, step 3's keyword fallback
+    # stands alone.
+    all_candidates = _append_prior_question_tools(
+        all_candidates, prior_question_tools, facing
+    )
 
     # 3. Fallback: vector store unavailable or index not yet ready.
     # Still apply the limit so the user-configured cap is always respected.
