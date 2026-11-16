@@ -10,6 +10,7 @@ turns into an error result. These tests run the real tools through it.
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -23,10 +24,13 @@ from langgraph.store.memory import InMemoryStore
 import custom_components.home_generative_agent as hga_component
 import custom_components.home_generative_agent.agent.graph as agent_graph
 from custom_components.home_generative_agent.agent import tools as hga_tools
-from custom_components.home_generative_agent.agent.tool_failure import ToolFailure
+from custom_components.home_generative_agent.agent.tool_failure import (
+    ToolFailure,
+    is_tool_refusal,
+)
 from custom_components.home_generative_agent.const import (
     CONF_MEMORY_MAX_PER_PERSON,
-    NO_REPLY_APOLOGY,
+    NO_REPLY_REFUSED,
 )
 
 if TYPE_CHECKING:
@@ -227,7 +231,7 @@ def test_a_tool_failure_is_still_its_text() -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_empty_reply_after_a_memory_refusal_apologizes(
+async def test_an_empty_reply_after_a_memory_refusal_does_not_ask_to_retry(
     hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The field case: "remember this" with no database, then no model text."""
@@ -275,4 +279,146 @@ async def test_an_empty_reply_after_a_memory_refusal_apologizes(
     reply = (await call_model(state, config, store=store))["messages"]
 
     assert isinstance(reply, AIMessage)
-    assert reply.content == NO_REPLY_APOLOGY
+    # Not "try again": no retry stores a memory without a database.
+    assert reply.content == NO_REPLY_REFUSED
+
+
+def _requires_pin() -> ToolMessage:
+    return ToolMessage(
+        content=json.dumps({"status": "requires_pin", "action_id": "a1"}),
+        tool_call_id="c0",
+        name="HassLockUnlock",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_refused_confirmation_resolves_the_pin_check(
+    hass: HomeAssistant,
+) -> None:
+    """
+    The confirm tool's own refusal is an answer, not a call that never ran.
+
+    Read as "never ran", the gone action stayed pending and the confirm tool
+    stayed bound for the whole lookback window (#1023 review).
+    """
+    refusal = await _run(
+        "confirm_sensitive_action",
+        {"action_id": "gone", "pin": "1234"},
+        _configurable(hass),
+    )
+    # A routing or tool error on the call itself: the PIN was never checked.
+    routing_error = ToolMessage(
+        content="Error: tool unavailable",
+        tool_call_id="c2",
+        name="confirm_sensitive_action",
+        status="error",
+    )
+    pending: Any = agent_graph._has_pending_pin_confirmation
+
+    assert refusal.status == "error"
+    assert pending([_requires_pin(), refusal]) is False
+    assert pending([_requires_pin(), routing_error]) is True
+
+
+@pytest.mark.asyncio
+async def test_a_tool_that_answered_it_could_not_is_carried(
+    hass: HomeAssistant,
+) -> None:
+    """'Camera porch was not found' then 'the front one' keeps the camera tool."""
+    refusal = await _run(
+        "get_and_analyze_camera_image",
+        {"camera_name": "porch"},
+        _configurable(hass),
+    )
+    call = {"name": refusal.name, "args": {}, "id": "c1", "type": "tool_call"}
+    messages = [
+        HumanMessage(content="what's on the porch camera?"),
+        AIMessage(content="", tool_calls=[call]),
+        refusal,
+        AIMessage(content="I could not find that camera."),
+        HumanMessage(content="the front one"),
+    ]
+    names: Any = agent_graph._prior_turn_tool_names
+
+    assert names(messages) == ["get_and_analyze_camera_image"]
+
+
+@pytest.mark.asyncio
+async def test_an_analysis_answered_with_the_error_caption_is_an_error(
+    hass: HomeAssistant,
+) -> None:
+    """analyze_image answers a Home Assistant error with the error caption."""
+    with (
+        patch.object(hga_tools, "_resolve_camera_entity_id", return_value="camera.x"),
+        patch.object(hga_tools, "_get_camera_image", AsyncMock(return_value=b"jpg")),
+        patch.object(
+            hga_tools,
+            "analyze_image",
+            AsyncMock(return_value=hga_tools.VLM_ERROR_CAPTION),
+        ),
+    ):
+        failed = await _run(
+            "get_and_analyze_camera_image",
+            {"camera_name": "x"},
+            _configurable(hass),
+        )
+    with (
+        patch.object(hga_tools, "_resolve_camera_entity_id", return_value="camera.x"),
+        patch.object(hga_tools, "_get_camera_image", AsyncMock(return_value=b"jpg")),
+        patch.object(hga_tools, "analyze_image", AsyncMock(return_value="A cat.")),
+    ):
+        seen = await _run(
+            "get_and_analyze_camera_image",
+            {"camera_name": "x"},
+            _configurable(hass),
+        )
+
+    assert failed.status == "error"
+    assert seen.status == "success"
+    assert seen.content == "A cat."
+
+
+@pytest.mark.asyncio
+async def test_a_confirmed_automation_that_may_be_installed_is_no_failure(
+    hass: HomeAssistant,
+) -> None:
+    """'May have been installed' must not invite a second install (#1023 review)."""
+    run: Any = hga_tools._execute_pending_automation
+    action = {"automation_config": {"alias": "x"}}
+    with (
+        patch.object(hga_tools, "_claim_pending_action", return_value=True),
+        patch.object(hga_tools, "_record_confirmed"),
+        patch.object(
+            hga_tools, "_async_write_automation", AsyncMock(side_effect=OSError)
+        ),
+    ):
+        _, maybe = await run("a1", action, {"hass": hass}, float("inf"))
+    _, invalid = await run("a1", {}, {"hass": hass}, float("inf"))
+
+    assert maybe is not None
+    assert not isinstance(maybe, ToolFailure)
+    assert isinstance(invalid, ToolFailure)
+
+
+@pytest.mark.asyncio
+async def test_an_alarm_warning_is_an_error_but_no_refusal(hass: HomeAssistant) -> None:
+    """
+    A panel still showing disarmed after the call may be arming.
+
+    Tagged as a refusal it would get "I couldn't do that" and be carried to the
+    next turn (#1023 review); it stays an untagged error, as on main.
+    """
+    with patch.object(
+        hga_tools,
+        "_perform_alarm_control",
+        AsyncMock(return_value={"success": True, "warning": "Still disarmed."}),
+    ):
+        result = await _run(
+            "alarm_control",
+            {"name": "Alarm", "state": "arm_away"},
+            _configurable(hass),
+        )
+
+    assert result.status == "error"
+    assert result.content == "Still disarmed."
+    assert not is_tool_refusal(result)

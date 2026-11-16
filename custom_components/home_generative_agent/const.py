@@ -1775,3 +1775,9 @@ NO_REPLY_APOLOGY = "I'm sorry, I was unable to respond. Please try again."
 # and some did not: "try again" would repeat what already ran, such as an
 # automation that would then be added twice (#1013 review).
 NO_REPLY_PARTIAL = "Some of that may not have worked. Please check before asking again."
+# Said instead for an empty reply after a round where every call was one of
+# our tools answering that it could not act (no database, memory full, a PIN
+# for an action that is gone, a camera that timed out, #1023 review). Many of
+# those a retry cannot fix, so the line does not ask for one; the tool's answer
+# stays in the history for the next turn to explain, retry or not.
+NO_REPLY_REFUSED = "I couldn't do that. Ask me what went wrong."

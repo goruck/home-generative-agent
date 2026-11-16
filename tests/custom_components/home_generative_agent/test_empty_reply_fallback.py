@@ -29,9 +29,13 @@ from custom_components.home_generative_agent.agent.helpers import (
     register_pending_action,
     start_pin_turn,
 )
+from custom_components.home_generative_agent.agent.tool_failure import (
+    TOOL_REFUSAL_KWARG,
+)
 from custom_components.home_generative_agent.const import (
     NO_REPLY_APOLOGY,
     NO_REPLY_PARTIAL,
+    NO_REPLY_REFUSED,
 )
 
 if TYPE_CHECKING:
@@ -321,3 +325,47 @@ async def test_a_confirmed_action_adds_nothing_after_its_outcome_line(
     )
 
     assert reply == []
+
+
+_REFUSED = {"status": "error", "additional_kwargs": {TOOL_REFUSAL_KWARG: True}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("results", "expected"),
+    [
+        pytest.param(
+            [_result("Not stored.", name="upsert_memory", **_REFUSED)],
+            NO_REPLY_REFUSED,
+            id="one_refusal",
+        ),
+        pytest.param(
+            [
+                _result("Not stored.", name="upsert_memory", **_REFUSED),
+                _result("No memory with id a.", "c2", "forget_memory", **_REFUSED),
+            ],
+            NO_REPLY_REFUSED,
+            id="two_refusals",
+        ),
+        # A call that never ran may work on a retry: the apology.
+        pytest.param(
+            [
+                _result("Not stored.", name="upsert_memory", **_REFUSED),
+                _result("Error: timed out", call_id="c2", status="error"),
+            ],
+            NO_REPLY_APOLOGY,
+            id="refusal_and_error",
+        ),
+    ],
+)
+async def test_a_round_our_tools_refused_does_not_ask_to_try_again(
+    hass: HomeAssistant,
+    empty_model: MagicMock,
+    results: list[ToolMessage],
+    expected: str,
+) -> None:
+    """Trying again would not store a memory with no database (#1023 review)."""
+    reply = await _reply(_state(*results), _config(hass), empty_model)
+
+    assert isinstance(reply, AIMessage)
+    assert reply.content == expected

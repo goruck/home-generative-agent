@@ -701,7 +701,7 @@ async def get_and_analyze_camera_image(  # noqa: D417
                 CONF_VLM_PROMPT_EXTRA, RECOMMENDED_VLM_PROMPT_EXTRA
             ),
         )
-        return await analyze_image(
+        caption = await analyze_image(
             vlm_model, image, detection_keywords, overrides=overrides
         )
     except (OllamaResponseError, TimeoutError, ProviderRefusedError) as err:
@@ -711,6 +711,8 @@ async def get_and_analyze_camera_image(  # noqa: D417
             # A timeout or a refused call: the reason, without a traceback.
             LOGGER.warning("%s %s", VLM_ERROR_CAPTION, err)
         return ToolFailure(VLM_ERROR_CAPTION)
+    # analyze_image answers a Home Assistant error with the same caption.
+    return ToolFailure(caption) if caption == VLM_ERROR_CAPTION else caption
 
 
 # The memory tools' answer when no Database subentry is set up (#1016): the
@@ -891,7 +893,7 @@ async def add_automation(  # noqa: D417
         # here: a phone that was renamed would otherwise install a camera
         # automation whose push silently fails.
         if mobile_push_service and not service_exists(hass, mobile_push_service):
-            return (
+            return ToolFailure(
                 f"{AUTOMATION_REFUSAL_PREFIX}: the mobile push service configured for "
                 f"this integration, '{sanitize_tool_text(mobile_push_service)}', "
                 "is not a Home Assistant service, so the camera automation's "
@@ -930,7 +932,7 @@ async def add_automation(  # noqa: D417
             warn_on_errors=False,
         )
     except (HomeAssistantError, MultipleInvalid) as err:
-        return f"Invalid automation configuration {err}"
+        return ToolFailure(f"Invalid automation configuration {err}")
 
     # Schema validation passes an automation whose trigger names an entity
     # that does not exist or whose action calls a service that does not, and
@@ -945,7 +947,7 @@ async def add_automation(  # noqa: D417
             sanitize_tool_text(str(ha_automation_config.get("alias", "<unnamed>"))),
             ", ".join(item.name or item.kind for item in missing),
         )
-        return describe_missing_targets(missing)
+        return ToolFailure(describe_missing_targets(missing))
 
     # A leak, smoke, gas or CO alert must not sit unseen in a notification
     # group or behind a Focus mode (#869). Rewrite the config that is written
@@ -1044,12 +1046,14 @@ def _maybe_require_pin_for_automation(
             "Set a PIN in the integration options to enforce confirmation.",
             ", ".join(call.describe() for call in critical_calls),
         )
-        return pin_msg(cfg.get("hass"), "automation_pin_unset")
+        return ToolFailure(pin_msg(cfg.get("hass"), "automation_pin_unset"))
 
     pending_actions = cfg.get("pending_actions")
     if pending_actions is None:
         LOGGER.error("Cannot gate critical automation: no pending action store.")
-        return pin_msg(cfg.get("hass"), "automation_pending_store_unavailable")
+        return ToolFailure(
+            pin_msg(cfg.get("hass"), "automation_pending_store_unavailable")
+        )
 
     action = {
         "tool_name": "add_automation",
@@ -1071,7 +1075,7 @@ def _maybe_require_pin_for_automation(
         pending_actions, action, pin_owner=cfg.get("pin_owner"), pin_reply=pin_reply
     )
     if action_id is None:
-        return refused_pin_request(cfg.get("hass"), pin_reply)
+        return ToolFailure(refused_pin_request(cfg.get("hass"), pin_reply))
     return json.dumps(
         {
             "status": "requires_pin",
@@ -1259,8 +1263,10 @@ async def confirm_sensitive_action(  # noqa: D417
     result, exec_err = await _execute_pending_action(
         resolved_action_id, action, cfg, deadline
     )
-    return result or ToolFailure(
-        exec_err or pin_msg(hass, "confirmation_unable_to_process")
+    return (
+        result
+        or exec_err
+        or ToolFailure(pin_msg(hass, "confirmation_unable_to_process"))
     )
 
 
@@ -1574,7 +1580,9 @@ async def _execute_pending_action(  # noqa: PLR0911, PLR0912
     if not isinstance(raw_tool_name, str) or not raw_tool_name:
         # Nothing can ever run it, so do not keep it until the TTL sweep.
         cfg.get("pending_actions", {}).pop(resolved_action_id, None)
-        return None, pin_msg(cfg.get("hass"), "pending_action_missing_tool_name")
+        return None, ToolFailure(
+            pin_msg(cfg.get("hass"), "pending_action_missing_tool_name")
+        )
     tool_name = raw_tool_name
 
     if tool_name == "add_automation":
@@ -1584,7 +1592,7 @@ async def _execute_pending_action(  # noqa: PLR0911, PLR0912
 
     ha_llm_api, api_err = _ensure_api(cfg)
     if api_err or ha_llm_api is None:
-        return None, pin_msg(cfg.get("hass"), "ha_llm_api_unavailable")
+        return None, ToolFailure(pin_msg(cfg.get("hass"), "ha_llm_api_unavailable"))
 
     tool_args = action.get("tool_args") or {}
     # The call runs as it was held: it was normalized and its lock filled in
@@ -1613,7 +1621,9 @@ async def _execute_pending_action(  # noqa: PLR0911, PLR0912
         # PIN was asked for: the line no longer names what would run, so the
         # request is dropped and has to be asked again (#836 review).
         cfg.get("pending_actions", {}).pop(resolved_action_id, None)
-        return None, pin_msg(cfg.get("hass"), "pending_action_not_found_or_expired")
+        return None, ToolFailure(
+            pin_msg(cfg.get("hass"), "pending_action_not_found_or_expired")
+        )
     if kind == BUILTIN_INTENT:
         tool_args = normalize_intent_for_alarm(tool_name, tool_args, None)
         tool_args = normalize_intent_for_lock(tool_name, tool_args, None)
@@ -1629,10 +1639,14 @@ async def _execute_pending_action(  # noqa: PLR0911, PLR0912
     if target_api is None:
         # The API that would have run it is gone.
         cfg.get("pending_actions", {}).pop(resolved_action_id, None)
-        return None, pin_msg(cfg.get("hass"), "pending_action_not_found_or_expired")
+        return None, ToolFailure(
+            pin_msg(cfg.get("hass"), "pending_action_not_found_or_expired")
+        )
 
     if not _claim_pending_action(cfg, resolved_action_id):
-        return None, pin_msg(cfg.get("hass"), "pending_action_not_found_or_expired")
+        return None, ToolFailure(
+            pin_msg(cfg.get("hass"), "pending_action_not_found_or_expired")
+        )
 
     reply_key, outcome = "action_execute_failed", PIN_OUTCOME_FAILED
     try:
@@ -1670,7 +1684,10 @@ async def _execute_pending_action(  # noqa: PLR0911, PLR0912
             content if status == "error" else json.dumps(response.data, default=str)
         )
     _record_confirmed(cfg, action, outcome)
-    return None, pin_msg(cfg.get("hass"), reply_key, err=failure)
+    reply = pin_msg(cfg.get("hass"), reply_key, err=failure)
+    # "May have run" is no failure to retry (#1023 review): only a call that
+    # did not act is a ToolFailure.
+    return None, reply if outcome == PIN_OUTCOME_UNKNOWN else ToolFailure(reply)
 
 
 async def _execute_pending_automation(
@@ -1683,10 +1700,10 @@ async def _execute_pending_automation(
     hass = cfg.get("hass")
     automation_config = action.get("automation_config")
     if hass is None or not isinstance(automation_config, dict):
-        return None, pin_msg(hass, "pending_automation_invalid")
+        return None, ToolFailure(pin_msg(hass, "pending_automation_invalid"))
 
     if not _claim_pending_action(cfg, resolved_action_id):
-        return None, pin_msg(hass, "pending_action_not_found_or_expired")
+        return None, ToolFailure(pin_msg(hass, "pending_action_not_found_or_expired"))
 
     try:
         async with asyncio.timeout_at(deadline):
@@ -1698,6 +1715,7 @@ async def _execute_pending_automation(
         LOGGER.exception("PIN-confirmed automation ended with an error")
         _record_confirmed(cfg, action, PIN_OUTCOME_UNKNOWN)
         # The type only: the message can hold paths or tokens.
+        # Claimed and maybe written: not a failure to retry (#1023 review).
         return None, pin_msg(hass, "automation_outcome_unknown", err=type(err).__name__)
 
     _record_confirmed(cfg, action, PIN_OUTCOME_DONE)
