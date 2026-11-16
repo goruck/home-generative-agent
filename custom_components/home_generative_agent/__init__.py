@@ -185,6 +185,7 @@ from .const import (
     DOMAIN,
     EMBEDDING_MODEL_CTX,
     EMBEDDING_MODEL_DIMS,
+    ENROLL_ADMIN_ONLY_MESSAGE,
     FALLBACK_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
     FALLBACK_CIRCUIT_BREAKER_THRESHOLD,
     FALLBACK_CIRCUIT_BREAKER_WINDOW_SECONDS,
@@ -5002,6 +5003,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     async def _handle_enroll_person(call: ServiceCall) -> None:
         name: str = call.data["name"]
         file_path: str = call.data["file_path"]
+
+        # Like the upload endpoint: an enrolled face is trusted by
+        # recognition, so only an administrator may add one. Checked before
+        # anything else, so a refused caller learns nothing about the setup.
+        # A call with no user (an automation started by a trigger) passes, as
+        # with Home Assistant's own admin services: only an admin can write one.
+        if call.context.user_id:
+            user = await hass.auth.async_get_user(call.context.user_id)
+            if user is None or not user.is_admin:
+                raise HomeAssistantError(ENROLL_ADMIN_ONLY_MESSAGE)
 
         # Captured before the first await: a reload landing during the media
         # read deletes ``entry.runtime_data`` (the service is deregistered on

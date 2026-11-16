@@ -55,6 +55,10 @@ NO_DATABASE_ENROLL_MESSAGE = (
     "Face recognition needs a configured database, and this entry has none. "
     f"{NO_DATABASE_REMEDIATION} Then try again."
 )
+# Shared by the enroll_person service and the upload endpoint: an enrolled
+# face is trusted by recognition (Sentinel's unknown-person rules, the
+# recognized-people sensors), so only an administrator may add one.
+ENROLL_ADMIN_ONLY_MESSAGE = "Only an administrator can enroll a face."
 # Machine-readable discriminator on the upload endpoint's 503 for this case, so
 # callers need not match on prose to tell it from the transient reload 503s.
 NO_DATABASE_ERROR_CODE = "database_not_configured"

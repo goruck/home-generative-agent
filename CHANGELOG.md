@@ -21,6 +21,7 @@ their own. See [RELEASING.md](RELEASING.md).
 
 ### Changed
 
+- **Only an administrator can enroll a face.** Recognition trusts every enrolled face (Sentinel's unknown-person rules, the recognized-people sensors), but any Home Assistant user could enroll one, so a household member or a leaked token could add their face under a resident's name and be "recognized" from then on. The enroll card and the `enroll_person` action now refuse a non-admin user with "Only an administrator can enroll a face." (the card says so before any files are picked, and the endpoint answers HTTP 403). An automation started by a trigger runs with no user and can still call the action, as with Home Assistant's own admin-only actions: only an admin can write an automation.
 - **Dashboard cards load automatically.** The enroll and proposals cards no longer need a manual entry under **Settings → Dashboards → Resources**: add the card to a dashboard directly. If you added an `/hga-card/...` or `/hga-enroll-card/...` entry under **Settings → Dashboards → Resources**, remove it after updating: a cached copy of the old file can otherwise load first and bring back the old card.
 
 ### Fixed

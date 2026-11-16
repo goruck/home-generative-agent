@@ -17,6 +17,14 @@ class HgaEnrollCard extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
+    // The endpoint refuses a non-admin user (HTTP 403); say so before they
+    // pick files instead of after the upload.
+    const refused = Boolean(hass && hass.user && !hass.user.is_admin);
+    if (this._button && refused !== this._refused) {
+      this._refused = refused;
+      this._button.disabled = refused;
+      this._setStatus(refused ? "Only an administrator can enroll a face." : "", refused ? "error" : "");
+    }
   }
 
   getCardSize() {
@@ -97,6 +105,12 @@ class HgaEnrollCard extends HTMLElement {
       this._renderFileList();
     });
     this._button.addEventListener("click", () => this._enroll());
+    // A re-render (setConfig after hass) builds a new button: apply the
+    // admin check to it again.
+    this._refused = undefined;
+    if (this._hass) {
+      this.hass = this._hass;
+    }
   }
 
   _addFiles(fileList) {
@@ -176,7 +190,7 @@ class HgaEnrollCard extends HTMLElement {
     } catch (err) {
       this._setStatus(`Upload failed: ${err}`, "error");
     } finally {
-      this._button.disabled = false;
+      this._button.disabled = Boolean(this._refused);
     }
   }
 }

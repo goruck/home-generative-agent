@@ -510,6 +510,8 @@ Face recognition requires the optional [face-service](https://github.com/goruck/
 
 It also requires the integration's PostgreSQL database: enrolled faces live in a `person_gallery` table there. If the entry has no Database subentry, face recognition is disabled at startup (a repair issue in **Settings → Repairs** says so), and both enrollment paths below refuse with "Face recognition needs a configured database". Run **+ Setup** on the integration page and complete the **Database setup** step to fix it (see [Configuration](configuration.md#basic-setup)).
 
+Only an administrator can enroll a face, by either path below. Recognition trusts every enrolled face, so a non-admin user could otherwise add their own face under a resident's name. Both refuse a non-admin user with "Only an administrator can enroll a face."; the card shows it before any files are picked, and the upload endpoint answers HTTP 403. An automation started by a trigger runs with no user and can still call the action, as with Home Assistant's own admin-only actions: only an admin can write an automation.
+
 ### Enroll via Service
 
 **Service:** `home_generative_agent.enroll_person`
