@@ -85,6 +85,7 @@ from ..core.memories import (  # noqa: TID252
     memories_full,
     memory_limit,
     memory_namespace,
+    store_available,
 )
 from ..core.utils import extract_final, verify_pin  # noqa: TID252
 from ..sentinel.network_audit import (  # noqa: TID252
@@ -708,6 +709,16 @@ async def get_and_analyze_camera_image(  # noqa: D417
         return VLM_ERROR_CAPTION
 
 
+# The memory tools' answer when no Database subentry is set up (#1016): the
+# store is a NullStore that keeps nothing, so a save must not read as done.
+NO_MEMORY_DATABASE = (
+    "Long-term memory is not available: no database is set up for this "
+    "integration, so nothing can be saved, listed or forgotten. Tell the user "
+    "you cannot remember this, and that long-term memory needs the Database "
+    "to be set up in this integration."
+)
+
+
 @tool(parse_docstring=True)
 async def upsert_memory(  # noqa: D417
     content: str,
@@ -739,6 +750,8 @@ async def upsert_memory(  # noqa: D417
     """
     if "configurable" not in config:
         return "Configuration not found. Please check your setup."
+    if not store_available(store):
+        return f"Not stored. {NO_MEMORY_DATABASE}"
 
     mem_id = memory_id or ulid.ulid_now()
 
@@ -775,6 +788,8 @@ async def list_memories(
     """
     if "configurable" not in config:
         return "Configuration not found. Please check your setup."
+    if not store_available(store):
+        return NO_MEMORY_DATABASE
     # One row past what is shown says whether older memories were left out.
     found = await store.asearch(
         memory_namespace(config["configurable"]["user_id"]),
@@ -808,6 +823,8 @@ async def forget_memory(  # noqa: D417
     """
     if "configurable" not in config:
         return "Configuration not found. Please check your setup."
+    if not store_available(store):
+        return f"Nothing was deleted. {NO_MEMORY_DATABASE}"
     namespace = memory_namespace(config["configurable"]["user_id"])
     if await store.aget(namespace, memory_id) is None:
         return f"No memory with id {memory_id}. Nothing was deleted."
