@@ -1752,6 +1752,39 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             return None
         return waiting_prompt.get("user")
 
+    @classmethod
+    def _turn_identity(
+        cls,
+        conversation_id: str,
+        speaker: Speaker | None,
+        thread_id: str,
+        waiting_prompt: Mapping[str, Any] | None,
+        user_name: str | None,
+    ) -> dict[str, Any]:
+        """
+        Return who the turn runs as: the run config's identity keys.
+
+        ``user_id`` is the speaker's memory user, never a followed prompt's
+        owner: that would hand the speaker the owner's memories (#941 review).
+        ``pin_owner`` is the owner, for the PIN owner check only.
+        """
+        clean_user_name, has_memory_user = cls._memory_namespace(user_name, speaker)
+        return {
+            "thread_id": thread_id,
+            # The satellite conversation a voice's thread belongs to: it
+            # holds one PIN prompt across its voices (#974).
+            "voice_conversation": conversation_id if speaker else None,
+            # The thread of the voice that spoke, which a PIN-only reply
+            # may have left for another voice's: voices are told apart by
+            # it, since every voice with no linked person is "robot".
+            "voice_thread": (
+                cls._thread_id(conversation_id, speaker) if speaker else None
+            ),
+            "user_id": clean_user_name,
+            "has_memory_user": has_memory_user,
+            "pin_owner": cls._pin_owner(user_name, waiting_prompt),
+        }
+
     @staticmethod
     def _thread_id(conversation_id: str, speaker: Speaker | None) -> str:
         """
@@ -2533,23 +2566,11 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 response=intent_response, conversation_id=conversation_id
             )
 
-        clean_user_name, has_memory_user = self._memory_namespace(user_name, speaker)
-
         app_config: RunnableConfig = {
             "configurable": {
-                "thread_id": thread_id,
-                # The satellite conversation a voice's thread belongs to: it
-                # holds one PIN prompt across its voices (#974).
-                "voice_conversation": conversation_id if speaker else None,
-                # The thread of the voice that spoke, which a PIN-only reply
-                # may have left for another voice's: voices are told apart by
-                # it, since every voice with no linked person is "robot".
-                "voice_thread": (
-                    self._thread_id(conversation_id, speaker) if speaker else None
+                **self._turn_identity(
+                    conversation_id, speaker, thread_id, waiting_prompt, user_name
                 ),
-                "user_id": clean_user_name,
-                "has_memory_user": has_memory_user,
-                "pin_owner": self._pin_owner(user_name, waiting_prompt),
                 "pin_reply": pin_reply,
                 "requester_is_admin": requester_is_admin,
                 "chat_model": base_llm,

@@ -238,7 +238,8 @@ def test_the_handler_names_the_conversation_only_for_a_voice() -> None:
     src = (_COMPONENT_DIR / "conversation.py").read_text()
     assert '"voice_conversation": conversation_id if speaker else None' in src
     # And the voice's own thread, which a followed turn leaves (#1001).
-    assert "self._thread_id(conversation_id, speaker) if speaker else None" in src
+    assert "cls._thread_id(conversation_id, speaker) if speaker else None" in src
+    # Run as values by the _turn_identity tests in test_conversation_units.py.
 
 
 def test_the_turn_ends_with_the_id_it_started_with() -> None:

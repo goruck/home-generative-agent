@@ -2563,7 +2563,8 @@ def test_each_turn_gets_its_own_pin_reply() -> None:
     src = inspect.getsource(HGAConversationEntity._async_handle_message_active)
     assert "start_pin_turn(" in src
     assert "runtime_data.pending_actions, thread_id, user_input.text" in src
-    assert '"thread_id": thread_id,' in src
+    # The run's thread comes from _turn_identity, given this same thread_id.
+    assert "conversation_id, speaker, thread_id, waiting_prompt, user_name" in src
 
 
 def test_the_pin_turn_starts_before_any_early_return() -> None:
@@ -4345,12 +4346,69 @@ def test_handler_passes_the_speaker_to_thread_memory_and_prompt() -> None:
     """The resolved speaker has to reach everything it is meant to change."""
     src = inspect.getsource(HGAConversationEntity._async_handle_message_active)
     assert "conversation_id, speaker, user_input.text" in src
-    assert "self._memory_namespace(user_name, speaker)" in src
-    # The every-turn memory tool keys on this flag (#1015).
-    assert '"has_memory_user": has_memory_user,' in src
-    assert '"user_id": clean_user_name,' in src
-    assert "self._pin_owner(user_name, waiting_prompt)" in src
+    # Its keys are checked by the _turn_identity tests below.
+    assert (
+        "**self._turn_identity(\n"
+        "                    conversation_id, speaker, thread_id, waiting_prompt, "
+        "user_name\n"
+        "                ),"
+    ) in src
     assert "self._speaker_prompt(speaker)" in src
+
+
+def test_a_guest_pin_for_another_voices_prompt_runs_as_the_guest() -> None:
+    """
+    A guest's "1234" while another voice's prompt waits (#941 review).
+
+    The turn joins the prompt's thread and is owner-checked as the prompt's
+    owner, but reads and writes the guest's own memories, never the owner's.
+    """
+    action = _waiting_action("conv:Пётр")
+    entity = _turn_entity(action)
+    guest = Speaker(name="Мария", person="person.maria", user="Maria")
+    thread_id, waiting = entity._turn_thread("conv", guest, "1234")
+
+    identity = HGAConversationEntity._turn_identity(
+        "conv", guest, thread_id, waiting, None
+    )
+
+    assert identity == {
+        "thread_id": "conv:Пётр",
+        "voice_conversation": "conv",
+        "voice_thread": "conv:person.maria",
+        "user_id": "Maria",
+        "has_memory_user": True,
+        "pin_owner": "ivan",
+    }
+
+
+def test_a_logged_in_turn_keeps_its_own_identity() -> None:
+    """A logged-in user is never someone else: no PIN owner, its own thread."""
+    entity = _turn_entity(_waiting_action("conv:Пётр"))
+    thread_id, waiting = entity._turn_thread("conv", None, "1234")
+
+    identity = HGAConversationEntity._turn_identity(
+        "conv", None, thread_id, waiting, "Logged"
+    )
+
+    assert identity == {
+        "thread_id": "conv",
+        "voice_conversation": None,
+        "voice_thread": None,
+        "user_id": "Logged",
+        "has_memory_user": True,
+        "pin_owner": None,
+    }
+
+
+def test_the_turn_identity_keys_are_the_ones_the_graph_reads() -> None:
+    """Renaming a key here, or in the graph, must fail a test."""
+    from custom_components.home_generative_agent.agent import graph  # noqa: PLC0415
+
+    graph_src = inspect.getsource(graph)
+    identity = HGAConversationEntity._turn_identity("conv", None, "conv", None, "U")
+    for key in identity:
+        assert f'"{key}"' in graph_src or key == "thread_id", key
 
 
 def test_recognized_voice_skips_foreign_turns() -> None:
