@@ -67,7 +67,6 @@ except ImportError:
 _HTTP_TRANSPORT_ERRORS: tuple[type[Exception], ...] = ()
 _HTTP_TIMEOUTS: tuple[type[Exception], ...] = ()
 _HTTP_POOL_TIMEOUTS: tuple[type[Exception], ...] = ()
-_HTTP_CONNECT_TIMEOUTS: tuple[type[Exception], ...] = ()
 for _http_module in ("httpx", "httpx2"):
     try:
         _http = importlib.import_module(_http_module)
@@ -76,7 +75,6 @@ for _http_module in ("httpx", "httpx2"):
     _HTTP_TRANSPORT_ERRORS += (_http.TransportError,)
     _HTTP_TIMEOUTS += (_http.TimeoutException,)
     _HTTP_POOL_TIMEOUTS += (_http.PoolTimeout,)
-    _HTTP_CONNECT_TIMEOUTS += (_http.ConnectTimeout,)
 FALLBACK_RETRYABLE_EXCEPTIONS += _HTTP_TRANSPORT_ERRORS
 
 try:
@@ -293,18 +291,6 @@ def is_timeout_error(err: BaseException) -> bool:
         ):
             return True
         if isinstance(seen, _HTTP_TIMEOUTS):
-            return True
-        seen = seen.__cause__
-    return False
-
-
-def _is_connect_timeout(err: BaseException) -> bool:
-    """Return True if the provider never took the connection (#1026)."""
-    seen: BaseException | None = err
-    for _ in range(_MAX_CAUSE_DEPTH):
-        if seen is None:
-            return False
-        if isinstance(seen, _HTTP_CONNECT_TIMEOUTS):
             return True
         seen = seen.__cause__
     return False
@@ -998,32 +984,6 @@ def _raise_if_stopped(err: BaseException | None) -> None:
         raise asyncio.CancelledError from (None if echoes_request_headers(err) else err)
 
 
-def _connect_timeout_is_a_stall(
-    wrapper: FallbackChatModel | FallbackVLM, index: int, err: Exception
-) -> bool:
-    """
-    Return True when a quick connect timeout should count toward a stall.
-
-    Ollama connections give up within seconds (#1026), far below the wait
-    that is stall evidence, so a server whose address swallows the
-    connection (a sleeping Mac) would cost every turn those seconds and never
-    be skipped. Not taking the connection counts, but only for a local
-    server with another provider in its chain that is not stalled: a stall
-    then sends calls on, while a lone provider's would refuse them, and a
-    short network blip would do that for a minute (#1026 review). A cloud
-    SDK's own connect timeout keeps the old rule.
-    """
-    _model, deployment, provider_id = wrapper.chain[index]
-    tracker = wrapper.stall_tracker
-    if deployment != "edge" or tracker is None or not _is_connect_timeout(err):
-        return False
-    return any(
-        not tracker.is_stalled(other_id)
-        for j, (_m, _d, other_id) in enumerate(wrapper.chain)
-        if j != index and other_id != provider_id
-    )
-
-
 def _handle_member_failure(  # noqa: PLR0913
     wrapper: FallbackChatModel | FallbackVLM,
     kind: str,
@@ -1073,16 +1033,12 @@ def _handle_member_failure(  # noqa: PLR0913
         wrapper.circuit_breaker.record_failure(provider_id)
     # Only a long wait is evidence of a hang: a slow model missing a short
     # Sentinel deadline, or our own connection pool timing out, is not a
-    # stalled provider. A connection the server never took is, however short
-    # the wait (#1026).
+    # stalled provider.
     if (
         wrapper.stall_tracker is not None
         and is_timeout_error(err)
         and not _is_client_pool_timeout(err)
-        and (
-            counts_as_stall_evidence(now - started)
-            or _connect_timeout_is_a_stall(wrapper, i, err)
-        )
+        and counts_as_stall_evidence(now - started)
     ):
         wrapper.stall_tracker.record_timeout(
             provider_id, _probe_call(_probe_model(wrapper, i))
