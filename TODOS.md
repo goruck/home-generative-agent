@@ -2227,20 +2227,6 @@ label pair ("Server URL" vs "Base URL").
 
 ## Config Entry Lifecycle
 
-### Decide whether face enrollment should be admin-only
-
-**What:** `EnrollPersonView` (`http.py`) has `requires_auth = True` but no admin check, and the `hga.enroll_person` service is likewise callable by any user context — so any authenticated HA user (or a leaked limited-scope long-lived token) can enroll faces into the gallery that feeds security-relevant recognition (Sentinel unknown-person rules, recognized-people sensors). Poisoning shape: enroll an arbitrary face under a trusted resident's name and the phantom becomes "recognized". Reserved-label refusal still applies; this is about *who*, not *what*.
-
-**Why:** Security-specialist finding during the v3.30.10 ship (confidence 5 — a deliberate-decision flag, not a demonstrated exploit). Pre-existing behavior, not introduced by that ship's view rewiring. Deferred by user decision (2026-08-21): gating changes which household members can use the enroll card, so it deserves its own PR, docs update, and release note rather than riding a lifecycle batch.
-
-**How to apply:** If admin-only: check `request[KEY_HASS_USER].is_admin` in `post()` (mirroring HA's admin-gated views) and require admin context in `_handle_enroll_person` for parity; update `docs/camera-entities.md` and the enroll card docs; release-note the behavior change. If open-by-design: document explicitly that any authenticated user may enroll.
-
-**Effort:** S
-**Priority:** P2
-**Depends on:** —
-
----
-
 ### A Sentinel write already under way when its stop gives up still lands
 
 **What:** The #988 `StopLatch` (`core/stop_latch.py`) is checked before a write or action starts. A left-behind run's save, database commit or service call that was already in flight when the stop stopped waiting still finishes: a suppression, inventory or discovery `Store.async_save` can then overwrite the reloaded entry's file, or recreate an inventory removing Sentinel has just deleted; a baseline transaction already committing commits; an auto-execute call already running actuates, and its audit row and cooldown are then refused; a notification button handler already running when the notifier stops has its closing saves refused (the latch warning then names a write it did not start). Pushes from a left-behind run are deliberately not latched (a refused push loses an alert whose cooldown was saved earlier).

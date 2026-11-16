@@ -14,7 +14,9 @@ from homeassistant.helpers.http import HomeAssistantView
 
 from .const import (
     DOMAIN,
+    ENROLL_ADMIN_ONLY_MESSAGE,
     HTTP_STATUS_BAD_GATEWAY,
+    HTTP_STATUS_FORBIDDEN,
     HTTP_STATUS_SERVICE_UNAVAILABLE,
     NO_DATABASE_ENROLL_MESSAGE,
     NO_DATABASE_ERROR_CODE,
@@ -35,6 +37,9 @@ MAX_UPLOAD_BYTES: Final = 10 * 1024 * 1024
 # memory in one request. The card sends a handful; 25 is generous.
 MAX_UPLOAD_FILES = 25
 ALLOWED_EXTENSIONS: Final = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+# Home Assistant's KEY_HASS_USER (homeassistant.components.http.const), named
+# here so the integration does not import the http component.
+_KEY_HASS_USER: Final = "hass_user"
 
 
 def _is_allowed_image(part: multipart.BodyPartReader) -> bool:
@@ -155,6 +160,16 @@ class EnrollPersonView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:  # noqa: PLR0911, PLR0912
         """Handle POST request to enroll a person."""
+        # First, before the body is read: an enrolled face is trusted by
+        # recognition, so a non-admin user (or a leaked token of one) must not
+        # be able to add a face under a resident's name. Not HA's
+        # require_admin decorator: it answers a bare 401 the card cannot show.
+        user = request.get(_KEY_HASS_USER)
+        if user is None or not user.is_admin:
+            return web.json_response(
+                {"status": "error", "message": ENROLL_ADMIN_ONLY_MESSAGE},
+                status=HTTP_STATUS_FORBIDDEN,
+            )
         try:
             reader = await request.multipart()
         except Exception as err:  # noqa: BLE001

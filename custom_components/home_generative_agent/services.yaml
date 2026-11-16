@@ -1,6 +1,6 @@
 enroll_person:
   name: Enroll Person
-  description: Enroll a new person into the face database from an image file.
+  description: Enroll a new person into the face database from an image file. Only an administrator can run it.
   fields:
     name:
       name: Person name

@@ -26,7 +26,7 @@ from homeassistant.config_entries import (
     ConfigSubentryData,
 )
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNAME
-from homeassistant.core import CoreState
+from homeassistant.core import Context, CoreState
 from homeassistant.exceptions import (
     ConfigEntryError,
     ConfigEntryNotReady,
@@ -38,12 +38,13 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from psycopg import OperationalError
 from psycopg import errors as pg_errors
 from psycopg_pool import PoolClosed, PoolTimeout
-from pytest_homeassistant.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry, MockUser
 
 import custom_components.home_generative_agent as hga_component
 from custom_components.home_generative_agent.const import (
     CONF_DB_NAME,
     DOMAIN,
+    ENROLL_ADMIN_ONLY_MESSAGE,
     RECOMMENDED_DB_HOST,
     RECOMMENDED_DB_NAME,
     RECOMMENDED_DB_PASSWORD,
@@ -875,9 +876,15 @@ async def test_issue_is_per_entry(hass: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def admin_context(hass_admin_user: MockUser) -> Context:
+    """Return a call context from an admin: enroll_person is admin-only."""
+    return Context(user_id=hass_admin_user.id)
+
+
 @pytest.mark.asyncio
 async def test_enroll_person_service_refuses_before_reading_any_media(
-    hass: Any, monkeypatch: pytest.MonkeyPatch
+    hass: Any, monkeypatch: pytest.MonkeyPatch, admin_context: Context
 ) -> None:
     """
     A clear error, not AttributeError on None — and no I/O first.
@@ -899,6 +906,65 @@ async def test_enroll_person_service_refuses_before_reading_any_media(
             "enroll_person",
             {"name": "Alice", "file_path": "/media/faces/alice.jpg"},
             blocking=True,
+            context=admin_context,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller", ["non_admin", "unknown_user"])
+async def test_enroll_person_service_is_admin_only(
+    hass: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    hass_read_only_user: MockUser,
+    caller: str,
+) -> None:
+    """
+    Only an admin may enroll a face: recognition trusts every enrolled face.
+
+    Refused before the gallery is touched or any media is read, so a
+    non-admin caller cannot add a face under a resident's name.
+    """
+    entry = await _setup_without_database(hass, monkeypatch)
+    entry.runtime_data.person_gallery = cast(
+        "Any", _FailingGallery(AssertionError("the gallery was used"))
+    )
+
+    async def _must_not_read(*_args: Any, **_kwargs: Any) -> bytes:
+        msg = "media was read before the admin check"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(hga_component, "_read_enroll_image_bytes", _must_not_read)
+    assert not hass_read_only_user.is_admin
+    user_id = hass_read_only_user.id if caller == "non_admin" else "no-such-user"
+
+    with pytest.raises(HomeAssistantError) as info:
+        await hass.services.async_call(
+            DOMAIN,
+            "enroll_person",
+            {"name": "Alice", "file_path": "/media/faces/alice.jpg"},
+            blocking=True,
+            context=Context(user_id=user_id),
+        )
+    assert str(info.value) == ENROLL_ADMIN_ONLY_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_enroll_person_service_lets_a_call_with_no_user_through(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    An automation started by a trigger (no user) can still enroll.
+
+    As with Home Assistant's own admin services: only an admin can write an
+    automation, so a call with no user is not a non-admin's.
+    """
+    message = "the gallery was reached"
+    with pytest.raises(HomeAssistantError, match=message):
+        await _enroll_with(
+            hass,
+            monkeypatch,
+            _FailingGallery(HomeAssistantError(message)),
+            Context(),
         )
 
 
@@ -913,7 +979,10 @@ class _FailingGallery:
 
 
 async def _enroll_with(
-    hass: Any, monkeypatch: pytest.MonkeyPatch, gallery: _FailingGallery
+    hass: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    gallery: _FailingGallery,
+    context: Context,
 ) -> None:
     entry = await _setup_without_database(hass, monkeypatch)
     entry.runtime_data.person_gallery = cast("Any", gallery)
@@ -927,12 +996,13 @@ async def _enroll_with(
         "enroll_person",
         {"name": "Alice", "file_path": "/media/faces/alice.jpg"},
         blocking=True,
+        context=context,
     )
 
 
 @pytest.mark.asyncio
 async def test_enroll_person_service_names_a_face_service_failure(
-    hass: Any, monkeypatch: pytest.MonkeyPatch
+    hass: Any, monkeypatch: pytest.MonkeyPatch, admin_context: Context
 ) -> None:
     """A down face service is a clear service error, not a traceback (#906)."""
     message = (
@@ -941,14 +1011,17 @@ async def test_enroll_person_service_names_a_face_service_failure(
     )
     with pytest.raises(HomeAssistantError) as info:
         await _enroll_with(
-            hass, monkeypatch, _FailingGallery(FaceServiceError(message))
+            hass,
+            monkeypatch,
+            _FailingGallery(FaceServiceError(message)),
+            admin_context,
         )
     assert str(info.value) == message
 
 
 @pytest.mark.asyncio
 async def test_enroll_person_service_names_a_database_failure(
-    hass: Any, monkeypatch: pytest.MonkeyPatch
+    hass: Any, monkeypatch: pytest.MonkeyPatch, admin_context: Context
 ) -> None:
     """A database error saving the face is named, by type only (#906)."""
     with pytest.raises(HomeAssistantError) as info:
@@ -956,6 +1029,7 @@ async def test_enroll_person_service_names_a_database_failure(
             hass,
             monkeypatch,
             _FailingGallery(OperationalError("connection to user=hga failed")),
+            admin_context,
         )
     assert str(info.value) == (
         "Could not save the face of Alice to the database (OperationalError)"
@@ -964,12 +1038,15 @@ async def test_enroll_person_service_names_a_database_failure(
 
 @pytest.mark.asyncio
 async def test_enroll_person_service_reports_a_closed_pool_as_a_reload(
-    hass: Any, monkeypatch: pytest.MonkeyPatch
+    hass: Any, monkeypatch: pytest.MonkeyPatch, admin_context: Context
 ) -> None:
     """A reload closing the pool is not a database failure."""
     with pytest.raises(HomeAssistantError, match="may be reloading"):
         await _enroll_with(
-            hass, monkeypatch, _FailingGallery(PoolClosed("the pool is closed"))
+            hass,
+            monkeypatch,
+            _FailingGallery(PoolClosed("the pool is closed")),
+            admin_context,
         )
 
 

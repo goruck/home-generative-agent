@@ -16,8 +16,10 @@ from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.home_generative_agent.const import (
     DOMAIN,
+    ENROLL_ADMIN_ONLY_MESSAGE,
     HTTP_STATUS_BAD_GATEWAY,
     HTTP_STATUS_BAD_REQUEST,
+    HTTP_STATUS_FORBIDDEN,
     HTTP_STATUS_OK,
     HTTP_STATUS_REQUEST_TOO_LARGE,
     HTTP_STATUS_SERVICE_UNAVAILABLE,
@@ -568,3 +570,42 @@ async def test_a_message_ending_in_a_period_is_not_doubled(
     assert data["message"] == (
         "Could not reach it: refused. 1 image(s) were enrolled first."
     )
+
+
+@pytest.mark.asyncio
+async def test_enroll_refuses_a_non_admin_before_reading_the_body(
+    hass: HomeAssistant,
+    hass_client: Callable[..., Awaitable[TestClient]],
+    hass_read_only_access_token: str,
+) -> None:
+    """
+    Only an admin may enroll: recognition trusts every enrolled face.
+
+    A non-admin user, or a leaked token of one, gets 403 with a message the
+    card shows, before any upload is read or the gallery is touched.
+    """
+    await async_setup_component(hass, "http", {})
+    dao = DummyDAO()
+    _add_loaded_entry(hass, dao)
+    hass.http.register_view(EnrollPersonView(hass))
+    client = await hass_client(hass_read_only_access_token)
+
+    form = FormData()
+    form.add_field("name", "Alice")
+    form.add_field("file", b"img", filename="face.jpg", content_type="image/jpeg")
+
+    response = await client.post("/api/home_generative_agent/enroll", data=form)
+    data = await response.json()
+
+    assert response.status == HTTP_STATUS_FORBIDDEN
+    assert data["message"] == ENROLL_ADMIN_ONLY_MESSAGE
+    assert dao.last_args is None
+
+
+def test_the_user_key_is_home_assistants() -> None:
+    """The admin check reads the key HA stores the request's user under."""
+    from homeassistant.components.http.const import KEY_HASS_USER  # noqa: PLC0415
+
+    from custom_components.home_generative_agent import http  # noqa: PLC0415
+
+    assert http._KEY_HASS_USER == KEY_HASS_USER
