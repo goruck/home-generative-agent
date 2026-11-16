@@ -75,6 +75,8 @@ def test_is_retryable_non_retryable() -> None:
 def test_is_retryable_httpx_connect_error() -> None:
     """httpx.ConnectError (Ollama network failure) should be retryable."""
     assert _is_retryable(httpx.ConnectError("All connection attempts failed")) is True
+    # A server that never takes the connection (#1026).
+    assert _is_retryable(httpx.ConnectTimeout("timed out")) is True
 
 
 def test_is_retryable_httpx2_connect_error() -> None:

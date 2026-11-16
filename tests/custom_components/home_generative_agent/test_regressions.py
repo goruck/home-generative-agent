@@ -25,6 +25,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import ConfigurableField
+from langchain_ollama import ChatOllama, OllamaEmbeddings
 
 import custom_components.home_generative_agent as hga_component
 import custom_components.home_generative_agent.agent.graph as agent_graph
@@ -389,6 +390,43 @@ def test_ollama_httpx_client_kwargs_use_prebuilt_ssl_context() -> None:
     kwargs = cast("Any", hga_component)._ollama_httpx_client_kwargs()
 
     assert isinstance(kwargs["verify"], ssl.SSLContext)
+
+
+def test_ollama_clients_limit_only_the_connect() -> None:
+    """
+    A server that never takes the connection fails over in seconds (#1026).
+
+    The ollama client sets no timeout, so a sleeping Mac's address held a call
+    for its whole 90 s share. Reading stays unlimited: a model load happens
+    after the connection is open.
+    """
+    kwargs = cast("Any", hga_component)._ollama_httpx_client_kwargs()
+    timeout = kwargs["timeout"]
+    assert timeout.connect == hga_component.OLLAMA_CONNECT_TIMEOUT_S
+    assert (timeout.read, timeout.write, timeout.pool) == (None, None, None)
+
+    # The ollama client hands it on to httpx unchanged.
+    chat = ChatOllama(
+        model="m",
+        base_url="http://ollama:11434",
+        sync_client_kwargs=kwargs,
+        async_client_kwargs=kwargs,
+    )
+    for client in (chat._client, chat._async_client):
+        assert client is not None
+        assert client._client.timeout.connect == hga_component.OLLAMA_CONNECT_TIMEOUT_S
+        assert client._client.timeout.read is None
+
+    embeddings = OllamaEmbeddings(
+        model="m",
+        base_url="http://ollama:11434",
+        sync_client_kwargs=kwargs,
+        async_client_kwargs=kwargs,
+    )
+    for client in (embeddings._client, embeddings._async_client):
+        assert client is not None
+        assert client._client.timeout.connect == hga_component.OLLAMA_CONNECT_TIMEOUT_S
+        assert client._client.timeout.read is None
 
 
 # ---------------------------------------------------------------------------
