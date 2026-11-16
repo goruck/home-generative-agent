@@ -298,16 +298,6 @@ async def test_services_say_so_without_a_database(service: str) -> None:
         await handlers[service](call)
 
 
-async def test_memory_tools_run_without_a_database() -> None:
-    """Saving with an id, listing and forgetting do not raise on a NullStore."""
-    args = {"config": _config(limit=1), "store": hga_component.NullStore()}
-    saved = await upsert_memory.coroutine(content="x", memory_id="a", **args)  # type: ignore[misc]
-    assert saved.startswith("Stored")
-    assert "no memories" in await list_memories.coroutine(**args)  # type: ignore[misc]
-    forgot = await forget_memory.coroutine(memory_id="a", **args)  # type: ignore[misc]
-    assert "Nothing was deleted" in forgot
-
-
 async def test_a_move_onto_an_existing_id_keeps_both_memories() -> None:
     """The target's memory with the same id must not be overwritten."""
     store = InMemoryStore()
@@ -410,3 +400,21 @@ async def test_people_lists_owners_past_the_first_page_only_once() -> None:
     assert "user119" in people
     assert "Anna" not in people
     assert len(people) == len(set(people))
+
+
+async def test_memory_tools_without_a_database_say_nothing_was_kept() -> None:
+    """With no Database subentry the store keeps nothing, so no tool claims it did."""
+    store = hga_component.NullStore()
+    args = {"config": _config(), "store": store}
+
+    saved = await upsert_memory.coroutine(content="I take my coffee black", **args)  # type: ignore[misc]
+    updated = await upsert_memory.coroutine(content="x", memory_id="a", **args)  # type: ignore[misc]
+    listed = await list_memories.coroutine(**args)  # type: ignore[misc]
+    forgot = await forget_memory.coroutine(memory_id="a", **args)  # type: ignore[misc]
+
+    assert saved.startswith("Not stored.")
+    assert "Stored memory" not in saved
+    assert forgot.startswith("Nothing was deleted.")
+    assert updated.startswith("Not stored.")
+    for text in (saved, updated, listed, forgot):
+        assert "no database is set up" in text
