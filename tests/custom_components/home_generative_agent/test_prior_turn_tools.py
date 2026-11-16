@@ -33,6 +33,8 @@ _FIELD_TOOLS = (
     "intent__HassTurnOff",
     _LIGHT_SET,
     _LIVE_CONTEXT,
+    "camera__LookAtCamera",
+    "camera__CameraEvents",
 )
 
 
@@ -43,7 +45,7 @@ def _item(name: str, score: float = 0.5) -> MagicMock:
         "api_id": "assist",
         "description": f"{name} description",
         "parameters": "{}",
-        "is_actuation": name != _LIVE_CONTEXT,
+        "is_actuation": name != _LIVE_CONTEXT and not name.startswith("camera__"),
     }
     item.score = score
     return item
@@ -264,3 +266,142 @@ def test_the_rejection_names_the_bound_tools_and_does_not_ask_for_a_retry() -> N
     assert "Do not call it again" in content
     assert "Call the tool again" not in content
     assert f"instead: {_LIVE_CONTEXT}, intent__HassTurnOn." in content
+
+
+# ---------------------------------------------------------------------------
+# The previous question's best tools on a short follow-up (#1033)
+# ---------------------------------------------------------------------------
+
+_CAMERA = "camera__LookAtCamera"
+_CAMERA_EVENTS = "camera__CameraEvents"
+_MOON_GARDEN = "What do you see on the moon garden camera?"
+
+
+def _camera_store() -> MagicMock:
+    """
+    Rank as the box did on 2026-11-16.
+
+    The previous question finds the camera tools; "the backyard one then" on
+    its own finds only noise.
+    """
+
+    async def _search(_ns: Any, *, query: str, limit: int) -> list[MagicMock]:
+        del limit
+        if "camera" in query:
+            return [_item(_CAMERA, 0.58), _item(_CAMERA_EVENTS, 0.52)]
+        return [
+            _item("vacuum__HassVacuumStart", 0.45),
+            _item("media_player__HassMediaUnpause", 0.44),
+        ]
+
+    store = MagicMock()
+    store.asearch = AsyncMock(side_effect=_search)
+    store.aget = AsyncMock(return_value=None)
+    return store
+
+
+def _no_tool_answer(follow_up: str) -> list[BaseMessage]:
+    """Build a turn the model answered from its prompt, with no tool run (#1033)."""
+    return [
+        HumanMessage(content=_MOON_GARDEN),
+        AIMessage(content="I don't have a moon garden camera. Check another one?"),
+        HumanMessage(content=follow_up),
+    ]
+
+
+async def _routed_by(store: MagicMock, messages: list[BaseMessage]) -> dict[str, str]:
+    result = await _retrieve_tools(_state(messages), _config(), store=store)
+    return result["tool_routing_map"]
+
+
+@pytest.mark.asyncio
+async def test_the_field_report_follow_up_gets_the_camera_tool() -> None:
+    """'the backyard one then', after a no-tool answer, can look at a camera."""
+    routed = await _routed_by(_camera_store(), _no_tool_answer("the backyard one then"))
+
+    assert _CAMERA in routed
+    assert _CAMERA_EVENTS in routed
+    # Appended past the limit: nothing the ranking chose was evicted.
+    assert "vacuum__HassVacuumStart" in routed
+    assert "media_player__HassMediaUnpause" in routed
+
+
+@pytest.mark.asyncio
+async def test_without_the_previous_question_the_camera_tool_is_not_ranked() -> None:
+    """Pin the fixture: the bind, not the ranking, is what brings it in."""
+    routed = await _routed_by(
+        _camera_store(), [HumanMessage(content="the backyard one then")]
+    )
+
+    assert _CAMERA not in routed
+
+
+@pytest.mark.asyncio
+async def test_a_long_query_does_not_bind_the_previous_questions_tools() -> None:
+    """A request that names its own target ranks on its own words."""
+    routed = await _routed_by(
+        _camera_store(),
+        _no_tool_answer("start the vacuum in the kitchen and then pause the music"),
+    )
+
+    assert _CAMERA not in routed
+
+
+@pytest.mark.asyncio
+async def test_a_referential_follow_up_is_not_searched_twice() -> None:
+    """Its ranking already searched the previous question; no extra search."""
+    store = _camera_store()
+    await _routed_by(store, _no_tool_answer("do that again"))
+
+    queries = [call.kwargs["query"] for call in store.asearch.await_args_list]
+    # Only the widened ranking's own passes, never the previous question alone
+    # with its question mark, as the extra search would send it.
+    assert queries == [
+        f"{_MOON_GARDEN.rstrip('?')}. do that again",
+        f"{_MOON_GARDEN.rstrip('?')}.",
+        "do that again",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_actuation_tool_is_not_bound_from_the_previous_question() -> None:
+    """
+    Only read-only tools: an earlier request's actuation tool stays unbound.
+
+    "Turn off the porch lights" ranks the light tool first; "what's the
+    weather then?" names no action, so it must not get one.
+    """
+
+    async def _search(_ns: Any, *, query: str, limit: int) -> list[MagicMock]:
+        del limit
+        if "porch" in query:
+            return [_item(_LIGHT_SET, 0.6), _item(_CAMERA, 0.3)]
+        return [_item("vacuum__HassVacuumStart", 0.45)]
+
+    store = MagicMock()
+    store.asearch = AsyncMock(side_effect=_search)
+    store.aget = AsyncMock(return_value=None)
+    routed = await _routed_by(
+        store,
+        [
+            HumanMessage(content="Turn off the porch lights"),
+            AIMessage(content="Which porch lights do you mean?"),
+            HumanMessage(content="what's the weather then?"),
+        ],
+    )
+
+    assert _LIGHT_SET not in routed
+    assert _CAMERA in routed
+
+
+@pytest.mark.asyncio
+async def test_an_excluded_tool_is_not_bound_from_the_previous_question() -> None:
+    """The user's per-tool exclusion still wins."""
+    result = await _retrieve_tools(
+        _state(_no_tool_answer("the backyard one then")),
+        _config(excluded=[_CAMERA]),
+        store=_camera_store(),
+    )
+
+    assert _CAMERA not in result["tool_routing_map"]
+    assert _CAMERA_EVENTS in result["tool_routing_map"]
