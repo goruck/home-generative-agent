@@ -236,9 +236,10 @@ def test_another_voice_waiting_ignores_a_voices_own_prompt() -> None:
 def test_the_handler_names_the_conversation_only_for_a_voice() -> None:
     """Read as text: importing conversation.py needs hassil."""
     src = (_COMPONENT_DIR / "conversation.py").read_text()
-    assert '"voice_conversation": conversation_id if speaker else None' in src
+    assert "voice_conversation=conversation_id if speaker else None" in src
     # And the voice's own thread, which a followed turn leaves (#1001).
-    assert "self._thread_id(conversation_id, speaker) if speaker else None" in src
+    assert "cls._thread_id(conversation_id, speaker) if speaker else None" in src
+    # Run as values by the _turn_identity tests in test_conversation_units.py.
 
 
 def test_the_turn_ends_with_the_id_it_started_with() -> None:
