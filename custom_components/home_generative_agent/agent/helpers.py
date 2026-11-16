@@ -1229,7 +1229,26 @@ def _refuse(
         )
 
 
-def register_pending_action(  # noqa: PLR0912
+def _carried_counts(
+    pending_actions: Mapping[str, Mapping[str, Any]], replaced: list[str]
+) -> dict[str, int]:
+    """
+    Return the counts a request carries from the prompts it replaces.
+
+    The failed attempts carry over, and so do the PIN checks another voice's
+    sentences took (see the conversation agent's _async_turn_thread), so
+    repeating the request does not give them a fresh budget. Each is the
+    highest of the prompts replaced, so replacing one never lowers it.
+    """
+    if not replaced:
+        return {}
+    return {
+        name: max(int(pending_actions[key].get(name, 0) or 0) for key in replaced)
+        for name in ("attempts", "sentence_checks")
+    }
+
+
+def register_pending_action(
     pending_actions: dict[str, dict[str, Any]],
     action: dict[str, Any],
     *,
@@ -1286,9 +1305,9 @@ def register_pending_action(  # noqa: PLR0912
     carried: dict[str, Any] = {}
     replaced: list[str] = []
     kept_id: str | None = None
-    for key, existing in list(pending_actions.items()):
-        if pending_action_expired(existing, now):
-            pending_actions.pop(key, None)
+    expired = [k for k, a in pending_actions.items() if pending_action_expired(a, now)]
+    for key in expired:
+        pending_actions.pop(key, None)
     waiting = waiting_voice_prompt(pending_actions, action, pin_owner=pin_owner)
     if waiting is not None:
         _refuse(pin_reply, PIN_REFUSED_OTHER_VOICE, action, waiting)
@@ -1346,13 +1365,9 @@ def register_pending_action(  # noqa: PLR0912
             elif existing.get("turn_id") == action.get("turn_id"):
                 _refuse(pin_reply, PIN_REFUSED_ONE_AT_A_TIME)
                 return None
-            carried["attempts"] = int(existing.get("attempts", 0) or 0)
-            # The PIN checks another voice's sentences took (see the
-            # conversation agent's _async_turn_thread) are kept the same way,
-            # so repeating the request does not give them a fresh budget.
-            carried["sentence_checks"] = int(existing.get("sentence_checks", 0) or 0)
             replaced.append(key)
 
+    carried.update(_carried_counts(pending_actions, replaced))
     for key in replaced:
         pending_actions.pop(key, None)
     while len(pending_actions) >= MAX_PENDING_ACTIONS:

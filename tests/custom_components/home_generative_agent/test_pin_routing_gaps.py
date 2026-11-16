@@ -13,6 +13,7 @@ from typing import Any
 
 from custom_components.home_generative_agent.agent.helpers import (
     MAX_PIN_ATTEMPTS,
+    MAX_PIN_REPLIES,
     PIN_REFUSED_IN_PROGRESS,
     PIN_REFUSED_LOCKED,
     PIN_REFUSED_ONE_AT_A_TIME,
@@ -447,3 +448,80 @@ def test_a_refusal_drops_none_of_the_prompts_it_checked() -> None:
     assert held is None
     assert reply.refusal == PIN_REFUSED_LOCKED
     assert set(pending) == set(before)
+
+
+def test_a_same_turn_reissue_keeps_one_prompt_under_its_id() -> None:
+    """The model calling the tool twice in one turn leaves one undisclosed prompt."""
+    pending: dict[str, Any] = {}
+    reply = start_pin_turn(pending, ANNA, "unlock the front door")
+    first = register_pending_action(
+        pending, _unlock(ANNA, "anna", "Front Door", reply), pin_reply=reply
+    )
+    again = register_pending_action(
+        pending, _unlock(ANNA, "anna", "Front Door", reply), pin_reply=reply
+    )
+
+    assert first is not None
+    assert again == first
+    assert list(pending) == [first]
+    assert "disclosed" not in pending[first]
+    assert not reply.refusal
+
+
+def test_a_reissue_that_took_the_last_reply_starts_a_fresh_prompt() -> None:
+    """
+    The prompt took all its replies; the request said again in that reply turn.
+
+    It keeps its id (#1004) but starts over: made by this turn and answered by
+    the next message, not by this one, so this turn's PIN cannot confirm it.
+    """
+    pending: dict[str, Any] = {}
+    anna = _hold(pending, ANNA, "anna", "Front Door")
+    assert anna is not None
+    pending[anna]["replies"] = MAX_PIN_REPLIES - 1
+    reply = start_pin_turn(pending, ANNA, "unlock the front door")
+    assert pending[anna]["replies"] == MAX_PIN_REPLIES
+
+    again = register_pending_action(
+        pending, _unlock(ANNA, "anna", "Front Door", reply), pin_reply=reply
+    )
+
+    assert again == anna
+    assert pending[anna]["turn_id"] == reply.turn_id
+    assert pending[anna].get("reply_turn") is None
+    assert "disclosed" not in pending[anna]
+    assert pending[anna] in prompts_awaiting_reply(pending, reply)
+
+
+def test_replacing_prompts_never_lowers_the_wrong_pin_count() -> None:
+    """
+    With two prompts for one user on a thread, the higher count carries.
+
+    Not reachable today (one prompt per user per thread). Before, the last
+    match's count won while the id came from the same-request one, so a
+    nearly locked-out request could get fresh tries.
+    """
+    pending: dict[str, Any] = {}
+    door = _hold(pending, ANNA, "anna", "Front Door")
+    assert door is not None
+    pending[door]["attempts"] = 1
+    gate = {
+        **pending[door],
+        "tool_args": {"domain": ["lock"], "name": "Gate"},
+        "attempts": MAX_PIN_ATTEMPTS - 1,
+        "sentence_checks": 2,
+    }
+    reordered = {"gate": gate, door: pending.pop(door)}
+    pending.update(reordered)
+    reply = start_pin_turn(pending, "conv1:other", "hello")
+
+    again = register_pending_action(
+        pending,
+        _unlock(ANNA, "anna", "Front Door", PinReply("unlock", turn_id="next")),
+        pin_reply=reply,
+    )
+
+    assert again == door
+    assert list(pending) == [door]
+    assert pending[door]["attempts"] == MAX_PIN_ATTEMPTS - 1
+    assert pending[door]["sentence_checks"] == 2

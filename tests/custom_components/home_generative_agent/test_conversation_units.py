@@ -3534,11 +3534,16 @@ def _schema_first_turn(
 
     monkeypatch.setattr(conv_module, "local_chat_session", _no_session)
     monkeypatch.setattr(conv_module.workflow, "compile", MagicMock())
+    # Whichever stub of the HA conversation module the suite loaded first
+    # (test_conversation_stream.py's has neither) gets what the handler reads.
     monkeypatch.setattr(
         conv_module.conversation,
         "ConversationResult",
         types.SimpleNamespace,
         raising=False,
+    )
+    monkeypatch.setattr(
+        conv_module.conversation, "DOMAIN", "conversation", raising=False
     )
 
     entity = _pin_entity()
