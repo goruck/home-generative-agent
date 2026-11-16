@@ -63,6 +63,7 @@ from custom_components.home_generative_agent.const import (
     MAX_REFERENTIAL_FOLLOW_UP_WORDS,
     NO_REPLY_APOLOGY,
     NO_REPLY_PARTIAL,
+    NO_REPLY_REFUSED,
     NON_OPEN_ACTUATION_KEYWORDS_REGEX,
     OPEN_AS_STATE_REGEX,
     OPEN_COMMAND_CLAUSE_REGEX,
@@ -94,11 +95,16 @@ from ..core.prompt_cache import (  # noqa: TID252
 from ..core.provider_stall import model_call_budget  # noqa: TID252
 from ..core.utils import extract_final  # noqa: TID252
 from .automation_pin import STEP_TARGET_KEYS
-from .automation_targets import AUTOMATION_ADDED_PREFIX, AUTOMATION_REFUSAL_PREFIX
+from .automation_targets import (
+    AUTOMATION_ADDED_PREFIX,
+    AUTOMATION_PUSHES_LEFT_ORDINARY,
+    AUTOMATION_REFUSAL_PREFIX,
+)
 from .helpers import (
     ALARM_DOMAIN,
     CONFIRM_TOOL_NAME,
     INTENT_NAME_ALL,
+    PIN_AWAITING_USER_REPLY,
     PIN_REFUSAL_ENDS_TURN,
     REMOTE_TOOL,
     active_llm_api_ids,
@@ -179,6 +185,7 @@ from .pin_messages import describe_pending_action, pin_msg, refused_pin_request
 from .rule_entities import expand_critical_rules
 from .template_actions import entities_of
 from .token_counter import count_tokens_cross_provider
+from .tool_failure import TOOL_REFUSAL_KWARG, ToolFailure, is_tool_refusal
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -415,6 +422,11 @@ async def _run_langchain_tool(
             raw_content = lc_result.content
             status = None
             result_str = _stringify(raw_content)
+        elif isinstance(lc_result, ToolFailure):
+            # Our tool's refusal in plain text (#1023): LangChain would call
+            # any string a success. A plain str for the checkpoint.
+            status = "error"
+            result_str = str(lc_result)
         elif isinstance(lc_result, str):
             status = None
             result_str = lc_result
@@ -422,26 +434,27 @@ async def _run_langchain_tool(
             status = None
             result_str = _stringify(lc_result)
 
-        if tool_name == "alarm_control":
-            try:
-                parsed = json.loads(result_str)
-                if isinstance(parsed, dict):
-                    warning = parsed.get("warning")
-                    success_val = bool(parsed.get("success", True))
-                    if warning or not success_val:
-                        status = "error"
-                        if parsed.get("result_text"):
-                            result_str = parsed["result_text"]
-                        elif warning:
-                            result_str = str(warning)
-            except json.JSONDecodeError:
-                status = None
+        refusal = isinstance(lc_result, ToolFailure)
+        # Plain text is not parsed: a ToolFailure keeps its error status.
+        parsed = loads_or_none(result_str) if tool_name == "alarm_control" else None
+        if isinstance(parsed, dict):
+            warning = parsed.get("warning")
+            success_val = bool(parsed.get("success", True))
+            if warning or not success_val:
+                status = "error"
+                # Not tagged as a refusal: a warning can follow a completed
+                # call while the panel is still arming (#1023 review).
+                if parsed.get("result_text"):
+                    result_str = parsed["result_text"]
+                elif warning:
+                    result_str = str(warning)
 
         return ToolMessage(
             content=result_str,
             name=tool_name,
             tool_call_id=tool_call.get("id") or "",
             status=status,
+            additional_kwargs={TOOL_REFUSAL_KWARG: True} if refusal else {},
         )
     except TimeoutError:
         return _make_transient_tool_error(
@@ -1771,7 +1784,9 @@ def _prior_turn_tool_names(messages: Sequence[BaseMessage]) -> list[str]:
 
     Only the turn just before the current message: its tool results sit
     between the previous user message and this one. A rejected or failed
-    call has an error status and is skipped, so a refusal is never carried.
+    call has an error status and is skipped, so a routing refusal is never
+    carried. One of our tools' own answers that it could not act (#1023) is
+    carried, as it was when those answers read as success.
     """
     if not messages or not isinstance(messages[-1], HumanMessage):
         return []
@@ -1781,7 +1796,9 @@ def _prior_turn_tool_names(messages: Sequence[BaseMessage]) -> list[str]:
             break
         if (
             isinstance(msg, ToolMessage)
-            and msg.status != "error"
+            # A tool that ran and answered it could not (a camera not found,
+            # #1023) is carried: the follow-up ("the front one") needs it.
+            and (msg.status != "error" or is_tool_refusal(msg))
             and msg.name
             and msg.name not in names
         ):
@@ -2850,9 +2867,11 @@ def _has_pending_pin_confirmation(messages: Sequence[AnyMessage]) -> bool:
                     # Refused before the PIN was checked (not in the user's
                     # message, or the message already used) — still pending.
                     continue
-                if getattr(msg, "status", None) == "error":
+                if getattr(msg, "status", None) == "error" and not is_tool_refusal(msg):
                     # Routing or tool error on confirm_sensitive_action itself —
-                    # the PIN was never checked. Keep the action pending.
+                    # the PIN was never checked. Keep the action pending. The
+                    # tool's own refusals (a wrong PIN, an action gone, #1023)
+                    # are answers: resolved here, the store keeps a live one.
                     continue
                 return False
         return True
@@ -3831,7 +3850,10 @@ def _result_succeeded(msg: ToolMessage) -> bool:
         # It reports a refusal, an invalid config or a PIN it needs in plain
         # text; only an installed automation reads as done (#1013 review).
         # Another server's tool of that name is read like any other.
-        return msg.content.startswith(AUTOMATION_ADDED_PREFIX)
+        return (
+            msg.content.startswith(AUTOMATION_ADDED_PREFIX)
+            and AUTOMATION_PUSHES_LEFT_ORDINARY not in msg.content
+        )
     data = loads_or_none(msg.content)
     if isinstance(data, str):
         # An HA API tool's JSON-string result, encoded once more on the way
@@ -3843,12 +3865,24 @@ def _result_succeeded(msg: ToolMessage) -> bool:
         return False
     # A tool's own JSON can hold a dict or list under "status" (#1013 review).
     status = data.get("status")
-    held = isinstance(status, str) and status in {"error", "requires_pin"}
+    held = isinstance(status, str) and status in {
+        "error",
+        "requires_pin",
+        PIN_AWAITING_USER_REPLY,
+    }
     return data.get("success") is not False and not held
 
 
 def _result_partly_acted(msg: ToolMessage) -> bool:
     """Return True for an action that acted on some of its devices only."""
+    if (
+        (msg.name or "").lower() == "add_automation"
+        and isinstance(msg.content, str)
+        and msg.content.startswith(AUTOMATION_ADDED_PREFIX)
+    ):
+        # Installed, but a safety alarm's pushes stay ordinary (#869, #1023):
+        # not "Done.", and not "try again", which would install a second.
+        return AUTOMATION_PUSHES_LEFT_ORDINARY in msg.content
     data = loads_or_none(msg.content) if isinstance(msg.content, str) else None
     return isinstance(data, dict) and bool(data.get("partial_failure"))
 
@@ -3865,7 +3899,8 @@ def _empty_reply_fallback(
     conversation from going silent. Otherwise the apology: "Done." would
     claim an action that never ran (a first reply, #946), failed, or waits
     for the PIN (#1013). A round where some calls acted gets a line that
-    does not ask to try again, which would repeat them. An empty AIMessage
+    does not ask to try again, which would repeat them, and so does one
+    where every call was our tool answering it could not act (#1023). An empty AIMessage
     would stay in the checkpoint for every later turn to read.
 
     None when a fixed PIN line will be the reply (conversation.py): the turn
@@ -3895,6 +3930,12 @@ def _empty_reply_fallback(
             "acted; saying so."
         )
         return NO_REPLY_PARTIAL
+    if all(is_tool_refusal(msg) for msg in responses):
+        # Every call answered it could not act: no "try again" (#1023 review).
+        LOGGER.warning(
+            "Model returned an empty reply after tools that refused; saying so."
+        )
+        return NO_REPLY_REFUSED
     LOGGER.warning(
         "Model returned an empty reply after a tool round that did not fully "
         "act; apologizing."

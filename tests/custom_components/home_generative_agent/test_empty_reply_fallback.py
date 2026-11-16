@@ -20,16 +20,22 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 import custom_components.home_generative_agent.agent.graph as agent_graph
 from custom_components.home_generative_agent.agent.automation_targets import (
     AUTOMATION_ADDED_PREFIX,
+    AUTOMATION_PUSHES_LEFT_ORDINARY,
     AUTOMATION_REFUSAL_PREFIX,
 )
 from custom_components.home_generative_agent.agent.graph import _should_continue
 from custom_components.home_generative_agent.agent.helpers import (
+    PIN_AWAITING_USER_REPLY,
     register_pending_action,
     start_pin_turn,
+)
+from custom_components.home_generative_agent.agent.tool_failure import (
+    TOOL_REFUSAL_KWARG,
 )
 from custom_components.home_generative_agent.const import (
     NO_REPLY_APOLOGY,
     NO_REPLY_PARTIAL,
+    NO_REPLY_REFUSED,
 )
 
 if TYPE_CHECKING:
@@ -184,6 +190,16 @@ async def test_done_after_a_round_that_acted(
             [_result({"status": "requires_pin", "action_id": "a1"})],
             id="held_without_a_prompt",
         ),
+        # A confirmation refused before the PIN was checked (#1023).
+        pytest.param(
+            [
+                _result(
+                    {"status": PIN_AWAITING_USER_REPLY, "action_id": "a1"},
+                    name="confirm_sensitive_action",
+                )
+            ],
+            id="pin_refused_unchecked",
+        ),
     ],
 )
 async def test_apology_after_a_round_that_did_not_act(
@@ -215,6 +231,17 @@ async def test_apology_after_a_round_that_did_not_act(
         pytest.param(
             [_result({"response_type": "action_done", "partial_failure": "1 failed"})],
             id="half_done",
+        ),
+        # Installed, but a safety alarm's pushes stay ordinary (#869, #1023).
+        pytest.param(
+            [
+                _result(
+                    f"{AUTOMATION_ADDED_PREFIX}01X. This automation fires on a "
+                    f"leak … {AUTOMATION_PUSHES_LEFT_ORDINARY} Tell the user.",
+                    name="add_automation",
+                )
+            ],
+            id="automation_added_pushes_left_ordinary",
         ),
     ],
 )
@@ -298,3 +325,47 @@ async def test_a_confirmed_action_adds_nothing_after_its_outcome_line(
     )
 
     assert reply == []
+
+
+_REFUSED = {"status": "error", "additional_kwargs": {TOOL_REFUSAL_KWARG: True}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("results", "expected"),
+    [
+        pytest.param(
+            [_result("Not stored.", name="upsert_memory", **_REFUSED)],
+            NO_REPLY_REFUSED,
+            id="one_refusal",
+        ),
+        pytest.param(
+            [
+                _result("Not stored.", name="upsert_memory", **_REFUSED),
+                _result("No memory with id a.", "c2", "forget_memory", **_REFUSED),
+            ],
+            NO_REPLY_REFUSED,
+            id="two_refusals",
+        ),
+        # A call that never ran may work on a retry: the apology.
+        pytest.param(
+            [
+                _result("Not stored.", name="upsert_memory", **_REFUSED),
+                _result("Error: timed out", call_id="c2", status="error"),
+            ],
+            NO_REPLY_APOLOGY,
+            id="refusal_and_error",
+        ),
+    ],
+)
+async def test_a_round_our_tools_refused_does_not_ask_to_try_again(
+    hass: HomeAssistant,
+    empty_model: MagicMock,
+    results: list[ToolMessage],
+    expected: str,
+) -> None:
+    """Trying again would not store a memory with no database (#1023 review)."""
+    reply = await _reply(_state(*results), _config(hass), empty_model)
+
+    assert isinstance(reply, AIMessage)
+    assert reply.content == expected
