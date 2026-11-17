@@ -150,6 +150,28 @@
 
 ---
 
+### PIN prompt store: states left untested and a claim that trusts the id after #1004
+
+**What:** Since #1004, `register_pending_action` keeps a re-issued request's id, so a prompt replaced by the same request has the same key as the one it replaced. Two follow-ups.
+
+1. `_claim_pending_action` (`agent/tools.py`) claims by id alone, so it can no longer tell the stored prompt from the one a confirmation loaded and checked. A confirmation's attempt increment (`_validate_pin_for_action`) also lands on the dict it loaded. Neither can happen today: nothing is awaited between loading the action and claiming it.
+2. Three cells of the review's state table have no test:
+   - a different request while another running turn's prompt is not yet delivered (refused "in progress");
+   - another voice asking for the same request while the owner's PIN reply is being handled (refused, with the in-progress line);
+   - two prompts for one user on one thread replaced by a different request (both dropped, new id, highest counts carried; no path creates two such prompts today).
+
+**Why:** gstack review of #1004 (2026-11-16): Claude adversarial (cycle 2, Low, not reachable) and the state-machines specialist (cycle 2). The maintainer chose to log the cells instead of adding a third review cycle. None is a bug today.
+
+**How to apply:**
+1. Pass the loaded dict to `_claim_pending_action` and claim only when `pending_actions.get(action_id) is action`, so an await added later between load and claim cannot run a replaced prompt.
+2. Add the three cases to `tests/custom_components/home_generative_agent/test_pin_routing_gaps.py`. The matrix is at `.gstack/tmp/state-machines.c2e2a67a7841.md` while it lasts.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ### Two overlapping turns in one conversation drop each other's undelivered PIN prompt
 
 **What:** `start_pin_turn` drops a pending action from an earlier turn whose fixed line was never delivered. Two `conversation.process` calls with the same `conversation_id` running at once: the second starts while the first is mid-run and drops the first's not-yet-disclosed action; the first then finishes with the model's own PIN request and no fixed line, and the PIN reads as "not found". Fail-safe, and not reachable from one satellite or chat panel, but confusing for an automation that fires twice.
