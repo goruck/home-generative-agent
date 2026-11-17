@@ -33,6 +33,8 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from langchain_core.runnables import RunnableConfig
 
 from custom_components.home_generative_agent.const import (
@@ -3468,6 +3470,222 @@ def test_an_in_progress_refusal_names_the_request_being_handled() -> None:
     assert line is not None
     assert "Front Door" in line
     assert line.endswith(".")
+
+
+def test_another_voices_prompt_being_answered_is_named_in_progress() -> None:
+    """
+    A third voice's PIN reply for the waiting prompt is already running (#1004).
+
+    No PIN can be followed to it now, so "is waiting for a PIN" would be
+    wrong: the line says its reply is being handled.
+    """
+    from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+        PIN_REFUSED_OTHER_VOICE,
+        PinReply,
+    )
+    from custom_components.home_generative_agent.agent.pin_messages import (  # noqa: PLC0415
+        describe_pending_action,
+        pin_msg,
+    )
+
+    reply = PinReply("unlock the back door")
+    reply.refusal = PIN_REFUSED_OTHER_VOICE
+    reply.waiting_action_id = "anna"
+    reply.waiting_conversation = "conv1"
+    being_answered = _voice_prompt("Front Door")
+    being_answered["reply_turn"] = "clara's turn"
+    entity = _pin_entity()
+
+    line = entity._refusal_line({"anna": being_answered}, reply)
+
+    assert line == pin_msg(
+        None,
+        "pin_in_progress_line",
+        action=describe_pending_action(entity.hass, being_answered),
+    )
+    # Still waiting: named as waiting for a PIN, as before.
+    waiting = _voice_prompt("Front Door")
+    assert "is waiting for a PIN" in str(entity._refusal_line({"anna": waiting}, reply))
+
+
+def _schema_first_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    pending: dict[str, Any],
+    thread_id: str,
+    run: Any,
+) -> tuple[Any, Any]:
+    """
+    Build an entity whose schema-first turn runs the real handler.
+
+    Everything the handler calls out to is stubbed except the PIN wiring:
+    start_pin_turn, keep_pin_prompts, _refusal_line and end_pin_turn run as
+    they do on a satellite. `run` stands in for the graph (`_async_run_ainvoke`).
+    """
+    from custom_components.home_generative_agent import (  # noqa: PLC0415
+        conversation as conv_module,
+    )
+    from custom_components.home_generative_agent.const import (  # noqa: PLC0415
+        CONF_SCHEMA_FIRST_YAML,
+    )
+
+    @contextlib.asynccontextmanager
+    async def _no_session(*_args: Any, **_kwargs: Any) -> AsyncIterator[None]:
+        yield
+
+    monkeypatch.setattr(conv_module, "local_chat_session", _no_session)
+    monkeypatch.setattr(conv_module.workflow, "compile", MagicMock())
+    # Whichever stub of the HA conversation module the suite loaded first
+    # (test_conversation_stream.py's has neither) gets what the handler reads.
+    monkeypatch.setattr(
+        conv_module.conversation,
+        "ConversationResult",
+        types.SimpleNamespace,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        conv_module.conversation, "DOMAIN", "conversation", raising=False
+    )
+
+    entity = _pin_entity()
+    entity.hass.auth = types.SimpleNamespace(
+        async_get_user=AsyncMock(return_value=None)
+    )
+    entity.entry = types.SimpleNamespace(
+        subentries={},
+        runtime_data=types.SimpleNamespace(
+            options={CONF_SCHEMA_FIRST_YAML: True},
+            pending_actions=pending,
+            model_deployments={},
+            chat_model=types.SimpleNamespace(bind_tools=MagicMock()),
+            chat_model_options={},
+            vision_model=None,
+            summarization_model=None,
+            store=None,
+            checkpointer=None,
+            tool_index_ready=True,
+            tool_indexing_in_progress=False,
+            tool_index_failed=False,
+        ),
+    )
+    entity._async_get_message_history = MagicMock(return_value=[])
+    entity._async_speaker = AsyncMock(return_value=None)
+    entity._async_turn_thread = AsyncMock(return_value=(thread_id, None))
+    entity._async_init_llm_apis = AsyncMock(return_value=types.SimpleNamespace(apis=[]))
+    entity._async_index_tools = AsyncMock()
+    entity._async_get_all_tools = MagicMock(return_value=([], []))
+    entity._async_render_system_prompt = MagicMock(return_value=("prompt", ""))
+    entity._async_run_ainvoke = AsyncMock(side_effect=run)
+    chat_log = types.SimpleNamespace(conversation_id="conv1", content=[])
+    return entity, chat_log
+
+
+def _user_input(text: str) -> Any:
+    return types.SimpleNamespace(
+        text=text,
+        language="en",
+        context=None,
+        device_id=None,
+        agent_id=None,
+        satellite_id=None,
+    )
+
+
+async def test_a_schema_first_error_reply_names_the_waiting_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The error is the whole schema-first reply, so it says why (#1001, #1004).
+
+    Boris asks to unlock the garage while Anna's unlock waits for her PIN;
+    the run then fails. Run through the handler, not read from its source.
+    """
+    from custom_components.home_generative_agent.agent.helpers import (  # noqa: PLC0415
+        PIN_REFUSED_OTHER_VOICE,
+        register_pending_action,
+    )
+
+    pending: dict[str, Any] = {"anna": _voice_prompt("Front Door")}
+
+    async def _run(_app: Any, _input: Any, config: Any, *_args: Any) -> None:
+        reply = config["configurable"]["pin_reply"]
+        held = register_pending_action(
+            pending,
+            {
+                "tool_name": "HassTurnOff",
+                "tool_args": {"domain": ["lock"], "name": "Garage Door"},
+                "user": "robot",
+                "thread_id": "conv1:boris",
+                "voice_conversation": "conv1",
+                "voice_thread": "conv1:boris",
+                "turn_id": reply.turn_id,
+            },
+            pin_reply=reply,
+        )
+        assert held is None
+        assert reply.refusal == PIN_REFUSED_OTHER_VOICE
+        msg = "The model backend failed."
+        raise HomeAssistantError(msg)
+
+    entity, chat_log = _schema_first_turn(monkeypatch, pending, "conv1:boris", _run)
+
+    result = await HGAConversationEntity._async_handle_message(
+        entity, _user_input("unlock the garage door"), chat_log
+    )
+
+    speech = result.response.speech["plain"]["speech"]
+    assert speech.startswith("A request to unlock")
+    assert "Front Door" in speech
+    assert "is waiting for a PIN" in speech
+    assert speech.endswith("The model backend failed.")
+    assert "anna" in pending
+
+
+async def test_a_failed_turn_hands_its_prompt_to_the_next_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The turn ends with the id it started with, however it fails (#1001).
+
+    Anna's PIN reply turn fails; her prompt is kept for her next message and
+    handed over as the turn ends. Were start_pin_turn given another id than
+    end_pin_turn, or the end skipped, the prompt would stay marked in
+    progress and block every other voice until it expired.
+    """
+    prompt = _voice_prompt("Front Door")
+    pending: dict[str, Any] = {"anna": prompt}
+    seen: list[str] = []
+
+    async def _run(_app: Any, _input: Any, config: Any, *_args: Any) -> None:
+        reply = config["configurable"]["pin_reply"]
+        seen.append(reply.turn_id)
+        assert prompt["reply_turn"] == reply.turn_id
+        msg = "The model backend failed."
+        raise HomeAssistantError(msg)
+
+    entity, chat_log = _schema_first_turn(monkeypatch, pending, "conv1:anna", _run)
+
+    await HGAConversationEntity._async_handle_message(
+        entity, _user_input("1234"), chat_log
+    )
+
+    assert seen
+    assert pending["anna"] is prompt
+    assert prompt["reply_turn"] is None
+    assert prompt["replies"] == 1
+
+    # And a turn that raises past the handler still ends.
+    async def _crash(_app: Any, _input: Any, config: Any, *_args: Any) -> None:
+        seen.append(config["configurable"]["pin_reply"].turn_id)
+        raise RuntimeError
+
+    entity._async_run_ainvoke = AsyncMock(side_effect=_crash)
+    with pytest.raises(RuntimeError):
+        await HGAConversationEntity._async_handle_message(
+            entity, _user_input("1234"), chat_log
+        )
+    assert seen[1] != seen[0]
+    # Not kept for another message: dropped as the turn ended.
+    assert "anna" not in pending
 
 
 async def test_a_refusal_with_a_prompt_of_its_own_keeps_the_question_last(

@@ -1229,6 +1229,25 @@ def _refuse(
         )
 
 
+def _carried_counts(
+    pending_actions: Mapping[str, Mapping[str, Any]], replaced: list[str]
+) -> dict[str, int]:
+    """
+    Return the counts a request carries from the prompts it replaces.
+
+    The failed attempts carry over, and so do the PIN checks another voice's
+    sentences took (see the conversation agent's _async_turn_thread), so
+    repeating the request does not give them a fresh budget. Each is the
+    highest of the prompts replaced, so replacing one never lowers it.
+    """
+    if not replaced:
+        return {}
+    return {
+        name: max(int(pending_actions[key].get(name, 0) or 0) for key in replaced)
+        for name in ("attempts", "sentence_checks")
+    }
+
+
 def register_pending_action(
     pending_actions: dict[str, dict[str, Any]],
     action: dict[str, Any],
@@ -1273,14 +1292,22 @@ def register_pending_action(
     only announce an action no PIN can confirm, while no longer blocking
     another voice's), or of one another turn is still handling: its line not
     delivered yet, or its PIN reply in progress (#1001). Each refusal returns
-    None and records its reason on `pin_reply` (`PinReply.refusal`).
+    None and records its reason on `pin_reply` (`PinReply.refusal`). Every
+    prompt the request would replace is checked before any is dropped, so a
+    refusal leaves the store as it found it.
+
+    The same request re-issued keeps its prompt's id (#1004): a refusal that
+    names the prompt by id (`PinReply.waiting_action_id`) still finds it, and
+    a model holding the id still confirms the same request.
     """
     now = dt_util.utcnow()
     thread_id = action.get("thread_id")
     carried: dict[str, Any] = {}
-    for key, existing in list(pending_actions.items()):
-        if pending_action_expired(existing, now):
-            pending_actions.pop(key, None)
+    replaced: list[str] = []
+    kept_id: str | None = None
+    expired = [k for k, a in pending_actions.items() if pending_action_expired(a, now)]
+    for key in expired:
+        pending_actions.pop(key, None)
     waiting = waiting_voice_prompt(pending_actions, action, pin_owner=pin_owner)
     if waiting is not None:
         _refuse(pin_reply, PIN_REFUSED_OTHER_VOICE, action, waiting)
@@ -1310,6 +1337,7 @@ def register_pending_action(
                 "voice_thread": existing.get("voice_thread"),
             }
             if _same_request(existing, action) and existing.get("turn_id"):
+                kept_id = key
                 reissued_in_reply = bool(
                     existing.get("reply_turn")
                     and existing.get("reply_turn") == action.get("turn_id")
@@ -1337,17 +1365,17 @@ def register_pending_action(
             elif existing.get("turn_id") == action.get("turn_id"):
                 _refuse(pin_reply, PIN_REFUSED_ONE_AT_A_TIME)
                 return None
-            carried["attempts"] = int(existing.get("attempts", 0) or 0)
-            # The PIN checks another voice's sentences took (see the
-            # conversation agent's _async_turn_thread) are kept the same way,
-            # so repeating the request does not give them a fresh budget.
-            carried["sentence_checks"] = int(existing.get("sentence_checks", 0) or 0)
-            pending_actions.pop(key, None)
+            replaced.append(key)
 
+    carried.update(_carried_counts(pending_actions, replaced))
+    for key in replaced:
+        pending_actions.pop(key, None)
     while len(pending_actions) >= MAX_PENDING_ACTIONS:
         pending_actions.pop(next(iter(pending_actions)), None)
 
-    action_id = ulid.ulid_now()
+    # Stored again at the end either way: the newest prompt is the one a PIN
+    # said next is followed to (`newest_pin_prompt`).
+    action_id = kept_id or ulid.ulid_now()
     pending_actions[action_id] = {
         **action,
         "attempts": 0,

@@ -240,21 +240,3 @@ def test_the_handler_names_the_conversation_only_for_a_voice() -> None:
     # And the voice's own thread, which a followed turn leaves (#1001).
     assert "cls._thread_id(conversation_id, speaker) if speaker else None" in src
     # Run as values by the _turn_identity tests in test_conversation_units.py.
-
-
-def test_the_turn_ends_with_the_id_it_started_with() -> None:
-    """
-    The id the turn's end drops by is the one its PinReply carries.
-
-    Were start_pin_turn to mint its own, end_pin_turn would drop nothing and
-    dead prompts would block the other voices (#1001).
-    """
-    src = (_COMPONENT_DIR / "conversation.py").read_text()
-    assert "thread_id, user_input.text, pin_turn_id" in src
-    assert "pin_turn_id: str,\n" in src
-
-
-def test_the_handler_ends_every_turn() -> None:
-    """Dead prompts are dropped however the turn returns or fails."""
-    src = (_COMPONENT_DIR / "conversation.py").read_text()
-    assert "finally:\n            end_pin_turn(runtime_data.pending_actions" in src
