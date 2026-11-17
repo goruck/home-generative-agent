@@ -2554,6 +2554,57 @@ async def test_migration_warns_when_it_turns_control_back_on(
 
 
 @pytest.mark.asyncio
+async def test_migration_warns_for_a_stored_empty_list(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The main #949 case: a v6.1 entry that stored [] is told control is back."""
+    assert await async_migrate_entry(
+        hass, _make_v6_entry(hass, {CONF_LLM_HASS_API: []})
+    )
+    assert "#949" in caplog.text
+
+
+def _entry_with_data(hass: Any, version: int, data: dict[str, Any]) -> Any:
+    """Return an entry whose LLM API value is held in data, not options."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Home Generative Agent",
+        version=version,
+        data=data,
+        options={},
+    )
+    entry.add_to_hass(hass)
+    return entry
+
+
+@pytest.mark.asyncio
+async def test_migration_v5_keeps_a_selection_held_in_data(
+    hass: HomeAssistant,
+) -> None:
+    """
+    A pre-v6 selection in entry.data survives the v5 step.
+
+    Runtime lays options over data, so the v5 step writing [] to options for
+    a key it found absent there masked the data selection, and v6.2 then
+    turned that [] into Assist (#998).
+    """
+    entry = _entry_with_data(hass, 5, {CONF_LLM_HASS_API: "mcp-abc"})
+    assert await async_migrate_entry(hass, entry)
+    assert {**entry.data, **entry.options}[CONF_LLM_HASS_API] == ["mcp-abc"]
+
+
+@pytest.mark.asyncio
+async def test_migration_warns_for_an_empty_choice_held_in_data(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An empty choice in entry.data becoming Assist is logged too (#998)."""
+    entry = _entry_with_data(hass, 6, {CONF_LLM_HASS_API: []})
+    assert await async_migrate_entry(hass, entry)
+    assert {**entry.data, **entry.options}[CONF_LLM_HASS_API] == [llm.LLM_API_ASSIST]
+    assert "#949" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_migration_repairs_a_list_of_blank_ids(hass: HomeAssistant) -> None:
     """A list the reader normalizes to [] is repaired like []."""
     entry = _make_v6_entry(hass, {CONF_LLM_HASS_API: [""]})

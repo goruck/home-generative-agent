@@ -40,6 +40,7 @@ from homeassistant.helpers.selector import (
 
 from .agent.helpers import (
     TOOL_KEY_SEP,
+    active_llm_api_ids,
     api_id_is_form_representable,
     llm_api_is_supported,
     normalize_api_tool_map,
@@ -499,12 +500,41 @@ def _add_tool_picker(
     )
 
 
+def _llm_api_selection_error(hass: HomeAssistant, raw: Any) -> str | None:
+    """
+    Return the error for an LLM API selection that loads nothing, else None.
+
+    An empty selection fails every conversation with "No LLM APIs could be
+    loaded" (issue #949), and so does one holding only APIs this integration
+    does not load (``llm_api_is_supported``), such as HA 2026.11's admin-only
+    "homeassistant" API kept selectable with a "(not supported yet)" label.
+    A stored id that is no longer registered is not counted against the
+    selection: that is often a transient MCP outage, kept on purpose (#568).
+    """
+    selected = normalize_llm_api_value(raw)
+    if not selected:
+        return "llm_api_required"
+    unsupported = {
+        api.id for api in llm.async_get_apis(hass) if not llm_api_is_supported(api)
+    }
+    if all(api_id in unsupported for api_id in selected):
+        return "llm_api_unsupported"
+    return None
+
+
 async def _schema_for_options(
     hass: HomeAssistant,
     opts: Mapping[str, Any],
     indexed_keys: set[str] | None = None,
+    tool_api_ids: list[str] | None = None,
 ) -> VolDictType:
-    """Generate the options schema for non-provider settings."""
+    """
+    Generate the options schema for non-provider settings.
+
+    The tool pickers list the tools of ``tool_api_ids`` when given, else of
+    the selected APIs: a refused selection that loads nothing would leave them
+    with no choices, so its re-render passes the stored selection instead.
+    """
     # `api.name` is `entry.title` for an MCP API, which HA sets from the
     # server's own `serverInfo.name` -- remote text, in a label, in the same
     # form whose tool picker sanitizes the identical value.
@@ -548,12 +578,15 @@ async def _schema_for_options(
             for api_id in stale
         )
 
+    picker_apis = (
+        selected_apis if tool_api_ids is None else normalize_llm_api_value(tool_api_ids)
+    )
     live_choices, live_seen, api_names = await _live_tool_choices(
         hass,
-        [api_id for api_id in selected_apis if api_id not in unsupported_api_ids],
+        [api_id for api_id in picker_apis if api_id not in unsupported_api_ids],
         indexed_keys,
     )
-    selected_api_set = set(selected_apis)
+    selected_api_set = set(picker_apis)
     selected_exclusions = _tool_map_as_list(opts.get(CONF_TOOL_EXCLUSIONS))
     tool_exclusion_choices = live_choices + _stale_selection_choices(
         selected_exclusions, live_seen, api_names, selected_api_set
@@ -1165,6 +1198,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         if not user_input.get(CONF_SPEAKER_SENSORS):
             options.pop(CONF_SPEAKER_SENSORS, None)
         errors: dict[str, str] = {}
+        api_err = _llm_api_selection_error(self.hass, options.get(CONF_LLM_HASS_API))
 
         # Field-specific edits with validation/normalization
         # The PIN goes first: once it passes, it is kept for the next save
@@ -1183,21 +1217,30 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             err = await self._maybe_edit_face_recognition_url(options, user_input)
         if not err:
             err = self._tool_picker_overlap_error(user_input)
-        if not err and not normalize_llm_api_value(options.get(CONF_LLM_HASS_API)):
-            # The agent cannot answer with no LLM API ("No LLM APIs could be
-            # loaded"), and storing nothing used to quietly mean Assist; say
-            # so instead of saving either (issue #949).
-            err = "llm_api_required"
+        if not err:
+            # The agent cannot answer with no LLM API it loads ("No LLM APIs
+            # could be loaded"), and storing nothing used to quietly mean
+            # Assist; say so instead of saving either (issue #949).
+            err = api_err
         if err:
             errors["base"] = err
 
         if errors:
-            # Re-render with the same options and show errors
+            # Re-render with the same options and show errors. A selection
+            # that loads nothing lists no tools, so the pickers keep the
+            # stored selection's tools until a save changes it.
             return self.async_show_form(
                 step_id="init",
                 data_schema=vol.Schema(
                     await _schema_for_options(
-                        self.hass, options, self._indexed_tool_keys()
+                        self.hass,
+                        options,
+                        self._indexed_tool_keys(),
+                        tool_api_ids=(
+                            active_llm_api_ids(self.config_entry.options)
+                            if api_err
+                            else None
+                        ),
                     )
                 ),
                 errors=errors,

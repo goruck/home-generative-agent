@@ -6274,7 +6274,10 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
         # v5 -> v6: normalize CONF_LLM_HASS_API from a string to a list.
         # "none" sentinel and absent key both become [] (no APIs); the v6.2
         # step below then replaces that [] with the Assist default (#949).
-        api_val = new_options.get(CONF_LLM_HASS_API)
+        # Runtime lays entry.options over entry.data, so read the selection
+        # the same way: an options [] written for a key held only in data
+        # would mask that selection (issue #998).
+        api_val = {**new_data, **new_options}.get(CONF_LLM_HASS_API)
         if isinstance(api_val, str):
             new_options[CONF_LLM_HASS_API] = [] if api_val == "none" else [api_val]
         elif api_val is None:
@@ -6298,9 +6301,9 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
         # still in data is the one that runs.
         {**new_data, **new_options}.get(CONF_LLM_HASS_API)
     ):
-        if CONF_LLM_HASS_API in new_options:
-            # A stored empty choice, including a pre-v6 "No control": the
-            # user turned control off, so say it is back on.
+        if CONF_LLM_HASS_API in {**new_data, **new_options}:
+            # A stored empty choice, in options or data, including a pre-v6
+            # "No control": the user turned control off, so say it is back on.
             LOGGER.warning(
                 "Home Assistant control (LLM API) was turned off for %s, "
                 "which failed every conversation; it is now set to Assist. "
