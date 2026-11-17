@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self, cast
@@ -2630,9 +2631,12 @@ async def test_migration_restores_a_data_selection_an_old_upgrade_masked(
         options={CONF_LLM_HASS_API: []},
     )
     entry.add_to_hass(hass)
+    caplog.set_level(logging.INFO)
     assert await async_migrate_entry(hass, entry)
     assert entry.options[CONF_LLM_HASS_API] == ["mcp-abc"]
     assert "#949" not in caplog.text
+    assert "Restored" in caplog.text
+    assert "mcp-abc" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -2641,6 +2645,45 @@ async def test_migration_keeps_a_data_held_no_control_choice_on_assist(
 ) -> None:
     """A pre-v6 "none" held in data is a choice, not a selection to restore."""
     entry = _entry_with_data(hass, 5, {CONF_LLM_HASS_API: "none"})
+    assert await async_migrate_entry(hass, entry)
+    assert entry.options[CONF_LLM_HASS_API] == [llm.LLM_API_ASSIST]
+    assert "#949" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_migration_reads_a_data_held_none_as_no_apis(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """
+    A pre-v6 "none" in data with no options key is a choice, not an API id.
+
+    Copied as ["none"] it loaded nothing and failed every conversation
+    without the #949 warning.
+    """
+    entry = _entry_with_data(hass, 6, {CONF_LLM_HASS_API: "none"})
+    assert await async_migrate_entry(hass, entry)
+    assert entry.options[CONF_LLM_HASS_API] == [llm.LLM_API_ASSIST]
+    assert "#949" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_migration_honors_an_explicit_v5_no_control_over_data(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """
+    A v5 "none" in options is a known No control choice, not a masking [].
+
+    The data selection is not restored over it; it gets Assist and the
+    #949 warning like any other turned-off install.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Home Generative Agent",
+        version=5,
+        data={CONF_LLM_HASS_API: ["mcp-abc"]},
+        options={CONF_LLM_HASS_API: "none"},
+    )
+    entry.add_to_hass(hass)
     assert await async_migrate_entry(hass, entry)
     assert entry.options[CONF_LLM_HASS_API] == [llm.LLM_API_ASSIST]
     assert "#949" in caplog.text
