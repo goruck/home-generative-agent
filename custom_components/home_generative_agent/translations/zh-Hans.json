@@ -541,6 +541,7 @@
       "cannot_connect": "无法连接到服务。请检查密钥和 URL 后重试。",
       "invalid_pin": "PIN 必须是 4 到 10 位数字。",
       "llm_api_required": "请至少选择一个 API。智能体需要 LLM API 才能回答。",
+      "llm_api_unsupported": "所选的 API 都标记为 \"not supported yet\"，智能体将无法回答。请选择 Assist 或其他受支持的 API。",
       "pin_required": "请输入 PIN，或关闭关键操作 PIN。",
       "tool_excluded_and_included": "同一个工具不能既被排除又被始终包含。请从其中一个列表中移除它。",
       "unknown": "意外错误。"

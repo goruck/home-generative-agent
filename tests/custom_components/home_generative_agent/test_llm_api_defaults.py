@@ -20,13 +20,15 @@ agent never saw the turn, so the critical-action PIN never ran.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from homeassistant.const import CONF_LLM_HASS_API
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import llm
+from homeassistant.helpers.selector import SelectOptionDict
 from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.home_generative_agent.agent.graph import _get_allowed_api_ids
@@ -167,6 +169,160 @@ async def test_options_flow_refuses_an_empty_selection(hass: Any) -> None:
 
     assert result["type"] == FlowResultType.FORM
     assert result["errors"] == {"base": "llm_api_required"}
+
+
+def _admin_api_registry() -> Any:
+    """Register Assist plus HA 2026.11's admin-only "homeassistant" API."""
+    return patch(
+        "custom_components.home_generative_agent.config_flow.llm.async_get_apis",
+        return_value=[
+            SimpleNamespace(id="assist", name="Assist"),
+            SimpleNamespace(
+                id="homeassistant", name="Home Assistant", requires_admin=True
+            ),
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_options_flow_refuses_a_selection_of_only_unsupported_apis(
+    hass: Any,
+) -> None:
+    """
+    A selection holding only APIs the agent does not load is refused.
+
+    It is not empty, so the empty-selection check passed it, and every
+    conversation then failed with "No LLM APIs could be loaded" (#998).
+    """
+    flow = _options_flow(
+        hass, {CONF_LLM_HASS_API: [llm.LLM_API_ASSIST, "homeassistant"]}
+    )
+
+    with _admin_api_registry():
+        result = cast(
+            "dict[str, Any]",
+            await flow.async_step_init({CONF_LLM_HASS_API: ["homeassistant"]}),
+        )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"base": "llm_api_unsupported"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "selection",
+    [
+        pytest.param([llm.LLM_API_ASSIST, "homeassistant"], id="with-a-supported"),
+        # Unregistered is often a transient MCP outage, kept on purpose (#568).
+        pytest.param(["homeassistant", "mcp-gone"], id="with-an-unregistered"),
+    ],
+)
+async def test_options_flow_saves_an_unsupported_api_beside_another(
+    hass: Any, selection: list[str]
+) -> None:
+    """An unsupported API is refused only when nothing else is selected."""
+    flow = _options_flow(hass, {CONF_LLM_HASS_API: [llm.LLM_API_ASSIST]})
+
+    with _admin_api_registry():
+        result = cast(
+            "dict[str, Any]",
+            await flow.async_step_init({CONF_LLM_HASS_API: selection}),
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_LLM_HASS_API] == selection
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "refused",
+    [pytest.param([], id="empty"), pytest.param(["homeassistant"], id="unsupported")],
+)
+async def test_a_refused_selection_keeps_the_stored_apis_tools_listed(
+    hass: Any, refused: list[str]
+) -> None:
+    """
+    The re-render after a refused selection lists the stored APIs' tools.
+
+    Built from the refused selection, the tool pickers had no choices, so
+    re-selecting Assist in the same form showed no tools to pick (#998).
+    """
+    flow = _options_flow(hass, {CONF_LLM_HASS_API: [llm.LLM_API_ASSIST]})
+    tools = AsyncMock(
+        return_value=(
+            [SelectOptionDict(label="Assist: HassTurnOn", value="assist|HassTurnOn")],
+            {"assist|HassTurnOn"},
+            {"assist": "Assist"},
+        )
+    )
+
+    with (
+        _admin_api_registry(),
+        patch(
+            "custom_components.home_generative_agent.config_flow._live_tool_choices",
+            tools,
+        ),
+    ):
+        result = cast(
+            "dict[str, Any]",
+            await flow.async_step_init({CONF_LLM_HASS_API: refused}),
+        )
+
+    assert result["type"] == FlowResultType.FORM
+    assert tools.await_args is not None
+    assert tools.await_args.args[1] == [llm.LLM_API_ASSIST]
+    keys = {str(key) for key in result["data_schema"].schema}
+    assert CONF_TOOL_EXCLUSIONS in keys
+    assert CONF_TOOL_INCLUSIONS in keys
+
+
+def _data_held_flow(hass: Any) -> Any:
+    """Build an options flow whose entry keeps its selection in data only."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Home Generative Agent",
+        data={CONF_LLM_HASS_API: ["mcp-abc"], "db_bootstrapped": True},
+        options={},
+    )
+    entry.add_to_hass(hass)
+    flow = HomeGenerativeAgentOptionsFlow()
+    flow.hass = hass
+    flow.handler = entry.entry_id
+    return flow
+
+
+def test_options_form_shows_a_selection_held_in_data(hass: Any) -> None:
+    """
+    The form starts from the selection that runs, even one held in data.
+
+    Runtime lays options over data; a form that read options alone showed
+    the Assist default, and its next save wrote Assist over the selection
+    (#998).
+    """
+    flow = _data_held_flow(hass)
+
+    options = flow._base_options()
+
+    assert options[CONF_LLM_HASS_API] == ["mcp-abc"]
+    assert "db_bootstrapped" not in options
+
+
+@pytest.mark.asyncio
+async def test_a_refused_selection_lists_a_data_held_selections_tools(
+    hass: Any,
+) -> None:
+    """The refused-save pickers fall back to a selection held in data too."""
+    flow = _data_held_flow(hass)
+    tools = AsyncMock(return_value=([], set(), {}))
+
+    with patch(
+        "custom_components.home_generative_agent.config_flow._live_tool_choices",
+        tools,
+    ):
+        await flow.async_step_init({CONF_LLM_HASS_API: []})
+
+    assert tools.await_args is not None
+    assert tools.await_args.args[1] == ["mcp-abc"]
 
 
 @pytest.mark.asyncio

@@ -541,6 +541,7 @@
       "cannot_connect": "Can't reach the service. Check keys/URLs and try again.",
       "invalid_pin": "PIN must be 4-10 digits.",
       "llm_api_required": "Select at least one API. The agent needs an LLM API to answer.",
+      "llm_api_unsupported": "Every selected API is marked \"not supported yet\", so the agent could not answer. Select Assist or another supported API.",
       "pin_required": "Enter a PIN, or turn off the critical action PIN.",
       "tool_excluded_and_included": "A tool cannot be both excluded and always included. Remove it from one of the two lists.",
       "unknown": "Unexpected error."

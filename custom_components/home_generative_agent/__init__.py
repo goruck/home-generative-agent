@@ -5924,11 +5924,16 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
     - v3 -> v4: move model settings into feature subentries and trim options.
     - v4 -> v5: move sentinel settings into a sentinel subentry.
     - v5 -> v6: store CONF_LLM_HASS_API as a list.
-    - v6.1 -> v6.2: write the Assist default where CONF_LLM_HASS_API is absent
-      or empty, warning when it replaces a stored empty choice.
+    - v6.1 -> v6.2: make entry.options name the CONF_LLM_HASS_API selection
+      that runs: copy one held only in entry.data, restore one an older
+      v5 -> v6 step masked with [], and write the Assist default where none
+      is named, warning when it replaces a stored empty choice.
     """
     current_version = config_entry.version or 1
     current_minor = config_entry.minor_version or 1
+    # A pre-v6 "none" seen by the v5 -> v6 step is a known No control choice;
+    # the v6.2 step must not restore a data selection over it.
+    explicit_no_control = False
     new_data = dict(config_entry.data)
     new_options = dict(config_entry.options)
     merged_options = {**new_data, **new_options}
@@ -6274,7 +6279,11 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
         # v5 -> v6: normalize CONF_LLM_HASS_API from a string to a list.
         # "none" sentinel and absent key both become [] (no APIs); the v6.2
         # step below then replaces that [] with the Assist default (#949).
-        api_val = new_options.get(CONF_LLM_HASS_API)
+        # Runtime lays entry.options over entry.data, so read the selection
+        # the same way: an options [] written for a key held only in data
+        # would mask that selection (issue #998).
+        api_val = {**new_data, **new_options}.get(CONF_LLM_HASS_API)
+        explicit_no_control = api_val == "none"
         if isinstance(api_val, str):
             new_options[CONF_LLM_HASS_API] = [] if api_val == "none" else [api_val]
         elif api_val is None:
@@ -6286,29 +6295,55 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
     # v6.1 -> v6.2: an absent CONF_LLM_HASS_API meant "the Assist default",
     # because the options flow deleted the key when the user deselected every
     # API, and a stored [] failed every conversation with "No LLM APIs could
-    # be loaded" (issue #949). Both become the Assist default that the absent
-    # key was already running, and the form now refuses an empty selection,
-    # so the key always names what runs. A minor bump, so an older release
-    # still loads the entry.
+    # be loaded" (issue #949). Where neither options nor data names an API,
+    # both become the Assist default that the absent key was already running;
+    # a selection held in data is copied into options or restored over a
+    # masking [] (issue #998). The form now refuses an empty selection, so
+    # the key always names what runs. A minor bump, so an older release still
+    # loads the entry.
     if (current_version, current_minor) < (
         CONFIG_ENTRY_VERSION,
         CONFIG_ENTRY_MINOR_VERSION,
-    ) and not normalize_llm_api_value(
+    ):
         # Runtime options lay entry.options over entry.data, so a selection
         # still in data is the one that runs.
-        {**new_data, **new_options}.get(CONF_LLM_HASS_API)
-    ):
-        if CONF_LLM_HASS_API in new_options:
-            # A stored empty choice, including a pre-v6 "No control": the
-            # user turned control off, so say it is back on.
-            LOGGER.warning(
-                "Home Assistant control (LLM API) was turned off for %s, "
-                "which failed every conversation; it is now set to Assist. "
-                "Choose the LLM APIs the agent may use under Control Home "
-                "Assistant in the options (issue #949)",
+        # A pre-v6 "none" is the No control choice, not an API id.
+        merged = {**new_data, **new_options}
+        merged_val = merged.get(CONF_LLM_HASS_API)
+        running_apis = (
+            [] if merged_val == "none" else normalize_llm_api_value(merged_val)
+        )
+        data_val = new_data.get(CONF_LLM_HASS_API)
+        data_apis = [] if data_val == "none" else normalize_llm_api_value(data_val)
+        if not running_apis and data_apis and not explicit_no_control:
+            # The pre-v6.2 v5 -> v6 step read options alone and wrote [] there,
+            # masking a selection held in data; restore what the user picked
+            # rather than Assist and a "turned off" warning (issue #998).
+            LOGGER.info(
+                "Restored the LLM API selection %s held in the data of %s, "
+                "which an earlier upgrade had hidden behind an empty one",
+                data_apis,
                 config_entry.title,
             )
-        new_options[CONF_LLM_HASS_API] = [llm.LLM_API_ASSIST]
+            new_options[CONF_LLM_HASS_API] = data_apis
+        elif not running_apis:
+            if CONF_LLM_HASS_API in merged:
+                # A stored empty choice, in options or data, including a
+                # pre-v6 "No control": the user turned control off, so say
+                # it is back on.
+                LOGGER.warning(
+                    "Home Assistant control (LLM API) was turned off for %s, "
+                    "which failed every conversation; it is now set to Assist. "
+                    "Choose the LLM APIs the agent may use under Control Home "
+                    "Assistant in the options (issue #949)",
+                    config_entry.title,
+                )
+            new_options[CONF_LLM_HASS_API] = [llm.LLM_API_ASSIST]
+        elif CONF_LLM_HASS_API not in new_options:
+            # The options form reads entry.options alone, so it would show
+            # the Assist default and its next save would write that over the
+            # selection held in data (issue #998).
+            new_options[CONF_LLM_HASS_API] = running_apis
 
     if (config_entry.version, config_entry.minor_version) < (
         CONFIG_ENTRY_VERSION,
