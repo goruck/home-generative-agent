@@ -2611,6 +2611,42 @@ async def test_migration_copies_a_data_held_selection_into_options(
 
 
 @pytest.mark.asyncio
+async def test_migration_restores_a_data_selection_an_old_upgrade_masked(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """
+    An options [] over a data selection gets the data selection back.
+
+    The pre-#999 v5 -> v6 step read options only and wrote [] there, which
+    masked a selection held in data and failed every conversation; v6.2
+    restores what the user picked instead of Assist and a false "turned
+    off" warning (#998).
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Home Generative Agent",
+        version=6,
+        data={CONF_LLM_HASS_API: ["mcp-abc"]},
+        options={CONF_LLM_HASS_API: []},
+    )
+    entry.add_to_hass(hass)
+    assert await async_migrate_entry(hass, entry)
+    assert entry.options[CONF_LLM_HASS_API] == ["mcp-abc"]
+    assert "#949" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_migration_keeps_a_data_held_no_control_choice_on_assist(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A pre-v6 "none" held in data is a choice, not a selection to restore."""
+    entry = _entry_with_data(hass, 5, {CONF_LLM_HASS_API: "none"})
+    assert await async_migrate_entry(hass, entry)
+    assert entry.options[CONF_LLM_HASS_API] == [llm.LLM_API_ASSIST]
+    assert "#949" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_migration_warns_for_an_empty_choice_held_in_data(
     hass: HomeAssistant, caplog: pytest.LogCaptureFixture
 ) -> None:

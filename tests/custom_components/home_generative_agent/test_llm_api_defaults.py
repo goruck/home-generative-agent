@@ -276,6 +276,55 @@ async def test_a_refused_selection_keeps_the_stored_apis_tools_listed(
     assert CONF_TOOL_INCLUSIONS in keys
 
 
+def _data_held_flow(hass: Any) -> Any:
+    """Build an options flow whose entry keeps its selection in data only."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Home Generative Agent",
+        data={CONF_LLM_HASS_API: ["mcp-abc"], "db_bootstrapped": True},
+        options={},
+    )
+    entry.add_to_hass(hass)
+    flow = HomeGenerativeAgentOptionsFlow()
+    flow.hass = hass
+    flow.handler = entry.entry_id
+    return flow
+
+
+def test_options_form_shows_a_selection_held_in_data(hass: Any) -> None:
+    """
+    The form starts from the selection that runs, even one held in data.
+
+    Runtime lays options over data; a form that read options alone showed
+    the Assist default, and its next save wrote Assist over the selection
+    (#998).
+    """
+    flow = _data_held_flow(hass)
+
+    options = flow._base_options()
+
+    assert options[CONF_LLM_HASS_API] == ["mcp-abc"]
+    assert "db_bootstrapped" not in options
+
+
+@pytest.mark.asyncio
+async def test_a_refused_selection_lists_a_data_held_selections_tools(
+    hass: Any,
+) -> None:
+    """The refused-save pickers fall back to a selection held in data too."""
+    flow = _data_held_flow(hass)
+    tools = AsyncMock(return_value=([], set(), {}))
+
+    with patch(
+        "custom_components.home_generative_agent.config_flow._live_tool_choices",
+        tools,
+    ):
+        await flow.async_step_init({CONF_LLM_HASS_API: []})
+
+    assert tools.await_args is not None
+    assert tools.await_args.args[1] == ["mcp-abc"]
+
+
 @pytest.mark.asyncio
 async def test_options_flow_stores_the_selection(hass: Any) -> None:
     """A non-empty selection is stored as submitted."""

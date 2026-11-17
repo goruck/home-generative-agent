@@ -6301,7 +6301,14 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
         # still in data is the one that runs.
         merged = {**new_data, **new_options}
         running_apis = normalize_llm_api_value(merged.get(CONF_LLM_HASS_API))
-        if not running_apis:
+        data_val = new_data.get(CONF_LLM_HASS_API)
+        data_apis = [] if data_val == "none" else normalize_llm_api_value(data_val)
+        if not running_apis and data_apis:
+            # The pre-v6.2 v5 -> v6 step read options alone and wrote [] there,
+            # masking a selection held in data; restore what the user picked
+            # rather than Assist and a "turned off" warning (issue #998).
+            new_options[CONF_LLM_HASS_API] = data_apis
+        elif not running_apis:
             if CONF_LLM_HASS_API in merged:
                 # A stored empty choice, in options or data, including a
                 # pre-v6 "No control": the user turned control off, so say

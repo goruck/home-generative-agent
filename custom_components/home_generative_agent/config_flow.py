@@ -962,6 +962,12 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
 
     def _base_options(self) -> dict[str, Any]:
         options = dict(DEFAULT_OPTIONS)
+        # Runtime lays entry.options over entry.data, so an LLM API selection
+        # kept in data is the one that runs; start from it, or the form shows
+        # the Assist default and saves it over that selection (issue #998).
+        # Only this key: other data keys are not options.
+        if CONF_LLM_HASS_API in self.config_entry.data:
+            options[CONF_LLM_HASS_API] = self.config_entry.data[CONF_LLM_HASS_API]
         options.update(self.config_entry.options)
         return options
 
@@ -1237,7 +1243,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
                         options,
                         self._indexed_tool_keys(),
                         tool_api_ids=(
-                            active_llm_api_ids(self.config_entry.options)
+                            active_llm_api_ids(self._base_options())
                             if api_err
                             else None
                         ),
