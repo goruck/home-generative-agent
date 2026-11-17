@@ -2594,6 +2594,23 @@ async def test_migration_v5_keeps_a_selection_held_in_data(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("version", [5, 6])
+async def test_migration_copies_a_data_held_selection_into_options(
+    hass: HomeAssistant, version: int
+) -> None:
+    """
+    A selection held only in entry.data is copied into entry.options.
+
+    The Options form reads entry.options alone, so it showed the Assist
+    default, and the next save of any option wrote Assist over the
+    selection that was running (#998).
+    """
+    entry = _entry_with_data(hass, version, {CONF_LLM_HASS_API: ["mcp-abc"]})
+    assert await async_migrate_entry(hass, entry)
+    assert entry.options[CONF_LLM_HASS_API] == ["mcp-abc"]
+
+
+@pytest.mark.asyncio
 async def test_migration_warns_for_an_empty_choice_held_in_data(
     hass: HomeAssistant, caplog: pytest.LogCaptureFixture
 ) -> None:

@@ -6296,22 +6296,29 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
     if (current_version, current_minor) < (
         CONFIG_ENTRY_VERSION,
         CONFIG_ENTRY_MINOR_VERSION,
-    ) and not normalize_llm_api_value(
+    ):
         # Runtime options lay entry.options over entry.data, so a selection
         # still in data is the one that runs.
-        {**new_data, **new_options}.get(CONF_LLM_HASS_API)
-    ):
-        if CONF_LLM_HASS_API in {**new_data, **new_options}:
-            # A stored empty choice, in options or data, including a pre-v6
-            # "No control": the user turned control off, so say it is back on.
-            LOGGER.warning(
-                "Home Assistant control (LLM API) was turned off for %s, "
-                "which failed every conversation; it is now set to Assist. "
-                "Choose the LLM APIs the agent may use under Control Home "
-                "Assistant in the options (issue #949)",
-                config_entry.title,
-            )
-        new_options[CONF_LLM_HASS_API] = [llm.LLM_API_ASSIST]
+        merged = {**new_data, **new_options}
+        running_apis = normalize_llm_api_value(merged.get(CONF_LLM_HASS_API))
+        if not running_apis:
+            if CONF_LLM_HASS_API in merged:
+                # A stored empty choice, in options or data, including a
+                # pre-v6 "No control": the user turned control off, so say
+                # it is back on.
+                LOGGER.warning(
+                    "Home Assistant control (LLM API) was turned off for %s, "
+                    "which failed every conversation; it is now set to Assist. "
+                    "Choose the LLM APIs the agent may use under Control Home "
+                    "Assistant in the options (issue #949)",
+                    config_entry.title,
+                )
+            new_options[CONF_LLM_HASS_API] = [llm.LLM_API_ASSIST]
+        elif CONF_LLM_HASS_API not in new_options:
+            # The options form reads entry.options alone, so it would show
+            # the Assist default and its next save would write that over the
+            # selection held in data (issue #998).
+            new_options[CONF_LLM_HASS_API] = running_apis
 
     if (config_entry.version, config_entry.minor_version) < (
         CONFIG_ENTRY_VERSION,
