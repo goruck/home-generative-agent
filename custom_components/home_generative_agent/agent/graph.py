@@ -33,10 +33,12 @@ from langchain_core.messages import (
     HumanMessage,
     RemoveMessage,
     SystemMessage,
+    ToolCall,
     ToolMessage,
 )
 from langchain_core.messages.utils import trim_messages
 from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.store.base import InvalidNamespaceError
 from pydantic import ValidationError
 
@@ -3571,6 +3573,7 @@ async def _retrieve_tools(  # noqa: PLR0915
         "tool_routing_map": routing_map,
         "action_rounds": 0,
         "correction_rounds": 0,
+        **_answer_interrupted_calls(state["messages"]),
     }
 
 
@@ -4869,6 +4872,29 @@ _ROUND_LIMIT_RESULT = (
 )
 
 
+# The result given to a tool call from an earlier turn that has none: the turn
+# was cancelled (a satellite that stopped listening, a client that left) after
+# the model asked for the call and before its result was saved (#947). The
+# call may have run, so the model is told not to assume either way.
+_INTERRUPTED_RESULT = (
+    "Unknown: the turn was stopped before this call's result was saved, so it "
+    "may or may not have run. Do not call it again unless the user asks."
+)
+
+
+def _tool_results(tool_calls: Sequence[ToolCall], content: str) -> list[ToolMessage]:
+    """Give each tool call a fixed error result with ``content``."""
+    return [
+        ToolMessage(
+            content=content,
+            name=tool_call.get("name", ""),
+            tool_call_id=tool_call.get("id") or "",
+            status="error",
+        )
+        for tool_call in tool_calls
+    ]
+
+
 def _unanswered_calls(messages: Sequence[AnyMessage]) -> list[ToolMessage]:
     """
     Answer the tool calls the guard cuts off, so none is left dangling.
@@ -4881,15 +4907,44 @@ def _unanswered_calls(messages: Sequence[AnyMessage]) -> list[ToolMessage]:
     last = messages[-1] if messages else None
     if not isinstance(last, AIMessage) or not last.tool_calls:
         return []
-    return [
-        ToolMessage(
-            content=_ROUND_LIMIT_RESULT,
-            name=tool_call.get("name", ""),
-            tool_call_id=tool_call.get("id") or "",
-            status="error",
-        )
-        for tool_call in last.tool_calls
-    ]
+    return _tool_results(last.tool_calls, _ROUND_LIMIT_RESULT)
+
+
+def _answer_interrupted_calls(messages: Sequence[AnyMessage]) -> dict[str, Any]:
+    """
+    Give every tool call in the history that has no result one.
+
+    A turn cancelled between the model asking for tools and their results
+    being saved leaves the call without a result in the checkpoint. OpenAI and
+    Anthropic reject such a history, so every later turn of the conversation
+    failed with a provider error until trimming dropped the call (#947). Each
+    such call gets ``_INTERRUPTED_RESULT`` right after its message.
+
+    Returns the state update that rewrites the history in that order, or {}
+    when nothing is missing, which is every ordinary turn.
+    """
+    answered = {m.tool_call_id for m in messages if isinstance(m, ToolMessage)}
+    repaired: list[AnyMessage] = []
+    changed = False
+    for message in messages:
+        repaired.append(message)
+        if not isinstance(message, AIMessage) or not message.tool_calls:
+            continue
+        missing = [
+            tool_call
+            for tool_call in message.tool_calls
+            if (tool_call.get("id") or "") not in answered
+        ]
+        if missing:
+            changed = True
+            repaired.extend(_tool_results(missing, _INTERRUPTED_RESULT))
+    if not changed:
+        return {}
+    LOGGER.info(
+        "Answered %d tool call(s) an interrupted turn left without a result.",
+        len(repaired) - len(messages),
+    )
+    return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *repaired]}
 
 
 async def _tool_loop_guard(state: State, config: RunnableConfig) -> dict[str, Any]:
