@@ -1,7 +1,7 @@
 # Home Assistant integration testing requirements
 
-homeassistant==2026.11.0
-pytest-homeassistant==2026.11.0
+homeassistant==2026.11.2
+pytest-homeassistant==2026.11.2
 # Match HA core's openai_conversation pin for this HA version: the STT platform
 # runs against core's SDK, and its constructor rules change between releases.
 openai==3.26.0
