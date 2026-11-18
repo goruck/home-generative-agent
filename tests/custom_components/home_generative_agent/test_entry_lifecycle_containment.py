@@ -746,3 +746,63 @@ async def test_services_yaml_lists_exactly_the_registered_services(
     advertised = set(yaml.safe_load((_COMPONENT_DIR / "services.yaml").read_text()))
 
     assert advertised == registered
+
+
+# ---------------------------------------------------------------------------
+# Cameras that appear after setup (#972)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", [image_platform, sensor_platform])
+async def test_camera_added_after_ha_started_gets_entities(
+    hass: Any, platform: Any
+) -> None:
+    """
+    An entry set up once HA is running, with no camera yet, adds one later.
+
+    It used to wait for EVENT_HOMEASSISTANT_STARTED, which had already fired,
+    so the camera never got entities until a reload (#972).
+    """
+    hass.set_state(CoreState.running)
+    entry = _platform_entry(hass)
+    entry.mock_state(hass, ConfigEntryState.LOADED)
+    added: list[Any] = []
+
+    await platform.async_setup_entry(hass, entry, added.extend)
+    immediate = len(added)
+
+    hass.states.async_set("camera.front", "idle")
+    await hass.async_block_till_done()
+
+    assert len(added) == immediate + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", [image_platform, sensor_platform])
+async def test_camera_added_beside_existing_ones_gets_entities_once(
+    hass: Any, platform: Any
+) -> None:
+    """
+    A new camera is added beside the ones found at setup, each only once.
+
+    A camera integration reload removes and re-adds its states; that must not
+    make a second entity for a camera that already has one.
+    """
+    hass.set_state(CoreState.running)
+    hass.states.async_set("camera.front", "idle")
+    entry = _platform_entry(hass)
+    entry.mock_state(hass, ConfigEntryState.LOADED)
+    added: list[Any] = []
+
+    await platform.async_setup_entry(hass, entry, added.extend)
+    after_setup = len(added)
+
+    hass.states.async_set("camera.back", "idle")
+    hass.states.async_remove("camera.front")
+    hass.states.async_set("camera.front", "idle")
+    hass.states.async_set("light.porch", "on")
+    await hass.async_block_till_done()
+
+    assert len(added) == after_setup + 1
+    assert added[-1]._camera_id == "camera.back"
