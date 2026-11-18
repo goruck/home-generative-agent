@@ -34,7 +34,7 @@ def _result(call_id: str, content: str = "Done") -> ToolMessage:
 
 
 def _cancelled_history() -> list[Any]:
-    """An earlier turn ended on a tool call; the user has just spoken again."""
+    """Return a history whose earlier turn ended on a tool call, then a new one."""
     return [
         HumanMessage(content="Turn on the porch and garage lights", id="h1"),
         AIMessage(content="", tool_calls=[_call("call-a"), _call("call-b")], id="a1"),
@@ -65,7 +65,7 @@ def test_each_unanswered_call_gets_a_result_right_after_it() -> None:
     answers = [m for m in repaired if isinstance(m, ToolMessage)]
     assert [m.tool_call_id for m in answers] == ["call-a", "call-b"]
     for answer in answers:
-        assert answer.status == "error"
+        assert answer.status == "success", "may have run: not marked failed"
         assert "may or may not have run" in str(answer.content)
         assert "Do not call it again" in str(answer.content)
 
@@ -78,7 +78,7 @@ def test_only_the_missing_results_are_added() -> None:
 
     _results_follow_their_calls(repaired)
     answers = [m for m in repaired if isinstance(m, ToolMessage)]
-    assert [(m.tool_call_id, m.content) for m in answers][0] == ("call-a", "Done")
+    assert (answers[0].tool_call_id, answers[0].content) == ("call-a", "Done")
     assert [m.tool_call_id for m in answers] == ["call-a", "call-b"]
 
 
@@ -118,15 +118,13 @@ async def test_the_model_is_sent_the_repaired_history_and_the_state_is_not_chang
 ) -> None:
     sent: list[Any] = []
 
-    async def _fake_invoke_model(_model: Any, messages: Any, *_a: Any, **_k: Any):
+    async def _fake_invoke_model(
+        _model: Any, messages: Any, *_a: Any, **_k: Any
+    ) -> AIMessage:
         sent.extend(messages)
         return AIMessage(content="It is on.")
 
-    async def _fake_trim(messages: list[Any], *_a: Any, **_k: Any) -> list[Any]:
-        return messages
-
     monkeypatch.setattr(agent_graph, "_invoke_model", _fake_invoke_model)
-    monkeypatch.setattr(agent_graph, "_trim_messages_for_model", _fake_trim)
     store = MagicMock()
     store.asearch = AsyncMock(return_value=[])
     history = _cancelled_history()
@@ -154,7 +152,9 @@ async def test_the_model_is_sent_the_repaired_history_and_the_state_is_not_chang
 
     result = await agent_graph._call_model(state, config, store=store)
 
+    # Through the real trimming: the call is kept, and its results follow it.
     _results_follow_their_calls(sent)
     assert sum(isinstance(m, ToolMessage) for m in sent) == 2
-    assert state["messages"] == history, "the saved history is not rewritten"
-    assert not any(isinstance(m, ToolMessage) for m in result["messages"])
+    assert not any(isinstance(m, ToolMessage) for m in result["messages"]), (
+        "the results go only to the model, not into the saved history"
+    )

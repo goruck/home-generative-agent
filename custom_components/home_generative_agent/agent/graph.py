@@ -4880,14 +4880,18 @@ _INTERRUPTED_RESULT = (
 )
 
 
-def _tool_results(tool_calls: Sequence[ToolCall], content: str) -> list[ToolMessage]:
-    """Give each tool call a fixed error result with ``content``."""
+def _tool_results(
+    tool_calls: Sequence[ToolCall],
+    content: str,
+    status: Literal["success", "error"] = "error",
+) -> list[ToolMessage]:
+    """Give each tool call a fixed result with ``content``."""
     return [
         ToolMessage(
             content=content,
             name=tool_call.get("name", ""),
             tool_call_id=tool_call.get("id") or "",
-            status="error",
+            status=status,
         )
         for tool_call in tool_calls
     ]
@@ -4944,7 +4948,9 @@ def _with_interrupted_results(messages: list[AnyMessage]) -> list[AnyMessage]:
             for call in message.tool_calls
             if (call.get("id") or "") not in answered
         ]
-        repaired.extend(_tool_results(missing, _INTERRUPTED_RESULT))
+        # Not an error: the call may have run, and Anthropic's is_error would
+        # read as "it failed" to the model.
+        repaired.extend(_tool_results(missing, _INTERRUPTED_RESULT, "success"))
     if len(repaired) != len(messages):
         LOGGER.debug(
             "Answered %d tool call(s) an interrupted turn left without a result "
