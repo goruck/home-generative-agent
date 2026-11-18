@@ -7,6 +7,10 @@ Three leaks in one area, all follow-ups from the deferred-start ship:
 * ``image.py`` and ``sensor.py`` registered bare ``EVENT_HOMEASSISTANT_STARTED``
   listeners that were never wired into ``entry.async_on_unload``, so a deferred
   ``async_add_entities`` could run for an entry that had already unloaded.
+  Since #972 both track cameras as they are added (``async_track_cameras``)
+  instead of waiting for that event; the same unload and entry-state
+  guarantees are pinned below. The tests still fire the start event, which
+  nothing listens to now: the camera's state alone must add it.
 * ``async_unload_entry`` was a run of bare awaits: one raising step put the
   entry in ``FAILED_UNLOAD`` — which skips the on-unload callbacks — leaving
   every deferred-start listener armed and every engine below the raising line
@@ -195,9 +199,10 @@ async def test_sensor_platform_refuses_the_add_while_the_entry_is_unloading(
     """
     Same residual window as image.py, sensor platform.
 
-    The guard is duplicated in each platform rather than shared, so the image
-    test cannot stand in for this one: a regression in sensor.py's copy would
-    strand camera sensors on an unloading entry with the image suite green.
+    The guard is shared in ``async_track_cameras`` since #972, but each
+    platform must still route its cameras through it: a sensor.py that added
+    them some other way would strand sensors on an unloading entry with the
+    image suite green.
     """
     hass.set_state(CoreState.not_running)
     entry = _platform_entry(hass)
