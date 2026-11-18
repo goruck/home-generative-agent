@@ -613,6 +613,10 @@
     "embedding_fallback_held_no_reference": {
       "title": "备用嵌入提供方 {providers} 没有可比较的版本",
       "description": "Home Generative Agent 无法将备用嵌入提供方 **{providers}** 上 **{model}** 的版本与记忆存储的版本进行比较：主提供方 **{primary}** 的版本未知（启动时不可用，或其服务器没有在 `/api/show` 中给出权重），而存储记录中也没有与该备用提供方一致的版本。另一个版本的备用提供方会在记忆存储中混入不同模型，因此它保持暂停：主提供方不可用期间，保存记忆和摄像头描述会失败，记忆搜索只返回最近的记忆。\n\n要使用它，请在两台服务器上拉取相同的版本（例如在每台服务器上运行 `ollama pull {model}`），使用会给出权重的服务器（普通 Ollama 服务器即可），并在主提供方恢复后重新加载 Home Generative Agent。如果主提供方在启动时有响应，每 5 分钟会重新读取一次它的版本，读取到后会立即检查备用提供方；此问题随后会自动清除。"
+    },
+    "llm_api_unsupported_selection": {
+      "title": "智能体无法加载所选的任何 LLM API",
+      "description": "**控制 Home Assistant** 中只选择了 {apis}，而 Home Generative Agent 暂不加载这些 API，因此每次对话都会失败并提示 \"No LLM APIs could be loaded\"。\n\n要修复此问题，请打开 **设置 → 设备与服务 → Home Generative Agent → 配置**，在 **控制 Home Assistant** 中选择 **Assist** 或其他受支持的 API。条目以智能体可加载的选择重新加载后，此问题会自动清除。"
     }
   }
 }

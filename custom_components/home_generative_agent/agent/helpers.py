@@ -213,6 +213,26 @@ def llm_api_is_supported(api: llm.API) -> bool:
     return not getattr(api, "requires_admin", False)
 
 
+def unsupported_only_apis(hass: HomeAssistant, selected: list[str]) -> list[llm.API]:
+    """
+    Return the selected APIs when every one is registered and unsupported.
+
+    Such a selection loads nothing, so every conversation fails with "No LLM
+    APIs could be loaded". Empty otherwise: when the selection is empty, when
+    any selected API is supported, or when any selected id is not registered
+    (often a transient MCP outage, kept on purpose, #568). The Options form
+    refuses such a selection (#998) and setup raises a repair issue for a
+    stored one (#1037), both through this one rule.
+    """
+    if not selected:
+        return []
+    registered = {api.id: api for api in llm.async_get_apis(hass)}
+    apis = [registered.get(api_id) for api_id in selected]
+    if any(api is None or llm_api_is_supported(api) for api in apis):
+        return []
+    return [api for api in apis if api is not None]
+
+
 def normalize_tool_exclusions(raw: Any) -> dict[str, list[str]]:
     """
     Normalize a stored ``CONF_TOOL_EXCLUSIONS`` value to ``{api_id: [name]}``.

@@ -353,6 +353,10 @@ from .core.lifecycle import (
     async_watch_database_deletion,
     defer_start_until_hass_started,
 )
+from .core.llm_api_guard import (
+    async_clear_llm_api_issue,
+    async_sync_llm_api_issue,
+)
 from .core.memories import register_memory_services
 from .core.migrations import migrate_person_gallery
 from .core.openai_client import StatelessReasoningChatOpenAI
@@ -5612,6 +5616,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         entry.entry_id,
         database_missing=db_uri is None and bool(providers),
     )
+    # Same placement: a selection holding only APIs the agent skips (the
+    # admin-only "Home Assistant" API) fails every turn, and an install that
+    # saved one before the Options form refused it (#998) has no other notice
+    # (#1037). An options save reloads the entry, which re-checks it.
+    async_sync_llm_api_issue(hass, entry.entry_id, options)
 
     # Same placement. Checked off the setup path: a model listing and a size
     # request per server that just answered its health check, plus one read of
@@ -5878,6 +5887,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
     # (a disable would otherwise leave it standing); the next successful
     # setup re-raises it if the database is still missing.
     async_clear_database_issue(hass, entry.entry_id)
+    async_clear_llm_api_issue(hass, entry.entry_id)
     async_clear_ollama_embedding_model_issue(hass, entry.entry_id)
     async_clear_embedding_size_issue(hass, entry.entry_id)
     # Same for the left-out and the held embedding fallbacks: setup re-syncs
@@ -5905,6 +5915,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> None
     would otherwise leave the old ones standing until a restart.
     """
     async_clear_database_issue(hass, entry.entry_id)
+    async_clear_llm_api_issue(hass, entry.entry_id)
     async_clear_ollama_embedding_model_issue(hass, entry.entry_id)
     async_clear_embedding_size_issue(hass, entry.entry_id)
     async_clear_other_model_fallback_issue(hass, entry.entry_id)

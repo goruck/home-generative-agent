@@ -49,6 +49,7 @@ from .agent.helpers import (
     sanitize_tool_text,
     split_tool_index_key,
     tool_index_key,
+    unsupported_only_apis,
 )
 from .const import (
     CONF_CRITICAL_ACTION_PIN,
@@ -514,10 +515,7 @@ def _llm_api_selection_error(hass: HomeAssistant, raw: Any) -> str | None:
     selected = normalize_llm_api_value(raw)
     if not selected:
         return "llm_api_required"
-    unsupported = {
-        api.id for api in llm.async_get_apis(hass) if not llm_api_is_supported(api)
-    }
-    if all(api_id in unsupported for api_id in selected):
+    if unsupported_only_apis(hass, selected):
         return "llm_api_unsupported"
     return None
 
