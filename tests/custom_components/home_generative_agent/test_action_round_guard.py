@@ -601,3 +601,104 @@ def test_pin_lines_follow_names_the_three_cases(
     assert (
         pin_lines_follow(config["configurable"]["pending_actions"], reply) is expected
     )
+
+
+# ---------------------------------------------------------------------------
+# The guard says which step the turn was on (#953)
+# ---------------------------------------------------------------------------
+
+
+def _cut_off_after(result: ToolMessage, *next_calls: str) -> Any:
+    state = _state(action_rounds=3)
+    state["messages"] = [
+        HumanMessage(content="turn on the porch light"),
+        AIMessage(
+            content="",
+            tool_calls=[{"name": result.name or "", "args": {}, "id": "a"}],
+        ),
+        result,
+        AIMessage(
+            content="",
+            tool_calls=[
+                {"name": name, "args": {}, "id": f"n{index}"}
+                for index, name in enumerate(next_calls or ("intent__HassTurnOn",))
+            ],
+        ),
+    ]
+    return state
+
+
+async def _guard_text(state: Any) -> str:
+    result = await _tool_loop_guard(cast("Any", state), _NO_PIN_CONFIG)
+    return str(result["messages"][-1].content)
+
+
+@pytest.mark.asyncio
+async def test_guard_names_a_failed_step_and_its_error() -> None:
+    error = ToolMessage(
+        content=(
+            "\nError: HomeAssistantError('Unable to find entity Porch')\n\n"
+            "Call the tool again with your mistake corrected.\n"
+        ),
+        name="intent__HassTurnOn",
+        tool_call_id="a",
+        status="error",
+    )
+
+    text = await _guard_text(_cut_off_after(error))
+
+    assert text.startswith("I wasn't able to complete this request")
+    assert text.endswith(
+        "The last step that failed was HassTurnOn: "
+        "HomeAssistantError('Unable to find entity Porch')"
+    )
+    assert "Call the tool again" not in text
+
+
+@pytest.mark.asyncio
+async def test_guard_repeats_only_the_error_of_a_json_result() -> None:
+    """The rest of a payload can carry home data; only its error is shown."""
+    failed = ToolMessage(
+        content=json.dumps(
+            {"error": "Action failed.", "entities": ["lock.front_door: unlocked"]}
+        ),
+        name="homeassistant__GetLiveContext",
+        tool_call_id="a",
+    )
+
+    text = await _guard_text(_cut_off_after(failed))
+
+    assert text.endswith("The last step that failed was GetLiveContext: Action failed.")
+    assert "front_door" not in text
+
+
+@pytest.mark.asyncio
+async def test_guard_names_the_steps_still_asked_for_after_an_ordinary_round() -> None:
+    empty_lookup = ToolMessage(
+        content="{}", name="homeassistant__GetLiveContext", tool_call_id="a"
+    )
+
+    text = await _guard_text(
+        _cut_off_after(
+            empty_lookup, "homeassistant__GetLiveContext", "get_entity_history"
+        )
+    )
+
+    assert text.endswith("It was still trying: GetLiveContext, get_entity_history.")
+    assert "failed" not in text
+
+
+@pytest.mark.asyncio
+async def test_guard_sanitizes_and_caps_a_remote_error() -> None:
+    remote = ToolMessage(
+        content="Error: bad\u202eevil " + "x" * 500,
+        name="mcp-abc__web_search",
+        tool_call_id="a",
+        status="error",
+    )
+
+    text = await _guard_text(_cut_off_after(remote))
+    note = text.split("The last step that failed was ", 1)[1]
+
+    assert "\u202e" not in note
+    assert len(note) < 200

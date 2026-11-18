@@ -4960,6 +4960,75 @@ def _with_interrupted_results(messages: list[AnyMessage]) -> list[AnyMessage]:
     return repaired
 
 
+# How long the one line of a failed step's error the guard repeats may be.
+_GUARD_ERROR_LINE_MAX = 160
+
+
+def _failure_line(msg: ToolMessage) -> str:
+    """
+    Return one safe line saying why a tool result failed, or "".
+
+    An error result's first line ("Error: Unable to find entity Porch"),
+    without the "Error:" label or the instructions to the model after it. A
+    JSON result gives only its "error" text: the rest of a payload can carry
+    home data. Remote text, so sanitized and capped.
+    """
+    if not isinstance(msg.content, str):
+        return ""
+    data = loads_or_none(msg.content)
+    if isinstance(data, str):
+        # An HA API tool's result, JSON-encoded once more (`_result_succeeded`).
+        data = loads_or_none(data)
+    if isinstance(data, dict):
+        error = data.get("error")
+        text = error if isinstance(error, str) else ""
+    elif data is None:
+        # Plain text: an error template or one of our own tools' failures.
+        text = msg.content
+    else:
+        text = ""
+    line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    line = line.removeprefix("Error:").strip()
+    return sanitize_tool_text(line, _GUARD_ERROR_LINE_MAX)
+
+
+def _guard_last_step_note(messages: Sequence[AnyMessage]) -> str:
+    """
+    Say which step the turn was on when the guard cut it off (#953).
+
+    The bare apology left the reason in the debug log only. When the round
+    before the cut-off had a failed result, the note names that tool and one
+    line of its error; otherwise it names the tools the model was still
+    asking for. Tool names come from the model or a remote server, so they
+    are sanitized too.
+    """
+    cut_off = messages[-1] if messages else None
+    earlier = (
+        messages[:-1]
+        if isinstance(cut_off, AIMessage) and cut_off.tool_calls
+        else messages
+    )
+    failed = [m for m in _last_round_responses(earlier) if not _result_succeeded(m)]
+    if failed:
+        name = sanitize_tool_text(base_tool_name(failed[-1].name or ""))
+        if line := _failure_line(failed[-1]):
+            return f"\n\nThe last step that failed was {name}: {line}"
+        if name:
+            return f"\n\nThe last step that failed was {name}."
+        return ""
+    if isinstance(cut_off, AIMessage) and cut_off.tool_calls:
+        names = sorted(
+            {
+                sanitize_tool_text(base_tool_name(call.get("name", "")))
+                for call in cut_off.tool_calls
+            }
+            - {""}
+        )
+        if names:
+            return f"\n\nIt was still trying: {', '.join(names)}."
+    return ""
+
+
 async def _tool_loop_guard(state: State, config: RunnableConfig) -> dict[str, Any]:
     """
     Emit a friendly message when the action-round limit is reached.
@@ -4986,6 +5055,8 @@ async def _tool_loop_guard(state: State, config: RunnableConfig) -> dict[str, An
     )
     if last_tool is not None and _is_automation_refusal(last_tool):
         content += f"\n\nThe last problem was:\n{last_tool.content}"
+    else:
+        content += _guard_last_step_note(messages)
     return {"messages": [*answers, AIMessage(content=content)]}
 
 
