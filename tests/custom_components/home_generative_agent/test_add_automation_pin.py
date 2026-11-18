@@ -16,6 +16,9 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.agent import tools as tools_module
+from custom_components.home_generative_agent.agent.automation_targets import (
+    AUTOMATION_MAY_BE_INSTALLED,
+)
 from custom_components.home_generative_agent.agent.critical_push import (
     CriticalPushResult,
 )
@@ -221,6 +224,79 @@ async def test_benign_automation_is_written_without_pin(tmp_path: Path) -> None:
     assert config["configurable"]["pending_actions"] == {}
     assert len(_written(tmp_path)) == 1
     assert hass.services.calls == [("automation", "reload")]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [HomeAssistantError("reload failed"), OSError("disk error at /config/x")],
+    ids=["reload_error", "os_error"],
+)
+@pytest.mark.asyncio
+async def test_a_failed_reload_without_a_pin_says_the_automation_may_exist(
+    tmp_path: Path, error: Exception
+) -> None:
+    """
+    The file is appended before the reload: no retry, which installs it twice.
+
+    #1030: the error used to reach the graph as a tool error, whose template
+    asks the model to call the tool again.
+    """
+    hass = _fake_hass(tmp_path)
+
+    async def _failing_reload(_domain: str, _service: str) -> None:
+        raise error
+
+    hass.services.async_call = _failing_reload
+    config = _config(hass, {})
+
+    result = await add_automation_tool(automation_yaml=LIGHT_YAML, config=config)
+
+    assert result.startswith(AUTOMATION_MAY_BE_INSTALLED)
+    assert "Do not add it again" in result
+    assert type(error).__name__ in result
+    assert "/config" not in result
+    assert "reload failed" not in result
+    # It was written, which is why a retry would add a second.
+    assert len(_written(tmp_path)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_install_leaves_the_install_note_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The note says "It is installed as written", which a failure cannot say."""
+    hass = _fake_hass(tmp_path)
+
+    async def _failing_reload(_domain: str, _service: str) -> None:
+        msg = "reload failed"
+        raise HomeAssistantError(msg)
+
+    hass.services.async_call = _failing_reload
+    monkeypatch.setattr(
+        tools_module, "_critical_push_note", lambda _r: " It is installed as written."
+    )
+
+    result = await add_automation_tool(
+        automation_yaml=LIGHT_YAML, config=_config(hass, {})
+    )
+
+    assert result.startswith(AUTOMATION_MAY_BE_INSTALLED)
+    assert "installed as written" not in result
+
+
+@pytest.mark.asyncio
+async def test_a_failure_before_the_append_is_an_ordinary_error(
+    tmp_path: Path,
+) -> None:
+    """Nothing was written, so the error is the graph's to report, retry and all."""
+    hass = _fake_hass(tmp_path)
+    (tmp_path / "automations.yaml").write_text("- [unclosed", encoding="utf-8")
+
+    with pytest.raises(yaml.YAMLError):
+        await add_automation_tool(automation_yaml=LIGHT_YAML, config=_config(hass, {}))
+
+    assert (tmp_path / "automations.yaml").read_text(encoding="utf-8") == "- [unclosed"
+    assert hass.services.calls == []
 
 
 @pytest.mark.asyncio

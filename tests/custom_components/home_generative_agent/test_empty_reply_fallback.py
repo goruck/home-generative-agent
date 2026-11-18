@@ -20,6 +20,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 import custom_components.home_generative_agent.agent.graph as agent_graph
 from custom_components.home_generative_agent.agent.automation_targets import (
     AUTOMATION_ADDED_PREFIX,
+    AUTOMATION_MAY_BE_INSTALLED,
     AUTOMATION_PUSHES_LEFT_ORDINARY,
     AUTOMATION_REFUSAL_PREFIX,
 )
@@ -242,6 +243,16 @@ async def test_apology_after_a_round_that_did_not_act(
                 )
             ],
             id="automation_added_pushes_left_ordinary",
+        ),
+        pytest.param(
+            [
+                _result(
+                    f"{AUTOMATION_MAY_BE_INSTALLED}, but the install ended with "
+                    "an unexpected error: HomeAssistantError. Do not add it again.",
+                    name="add_automation",
+                )
+            ],
+            id="automation_may_be_installed",
         ),
     ],
 )
