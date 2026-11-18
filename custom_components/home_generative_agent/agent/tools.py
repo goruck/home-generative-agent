@@ -106,6 +106,7 @@ from ..sentinel.redaction import redact_network_identifiers  # noqa: TID252
 from .automation_pin import find_critical_automation_calls
 from .automation_targets import (
     AUTOMATION_ADDED_PREFIX,
+    AUTOMATION_MAY_BE_INSTALLED,
     AUTOMATION_PUSHES_LEFT_ORDINARY,
     AUTOMATION_REFUSAL_PREFIX,
     describe_missing_targets,
@@ -977,7 +978,27 @@ async def add_automation(  # noqa: D417
     if pin_challenge:
         return pin_challenge
 
-    return await _async_write_automation(hass, ha_automation_config) + install_note
+    return await _install_automation(hass, ha_automation_config, install_note)
+
+
+async def _install_automation(
+    hass: HomeAssistant, ha_automation_config: dict[str, Any], install_note: str
+) -> str:
+    """Install an automation that needs no PIN; no retry once the append began."""
+    try:
+        result = await _async_write_automation(hass, ha_automation_config)
+    except AutomationMayBeInstalledError as err:
+        # The file may hold it already (a failed reload, a disk error): a
+        # retry could install it twice (#1030), as on the PIN path. The
+        # install note says it is installed, so it is left off.
+        LOGGER.exception("add_automation ended with an error")
+        # The error type only: its message can hold paths or tokens.
+        return (
+            f"{AUTOMATION_MAY_BE_INSTALLED}, but the install ended with an "
+            f"unexpected error: {err}. Do not add it again; tell the user to "
+            "check their automations first."
+        )
+    return result + install_note
 
 
 def _critical_push_note(critical_push: CriticalPushResult) -> str:
@@ -1091,34 +1112,48 @@ def _maybe_require_pin_for_automation(
     )
 
 
+class AutomationMayBeInstalledError(Exception):
+    """An install failed once the append to automations.yaml had started."""
+
+
 async def _async_write_automation(
     hass: HomeAssistant, ha_automation_config: dict[str, Any]
 ) -> str:
-    """Append a validated automation to automations.yaml and reload."""
+    """
+    Append a validated automation to automations.yaml and reload.
+
+    An error before the append leaves the file as it was and is raised as is.
+    Once the append starts, any error is raised as
+    `AutomationMayBeInstalledError` (#1030): the automation may be in the
+    file, so a retry could install it twice.
+    """
     async with aiofiles.open(
         Path(hass.config.config_dir) / AUTOMATION_CONFIG_PATH, encoding="utf-8"
     ) as f:
         ha_exsiting_automation_configs = await f.read()
         ha_exsiting_automations_yaml = yaml.safe_load(ha_exsiting_automation_configs)
-
-    async with aiofiles.open(
-        Path(hass.config.config_dir) / AUTOMATION_CONFIG_PATH,
-        "a" if ha_exsiting_automations_yaml else "w",
-        encoding="utf-8",
-    ) as f:
-        ha_automation_config_raw = yaml.dump(
-            [ha_automation_config], allow_unicode=True, sort_keys=False
-        )
-        await f.write("\n" + ha_automation_config_raw)
-
-    await hass.services.async_call(AUTOMATION_DOMAIN, SERVICE_RELOAD)
-    hass.bus.async_fire(
-        AUTOMATION_TOOL_EVENT_REGISTERED,
-        {
-            "automation_config": ha_automation_config,
-            "raw_config": ha_automation_config_raw,
-        },
+    ha_automation_config_raw = yaml.dump(
+        [ha_automation_config], allow_unicode=True, sort_keys=False
     )
+
+    try:
+        async with aiofiles.open(
+            Path(hass.config.config_dir) / AUTOMATION_CONFIG_PATH,
+            "a" if ha_exsiting_automations_yaml else "w",
+            encoding="utf-8",
+        ) as f:
+            await f.write("\n" + ha_automation_config_raw)
+
+        await hass.services.async_call(AUTOMATION_DOMAIN, SERVICE_RELOAD)
+        hass.bus.async_fire(
+            AUTOMATION_TOOL_EVENT_REGISTERED,
+            {
+                "automation_config": ha_automation_config,
+                "raw_config": ha_automation_config_raw,
+            },
+        )
+    except Exception as err:
+        raise AutomationMayBeInstalledError(type(err).__name__) from err
 
     return f"{AUTOMATION_ADDED_PREFIX}{ha_automation_config['id']}"
 
@@ -1716,7 +1751,12 @@ async def _execute_pending_automation(
         _record_confirmed(cfg, action, PIN_OUTCOME_UNKNOWN)
         # The type only: the message can hold paths or tokens.
         # Claimed and maybe written: not a failure to retry (#1023 review).
-        return None, pin_msg(hass, "automation_outcome_unknown", err=type(err).__name__)
+        name = (
+            str(err)
+            if isinstance(err, AutomationMayBeInstalledError)
+            else type(err).__name__
+        )
+        return None, pin_msg(hass, "automation_outcome_unknown", err=name)
 
     _record_confirmed(cfg, action, PIN_OUTCOME_DONE)
     install_note = action.get("install_note")

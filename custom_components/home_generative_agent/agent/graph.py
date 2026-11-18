@@ -97,6 +97,7 @@ from ..core.utils import extract_final  # noqa: TID252
 from .automation_pin import STEP_TARGET_KEYS
 from .automation_targets import (
     AUTOMATION_ADDED_PREFIX,
+    AUTOMATION_MAY_BE_INSTALLED,
     AUTOMATION_PUSHES_LEFT_ORDINARY,
     AUTOMATION_REFUSAL_PREFIX,
 )
@@ -3967,14 +3968,14 @@ def _result_succeeded(msg: ToolMessage) -> bool:
 
 def _result_partly_acted(msg: ToolMessage) -> bool:
     """Return True for an action that acted on some of its devices only."""
-    if (
-        (msg.name or "").lower() == "add_automation"
-        and isinstance(msg.content, str)
-        and msg.content.startswith(AUTOMATION_ADDED_PREFIX)
-    ):
+    if (msg.name or "").lower() == "add_automation" and isinstance(msg.content, str):
+        # Maybe installed before the install failed (#1030): not "try again".
+        if msg.content.startswith(AUTOMATION_MAY_BE_INSTALLED):
+            return True
         # Installed, but a safety alarm's pushes stay ordinary (#869, #1023):
         # not "Done.", and not "try again", which would install a second.
-        return AUTOMATION_PUSHES_LEFT_ORDINARY in msg.content
+        if msg.content.startswith(AUTOMATION_ADDED_PREFIX):
+            return AUTOMATION_PUSHES_LEFT_ORDINARY in msg.content
     data = loads_or_none(msg.content) if isinstance(msg.content, str) else None
     return isinstance(data, dict) and bool(data.get("partial_failure"))
 
