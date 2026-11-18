@@ -38,7 +38,6 @@ from langchain_core.messages import (
 )
 from langchain_core.messages.utils import trim_messages
 from langgraph.graph import END, START, MessagesState, StateGraph
-from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.store.base import InvalidNamespaceError
 from pydantic import ValidationError
 
@@ -3573,7 +3572,6 @@ async def _retrieve_tools(  # noqa: PLR0915
         "tool_routing_map": routing_map,
         "action_rounds": 0,
         "correction_rounds": 0,
-        **_answer_interrupted_calls(state["messages"]),
     }
 
 
@@ -4096,8 +4094,8 @@ async def _call_model(
     # Model input = System + current messages.
     messages = [system_message, *state["messages"]]
 
-    trimmed_messages = await _trim_messages_for_model(
-        messages, opts, chat_model_options, hass
+    trimmed_messages = _with_interrupted_results(
+        await _trim_messages_for_model(messages, opts, chat_model_options, hass)
     )
 
     LOGGER.debug("Model call messages: %s", trimmed_messages)
@@ -4910,41 +4908,50 @@ def _unanswered_calls(messages: Sequence[AnyMessage]) -> list[ToolMessage]:
     return _tool_results(last.tool_calls, _ROUND_LIMIT_RESULT)
 
 
-def _answer_interrupted_calls(messages: Sequence[AnyMessage]) -> dict[str, Any]:
+def _with_interrupted_results(messages: list[AnyMessage]) -> list[AnyMessage]:
     """
-    Give every tool call in the history that has no result one.
+    Return the model input with a result after every tool call that has none.
 
     A turn cancelled between the model asking for tools and their results
     being saved leaves the call without a result in the checkpoint. OpenAI and
     Anthropic reject such a history, so every later turn of the conversation
     failed with a provider error until trimming dropped the call (#947). Each
-    such call gets ``_INTERRUPTED_RESULT`` right after its message.
+    such call gets ``_INTERRUPTED_RESULT`` in what is sent, right after the
+    results its message did get.
 
-    Returns the state update that rewrites the history in that order, or {}
-    when nothing is missing, which is every ordinary turn.
+    Only the input is changed, never the saved history: a turn still running
+    on the same conversation keeps its own results, and the PIN checks read
+    the history as it was. A call counts as answered only by the results right
+    after its own message, since some servers reuse ids such as ``call_0`` in
+    every response.
     """
-    answered = {m.tool_call_id for m in messages if isinstance(m, ToolMessage)}
     repaired: list[AnyMessage] = []
-    changed = False
-    for message in messages:
+    index = 0
+    while index < len(messages):
+        message = messages[index]
         repaired.append(message)
+        index += 1
         if not isinstance(message, AIMessage) or not message.tool_calls:
             continue
+        answered: set[str] = set()
+        while index < len(messages) and isinstance(messages[index], ToolMessage):
+            result = cast("ToolMessage", messages[index])
+            answered.add(result.tool_call_id)
+            repaired.append(result)
+            index += 1
         missing = [
-            tool_call
-            for tool_call in message.tool_calls
-            if (tool_call.get("id") or "") not in answered
+            call
+            for call in message.tool_calls
+            if (call.get("id") or "") not in answered
         ]
-        if missing:
-            changed = True
-            repaired.extend(_tool_results(missing, _INTERRUPTED_RESULT))
-    if not changed:
-        return {}
-    LOGGER.info(
-        "Answered %d tool call(s) an interrupted turn left without a result.",
-        len(repaired) - len(messages),
-    )
-    return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *repaired]}
+        repaired.extend(_tool_results(missing, _INTERRUPTED_RESULT))
+    if len(repaired) != len(messages):
+        LOGGER.debug(
+            "Answered %d tool call(s) an interrupted turn left without a result "
+            "(model input only).",
+            len(repaired) - len(messages),
+        )
+    return repaired
 
 
 async def _tool_loop_guard(state: State, config: RunnableConfig) -> dict[str, Any]:
