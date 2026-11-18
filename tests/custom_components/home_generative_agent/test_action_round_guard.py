@@ -634,7 +634,8 @@ async def _guard_text(state: Any) -> str:
 
 
 @pytest.mark.asyncio
-async def test_guard_names_a_failed_step_and_its_error() -> None:
+async def test_guard_names_a_failed_step_but_not_its_error() -> None:
+    """An error's text can be meant for the model; only the step is named."""
     error = ToolMessage(
         content=(
             "\nError: HomeAssistantError('Unable to find entity Porch')\n\n"
@@ -649,15 +650,14 @@ async def test_guard_names_a_failed_step_and_its_error() -> None:
 
     assert text.startswith("I wasn't able to complete this request")
     assert text.endswith(
-        "The last step that failed was HassTurnOn: "
-        "HomeAssistantError('Unable to find entity Porch')"
+        "The last step that failed was HassTurnOn. Ask me what went wrong."
     )
+    assert "Porch" not in text
     assert "Call the tool again" not in text
 
 
 @pytest.mark.asyncio
-async def test_guard_repeats_only_the_error_of_a_json_result() -> None:
-    """The rest of a payload can carry home data; only its error is shown."""
+async def test_guard_names_a_failed_json_result_without_its_payload() -> None:
     failed = ToolMessage(
         content=json.dumps(
             {"error": "Action failed.", "entities": ["lock.front_door: unlocked"]}
@@ -668,7 +668,9 @@ async def test_guard_repeats_only_the_error_of_a_json_result() -> None:
 
     text = await _guard_text(_cut_off_after(failed))
 
-    assert text.endswith("The last step that failed was GetLiveContext: Action failed.")
+    assert text.endswith(
+        "The last step that failed was GetLiveContext. Ask me what went wrong."
+    )
     assert "front_door" not in text
 
 
@@ -689,10 +691,10 @@ async def test_guard_names_the_steps_still_asked_for_after_an_ordinary_round() -
 
 
 @pytest.mark.asyncio
-async def test_guard_sanitizes_and_caps_a_remote_error() -> None:
+async def test_guard_sanitizes_and_caps_a_remote_tool_name() -> None:
     remote = ToolMessage(
-        content="Error: bad\u202eevil " + "x" * 500,
-        name="mcp-abc__web_search",
+        content="Error: quota exceeded",
+        name="mcp-abc__web\u202esearch" + "x" * 500,
         tool_call_id="a",
         status="error",
     )
@@ -701,4 +703,17 @@ async def test_guard_sanitizes_and_caps_a_remote_error() -> None:
     note = text.split("The last step that failed was ", 1)[1]
 
     assert "\u202e" not in note
+    assert "quota" not in note
     assert len(note) < 200
+
+
+@pytest.mark.asyncio
+async def test_guard_skips_a_failed_step_with_no_name() -> None:
+    nameless = ToolMessage(
+        content="Error: boom", name="", tool_call_id="a", status="error"
+    )
+
+    text = await _guard_text(_cut_off_after(nameless, "intent__HassTurnOn"))
+
+    assert "failed was" not in text
+    assert text.endswith("It was still trying: HassTurnOn.")
