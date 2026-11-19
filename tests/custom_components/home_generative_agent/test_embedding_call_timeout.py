@@ -319,3 +319,50 @@ def test_removing_a_member_drops_its_hold() -> None:
     emb.remove_provider("p1")
 
     assert "p1" not in emb._timed_out_until
+
+
+def test_marking_the_tool_index_stale_drops_the_retry_wait() -> None:
+    """Another embedder answers now: its rebuild does not wait (#969)."""
+    from custom_components.home_generative_agent.core.utils import (  # noqa: PLC0415
+        mark_tool_index_stale,
+    )
+
+    rd = MagicMock()
+    rd.tool_content_hashes = {}
+    rd.tool_index_task = None
+    rd.tool_index_retry_after = 1e12
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "custom_components.home_generative_agent.core.utils.async_dispatcher_send",
+            MagicMock(),
+        )
+        mark_tool_index_stale(MagicMock(), rd)
+
+    assert rd.tool_index_retry_after == 0.0
+
+
+@pytest.mark.usefixtures("short_timeout")
+@pytest.mark.asyncio
+async def test_each_member_is_held_from_the_end_of_an_all_timed_out_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first member's hold does not run out before the call ends."""
+    now = [1000.0]
+    monkeypatch.setattr(fallback_module, "monotonic", lambda: now[0])
+    emb = FallbackEmbeddings(
+        [(_Frozen(), "edge", "p1"), (_Frozen(), "edge", "p2")],
+        circuit_breaker=CircuitBreaker(),
+    )
+    real_within = fallback_module._within
+
+    async def _ticking(call: object, timeout_s: float) -> object:
+        now[0] += 70.0  # Longer than a hold: p1's own would run out.
+        return await real_within(call, timeout_s)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(fallback_module, "_within", _ticking)
+
+    with pytest.raises(EmbeddingsTimedOutError):
+        await emb.aembed_query("porch light")
+
+    assert emb._timed_out("p1"), "held from the end, not from its own timeout"

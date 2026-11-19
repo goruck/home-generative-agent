@@ -1696,6 +1696,7 @@ def mark_tool_index_stale(hass: HomeAssistant, runtime_data: Any) -> None:
     runtime_data.tool_content_hashes.clear()
     runtime_data.tool_index_ready = False
     runtime_data.tool_index_failed = False
+    runtime_data.tool_index_retry_after = 0.0  # Another embedder (#969).
     task = runtime_data.tool_index_task
     if task is not None and not task.done():
         task.cancel()

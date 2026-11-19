@@ -2044,15 +2044,15 @@ label pair ("Server URL" vs "Base URL").
 
 ## Model Providers
 
-### Callers with a shorter limit than the embedding chain's never fail over
+### Direct embedding callers with a short limit never fail over
 
-**What:** Three callers bound an embedding call with a limit no longer than a provider's in `FallbackEmbeddings` (30 s plus 0.25 s per text, #969): the tool-index top-up during a turn (`_TOOL_INDEX_DELTA_TIMEOUT_S`, 30 s, `conversation.py`), the camera caption scan (`_RECENT_CAPTION_SCAN_TIMEOUT_SEC`, 10 s, `core/video_analyzer.py`) and the embedding-size probe (`_PROBE_TIMEOUT_S`, 15 s, `core/embedding_store.py`). With a frozen primary and a healthy fallback, the caller cancels the call before the primary's limit fires. A cancel is not a failure, so nothing is recorded, no hold starts and the fallback is never tried on those paths. A turn with a tool-index top-up to write therefore waits about 30 s there, then again on its first search, which is what starts the hold. The missing failover was already true before #969; it is not a regression.
+**What:** Two callers call the embedding chain directly, not through the store, and bound it with a limit no longer than a provider's in `FallbackEmbeddings` (30 s plus 0.25 s per text, #969): the camera caption scan (`_RECENT_CAPTION_SCAN_TIMEOUT_SEC`, 10 s, `core/video_analyzer.py`, its `embeddings.aembed_documents`) and the embedding-size probe (`_PROBE_TIMEOUT_S`, 15 s, `core/embedding_store.py`). With a frozen primary and a healthy fallback, the caller cancels the call before the primary's limit fires. A cancel is not a failure, so nothing is recorded, no hold starts and the fallback is never tried there; the caption scan's dedup then fails open. This was already true before #969; it is not a regression. Calls through the store (memory and tool search, the tool-index top-up, caption writes) are not affected: LangGraph's batched store runs them in its own task, so a caller's limit only stops it waiting and the chain carries on.
 
 **Why:** Red team and Codex, review of #969 (2026-11-18). Lindo chose to narrow the docs instead of passing budgets in that PR.
 
-**How to apply:** Let a caller hand its remaining time to the chain, as `model_call_budget` / `member_timeout` (`core/provider_stall.py`) do for chat: wrap those calls in `model_call_budget(...)` and have `_through_chain` take `min(timeout_s, member_timeout(last=...))` for each member. Short budgets are not split (`SPLIT_MIN_BUDGET_S`), so the caption scan would need its own rule. Test a frozen primary and a healthy fallback on the top-up path.
+**How to apply:** Wrap those two direct calls in `model_call_budget(...)` and have `_through_chain` take `min(timeout_s, member_timeout(last=...))` for each member, as the chat chain does (`core/provider_stall.py`). Short budgets are not split (`SPLIT_MIN_BUDGET_S`), so the caption scan would need its own rule. A store-routed call would not see such a budget (the store's task keeps the context it started with). Test a frozen primary and a healthy fallback on the caption scan.
 
-**Effort:** M
+**Effort:** S
 **Priority:** P3
 **Depends on:** None
 

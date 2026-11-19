@@ -1513,9 +1513,10 @@ def with_member_configurable(
 # `kill -STOP`, a host swapping hard, a suspended VM) held the call, and the
 # conversation turn searching its tools and memories, with no end. An embedding
 # answers in well under a second; this leaves room for loading the model into
-# memory first. A call with many texts gets more time for each. A caller with
-# a limit of its own no longer than this (the tool-index top-up during a turn,
-# the camera caption scan, the embedding-size probe) cancels the call first:
+# memory first. A call with many texts gets more time for each. A call through
+# the store runs in the store's own task, so a caller's shorter limit only
+# stops it waiting. A direct caller with a limit no longer than this (the
+# camera caption scan, the embedding-size probe) cancels the call itself:
 # there the next provider is not tried and no hold starts (TODOS.md).
 EMBEDDING_CALL_TIMEOUT_S = 30.0
 EMBEDDING_TIMEOUT_PER_TEXT_S = 0.25
@@ -1980,8 +1981,8 @@ class FallbackEmbeddings:
         Each member has `timeout_s` to answer. A timeout is a failure like a
         refused connection: it is counted toward the member's breaker and the
         next member is tried. The member is then skipped for
-        `EMBEDDING_TIMEOUT_HOLD_S`; when timeouts are all that kept every
-        member from answering, `EmbeddingsTimedOutError` is raised (#969).
+        `EMBEDDING_TIMEOUT_HOLD_S`; when no member answered, see
+        `_unanswered_error` for when that is `EmbeddingsTimedOutError` (#969).
         """
         chain = self._ordered_chain()
         # Members to try although their breakers are open (#881).
@@ -2078,6 +2079,11 @@ class FallbackEmbeddings:
         # run out before a chain of timeouts ends.
         timed_out = timed_out_now + [p for p in skipped if self._timed_out(p)]
         if timed_out and not held and not failed:
+            # Held from the end of the call: in a longer chain the first
+            # member's hold would run out before the last one timed out.
+            until = monotonic() + EMBEDDING_TIMEOUT_HOLD_S
+            for provider_id in timed_out_now:
+                self._timed_out_until[provider_id] = until
             msg = (
                 "No embedding provider answered in time: "
                 + ", ".join(timed_out)

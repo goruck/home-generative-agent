@@ -151,7 +151,7 @@ from .core.conversation_helpers import (
 )
 from .core.fallback import (
     EMBEDDING_TIMEOUT_HOLD_S,
-    EmbeddingsTimedOutError,
+    EmbeddingsCircuitOpenError,
     EmbeddingsUnavailableError,
 )
 from .core.memories import memory_user as memory_store_user
@@ -1197,12 +1197,13 @@ async def _run_tool_index_background(
     except asyncio.CancelledError:
         _LOGGER.debug("Tool index write cancelled by the entry unload.")
         raise
-    except EmbeddingsTimedOutError as err:
-        # A slow model load or a frozen server (#969) is not a failed index:
-        # it is built again once the provider is tried again.
+    except EmbeddingsCircuitOpenError as err:
+        # A slow model load or a frozen server (#969), or a breaker between
+        # tries (one chunk's call refused while another tries the member), is
+        # not a failed index: it is built again once the provider is tried.
         rd.tool_index_retry_after = monotonic() + EMBEDDING_TIMEOUT_HOLD_S
         _LOGGER.warning(
-            "Tool index not built yet, trying again in %.0f s: %s",
+            "Tool index not built yet; built again on a turn after %.0f s: %s",
             EMBEDDING_TIMEOUT_HOLD_S,
             err,
         )
