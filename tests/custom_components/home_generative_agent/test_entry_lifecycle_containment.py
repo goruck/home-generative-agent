@@ -7,6 +7,10 @@ Three leaks in one area, all follow-ups from the deferred-start ship:
 * ``image.py`` and ``sensor.py`` registered bare ``EVENT_HOMEASSISTANT_STARTED``
   listeners that were never wired into ``entry.async_on_unload``, so a deferred
   ``async_add_entities`` could run for an entry that had already unloaded.
+  Since #972 both track cameras as they are added (``async_track_cameras``)
+  instead of waiting for that event; the same unload and entry-state
+  guarantees are pinned below. The tests still fire the start event, which
+  nothing listens to now: the camera's state alone must add it.
 * ``async_unload_entry`` was a run of bare awaits: one raising step put the
   entry in ``FAILED_UNLOAD`` — which skips the on-unload callbacks — leaving
   every deferred-start listener armed and every engine below the raising line
@@ -195,9 +199,10 @@ async def test_sensor_platform_refuses_the_add_while_the_entry_is_unloading(
     """
     Same residual window as image.py, sensor platform.
 
-    The guard is duplicated in each platform rather than shared, so the image
-    test cannot stand in for this one: a regression in sensor.py's copy would
-    strand camera sensors on an unloading entry with the image suite green.
+    The guard is shared in ``async_track_cameras`` since #972, but each
+    platform must still route its cameras through it: a sensor.py that added
+    them some other way would strand sensors on an unloading entry with the
+    image suite green.
     """
     hass.set_state(CoreState.not_running)
     entry = _platform_entry(hass)
@@ -746,3 +751,63 @@ async def test_services_yaml_lists_exactly_the_registered_services(
     advertised = set(yaml.safe_load((_COMPONENT_DIR / "services.yaml").read_text()))
 
     assert advertised == registered
+
+
+# ---------------------------------------------------------------------------
+# Cameras that appear after setup (#972)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", [image_platform, sensor_platform])
+async def test_camera_added_after_ha_started_gets_entities(
+    hass: Any, platform: Any
+) -> None:
+    """
+    An entry set up once HA is running, with no camera yet, adds one later.
+
+    It used to wait for EVENT_HOMEASSISTANT_STARTED, which had already fired,
+    so the camera never got entities until a reload (#972).
+    """
+    hass.set_state(CoreState.running)
+    entry = _platform_entry(hass)
+    entry.mock_state(hass, ConfigEntryState.LOADED)
+    added: list[Any] = []
+
+    await platform.async_setup_entry(hass, entry, added.extend)
+    immediate = len(added)
+
+    hass.states.async_set("camera.front", "idle")
+    await hass.async_block_till_done()
+
+    assert len(added) == immediate + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", [image_platform, sensor_platform])
+async def test_camera_added_beside_existing_ones_gets_entities_once(
+    hass: Any, platform: Any
+) -> None:
+    """
+    A new camera is added beside the ones found at setup, each only once.
+
+    A camera integration reload removes and re-adds its states; that must not
+    make a second entity for a camera that already has one.
+    """
+    hass.set_state(CoreState.running)
+    hass.states.async_set("camera.front", "idle")
+    entry = _platform_entry(hass)
+    entry.mock_state(hass, ConfigEntryState.LOADED)
+    added: list[Any] = []
+
+    await platform.async_setup_entry(hass, entry, added.extend)
+    after_setup = len(added)
+
+    hass.states.async_set("camera.back", "idle")
+    hass.states.async_remove("camera.front")
+    hass.states.async_set("camera.front", "idle")
+    hass.states.async_set("light.porch", "on")
+    await hass.async_block_till_done()
+
+    assert len(added) == after_setup + 1
+    assert added[-1]._camera_id == "camera.back"

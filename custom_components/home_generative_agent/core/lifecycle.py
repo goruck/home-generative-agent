@@ -12,6 +12,7 @@ from homeassistant.config_entries import (
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.event import async_track_state_added_domain
 
 from ..const import DOMAIN  # noqa: TID252
 from .subentry_resolver import get_database_subentry
@@ -20,7 +21,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from homeassistant.config_entries import ConfigEntry
-    from homeassistant.core import HomeAssistant
+    from homeassistant.core import Event, EventStateChangedData, HomeAssistant
 
 # An entry that is not running because of its database: waiting to retry on
 # one it cannot reach, or failed on settings it cannot use. A change to the
@@ -93,6 +94,53 @@ def defer_start_until_hass_started(
             remove_listener()
 
     entry.async_on_unload(_cancel_listener)
+
+
+# A platform set up while HA is still starting gets cameras while its entry is
+# still in SETUP_IN_PROGRESS, so that state may add entities too.
+_CAMERA_ADD_STATES = (ConfigEntryState.LOADED, ConfigEntryState.SETUP_IN_PROGRESS)
+
+
+@callback
+def async_track_cameras(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    add_cameras: Callable[[list[str]], None],
+) -> None:
+    """
+    Call ``add_cameras`` with today's cameras, then with each camera added later.
+
+    The image and sensor platforms make one entity per camera. Looking only
+    once, at setup or when HA finished starting, left an entry with no
+    entities for a camera that appeared later: one set up after HA had started
+    (a first install, a reload while the camera integration was down) waited
+    for a start event that had already fired (#972). Each camera is passed
+    once per platform setup, however often its integration reloads.
+
+    The listener is removed on unload. ``async_unload_entry`` awaits several
+    times before HA runs the on-unload callbacks, so a camera added in that
+    window is refused by the entry-state check instead: adding entities to a
+    platform that has begun unloading strands them on a dead entry.
+    """
+    known: set[str] = set()
+
+    @callback
+    def _add(entity_ids: list[str]) -> None:
+        new = [entity_id for entity_id in entity_ids if entity_id not in known]
+        if new:
+            known.update(new)
+            add_cameras(new)
+
+    _add([state.entity_id for state in hass.states.async_all("camera")])
+
+    @callback
+    def _on_camera_added(event: Event[EventStateChangedData]) -> None:
+        if entry.state in _CAMERA_ADD_STATES:
+            _add([event.data["entity_id"]])
+
+    entry.async_on_unload(
+        async_track_state_added_domain(hass, "camera", _on_camera_added)
+    )
 
 
 def _database_subentry_id(hass: HomeAssistant, entry: ConfigEntry) -> str | None:

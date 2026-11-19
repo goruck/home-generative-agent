@@ -29,6 +29,8 @@ For each configured camera the integration registers:
 | Image | `image.<camera_slug>_last_event` | Most recent snapshot published by the analyzer |
 | Sensor | `sensor.<camera_slug>_recognized_people` | People recognized in the last analyzed event (aggregated across the batch's frames) |
 
+A camera added after Home Assistant started, such as a new camera or one whose integration was down at startup, gets both entities as soon as it appears, with no reload ([#972](https://github.com/goruck/home-generative-agent/issues/972)).
+
 **Sensor attributes:**
 
 | Attribute | Description |
