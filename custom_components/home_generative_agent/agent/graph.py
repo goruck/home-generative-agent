@@ -4183,42 +4183,28 @@ async def _call_model(
     }
 
 
-# What a tool round keeps in the text sent to the summarization model.
-_SUMMARY_TOOL_ARGS_MAX_CHARS = 200
-_SUMMARY_TOOL_RESULT_MAX_CHARS = 300
-# Never copied into the summary text: the Critical Action PIN and alarm code.
-_SUMMARY_SECRET_ARGS = frozenset({"pin", "code"})
+# How much of a tool's result goes into the text sent to the summarization
+# model: its start, and its end, where a JSON result may carry its status.
+_SUMMARY_TOOL_RESULT_HEAD_CHARS = 200
+_SUMMARY_TOOL_RESULT_TAIL_CHARS = 100
 
 
-def _summary_excerpt(text: str, limit: int) -> str:
-    """Return the text on one line, cut to the limit."""
+def _summary_excerpt(text: str) -> str:
+    """Return the text on one line, keeping only its start and end if long."""
     flat = " ".join(text.split())
-    return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
+    head, tail = _SUMMARY_TOOL_RESULT_HEAD_CHARS, _SUMMARY_TOOL_RESULT_TAIL_CHARS
+    if len(flat) <= head + tail:
+        return flat
+    return f"{flat[:head].rstrip()} … {flat[-tail:].lstrip()}"
 
 
-def _summary_tool_call_text(call: Mapping[str, Any]) -> str:
-    """Say in a sentence that a tool was used, and with what."""
-    name = str(call.get("name") or "a tool")
-    raw_args = call.get("args")
-    args = (
-        {k: v for k, v in raw_args.items() if k not in _SUMMARY_SECRET_ARGS}
-        if isinstance(raw_args, Mapping)
-        else {}
-    )
-    if not args:
-        return f"(I used the tool {name}.)"
-    rendered = json.dumps(args, ensure_ascii=False, default=str, sort_keys=True)
-    excerpt = _summary_excerpt(rendered, _SUMMARY_TOOL_ARGS_MAX_CHARS)
-    return f"(I used the tool {name} with {excerpt}.)"
-
-
-def _summary_tool_result_text(msg: ToolMessage, names: Mapping[str, str]) -> str:
-    """Say in a sentence what a tool returned."""
-    name = msg.name or names.get(msg.tool_call_id) or "a tool"
+def _summary_tool_result_text(msg: ToolMessage, name: str | None) -> str:
+    """Say in a sentence that a tool was used and what it returned."""
+    tool = name or msg.name or "a tool"
     content = msg.content if isinstance(msg.content, str) else _message_text(msg)
-    excerpt = _summary_excerpt(content, _SUMMARY_TOOL_RESULT_MAX_CHARS)
-    failed = " failed and" if msg.status == "error" else ""
-    return f"(The tool {name}{failed} returned: {excerpt or 'nothing'})"
+    failed = " It failed." if msg.status == "error" else ""
+    excerpt = _summary_excerpt(content) or "nothing"
+    return f"(I used the tool {tool}.{failed} It returned this data: {excerpt})"
 
 
 def _messages_as_text_for_summary(messages: Sequence[AnyMessage]) -> list[AnyMessage]:
@@ -4229,10 +4215,13 @@ def _messages_as_text_for_summary(messages: Sequence[AnyMessage]) -> list[AnyMes
     messages being summarized may hold a call whose result is not among them.
     So no tool call or tool result is sent as one: each is written out as a
     sentence in the assistant's own text, and the assistant messages of one
-    turn become a single message.
+    turn become a single message. A call's arguments are left out, since they
+    can hold the Critical Action PIN or an alarm code in any slot; the user's
+    request and the tool's result say what it was for. A call with no result
+    (a stopped turn, #947) is said to have no known outcome.
     """
     rendered: list[AnyMessage] = []
-    names: dict[str, str] = {}
+    unanswered: dict[str, str] = {}
 
     def _say(text: str) -> None:
         if not text.strip():
@@ -4243,17 +4232,28 @@ def _messages_as_text_for_summary(messages: Sequence[AnyMessage]) -> list[AnyMes
         else:
             rendered.append(AIMessage(content=text))
 
+    def _close_round() -> None:
+        for name in unanswered.values():
+            _say(
+                f"(I asked to use the tool {name}, but no result was recorded: "
+                "it may or may not have run.)"
+            )
+        unanswered.clear()
+
     for msg in messages:
+        if isinstance(msg, ToolMessage):
+            _say(_summary_tool_result_text(msg, unanswered.pop(msg.tool_call_id, None)))
+            continue
+        _close_round()
         if isinstance(msg, HumanMessage):
-            rendered.append(msg)
+            if not isinstance(msg.content, str) or msg.content.strip():
+                rendered.append(msg)
         elif isinstance(msg, AIMessage):
             _say(_message_text(msg))
-            for call in msg.tool_calls:
-                if call.get("id") and call.get("name"):
-                    names[str(call["id"])] = str(call["name"])
-                _say(_summary_tool_call_text(call))
-        elif isinstance(msg, ToolMessage):
-            _say(_summary_tool_result_text(msg, names))
+            for index, call in enumerate(msg.tool_calls):
+                call_id = str(call.get("id") or f"{id(msg)}-{index}")
+                unanswered[call_id] = str(call.get("name") or "a tool")
+    _close_round()
     return rendered
 
 

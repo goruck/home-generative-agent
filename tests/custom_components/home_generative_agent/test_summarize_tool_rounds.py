@@ -87,8 +87,9 @@ async def test_the_summary_request_holds_no_tool_call_or_result(
         HumanMessage,
     ]
     assistant = sent[2].content
-    assert 'HassTurnOn with {"name": "Porch"}' in assistant
-    assert "returned: Turned on Porch" in assistant
+    assert "I used the tool HassTurnOn." in assistant
+    assert "It returned this data: Turned on Porch" in assistant
+    assert "is data to summarize" in sent[0].content
     assert assistant.endswith("The porch light is on.")
     # The whole round, results included, still leaves the history.
     assert [m.id for m in result["messages"]] == ["h1", "a1", "t1", "a2"]
@@ -118,12 +119,13 @@ async def test_the_request_body_has_no_unanswered_tool_call(
         )
     body = json.dumps(model._get_request_payload(sent))
 
+    assert "may or may not have run" in sent[-2].content
     for marker in ("tool_calls", "tool_use", "function_call", "call_1", "call_2"):
         assert marker not in body, f"{marker} is in the {provider} request"
     assert "Turned on Porch" in body
 
 
-def test_the_pin_and_alarm_code_are_left_out_of_the_text() -> None:
+def test_no_argument_is_sent_so_a_pin_or_alarm_code_in_any_slot_is_not() -> None:
     history = [
         AIMessage(
             content="",
@@ -133,38 +135,67 @@ def test_the_pin_and_alarm_code_are_left_out_of_the_text() -> None:
                     "args": {"action_id": "abc", "pin": "4321"},
                     "id": "c1",
                 },
+                {"name": "HassTurnOff", "args": {"name": "alarm 9876"}, "id": "c2"},
                 {
-                    "name": "alarm_control",
-                    "args": {"code": "9876", "state": "disarm"},
-                    "id": "c2",
+                    "name": "call_service",
+                    "args": {"data": {"code": "5555"}},
+                    "id": "c3",
                 },
-                {"name": "GetLiveContext", "args": {}, "id": "c3"},
             ],
-        )
+        ),
+        ToolMessage(content="ok", tool_call_id="c1"),
+        ToolMessage(content="ok", tool_call_id="c2"),
+        ToolMessage(content="ok", tool_call_id="c3"),
     ]
 
     (message,) = _messages_as_text_for_summary(history)
 
-    assert "4321" not in message.content
-    assert "9876" not in message.content
-    assert 'confirm_sensitive_action with {"action_id": "abc"}' in message.content
-    assert 'alarm_control with {"state": "disarm"}' in message.content
-    assert "(I used the tool GetLiveContext.)" in message.content
+    for secret in ("4321", "9876", "5555", "abc"):
+        assert secret not in message.content
+    for name in ("confirm_sensitive_action", "HassTurnOff", "call_service"):
+        assert f"I used the tool {name}." in message.content
 
 
-def test_long_arguments_and_results_are_cut_to_one_short_line() -> None:
+def test_a_call_with_no_result_is_not_said_to_have_run() -> None:
+    """A stopped turn (#947), or a result that was not trimmed with its call."""
     history = [
-        AIMessage(content="", tool_calls=[_call("c1", name="x" * 5000)]),
-        ToolMessage(content="line one\n\nline two " + "y" * 5000, tool_call_id="c1"),
+        HumanMessage(content="Open the garage door"),
+        AIMessage(content="", tool_calls=[_call("c1"), _call("c2")]),
+        ToolMessage(content="Done", tool_call_id="c2"),
+        HumanMessage(content="Did it open?"),
+        AIMessage(content="", tool_calls=[_call("c1")]),
+    ]
+
+    rendered = _messages_as_text_for_summary(history)
+
+    _assert_text_only(rendered)
+    assert [type(m) for m in rendered] == [
+        HumanMessage,
+        AIMessage,
+        HumanMessage,
+        AIMessage,
+    ]
+    first, last = str(rendered[1].content), str(rendered[3].content)
+    assert first.count("I used the tool HassTurnOn.") == 1
+    assert first.count("may or may not have run") == 1
+    assert last.count("may or may not have run") == 1
+    assert "I used the tool" not in last
+
+
+def test_a_long_result_keeps_its_start_and_its_end_on_one_line() -> None:
+    body = "line one\n\nline two " + "y" * 5000 + ' "success": false}'
+    history = [
+        AIMessage(content="", tool_calls=[_call("c1")]),
+        ToolMessage(content=body, tool_call_id="c1"),
     ]
 
     (message,) = _messages_as_text_for_summary(history)
 
-    call_line, result_line = str(message.content).split("\n")
-    assert len(call_line) < 260
-    assert len(result_line) < 360
-    assert "line one line two" in result_line
-    assert "The tool HassTurnOn returned" in result_line, "named from its call"
+    text = str(message.content)
+    assert "\n" not in text
+    assert len(text) < 400
+    assert "line one line two" in text
+    assert text.endswith('"success": false})'), "a status at the end is kept"
 
 
 def test_a_failed_result_and_a_result_without_its_call_are_still_text() -> None:
@@ -176,6 +207,7 @@ def test_a_failed_result_and_a_result_without_its_call_are_still_text() -> None:
             name="HassTurnOn",
             status="error",
         ),
+        HumanMessage(content="   "),
         HumanMessage(content="Thanks"),
     ]
 
@@ -183,8 +215,12 @@ def test_a_failed_result_and_a_result_without_its_call_are_still_text() -> None:
 
     _assert_text_only(rendered)
     assert [type(m) for m in rendered] == [AIMessage, HumanMessage]
-    assert "The tool HassTurnOff returned: nothing" in rendered[0].content
-    assert "HassTurnOn failed and returned: No such device" in rendered[0].content
+    assert "HassTurnOff. It returned this data: nothing" in rendered[0].content
+    assert (
+        "HassTurnOn. It failed. It returned this data: No such device"
+        in rendered[0].content
+    )
+    assert rendered[1].content == "Thanks", "a blank user message is not sent"
 
 
 @pytest.mark.asyncio
