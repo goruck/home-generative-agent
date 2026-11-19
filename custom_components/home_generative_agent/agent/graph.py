@@ -4960,6 +4960,39 @@ def _with_interrupted_results(messages: list[AnyMessage]) -> list[AnyMessage]:
     return repaired
 
 
+def _guard_last_step_note(messages: Sequence[AnyMessage]) -> str:
+    """
+    Say which step the turn was on when the guard cut it off (#953).
+
+    The bare apology left the reason in the debug log only. When the round
+    before the cut-off had a failed result, the note names that tool and
+    offers to explain, which the next turn can do from the results in the
+    history; otherwise it names the tools the model was still asking for.
+    Only names: an error's text can be an instruction to the model or carry
+    home data, and the reply may be spoken aloud. Tool names come from the
+    model or a remote server, so they are sanitized.
+    """
+    cut_off = messages[-1] if messages else None
+    asked = (
+        cut_off.tool_calls
+        if isinstance(cut_off, AIMessage) and cut_off.tool_calls
+        else []
+    )
+    earlier = messages[:-1] if asked else messages
+    failed = [m for m in _last_round_responses(earlier) if not _result_succeeded(m)]
+    if failed and (name := _shown_tool_name(failed[-1].name or "")):
+        return f"\n\nThe last step that failed was {name}. Ask me what went wrong."
+    names = sorted({_shown_tool_name(call.get("name", "")) for call in asked} - {""})
+    if names:
+        return f"\n\nIt was still trying: {', '.join(names)}."
+    return ""
+
+
+def _shown_tool_name(name: str) -> str:
+    """Return a tool's name as the user is shown it: no namespace, made safe."""
+    return sanitize_tool_text(base_tool_name(name)).strip()
+
+
 async def _tool_loop_guard(state: State, config: RunnableConfig) -> dict[str, Any]:
     """
     Emit a friendly message when the action-round limit is reached.
@@ -4986,6 +5019,8 @@ async def _tool_loop_guard(state: State, config: RunnableConfig) -> dict[str, An
     )
     if last_tool is not None and _is_automation_refusal(last_tool):
         content += f"\n\nThe last problem was:\n{last_tool.content}"
+    else:
+        content += _guard_last_step_note(messages)
     return {"messages": [*answers, AIMessage(content=content)]}
 
 
