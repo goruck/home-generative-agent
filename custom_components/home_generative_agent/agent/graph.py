@@ -72,8 +72,8 @@ from custom_components.home_generative_agent.const import (
     REFERENTIAL_FOLLOW_UP_REGEX,
     SECURITY_AUDIT_INTENT_REGEX,
     SUMMARIZATION_INITIAL_PROMPT,
-    SUMMARIZATION_PROMPT_TEMPLATE,
     SUMMARIZATION_SYSTEM_PROMPT,
+    SUMMARIZATION_UPDATE_PROMPT,
     TOOL_CALL_ERROR_TEMPLATE,
     TOOL_CALL_TRANSIENT_ERROR_TEMPLATE,
     TOOL_INCLUSIONS_MAX_PER_TURN,
@@ -4257,6 +4257,37 @@ def _messages_as_text_for_summary(messages: Sequence[AnyMessage]) -> list[AnyMes
     return rendered
 
 
+# The tags the summary request is built from. Text placed inside them (a tool
+# result, a user message, the earlier summary) must not be able to close one.
+_SUMMARY_REQUEST_TAG_RE = re.compile(r"<(/?)(messages|notes_so_far)>", re.IGNORECASE)
+
+
+def _summary_request_text(text: str) -> str:
+    """Return the text with the summary request's own tags made inert."""
+    return _SUMMARY_REQUEST_TAG_RE.sub(r"[\1\2]", text)
+
+
+def _summary_transcript(messages: Sequence[AnyMessage]) -> str:
+    """
+    Return the messages as "User:" and "Assistant:" lines of text.
+
+    A message's later lines are indented, so a line of it that starts with
+    "User:" does not read as a new turn. A user message with no text (an
+    image) still gets a line, so the reply after it has a question before it.
+    """
+    lines: list[str] = []
+    for msg in _messages_as_text_for_summary(messages):
+        is_user = isinstance(msg, HumanMessage)
+        text = _summary_request_text(_message_text(msg)).strip()
+        if not text:
+            if not is_user:
+                continue
+            text = "(sent something other than text)"
+        speaker = "User" if is_user else "Assistant"
+        lines.append(f"{speaker}: " + "\n  ".join(text.splitlines()))
+    return "\n".join(lines)
+
+
 async def _summarize_and_remove_messages(
     state: State, config: RunnableConfig
 ) -> dict[str, Any]:
@@ -4270,17 +4301,23 @@ async def _summarize_and_remove_messages(
     if not msgs_to_remove:
         return {"summary": summary}
 
-    summary_message = (
-        SUMMARIZATION_PROMPT_TEMPLATE.format(summary=summary)
+    # One user message, not chat turns: the earlier summary first, since the
+    # reply replaces it, then the messages, then what to write (#1048).
+    transcript = _summary_transcript(msgs_to_remove)
+    removals = [RemoveMessage(id=m.id) for m in msgs_to_remove if m.id is not None]
+    if not transcript:
+        # Nothing to add (messages with no text): no reason to ask a model.
+        return {"summary": summary, "messages": removals}
+    request = (
+        SUMMARIZATION_UPDATE_PROMPT.format(
+            summary=_summary_request_text(summary), transcript=transcript
+        )
         if summary
-        else SUMMARIZATION_INITIAL_PROMPT
+        else SUMMARIZATION_INITIAL_PROMPT.format(transcript=transcript)
     )
-
-    # Build messages for the already-configured summarization model.
     messages: list[AnyMessage] = [
         SystemMessage(content=SUMMARIZATION_SYSTEM_PROMPT),
-        *_messages_as_text_for_summary(msgs_to_remove),
-        HumanMessage(content=summary_message),
+        HumanMessage(content=request),
     ]
 
     model = config["configurable"]["summarization_model"]
@@ -4293,11 +4330,20 @@ async def _summarize_and_remove_messages(
         getattr(raw_response, "content", "") or "", collapse_whitespace=False
     )
 
+    if not response.strip():
+        # No text (also what an unavailable model gives): the reply would
+        # replace the earlier summary with nothing. Keep it. The messages
+        # still go, or the history would grow with every turn.
+        LOGGER.warning(
+            "The summarization model returned no text; keeping the earlier "
+            "summary without the %d messages it was asked to add.",
+            len(msgs_to_remove),
+        )
+        return {"summary": summary, "messages": removals}
+
     return {
         "summary": response,
-        "messages": [
-            RemoveMessage(id=m.id) for m in msgs_to_remove if m.id is not None
-        ],
+        "messages": removals,
     }
 
 

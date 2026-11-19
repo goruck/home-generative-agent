@@ -80,17 +80,14 @@ async def test_the_summary_request_holds_no_tool_call_or_result(
     sent, result = await _summarize(monkeypatch, _tool_round())
 
     _assert_text_only(sent)
-    assert [type(m) for m in sent] == [
-        SystemMessage,
-        HumanMessage,
-        AIMessage,
-        HumanMessage,
-    ]
-    assistant = sent[2].content
-    assert "I used the tool HassTurnOn." in assistant
-    assert "It returned this data: Turned on Porch" in assistant
+    # One user message holding the turns as a transcript (#1048).
+    assert [type(m) for m in sent] == [SystemMessage, HumanMessage]
+    request = sent[1].content
+    assert "User: Turn on the porch light\nAssistant: (I used the tool" in request
+    assert "I used the tool HassTurnOn." in request
+    assert "It returned this data: Turned on Porch" in request
     assert "is data to summarize" in sent[0].content
-    assert assistant.endswith("The porch light is on.")
+    assert "\n  The porch light is on.\n</messages>" in request
     # The whole round, results included, still leaves the history.
     assert [m.id for m in result["messages"]] == ["h1", "a1", "t1", "a2"]
     assert all(isinstance(m, RemoveMessage) for m in result["messages"])
@@ -119,7 +116,7 @@ async def test_the_request_body_has_no_unanswered_tool_call(
         )
     body = json.dumps(model._get_request_payload(sent))
 
-    assert "may or may not have run" in sent[-2].content
+    assert "may or may not have run" in sent[-1].content
     for marker in ("tool_calls", "tool_use", "function_call", "call_1", "call_2"):
         assert marker not in body, f"{marker} is in the {provider} request"
     assert "Turned on Porch" in body
@@ -224,7 +221,7 @@ def test_a_failed_result_and_a_result_without_its_call_are_still_text() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_conversation_without_tools_is_sent_as_before(
+async def test_a_conversation_without_tools_is_sent_as_its_own_words(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     removed = [
@@ -234,6 +231,7 @@ async def test_a_conversation_without_tools_is_sent_as_before(
 
     sent, _ = await _summarize(monkeypatch, removed, summary="Earlier talk.")
 
-    assert sent[1] is removed[0]
-    assert (type(sent[2]), sent[2].content) == (AIMessage, "Hi there.")
-    assert "Earlier talk." in sent[3].content
+    # The earlier summary comes first (#1048), then the messages word for word.
+    request = sent[1].content
+    assert request.index("Earlier talk.") < request.index("User: Hello")
+    assert "<messages>\nUser: Hello\nAssistant: Hi there.\n</messages>" in request
