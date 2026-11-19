@@ -1495,6 +1495,41 @@ def with_member_configurable(
     )
 
 
+# How long one embedding provider may take to answer a call, before the next
+# one is tried (#969). The Ollama client limits only the connect, so a server
+# that took the connection and never answered (a process frozen by
+# `kill -STOP`, a host swapping hard, a suspended VM) held the call, and the
+# conversation turn searching its tools and memories, with no end. An embedding
+# answers in well under a second; this leaves room for loading the model into
+# memory first. A call with many texts (the tool index, a caption scan) gets
+# more time for each.
+EMBEDDING_CALL_TIMEOUT_S = 30.0
+EMBEDDING_TIMEOUT_PER_TEXT_S = 0.25
+
+
+def _embedding_timeout(texts: int) -> float:
+    """Return how long one provider may take to embed `texts` texts."""
+    return EMBEDDING_CALL_TIMEOUT_S + EMBEDDING_TIMEOUT_PER_TEXT_S * texts
+
+
+async def _within[T](call: Awaitable[T], timeout_s: float) -> T:
+    """
+    Await `call`, raising TimeoutError with how long it waited if it runs over.
+
+    ``asyncio.timeout`` uncancels the task when its own deadline fires, so the
+    stop check in the chain does not take this for the caller stopping.
+    """
+    timeout = asyncio.timeout(timeout_s)
+    try:
+        async with timeout:
+            return await call
+    except TimeoutError:
+        if not timeout.expired():
+            raise  # The provider's own timeout, with its cause.
+        msg = f"No answer within {timeout_s:.0f} s"
+        raise TimeoutError(msg) from None
+
+
 class FallbackEmbeddings:
     """Fallback wrapper for embedding models."""
 
@@ -1861,13 +1896,17 @@ class FallbackEmbeddings:
     async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
         """Embed documents through the fallback chain."""
         return await self._through_chain(
-            "Embedding call", lambda model: self._aembed_documents(model, texts)
+            "Embedding call",
+            lambda model: self._aembed_documents(model, texts),
+            _embedding_timeout(len(texts)),
         )
 
     async def aembed_query(self, text: str) -> list[float]:
         """Embed a query through the fallback chain."""
         return await self._through_chain(
-            "Embedding query", lambda model: self._aembed_query(model, text)
+            "Embedding query",
+            lambda model: self._aembed_query(model, text),
+            _embedding_timeout(1),
         )
 
     def _record_failure(
@@ -1894,9 +1933,15 @@ class FallbackEmbeddings:
             self.circuit_breaker.record_failure(provider_id)
 
     async def _through_chain[T](
-        self, label: str, call: Callable[[Any], Awaitable[T]]
+        self, label: str, call: Callable[[Any], Awaitable[T]], timeout_s: float
     ) -> T:
-        """Run `call` on each member in turn until one answers."""
+        """
+        Run `call` on each member in turn until one answers.
+
+        Each member has `timeout_s` to answer. A timeout is a failure like a
+        refused connection: it is counted toward the member's breaker and the
+        next member is tried (#969).
+        """
         chain = self._ordered_chain()
         # Members to try although their breakers are open (#881).
         probes = (
@@ -1927,7 +1972,7 @@ class FallbackEmbeddings:
                 continue
             admission = self._admissions.get(provider_id, 0)
             try:
-                result = await call(model)
+                result = await _within(call(model), timeout_s)
             except Exception as err:
                 _raise_if_stopped(err)
                 last_err = err
