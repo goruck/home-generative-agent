@@ -1018,10 +1018,20 @@ SUMMARIZATION_COMPACT_PROMPT = (
     "them in at most 300 words. Keep everything the user said about "
     "themselves or what they prefer, and the latest reported state of each "
     "device. Where a later note changes an earlier one, keep only the later. "
-    "Drop minor details first."
+    "Drop minor details first. Reply with the rewritten notes only, in the "
+    "language they are written in, with no heading."
 )
-# About 1,000 tokens of notes in every later system prompt.
+# About 1,000 tokens of English notes in every later system prompt.
 SUMMARY_COMPACT_ABOVE_CHARS = 4000
+# A rewrite shorter than this left most of the notes out (a refusal, or the
+# newest notes alone), so it is not used.
+SUMMARY_COMPACT_MIN_CHARS = 400
+# Notes are added in time order and an older one is not corrected when a
+# newer one changes it, so the agent is told which to believe.
+PAST_SUMMARY_NOTE = (
+    "(Notes on the earlier turns, oldest first. Where two disagree, the "
+    "later one is right.)"
+)
 
 # ---------------- Embeddings ----------------
 EMBEDDING_MODEL_OLLAMA_SUPPORTED = Literal["mxbai-embed-large"]

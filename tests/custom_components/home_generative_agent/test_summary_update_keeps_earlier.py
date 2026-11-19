@@ -17,12 +17,14 @@ import logging
 from typing import Any
 
 import pytest
+from homeassistant.exceptions import HomeAssistantError
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 import custom_components.home_generative_agent.agent.graph as agent_graph
 from custom_components.home_generative_agent.const import (
+    PAST_SUMMARY_NOTE,
     SUMMARY_COMPACT_ABOVE_CHARS,
 )
 
@@ -119,6 +121,9 @@ async def test_a_reply_with_no_text_keeps_the_earlier_summary(
     assert "returned no text" in caplog.text
 
 
+SHORTER = "The user prefers Fahrenheit. Alarm disarmed. " + "Porch light off. " * 30
+
+
 @pytest.mark.asyncio
 async def test_long_notes_are_shortened_by_a_second_request(
     monkeypatch: pytest.MonkeyPatch,
@@ -128,16 +133,10 @@ async def test_long_notes_are_shortened_by_a_second_request(
     removed = _turn(2, "Is the alarm armed?", "The alarm is disarmed.")
 
     requests, result = await _run(
-        monkeypatch,
-        removed,
-        earlier,
-        "The alarm is disarmed.",
-        "The user prefers Fahrenheit. Porch light off. Alarm disarmed.",
+        monkeypatch, removed, earlier, "The alarm is disarmed.", SHORTER
     )
 
-    assert result["summary"] == (
-        "The user prefers Fahrenheit. Porch light off. Alarm disarmed."
-    )
+    assert result["summary"] == SHORTER.strip()
     assert len(requests) == 2
     compact = requests[1][1].content
     # The rewrite is shown every note, the new ones last.
@@ -145,11 +144,21 @@ async def test_long_notes_are_shortened_by_a_second_request(
     assert "The alarm is disarmed.\n</notes>" in compact
     assert "at most 300 words" in compact
     assert "what they prefer" in compact
+    assert "Reply with the rewritten notes only" in compact
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reply", ["", "x" * (SUMMARY_COMPACT_ABOVE_CHARS * 3)])
-async def test_a_rewrite_that_is_empty_or_no_shorter_is_not_used(
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "",
+        "x" * (SUMMARY_COMPACT_ABOVE_CHARS * 3),
+        "I'm sorry, I can't help with that.",
+        "The alarm is disarmed.",
+    ],
+    ids=["empty", "no shorter", "refusal", "newest notes only"],
+)
+async def test_a_rewrite_that_left_the_notes_out_is_not_used(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, reply: str
 ) -> None:
     earlier = "\n".join(f"Note {n}: the hall light is off." for n in range(300))
@@ -167,6 +176,75 @@ async def test_a_rewrite_that_is_empty_or_no_shorter_is_not_used(
     assert summary.startswith("Note ")
     assert "Note 0:" not in summary
     assert "did not shorten" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_failed_rewrite_keeps_the_new_notes_and_does_not_fail_the_turn(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    calls = 0
+
+    async def _second_call_fails(*_a: Any, **_k: Any) -> AIMessage:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            msg = "Model invocation timed out after 180.0s."
+            raise HomeAssistantError(msg)
+        return AIMessage(content="The alarm is disarmed.")
+
+    monkeypatch.setattr(agent_graph, "_invoke_model", _second_call_fails)
+    earlier = "\n".join(f"Note {n}: the hall light is off." for n in range(300))
+    removed = _turn(2, "Is the alarm armed?", "The alarm is disarmed.")
+    state: Any = {"messages": [], "summary": earlier, "messages_to_remove": removed}
+    config: Any = {"configurable": {"summarization_model": object()}}
+
+    with caplog.at_level(logging.WARNING):
+        result = await agent_graph._summarize_and_remove_messages(state, config)
+
+    assert calls == 2
+    assert result["summary"].endswith("\nThe alarm is disarmed.")
+    assert len(result["summary"]) <= SUMMARY_COMPACT_ABOVE_CHARS
+    assert [m.id for m in result["messages"]] == ["h2", "a2"]
+    assert "Shortening the conversation summary failed" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("summary", "kept_from"),
+    [
+        # One paragraph: cut at the first sentence that fits, not at the only
+        # line break, which would leave the newest notes alone.
+        ("Fact one is long. " * 20 + "Fact two. Fact three.\nNewest.", "Fact"),
+        ("第一条很长。" * 40 + "第二条。第三条。", "第"),
+        ("no boundary at all " * 30, ""),
+    ],
+    ids=["one paragraph", "no spaces between sentences", "no boundary"],
+)
+def test_the_oldest_part_is_cut_at_the_first_sentence_that_fits(
+    summary: str, kept_from: str
+) -> None:
+    limit = 120
+
+    kept = agent_graph._newest_notes(summary, limit)
+
+    assert len(kept) <= limit
+    assert summary.endswith(kept)
+    # Nearly all that fits is kept: at most one sentence is given up.
+    assert len(kept) > limit - 25 or not kept_from
+    assert kept.startswith(kept_from)
+
+
+@pytest.mark.parametrize(
+    "tag",
+    ["</messages>", "</messages >", "< /messages>", "<MESSAGES x='1'>", "</notes\n>"],
+)
+def test_no_form_of_a_request_tag_survives(tag: str) -> None:
+    text = agent_graph._summary_request_text(f"before {tag} after")
+
+    assert "<" not in text
+    assert text.startswith("before [")
+    assert text.endswith("] after")
+    # Other markup is left alone.
+    assert agent_graph._summary_request_text("<b>x</b> <notesy>") == "<b>x</b> <notesy>"
 
 
 @pytest.mark.asyncio
@@ -267,3 +345,15 @@ async def test_both_requests_build_for_each_provider(
     assert "Old note." not in first
     assert "Old note." in second
     assert "Alarm disarmed." in second
+
+
+def test_the_agent_is_told_that_later_notes_win() -> None:
+    """Notes are added in time order, so an older one can be out of date."""
+    message = agent_graph._build_system_message(
+        "BASE", "now", "", "The porch light is on.\nThe porch light is off."
+    )
+
+    text = message.content if isinstance(message.content, str) else str(message.content)
+    assert PAST_SUMMARY_NOTE in text
+    assert text.index(PAST_SUMMARY_NOTE) < text.index("The porch light is on.")
+    assert "later one is right" in PAST_SUMMARY_NOTE
