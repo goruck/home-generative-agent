@@ -714,8 +714,7 @@ class EmbeddingsTimedOutError(EmbeddingsCircuitOpenError):
     `EMBEDDING_TIMEOUT_HOLD_S`, so one frozen server costs a conversation turn
     one wait, not one per search. Memory search falls back to recent
     memories, tool retrieval to keyword ranking, and the tool index is built
-    again on a later pass instead of being marked failed. A re-embed waits
-    and tries again, as between half-open tries.
+    again on a later pass instead of being marked failed.
     """
 
 
@@ -1515,9 +1514,9 @@ def with_member_configurable(
 # conversation turn searching its tools and memories, with no end. An embedding
 # answers in well under a second; this leaves room for loading the model into
 # memory first. A call with many texts gets more time for each. A caller with
-# a shorter limit of its own (the tool-index top-up during a turn, the camera
-# caption scan) cancels the call first, so there the next provider is not
-# tried.
+# a limit of its own no longer than this (the tool-index top-up during a turn,
+# the camera caption scan, the embedding-size probe) cancels the call first:
+# there the next provider is not tried and no hold starts (TODOS.md).
 EMBEDDING_CALL_TIMEOUT_S = 30.0
 EMBEDDING_TIMEOUT_PER_TEXT_S = 0.25
 # How long a provider that timed out is skipped (#969). A turn makes several
@@ -1762,7 +1761,11 @@ class FallbackEmbeddings:
             return []
         candidates: list[str] = []
         for _model, _deployment, provider_id in chain:
-            if not self._is_member(provider_id) or provider_id in self._unverified:
+            if (
+                not self._is_member(provider_id)
+                or provider_id in self._unverified
+                or self._timed_out(provider_id)  # Held after a timeout (#969).
+            ):
                 continue
             if not self._is_open(provider_id):
                 return []
@@ -1878,6 +1881,7 @@ class FallbackEmbeddings:
         self.chain = kept
         self._unverified.discard(provider_id)
         self._by_record.discard(provider_id)
+        self._timed_out_until.pop(provider_id, None)
         if self._active_provider_id == provider_id:
             self._active_provider_id = kept[0][2] if kept else None
             if self._active_provider_id is not None and self.removed_callback:
@@ -1943,8 +1947,12 @@ class FallbackEmbeddings:
         place: tuple[int, int],
         *,
         half_open: bool,
-    ) -> None:
-        """Log and count a member's retryable failure (see chat's)."""
+    ) -> bool:
+        """
+        Log and count a member's retryable failure (see chat's).
+
+        Return True for a timeout, which holds the member (#969).
+        """
         if half_open and not is_model_not_found(err):
             # Its breaker opening was logged; an outage repeats this (#881).
             LOGGER.debug(
@@ -1957,9 +1965,11 @@ class FallbackEmbeddings:
             _log_provider_failure(label, provider_id, *place, err)
         if self.circuit_breaker and not half_open:
             self.circuit_breaker.record_failure(provider_id)
-        if is_timeout_error(err):
-            # Skipped for a while, lone or not: see EMBEDDING_TIMEOUT_HOLD_S.
-            self._timed_out_until[provider_id] = monotonic() + EMBEDDING_TIMEOUT_HOLD_S
+        if not is_timeout_error(err):
+            return False
+        # Skipped for a while, lone or not: see EMBEDDING_TIMEOUT_HOLD_S.
+        self._timed_out_until[provider_id] = monotonic() + EMBEDDING_TIMEOUT_HOLD_S
+        return True
 
     async def _through_chain[T](
         self, label: str, call: Callable[[Any], Awaitable[T]], timeout_s: float
@@ -1986,6 +1996,7 @@ class FallbackEmbeddings:
         failed_providers: list[str] = []
         skipped: list[str] = []
         held: list[str] = []
+        timed_out: list[str] = []  # This call's members that timed out.
         for i, (model, _deployment, provider_id) in enumerate(chain):
             # The chain can lose a member while this call runs (#860).
             if not self._is_member(provider_id):
@@ -2010,14 +2021,17 @@ class FallbackEmbeddings:
                 if not _is_retryable(err):
                     _raise_if_header_echo(err, "Embedding call")
                     raise
-                failed_providers.append(provider_id)
-                self._record_failure(
-                    label,
-                    provider_id,
-                    err,
-                    (i + 1, len(chain)),
-                    half_open=half_open,
-                )
+                (
+                    timed_out
+                    if self._record_failure(
+                        label,
+                        provider_id,
+                        err,
+                        (i + 1, len(chain)),
+                        half_open=half_open,
+                    )
+                    else failed_providers
+                ).append(provider_id)
                 continue
             else:
                 if self._removed_meanwhile(label, provider_id):
@@ -2025,12 +2039,12 @@ class FallbackEmbeddings:
                 if self._held_meanwhile(label, provider_id, admission):
                     held.append(provider_id)
                     continue
-                if failed_providers:
+                if failed_providers or timed_out:
                     LOGGER.warning(
                         "Embedding fallback activated: provider %s succeeded "
                         "after failed provider(s): %s",
                         provider_id,
-                        ", ".join(failed_providers),
+                        ", ".join(failed_providers + timed_out),
                     )
                 self._record_success(provider_id)
                 return result
@@ -2038,7 +2052,7 @@ class FallbackEmbeddings:
                 _end_probe(self.circuit_breaker, provider_id, half_open=half_open)
 
         raise self._unanswered_error(
-            last_err, failed_providers, skipped, held
+            last_err, failed_providers, skipped, held, timed_out
         ) from _chain_cause(last_err)
 
     def _timed_out(self, provider_id: str) -> bool:
@@ -2051,6 +2065,7 @@ class FallbackEmbeddings:
         failed: list[str],
         skipped: list[str],
         held: list[str],
+        timed_out_now: list[str],
     ) -> HomeAssistantError:
         """
         Return the error for a call no member answered.
@@ -2059,8 +2074,10 @@ class FallbackEmbeddings:
         one's, kept a member out, no member failed another way, and none is
         held until its build is checked: that one stays unavailable (#857).
         """
-        timed_out = [p for p in dict.fromkeys(failed + skipped) if self._timed_out(p)]
-        if timed_out and not held and all(p in timed_out for p in failed):
+        # This call's timeouts count however long the call took: a hold can
+        # run out before a chain of timeouts ends.
+        timed_out = timed_out_now + [p for p in skipped if self._timed_out(p)]
+        if timed_out and not held and not failed:
             msg = (
                 "No embedding provider answered in time: "
                 + ", ".join(timed_out)

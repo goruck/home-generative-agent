@@ -20,6 +20,7 @@ import sys
 import textwrap
 import types
 from enum import IntFlag
+from time import monotonic
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
@@ -596,6 +597,7 @@ async def test_run_tool_index_background_timeout_is_retried_not_failed() -> None
     assert rd.tool_indexing_in_progress is False
     assert rd.tool_content_hashes == {}
     assert send.call_args.args[2] == "stale"
+    assert rd.tool_index_retry_after > monotonic(), "no new pass right away"
 
 
 @pytest.mark.asyncio
@@ -1044,6 +1046,7 @@ def _index_runtime_data(**overrides: Any) -> Any:
         embedding_fingerprint=None,
         tool_indexing_in_progress=False,
         tool_index_failed=False,
+        tool_index_retry_after=0.0,
         tool_content_hashes={},
         tool_index_houses={},
         store=MagicMock(),

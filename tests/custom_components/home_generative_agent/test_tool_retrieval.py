@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -3827,23 +3828,21 @@ async def test_rag_retrieval_stops_searching_when_embeddings_time_out() -> None:
 
 
 @pytest.mark.asyncio
-async def test_safety_tools_are_listed_unranked_when_embeddings_time_out() -> None:
-    """The actuation tools stay bound without a query embedding (#969)."""
+async def test_safety_filter_leaves_ranking_to_the_keyword_fallback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    No embeddings: no safety tools, so the keyword fallback ranks (#969).
+
+    Any tool returned here would count as a ranked candidate and keep the
+    keyword fallback, which puts actuation tools first, from running.
+    """
     from custom_components.home_generative_agent.core.fallback import (  # noqa: PLC0415
         EmbeddingsTimedOutError,
     )
 
-    calls: list[dict] = []
-
-    async def _asearch(_namespace: tuple[str, ...], **kwargs: object) -> list:
-        calls.append(dict(kwargs))
-        if kwargs.get("query"):
-            msg = "timed out"
-            raise EmbeddingsTimedOutError(msg)
-        return []
-
     store = MagicMock()
-    store.asearch = AsyncMock(side_effect=_asearch)
+    store.asearch = AsyncMock(side_effect=EmbeddingsTimedOutError("timed out"))
     config: RunnableConfig = {
         "configurable": {
             "tool_index_ready": True,
@@ -3851,7 +3850,11 @@ async def test_safety_tools_are_listed_unranked_when_embeddings_time_out() -> No
         }
     }
 
-    await _get_actuation_safety_tools(store, config, "turn on lights", {"assist"})
+    with caplog.at_level(logging.WARNING):
+        tools = await _get_actuation_safety_tools(
+            store, config, "turn on lights", {"assist"}
+        )
 
-    assert len(calls) == 2
-    assert "query" not in calls[1], "the fallback list embeds nothing"
+    assert tools == []
+    assert store.asearch.await_count == 1, "no unranked page stands in"
+    assert not caplog.records, "the chain logged the cause"

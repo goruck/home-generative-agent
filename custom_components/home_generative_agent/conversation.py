@@ -12,6 +12,7 @@ import json
 import logging
 import re
 from collections import deque
+from time import monotonic
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict, cast
 
 if TYPE_CHECKING:
@@ -148,7 +149,11 @@ from .core.conversation_helpers import (
     _is_dashboard_request,
     _maybe_fix_dashboard_entities,
 )
-from .core.fallback import EmbeddingsTimedOutError
+from .core.fallback import (
+    EMBEDDING_TIMEOUT_HOLD_S,
+    EmbeddingsTimedOutError,
+    EmbeddingsUnavailableError,
+)
 from .core.memories import memory_user as memory_store_user
 from .core.pipeline_guard import async_check_pin_pipeline_conflict
 from .core.utils import (
@@ -1194,8 +1199,13 @@ async def _run_tool_index_background(
         raise
     except EmbeddingsTimedOutError as err:
         # A slow model load or a frozen server (#969) is not a failed index:
-        # the next pass builds it again once the provider answers.
-        _LOGGER.warning("Tool index not built yet, will retry: %s", err)
+        # it is built again once the provider is tried again.
+        rd.tool_index_retry_after = monotonic() + EMBEDDING_TIMEOUT_HOLD_S
+        _LOGGER.warning(
+            "Tool index not built yet, trying again in %.0f s: %s",
+            EMBEDDING_TIMEOUT_HOLD_S,
+            err,
+        )
         async_dispatcher_send(hass, SIGNAL_TOOL_INDEX_UPDATED, "stale", 0)
     except Exception:
         _LOGGER.exception("Global tool index background task failed")
@@ -2930,7 +2940,14 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         sourced from the already-loaded API instances, so the new tools are
         retrievable on the triggering turn.
         """
-        if runtime_data.tool_indexing_in_progress or runtime_data.tool_index_failed:
+        if (
+            runtime_data.tool_indexing_in_progress
+            or runtime_data.tool_index_failed
+            or (
+                not runtime_data.tool_index_ready
+                and monotonic() < runtime_data.tool_index_retry_after
+            )
+        ):
             _LOGGER.debug(
                 "Tool index guard skipped indexing: ready=%s indexing=%s "
                 "failed=%s cached_hashes=%d.",
@@ -3193,8 +3210,12 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             # path; a hung embedding provider must not stall the voice turn.
             async with asyncio.timeout(_TOOL_INDEX_DELTA_TIMEOUT_S):
                 await gather_store_puts_in_chunks(index_tasks)
-        except Exception:
-            _LOGGER.exception("Tool index top-up write failed; retrying next turn")
+        except Exception as err:
+            if isinstance(err, EmbeddingsUnavailableError):
+                # Down, held or timed out: the chain logged why (#969).
+                _LOGGER.debug("Tool index top-up skipped; retrying next turn: %s", err)
+            else:
+                _LOGGER.exception("Tool index top-up write failed; retrying next turn")
             # Terminal sensor signal: retrieval still serves the pre-delta
             # index, so the state is "ready", not a stuck "indexing", unless
             # a build adopted during the write made that index stale.

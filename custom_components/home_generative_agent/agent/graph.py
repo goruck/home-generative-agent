@@ -2172,17 +2172,20 @@ async def _get_actuation_safety_tools(
             query=query,
             filter={"is_actuation": True},
         )
+    except EmbeddingsUnavailableError as err:
+        # No provider can embed the query (down, held, or timed out, #969):
+        # with no ranked candidates the keyword fallback binds the tools,
+        # actuation ones first for an actuation query. An unranked page here
+        # would stand in for that ranking. The chain logged the cause.
+        LOGGER.debug("Deterministic safety tool filter skipped: %s", err)
+        results = []
     except (
-        EmbeddingsUnavailableError,
         InvalidNamespaceError,
         psycopg.OperationalError,
         psycopg.ProgrammingError,
         psycopg.DataError,
         ValueError,
     ) as err:
-        # Unranked, the actuation tools are still listed without embedding
-        # anything, so a provider that is down or timed out (#969) still
-        # leaves them bound.
         LOGGER.warning("Deterministic safety tool filter failed (known error): %s", err)
         try:
             results = await store.asearch(("system", "tools"))

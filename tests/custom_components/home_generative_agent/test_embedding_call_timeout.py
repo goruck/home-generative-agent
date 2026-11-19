@@ -279,3 +279,43 @@ async def test_memory_search_uses_recent_memories_after_a_timeout() -> None:
     assert await _search_memories(store, "user-1", "how do I take my coffee") == (
         recent
     )
+
+
+@pytest.mark.usefixtures("short_timeout")
+@pytest.mark.asyncio
+async def test_a_chain_of_timeouts_longer_than_the_hold_is_still_timed_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first member's hold can run out before the last one times out."""
+    monkeypatch.setattr(fallback_module, "EMBEDDING_TIMEOUT_HOLD_S", 0.01)
+    emb = FallbackEmbeddings(
+        [(_Frozen(), "edge", "p1"), (_Frozen(), "edge", "p2")],
+        circuit_breaker=CircuitBreaker(),
+    )
+
+    with pytest.raises(EmbeddingsTimedOutError, match="p1, p2 timed out"):
+        await emb.aembed_query("porch light")
+
+
+def test_a_timed_out_member_does_not_keep_the_others_from_a_half_open_try() -> None:
+    """Held after a timeout, it is left out like a member held for its build."""
+    breaker = CircuitBreaker(threshold=1)
+    breaker.record_failure("p2")
+    emb = FallbackEmbeddings(
+        [(_Frozen(), "edge", "p1"), (_answering([0.1]), "cloud", "p2")],
+        circuit_breaker=breaker,
+    )
+    emb._timed_out_until["p1"] = fallback_module.monotonic() + 60
+
+    assert emb._probe_candidates(emb._ordered_chain()) == ["p2"]
+
+
+def test_removing_a_member_drops_its_hold() -> None:
+    emb = FallbackEmbeddings(
+        [(_Frozen(), "edge", "p1"), (_answering([0.1]), "cloud", "p2")]
+    )
+    emb._timed_out_until["p1"] = fallback_module.monotonic() + 60
+
+    emb.remove_provider("p1")
+
+    assert "p1" not in emb._timed_out_until

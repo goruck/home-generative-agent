@@ -2505,3 +2505,43 @@ async def test_fallback_chat_incomplete_for_another_reason_does_not_fallback() -
 )
 def test_is_retryable_ignores_a_quoted_stream_code(err: Exception) -> None:
     assert _is_retryable(err) is False
+
+
+@pytest.mark.parametrize("method", ["aembed_documents", "aembed_query"])
+@pytest.mark.asyncio
+async def test_a_timed_out_embedding_try_holds_past_the_breakers_retry(
+    method: str, clock: list[float]
+) -> None:
+    """
+    A timeout holds the member for longer than the breaker's retry (#969).
+
+    Each try of a frozen server costs a turn the whole timeout, so it is not
+    tried again at the breaker's next half-open slot: the refusal says the
+    providers timed out, and they are tried again once the hold runs out.
+    """
+    from custom_components.home_generative_agent.core.fallback import (  # noqa: PLC0415
+        EMBEDDING_TIMEOUT_HOLD_S,
+        EmbeddingsTimedOutError,
+    )
+
+    primary, fallback = AsyncMock(), AsyncMock()
+    getattr(primary, method).side_effect = TimeoutError()
+    getattr(fallback, method).side_effect = TimeoutError()
+    breaker = _all_open()
+    emb = FallbackEmbeddings(
+        chain=[(primary, "edge", "p1"), (fallback, "edge", "p2")],
+        circuit_breaker=breaker,
+    )
+    with pytest.raises(EmbeddingsTimedOutError):
+        await _call(emb, method)
+
+    clock[0] += 20.0  # Past the breaker's 10 s retry, inside the hold.
+    with pytest.raises(EmbeddingsTimedOutError, match="p1, p2 timed out"):
+        await _call(emb, method)
+    assert getattr(primary, method).await_count == 1
+    assert getattr(fallback, method).await_count == 1
+
+    clock[0] += EMBEDDING_TIMEOUT_HOLD_S
+    with pytest.raises(HomeAssistantError):
+        await _call(emb, method)
+    assert getattr(primary, method).await_count == 2
