@@ -561,6 +561,44 @@ async def test_run_tool_index_background_failure_sets_flag() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_tool_index_background_timeout_is_retried_not_failed() -> None:
+    """A slow model load or a frozen server leaves the index to build again (#969)."""
+    from custom_components.home_generative_agent.core.fallback import (  # noqa: PLC0415
+        EmbeddingsTimedOutError,
+    )
+
+    rd = MagicMock()
+    rd.tool_index_ready = False
+    rd.tool_indexing_in_progress = True
+    rd.tool_index_failed = False
+    rd.tool_index_rearmed = False
+    rd.tool_content_hashes = {}
+    hass = MagicMock()
+
+    with (
+        patch(
+            "custom_components.home_generative_agent.conversation.gather_store_puts_in_chunks",
+            new=AsyncMock(side_effect=EmbeddingsTimedOutError("timed out")),
+        ),
+        patch(
+            "custom_components.home_generative_agent.conversation.async_dispatcher_send"
+        ) as send,
+    ):
+        await _run_tool_index_background(
+            index_tasks=[AsyncMock()],
+            tool_hashes={"key": "hash"},
+            rd=rd,
+            hass=hass,
+        )
+
+    assert rd.tool_index_failed is False
+    assert rd.tool_index_ready is False
+    assert rd.tool_indexing_in_progress is False
+    assert rd.tool_content_hashes == {}
+    assert send.call_args.args[2] == "stale"
+
+
+@pytest.mark.asyncio
 async def test_run_tool_index_background_failure_after_an_admission_rearms() -> None:
     """
     A held embedding fallback admitted mid-write does not latch the failure.

@@ -3797,3 +3797,61 @@ async def test_a_namespaced_exclusion_blocks_the_bare_row_with_live_filter_off()
         _query_state("Open the study shade"), config, store=store
     )
     assert not any(name.endswith("HassTurnOn") for name in result["tool_routing_map"])
+
+
+@pytest.mark.asyncio
+async def test_rag_retrieval_stops_searching_when_embeddings_time_out() -> None:
+    """Each later sub-query would wait out the same frozen provider (#969)."""
+    from custom_components.home_generative_agent.agent.graph import (  # noqa: PLC0415
+        _split_query_intents,
+    )
+    from custom_components.home_generative_agent.core.fallback import (  # noqa: PLC0415
+        EmbeddingsTimedOutError,
+    )
+
+    query = "turn on the porch light and close the garage door"
+    assert len(_split_query_intents(query)) > 1
+    store = MagicMock()
+    store.asearch = AsyncMock(side_effect=EmbeddingsTimedOutError("timed out"))
+    config: RunnableConfig = {
+        "configurable": {
+            "tool_index_ready": True,
+            "options": {"tool_retrieval_limit": 5},
+        }
+    }
+
+    rag_tools, _ = await _get_rag_retrieved_tools(store, config, query, {"assist"})
+
+    assert rag_tools == []
+    assert store.asearch.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_safety_tools_are_listed_unranked_when_embeddings_time_out() -> None:
+    """The actuation tools stay bound without a query embedding (#969)."""
+    from custom_components.home_generative_agent.core.fallback import (  # noqa: PLC0415
+        EmbeddingsTimedOutError,
+    )
+
+    calls: list[dict] = []
+
+    async def _asearch(_namespace: tuple[str, ...], **kwargs: object) -> list:
+        calls.append(dict(kwargs))
+        if kwargs.get("query"):
+            msg = "timed out"
+            raise EmbeddingsTimedOutError(msg)
+        return []
+
+    store = MagicMock()
+    store.asearch = AsyncMock(side_effect=_asearch)
+    config: RunnableConfig = {
+        "configurable": {
+            "tool_index_ready": True,
+            "options": {"tool_retrieval_limit": 5},
+        }
+    }
+
+    await _get_actuation_safety_tools(store, config, "turn on lights", {"assist"})
+
+    assert len(calls) == 2
+    assert "query" not in calls[1], "the fallback list embeds nothing"

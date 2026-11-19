@@ -148,6 +148,7 @@ from .core.conversation_helpers import (
     _is_dashboard_request,
     _maybe_fix_dashboard_entities,
 )
+from .core.fallback import EmbeddingsTimedOutError
 from .core.memories import memory_user as memory_store_user
 from .core.pipeline_guard import async_check_pin_pipeline_conflict
 from .core.utils import (
@@ -1191,6 +1192,11 @@ async def _run_tool_index_background(
     except asyncio.CancelledError:
         _LOGGER.debug("Tool index write cancelled by the entry unload.")
         raise
+    except EmbeddingsTimedOutError as err:
+        # A slow model load or a frozen server (#969) is not a failed index:
+        # the next pass builds it again once the provider answers.
+        _LOGGER.warning("Tool index not built yet, will retry: %s", err)
+        async_dispatcher_send(hass, SIGNAL_TOOL_INDEX_UPDATED, "stale", 0)
     except Exception:
         _LOGGER.exception("Global tool index background task failed")
         if rd.tool_index_rearmed:

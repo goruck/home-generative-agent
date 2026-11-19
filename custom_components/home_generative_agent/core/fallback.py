@@ -706,6 +706,19 @@ class EmbeddingsCircuitOpenError(EmbeddingsUnavailableError):
     """
 
 
+class EmbeddingsTimedOutError(EmbeddingsCircuitOpenError):
+    """
+    No embedding provider answered in time, or each is held after a timeout (#969).
+
+    A provider that timed out is not tried again for
+    `EMBEDDING_TIMEOUT_HOLD_S`, so one frozen server costs a conversation turn
+    one wait, not one per search. Memory search falls back to recent
+    memories, tool retrieval to keyword ranking, and the tool index is built
+    again on a later pass instead of being marked failed. A re-embed waits
+    and tries again, as between half-open tries.
+    """
+
+
 class ModelChainTimeoutError(HomeAssistantError, TimeoutError):
     """
     Every provider tried timed out.
@@ -1501,10 +1514,18 @@ def with_member_configurable(
 # `kill -STOP`, a host swapping hard, a suspended VM) held the call, and the
 # conversation turn searching its tools and memories, with no end. An embedding
 # answers in well under a second; this leaves room for loading the model into
-# memory first. A call with many texts (the tool index, a caption scan) gets
-# more time for each.
+# memory first. A call with many texts gets more time for each. A caller with
+# a shorter limit of its own (the tool-index top-up during a turn, the camera
+# caption scan) cancels the call first, so there the next provider is not
+# tried.
 EMBEDDING_CALL_TIMEOUT_S = 30.0
 EMBEDDING_TIMEOUT_PER_TEXT_S = 0.25
+# How long a provider that timed out is skipped (#969). A turn makes several
+# searches one after another, and a lone provider has no circuit breaker; the
+# breaker of a longer chain needs three failures within its 60 s window, which
+# timeouts 30 s apart never reach. Without the hold every search waited out a
+# frozen server again.
+EMBEDDING_TIMEOUT_HOLD_S = 60.0
 
 
 def _embedding_timeout(texts: int) -> float:
@@ -1523,9 +1544,11 @@ async def _within[T](call: Awaitable[T], timeout_s: float) -> T:
     try:
         async with timeout:
             return await call
-    except TimeoutError:
+    except Exception:
+        # Before the deadline: the provider's own error, with its cause. After
+        # it, a timeout, whatever the client turned the cancel into (#985).
         if not timeout.expired():
-            raise  # The provider's own timeout, with its cause.
+            raise
         msg = f"No answer within {timeout_s:.0f} s"
         raise TimeoutError(msg) from None
 
@@ -1573,6 +1596,8 @@ class FallbackEmbeddings:
         self._by_record: set[str] = set()
         # Bumped each time a member is held again, for the calls on it.
         self._admissions: dict[str, int] = {}
+        # Members skipped until this monotonic time after a timeout (#969).
+        self._timed_out_until: dict[str, float] = {}
 
     def _is_member(self, provider_id: str) -> bool:
         return any(item[2] == provider_id for item in self.chain)
@@ -1863,6 +1888,7 @@ class FallbackEmbeddings:
         """Record the provider used successfully for future embedding calls."""
         if self.circuit_breaker:
             self.circuit_breaker.record_success(provider_id)
+        self._timed_out_until.pop(provider_id, None)
         self.served.add(provider_id)
         self.served_calls[provider_id] += 1
         previous_provider_id = self._active_provider_id
@@ -1931,6 +1957,9 @@ class FallbackEmbeddings:
             _log_provider_failure(label, provider_id, *place, err)
         if self.circuit_breaker and not half_open:
             self.circuit_breaker.record_failure(provider_id)
+        if is_timeout_error(err):
+            # Skipped for a while, lone or not: see EMBEDDING_TIMEOUT_HOLD_S.
+            self._timed_out_until[provider_id] = monotonic() + EMBEDDING_TIMEOUT_HOLD_S
 
     async def _through_chain[T](
         self, label: str, call: Callable[[Any], Awaitable[T]], timeout_s: float
@@ -1940,7 +1969,9 @@ class FallbackEmbeddings:
 
         Each member has `timeout_s` to answer. A timeout is a failure like a
         refused connection: it is counted toward the member's breaker and the
-        next member is tried (#969).
+        next member is tried. The member is then skipped for
+        `EMBEDDING_TIMEOUT_HOLD_S`; when timeouts are all that kept every
+        member from answering, `EmbeddingsTimedOutError` is raised (#969).
         """
         chain = self._ordered_chain()
         # Members to try although their breakers are open (#881).
@@ -1959,7 +1990,7 @@ class FallbackEmbeddings:
             # The chain can lose a member while this call runs (#860).
             if not self._is_member(provider_id):
                 continue
-            if self._is_open(provider_id, probes):
+            if self._is_open(provider_id, probes) or self._timed_out(provider_id):
                 skipped.append(provider_id)
                 continue
             if not await self._admitted(provider_id):
@@ -2006,7 +2037,44 @@ class FallbackEmbeddings:
             finally:
                 _end_probe(self.circuit_breaker, provider_id, half_open=half_open)
 
-        raise self._chain_error(last_err, skipped, held) from _chain_cause(last_err)
+        raise self._unanswered_error(
+            last_err, failed_providers, skipped, held
+        ) from _chain_cause(last_err)
+
+    def _timed_out(self, provider_id: str) -> bool:
+        """Return True while a member is skipped after a timeout (#969)."""
+        return self._timed_out_until.get(provider_id, 0.0) > monotonic()
+
+    def _unanswered_error(
+        self,
+        last_err: Exception | None,
+        failed: list[str],
+        skipped: list[str],
+        held: list[str],
+    ) -> HomeAssistantError:
+        """
+        Return the error for a call no member answered.
+
+        `EmbeddingsTimedOutError` when a timeout, this call's or a recent
+        one's, kept a member out, no member failed another way, and none is
+        held until its build is checked: that one stays unavailable (#857).
+        """
+        timed_out = [p for p in dict.fromkeys(failed + skipped) if self._timed_out(p)]
+        if timed_out and not held and all(p in timed_out for p in failed):
+            msg = (
+                "No embedding provider answered in time: "
+                + ", ".join(timed_out)
+                + f" timed out within the last {EMBEDDING_TIMEOUT_HOLD_S:.0f} s"
+            )
+            return EmbeddingsTimedOutError(msg)
+        breaker_skipped = [p for p in skipped if p not in timed_out]
+        if last_err is None and timed_out:
+            # Skipped after a recent timeout: that is the last error.
+            last_err = TimeoutError(
+                ", ".join(timed_out)
+                + f" timed out within the last {EMBEDDING_TIMEOUT_HOLD_S:.0f} s"
+            )
+        return self._chain_error(last_err, breaker_skipped, held)
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         """Raise: synchronous embedding is not supported in async HA context."""

@@ -1357,8 +1357,8 @@ async def test_an_embedding_refusal_says_when_one_is_tried_again(
 ) -> None:
     """Both tried once; the next call is refused and says when (#881)."""
     primary, fallback = AsyncMock(), AsyncMock()
-    getattr(primary, method).side_effect = TimeoutError()
-    getattr(fallback, method).side_effect = TimeoutError()
+    getattr(primary, method).side_effect = ConnectionError()
+    getattr(fallback, method).side_effect = ConnectionError()
     emb = FallbackEmbeddings(
         chain=[(primary, "edge", "p1"), (fallback, "edge", "p2")],
         circuit_breaker=_all_open(),
@@ -1528,8 +1528,8 @@ async def test_a_failed_embedding_try_leaves_the_cooldown_as_it_was(
 ) -> None:
     """As for the chat chain: being tried does not keep it skipped longer."""
     primary, fallback = AsyncMock(), AsyncMock()
-    primary.aembed_query.side_effect = TimeoutError()
-    fallback.aembed_query.side_effect = TimeoutError()
+    primary.aembed_query.side_effect = ConnectionError()
+    fallback.aembed_query.side_effect = ConnectionError()
     breaker = _all_open()
     emb = FallbackEmbeddings(
         chain=[(primary, "edge", "p1"), (fallback, "edge", "p2")],

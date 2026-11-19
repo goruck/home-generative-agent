@@ -7,23 +7,29 @@ suspended VM) still completes the TCP handshake: the kernel accepts the
 connection into its backlog, and nothing is ever read or written. The Ollama
 client limits only the connect, so an embedding call to it waited forever, and
 with it the conversation turn searching its tools and memories.
+
+A provider that timed out is then skipped for a while, so a turn's later
+searches, and the next turns, do not each wait it out again.
 """
 
 from __future__ import annotations
 
 import asyncio
 import socket
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from homeassistant.exceptions import HomeAssistantError
 from langchain_ollama import OllamaEmbeddings
 
+import custom_components.home_generative_agent as hga_component
 import custom_components.home_generative_agent.core.fallback as fallback_module
-from custom_components.home_generative_agent import _ollama_httpx_client_kwargs
+from custom_components.home_generative_agent.agent.graph import _search_memories
 from custom_components.home_generative_agent.core.fallback import (
     CircuitBreaker,
+    EmbeddingsTimedOutError,
+    EmbeddingsUnavailableError,
     FallbackEmbeddings,
 )
 
@@ -54,11 +60,12 @@ def short_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _frozen_ollama(url: str) -> OllamaEmbeddings:
     """Build Ollama embeddings the way setup does."""
+    client_kwargs = cast("Any", hga_component)._ollama_httpx_client_kwargs
     return OllamaEmbeddings(
         model="mxbai-embed-large",
         base_url=url,
-        sync_client_kwargs=_ollama_httpx_client_kwargs(),
-        async_client_kwargs=_ollama_httpx_client_kwargs(),
+        sync_client_kwargs=client_kwargs(),
+        async_client_kwargs=client_kwargs(),
     )
 
 
@@ -69,21 +76,44 @@ def _answering(vector: list[float]) -> MagicMock:
     return model
 
 
+class _Frozen:
+    """An in-process provider that never answers, and says when it was called."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.started = asyncio.Event()
+
+    async def aembed_query(self, _text: str) -> list[float]:
+        self.calls += 1
+        self.started.set()
+        await asyncio.Event().wait()
+        raise AssertionError  # pragma: no cover - never reached
+
+    async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [await self.aembed_query(text) for text in texts]
+
+
 @pytest.mark.usefixtures("short_timeout")
 @pytest.mark.asyncio
 async def test_a_lone_frozen_provider_fails_the_call(frozen_server: str) -> None:
     emb = FallbackEmbeddings([(_frozen_ollama(frozen_server), "edge", "p1")])
 
     async with asyncio.timeout(_OUTER_LIMIT_S):
-        with pytest.raises(HomeAssistantError, match="No answer within"):
+        with pytest.raises(EmbeddingsTimedOutError, match="p1 timed out"):
             await emb.aembed_query("turn on the porch light")
 
 
 @pytest.mark.usefixtures("short_timeout")
 @pytest.mark.asyncio
-@pytest.mark.parametrize("method", ["aembed_query", "aembed_documents"])
+@pytest.mark.parametrize(
+    ("method", "arg", "expected"),
+    [
+        ("aembed_query", "porch light", [0.1, 0.2]),
+        ("aembed_documents", ["porch light"], [[0.1, 0.2]]),
+    ],
+)
 async def test_a_frozen_primary_hands_the_call_to_the_fallback(
-    frozen_server: str, method: str
+    frozen_server: str, method: str, arg: object, expected: object
 ) -> None:
     breaker = CircuitBreaker()
     fallback = _answering([0.1, 0.2])
@@ -91,13 +121,83 @@ async def test_a_frozen_primary_hands_the_call_to_the_fallback(
         [(_frozen_ollama(frozen_server), "edge", "p1"), (fallback, "cloud", "p2")],
         circuit_breaker=breaker,
     )
-    arg = "porch light" if method == "aembed_query" else ["porch light"]
 
     async with asyncio.timeout(_OUTER_LIMIT_S):
         result = await getattr(emb, method)(arg)
 
-    assert result in ([0.1, 0.2], [[0.1, 0.2]])
+    assert result == expected
+    getattr(fallback, method).assert_awaited_once()
     assert breaker._failures["p1"], "the timeout counts toward the breaker"
+
+
+@pytest.mark.usefixtures("short_timeout")
+@pytest.mark.asyncio
+async def test_a_lone_provider_that_timed_out_is_skipped_meanwhile() -> None:
+    """A turn's later searches fail at once instead of each waiting it out."""
+    frozen = _Frozen()
+    emb = FallbackEmbeddings([(frozen, "edge", "p1")])
+
+    with pytest.raises(EmbeddingsTimedOutError):
+        await emb.aembed_query("turn on the porch light")
+    async with asyncio.timeout(0.2):  # Well under the provider's 0.5 s.
+        with pytest.raises(EmbeddingsTimedOutError, match="p1 timed out"):
+            await emb.aembed_query("and close the garage door")
+
+    assert frozen.calls == 1
+
+
+@pytest.mark.usefixtures("short_timeout")
+@pytest.mark.asyncio
+async def test_a_timed_out_primary_is_skipped_for_the_fallback() -> None:
+    """The breaker needs three failures in 60 s; timeouts 30 s apart never get there."""
+    frozen = _Frozen()
+    fallback = _answering([0.3])
+    emb = FallbackEmbeddings(
+        [(frozen, "edge", "p1"), (fallback, "cloud", "p2")],
+        circuit_breaker=CircuitBreaker(),
+    )
+
+    assert await emb.aembed_query("porch light") == [0.3]
+    async with asyncio.timeout(0.2):
+        assert await emb.aembed_query("garage door") == [0.3]
+
+    assert frozen.calls == 1
+
+
+@pytest.mark.usefixtures("short_timeout")
+@pytest.mark.asyncio
+async def test_a_timed_out_provider_is_tried_again_after_the_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frozen = _Frozen()
+    emb = FallbackEmbeddings([(frozen, "edge", "p1")])
+    now = [1000.0]
+    monkeypatch.setattr(fallback_module, "monotonic", lambda: now[0])
+
+    with pytest.raises(EmbeddingsTimedOutError):
+        await emb.aembed_query("porch light")
+    now[0] += fallback_module.EMBEDDING_TIMEOUT_HOLD_S + 1
+    with pytest.raises(EmbeddingsTimedOutError):
+        await emb.aembed_query("porch light")
+
+    assert frozen.calls == 2
+
+
+@pytest.mark.usefixtures("short_timeout")
+@pytest.mark.asyncio
+async def test_another_failure_is_not_reported_as_a_timeout() -> None:
+    """A timeout beside a provider that failed another way is not 'unavailable'."""
+    broken = MagicMock()
+    broken.aembed_query = AsyncMock(side_effect=ConnectionError("refused"))
+    emb = FallbackEmbeddings(
+        [(_Frozen(), "edge", "p1"), (broken, "cloud", "p2")],
+        circuit_breaker=CircuitBreaker(),
+    )
+
+    with pytest.raises(HomeAssistantError) as caught:
+        await emb.aembed_query("porch light")
+
+    assert not isinstance(caught.value, EmbeddingsUnavailableError)
 
 
 @pytest.mark.asyncio
@@ -131,20 +231,51 @@ async def test_the_providers_own_timeout_keeps_its_cause() -> None:
     assert caught.value.__cause__ is cause
 
 
+@pytest.mark.asyncio
+async def test_a_cancel_the_client_reports_as_its_own_error_is_a_timeout() -> None:
+    """Some clients turn the cancel into a read error (#985)."""
+
+    async def _converts_the_cancel() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            msg = "connection reset"
+            raise OSError(msg) from None
+
+    with pytest.raises(TimeoutError, match="No answer within"):
+        await fallback_module._within(_converts_the_cancel(), 0.05)
+
+
 @pytest.mark.usefixtures("short_timeout")
 @pytest.mark.asyncio
-async def test_a_stopped_caller_is_not_taken_for_a_frozen_provider(
-    frozen_server: str,
-) -> None:
+async def test_a_stopped_caller_is_not_taken_for_a_frozen_provider() -> None:
     """The caller's cancel stops the call; the next provider is not tried."""
+    frozen = _Frozen()
     fallback = _answering([0.1])
-    emb = FallbackEmbeddings(
-        [(_frozen_ollama(frozen_server), "edge", "p1"), (fallback, "cloud", "p2")]
-    )
+    emb = FallbackEmbeddings([(frozen, "edge", "p1"), (fallback, "cloud", "p2")])
     task = asyncio.create_task(emb.aembed_query("porch light"))
-    await asyncio.sleep(0.1)
+    await frozen.started.wait()
     task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
         await task
     fallback.aembed_query.assert_not_called()
+    assert not emb._timed_out("p1"), "a stop does not hold the provider"
+
+
+@pytest.mark.asyncio
+async def test_memory_search_uses_recent_memories_after_a_timeout() -> None:
+    recent = [MagicMock()]
+
+    async def _asearch(_namespace: tuple[str, ...], **kwargs: object) -> list:
+        if kwargs.get("query"):
+            msg = "No embedding provider answered in time"
+            raise EmbeddingsTimedOutError(msg)
+        return recent
+
+    store = MagicMock()
+    store.asearch = AsyncMock(side_effect=_asearch)
+
+    assert await _search_memories(store, "user-1", "how do I take my coffee") == (
+        recent
+    )
