@@ -801,7 +801,7 @@ v3.41.1 rather than deferred; see the TODO above.
 
 ### The conversation summary can keep `add_automation` bound for a whole conversation
 
-**What:** `_conversation_has_automation_context` (`agent/graph.py`) runs `_query_wants_automation` over the summary as well as the last few user turns. Since #1048 the summary is asked to record what the user asked for and to carry it over on every update, so one automation request early on may match on every later turn, past the `_AUTOMATION_CONTEXT_HUMAN_TURNS` window.
+**What:** `_conversation_has_automation_context` (`agent/graph.py`) runs `_query_wants_automation` over the summary as well as the last few user turns. Since #1048 the summary is asked to record what the user asked for and earlier notes are kept until the summary is shortened, so one automation request early on may match on every later turn, past the `_AUTOMATION_CONTEXT_HUMAN_TURNS` window.
 
 **Why:** Found by the review of the #1048 fix; not confirmed against real summaries. The cost is the extra tool description on each turn and a chance that unrelated conditional phrasing is routed to `add_automation`.
 

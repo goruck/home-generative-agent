@@ -71,9 +71,10 @@ from custom_components.home_generative_agent.const import (
     READ_ONLY_STATE_QUERY_REGEX,
     REFERENTIAL_FOLLOW_UP_REGEX,
     SECURITY_AUDIT_INTENT_REGEX,
-    SUMMARIZATION_INITIAL_PROMPT,
+    SUMMARIZATION_COMPACT_PROMPT,
+    SUMMARIZATION_PROMPT,
     SUMMARIZATION_SYSTEM_PROMPT,
-    SUMMARIZATION_UPDATE_PROMPT,
+    SUMMARY_COMPACT_ABOVE_CHARS,
     TOOL_CALL_ERROR_TEMPLATE,
     TOOL_CALL_TRANSIENT_ERROR_TEMPLATE,
     TOOL_INCLUSIONS_MAX_PER_TURN,
@@ -4259,7 +4260,7 @@ def _messages_as_text_for_summary(messages: Sequence[AnyMessage]) -> list[AnyMes
 
 # The tags the summary request is built from. Text placed inside them (a tool
 # result, a user message, the earlier summary) must not be able to close one.
-_SUMMARY_REQUEST_TAG_RE = re.compile(r"<(/?)(messages|notes_so_far)>", re.IGNORECASE)
+_SUMMARY_REQUEST_TAG_RE = re.compile(r"<(/?)(messages|notes)>", re.IGNORECASE)
 
 
 def _summary_request_text(text: str) -> str:
@@ -4288,6 +4289,60 @@ def _summary_transcript(messages: Sequence[AnyMessage]) -> str:
     return "\n".join(lines)
 
 
+async def _ask_summarization_model(config: RunnableConfig, request: str) -> str:
+    """Return the summarization model's reply to *request*, "" if it has none."""
+    messages: list[AnyMessage] = [
+        SystemMessage(content=SUMMARIZATION_SYSTEM_PROMPT),
+        HumanMessage(content=request),
+    ]
+    model = config.get("configurable", {})["summarization_model"]
+    LOGGER.debug("Summary messages: %s", messages)
+    raw_response = await _invoke_model(model, messages, {})
+    LOGGER.debug("Raw summary response: %s", raw_response)
+    # Keep the summary's own line breaks; it is fed back into the prompt. A
+    # model that is not available answers with a str, which has no content.
+    return extract_final(
+        getattr(raw_response, "content", "") or "", collapse_whitespace=False
+    ).strip()
+
+
+def _newest_notes(summary: str, limit: int) -> str:
+    """Return the end of the notes that fits *limit*, from a line or sentence."""
+    if len(summary) <= limit:
+        return summary
+    tail = summary[-limit:]
+    for mark in ("\n", ". "):
+        _, found, rest = tail.partition(mark)
+        if found and rest.strip():
+            return rest.strip()
+    return tail
+
+
+async def _compact_summary(config: RunnableConfig, summary: str) -> str:
+    """
+    Return the notes shortened by the model once they are too long.
+
+    The only request that lets a model rewrite the notes. A reply that is
+    empty or no shorter is not used. Notes still over the limit lose their
+    oldest part, so the summary cannot grow without bound.
+    """
+    if len(summary) <= SUMMARY_COMPACT_ABOVE_CHARS:
+        return summary
+    shorter = await _ask_summarization_model(
+        config,
+        SUMMARIZATION_COMPACT_PROMPT.format(summary=_summary_request_text(summary)),
+    )
+    if shorter and len(shorter) < len(summary):
+        summary = shorter
+    else:
+        LOGGER.warning(
+            "The summarization model did not shorten the conversation summary "
+            "(%d characters); dropping its oldest part instead.",
+            len(summary),
+        )
+    return _newest_notes(summary, SUMMARY_COMPACT_ABOVE_CHARS)
+
+
 async def _summarize_and_remove_messages(
     state: State, config: RunnableConfig
 ) -> dict[str, Any]:
@@ -4301,39 +4356,19 @@ async def _summarize_and_remove_messages(
     if not msgs_to_remove:
         return {"summary": summary}
 
-    # One user message, not chat turns: the earlier summary first, since the
-    # reply replaces it, then the messages, then what to write (#1048).
     transcript = _summary_transcript(msgs_to_remove)
     removals = [RemoveMessage(id=m.id) for m in msgs_to_remove if m.id is not None]
     if not transcript:
         # Nothing to add (messages with no text): no reason to ask a model.
         return {"summary": summary, "messages": removals}
-    request = (
-        SUMMARIZATION_UPDATE_PROMPT.format(
-            summary=_summary_request_text(summary), transcript=transcript
-        )
-        if summary
-        else SUMMARIZATION_INITIAL_PROMPT.format(transcript=transcript)
+
+    # The model writes notes for these messages only. They are added after
+    # the summary so far, which no reply can then leave out (#1048).
+    notes = await _ask_summarization_model(
+        config, SUMMARIZATION_PROMPT.format(transcript=transcript)
     )
-    messages: list[AnyMessage] = [
-        SystemMessage(content=SUMMARIZATION_SYSTEM_PROMPT),
-        HumanMessage(content=request),
-    ]
-
-    model = config["configurable"]["summarization_model"]
-    LOGGER.debug("Summary messages: %s", messages)
-    raw_response = await _invoke_model(model, messages, {})
-    LOGGER.debug("Raw summary response: %s", raw_response)
-
-    # Keep the summary's own line breaks; it is fed back into the prompt.
-    response = extract_final(
-        getattr(raw_response, "content", "") or "", collapse_whitespace=False
-    )
-
-    if not response.strip():
-        # No text (also what an unavailable model gives): the reply would
-        # replace the earlier summary with nothing. Keep it. The messages
-        # still go, or the history would grow with every turn.
+    if not notes:
+        # The messages still go, or the history would grow with every turn.
         LOGGER.warning(
             "The summarization model returned no text; keeping the earlier "
             "summary without the %d messages it was asked to add.",
@@ -4341,8 +4376,9 @@ async def _summarize_and_remove_messages(
         )
         return {"summary": summary, "messages": removals}
 
+    combined = f"{summary.rstrip()}\n{notes}" if summary.strip() else notes
     return {
-        "summary": response,
+        "summary": await _compact_summary(config, combined),
         "messages": removals,
     }
 

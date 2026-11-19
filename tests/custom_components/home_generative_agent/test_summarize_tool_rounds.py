@@ -231,7 +231,7 @@ async def test_a_conversation_without_tools_is_sent_as_its_own_words(
 
     sent, _ = await _summarize(monkeypatch, removed, summary="Earlier talk.")
 
-    # The earlier summary comes first (#1048), then the messages word for word.
+    # The messages word for word; the earlier summary is not sent (#1048).
     request = sent[1].content
-    assert request.index("Earlier talk.") < request.index("User: Hello")
+    assert "Earlier talk." not in request
     assert "<messages>\nUser: Hello\nAssistant: Hi there.\n</messages>" in request
