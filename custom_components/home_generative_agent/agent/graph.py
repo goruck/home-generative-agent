@@ -4183,6 +4183,80 @@ async def _call_model(
     }
 
 
+# What a tool round keeps in the text sent to the summarization model.
+_SUMMARY_TOOL_ARGS_MAX_CHARS = 200
+_SUMMARY_TOOL_RESULT_MAX_CHARS = 300
+# Never copied into the summary text: the Critical Action PIN and alarm code.
+_SUMMARY_SECRET_ARGS = frozenset({"pin", "code"})
+
+
+def _summary_excerpt(text: str, limit: int) -> str:
+    """Return the text on one line, cut to the limit."""
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
+
+
+def _summary_tool_call_text(call: Mapping[str, Any]) -> str:
+    """Say in a sentence that a tool was used, and with what."""
+    name = str(call.get("name") or "a tool")
+    raw_args = call.get("args")
+    args = (
+        {k: v for k, v in raw_args.items() if k not in _SUMMARY_SECRET_ARGS}
+        if isinstance(raw_args, Mapping)
+        else {}
+    )
+    if not args:
+        return f"(I used the tool {name}.)"
+    rendered = json.dumps(args, ensure_ascii=False, default=str, sort_keys=True)
+    excerpt = _summary_excerpt(rendered, _SUMMARY_TOOL_ARGS_MAX_CHARS)
+    return f"(I used the tool {name} with {excerpt}.)"
+
+
+def _summary_tool_result_text(msg: ToolMessage, names: Mapping[str, str]) -> str:
+    """Say in a sentence what a tool returned."""
+    name = msg.name or names.get(msg.tool_call_id) or "a tool"
+    content = msg.content if isinstance(msg.content, str) else _message_text(msg)
+    excerpt = _summary_excerpt(content, _SUMMARY_TOOL_RESULT_MAX_CHARS)
+    failed = " failed and" if msg.status == "error" else ""
+    return f"(The tool {name}{failed} returned: {excerpt or 'nothing'})"
+
+
+def _messages_as_text_for_summary(messages: Sequence[AnyMessage]) -> list[AnyMessage]:
+    """
+    Return the messages as user and assistant text only (#1045).
+
+    OpenAI and Anthropic reject a tool call with no result after it, and the
+    messages being summarized may hold a call whose result is not among them.
+    So no tool call or tool result is sent as one: each is written out as a
+    sentence in the assistant's own text, and the assistant messages of one
+    turn become a single message.
+    """
+    rendered: list[AnyMessage] = []
+    names: dict[str, str] = {}
+
+    def _say(text: str) -> None:
+        if not text.strip():
+            return
+        last = rendered[-1] if rendered else None
+        if isinstance(last, AIMessage):
+            rendered[-1] = AIMessage(content=f"{last.content}\n{text}")
+        else:
+            rendered.append(AIMessage(content=text))
+
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            rendered.append(msg)
+        elif isinstance(msg, AIMessage):
+            _say(_message_text(msg))
+            for call in msg.tool_calls:
+                if call.get("id") and call.get("name"):
+                    names[str(call["id"])] = str(call["name"])
+                _say(_summary_tool_call_text(call))
+        elif isinstance(msg, ToolMessage):
+            _say(_summary_tool_result_text(msg, names))
+    return rendered
+
+
 async def _summarize_and_remove_messages(
     state: State, config: RunnableConfig
 ) -> dict[str, Any]:
@@ -4203,12 +4277,11 @@ async def _summarize_and_remove_messages(
     )
 
     # Build messages for the already-configured summarization model.
-    messages = cast(
-        "list[AnyMessage]",
-        [SystemMessage(content=SUMMARIZATION_SYSTEM_PROMPT)]
-        + [m for m in msgs_to_remove if isinstance(m, (HumanMessage, AIMessage))]
-        + [HumanMessage(content=summary_message)],
-    )
+    messages: list[AnyMessage] = [
+        SystemMessage(content=SUMMARIZATION_SYSTEM_PROMPT),
+        *_messages_as_text_for_summary(msgs_to_remove),
+        HumanMessage(content=summary_message),
+    ]
 
     model = config["configurable"]["summarization_model"]
     LOGGER.debug("Summary messages: %s", messages)
