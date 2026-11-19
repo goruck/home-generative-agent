@@ -1121,6 +1121,12 @@ async def _get_rag_retrieved_tools(  # noqa: PLR0912, PLR0915
             results = await store.asearch(
                 ("system", "tools"), query=sub_query, limit=limit * 4
             )
+        except EmbeddingsUnavailableError as err:
+            # No provider can embed the query (#969): every later sub-query
+            # would fail the same way, after a wait. The keyword fallback
+            # ranks the tools instead; the chain logged the cause.
+            LOGGER.debug("RAG tool retrieval skipped: %s", err)
+            break
         except (
             InvalidNamespaceError,
             psycopg.OperationalError,
@@ -2166,6 +2172,13 @@ async def _get_actuation_safety_tools(
             query=query,
             filter={"is_actuation": True},
         )
+    except EmbeddingsUnavailableError as err:
+        # No provider can embed the query (down, held, or timed out, #969):
+        # with no ranked candidates the keyword fallback binds the tools,
+        # actuation ones first for an actuation query. An unranked page here
+        # would stand in for that ranking. The chain logged the cause.
+        LOGGER.debug("Deterministic safety tool filter skipped: %s", err)
+        results = []
     except (
         InvalidNamespaceError,
         psycopg.OperationalError,

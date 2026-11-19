@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -3797,3 +3798,63 @@ async def test_a_namespaced_exclusion_blocks_the_bare_row_with_live_filter_off()
         _query_state("Open the study shade"), config, store=store
     )
     assert not any(name.endswith("HassTurnOn") for name in result["tool_routing_map"])
+
+
+@pytest.mark.asyncio
+async def test_rag_retrieval_stops_searching_when_embeddings_time_out() -> None:
+    """Each later sub-query would wait out the same frozen provider (#969)."""
+    from custom_components.home_generative_agent.agent.graph import (  # noqa: PLC0415
+        _split_query_intents,
+    )
+    from custom_components.home_generative_agent.core.fallback import (  # noqa: PLC0415
+        EmbeddingsTimedOutError,
+    )
+
+    query = "turn on the porch light and close the garage door"
+    assert len(_split_query_intents(query)) > 1
+    store = MagicMock()
+    store.asearch = AsyncMock(side_effect=EmbeddingsTimedOutError("timed out"))
+    config: RunnableConfig = {
+        "configurable": {
+            "tool_index_ready": True,
+            "options": {"tool_retrieval_limit": 5},
+        }
+    }
+
+    rag_tools, _ = await _get_rag_retrieved_tools(store, config, query, {"assist"})
+
+    assert rag_tools == []
+    assert store.asearch.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_safety_filter_leaves_ranking_to_the_keyword_fallback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    No embeddings: no safety tools, so the keyword fallback ranks (#969).
+
+    Any tool returned here would count as a ranked candidate and keep the
+    keyword fallback, which puts actuation tools first, from running.
+    """
+    from custom_components.home_generative_agent.core.fallback import (  # noqa: PLC0415
+        EmbeddingsTimedOutError,
+    )
+
+    store = MagicMock()
+    store.asearch = AsyncMock(side_effect=EmbeddingsTimedOutError("timed out"))
+    config: RunnableConfig = {
+        "configurable": {
+            "tool_index_ready": True,
+            "options": {"tool_retrieval_limit": 5},
+        }
+    }
+
+    with caplog.at_level(logging.WARNING):
+        tools = await _get_actuation_safety_tools(
+            store, config, "turn on lights", {"assist"}
+        )
+
+    assert tools == []
+    assert store.asearch.await_count == 1, "no unranked page stands in"
+    assert not caplog.records, "the chain logged the cause"

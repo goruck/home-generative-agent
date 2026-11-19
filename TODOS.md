@@ -2044,6 +2044,19 @@ label pair ("Server URL" vs "Base URL").
 
 ## Model Providers
 
+### Direct embedding callers with a short limit never fail over
+
+**What:** Two callers call the embedding chain directly, not through the store, and bound it with a limit no longer than a provider's in `FallbackEmbeddings` (30 s plus 0.25 s per text, #969): the camera caption scan (`_RECENT_CAPTION_SCAN_TIMEOUT_SEC`, 10 s, `core/video_analyzer.py`, its `embeddings.aembed_documents`) and the embedding-size probe (`_PROBE_TIMEOUT_S`, 15 s, `core/embedding_store.py`). With a frozen primary and a healthy fallback, the caller cancels the call before the primary's limit fires. A cancel is not a failure, so nothing is recorded, no hold starts and the fallback is never tried there; the caption scan's dedup then fails open. This was already true before #969; it is not a regression. Calls through the store (memory and tool search, the tool-index top-up, caption writes) are not affected: LangGraph's batched store runs them in its own task, so a caller's limit only stops it waiting and the chain carries on.
+
+**Why:** Red team and Codex, review of #969 (2026-11-18). Lindo chose to narrow the docs instead of passing budgets in that PR.
+
+**How to apply:** Wrap those two direct calls in `model_call_budget(...)` and have `_through_chain` take `min(timeout_s, member_timeout(last=...))` for each member, as the chat chain does (`core/provider_stall.py`). Short budgets are not split (`SPLIT_MIN_BUDGET_S`), so the caption scan would need its own rule. A store-routed call would not see such a budget (the store's task keeps the context it started with). Test a frozen primary and a healthy fallback on the caption scan.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+
 ### The Responses API's assistant phase is not kept between turns
 
 **What:** Newer OpenAI models (codex models from `gpt-5.3-codex`) tag assistant output with a `phase` (`commentary` vs `final_answer`) and expect it replayed. The `v0` output format drops it on a streamed reply, and `agent/graph.py` `_call_model` checkpoints each reply as text plus tool calls, so the next request loses the distinction between intermediate commentary and the final answer.

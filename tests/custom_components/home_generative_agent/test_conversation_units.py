@@ -20,6 +20,7 @@ import sys
 import textwrap
 import types
 from enum import IntFlag
+from time import monotonic
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
@@ -47,6 +48,10 @@ from custom_components.home_generative_agent.const import (
     NO_REPLY_APOLOGY,
     SPEAKER_NAME_MAX_CHARS,
     TOOL_SUBSET_PROMPT,
+)
+from custom_components.home_generative_agent.core.fallback import (
+    EmbeddingsCircuitOpenError,
+    EmbeddingsTimedOutError,
 )
 from custom_components.home_generative_agent.core.utils import (
     gather_store_puts_in_chunks,
@@ -561,6 +566,55 @@ async def test_run_tool_index_background_failure_sets_flag() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("circuit_open", [False, True])
+async def test_run_tool_index_background_timeout_is_retried_not_failed(
+    *, circuit_open: bool
+) -> None:
+    """
+    A slow model load or a frozen server leaves the index to build again (#969).
+
+    So does a breaker between tries: one chunk's call is refused while
+    another tries the member that just came back.
+    """
+    rd = MagicMock()
+    rd.tool_index_ready = False
+    rd.tool_indexing_in_progress = True
+    rd.tool_index_failed = False
+    rd.tool_index_rearmed = False
+    rd.tool_content_hashes = {}
+    hass = MagicMock()
+
+    with (
+        patch(
+            "custom_components.home_generative_agent.conversation.gather_store_puts_in_chunks",
+            new=AsyncMock(
+                side_effect=(
+                    EmbeddingsCircuitOpenError("refused")
+                    if circuit_open
+                    else EmbeddingsTimedOutError("timed out")
+                )
+            ),
+        ),
+        patch(
+            "custom_components.home_generative_agent.conversation.async_dispatcher_send"
+        ) as send,
+    ):
+        await _run_tool_index_background(
+            index_tasks=[AsyncMock()],
+            tool_hashes={"key": "hash"},
+            rd=rd,
+            hass=hass,
+        )
+
+    assert rd.tool_index_failed is False
+    assert rd.tool_index_ready is False
+    assert rd.tool_indexing_in_progress is False
+    assert rd.tool_content_hashes == {}
+    assert send.call_args.args[2] == "stale"
+    assert rd.tool_index_retry_after > monotonic(), "no new pass right away"
+
+
+@pytest.mark.asyncio
 async def test_run_tool_index_background_failure_after_an_admission_rearms() -> None:
     """
     A held embedding fallback admitted mid-write does not latch the failure.
@@ -1006,6 +1060,7 @@ def _index_runtime_data(**overrides: Any) -> Any:
         embedding_fingerprint=None,
         tool_indexing_in_progress=False,
         tool_index_failed=False,
+        tool_index_retry_after=0.0,
         tool_content_hashes={},
         tool_index_houses={},
         store=MagicMock(),
@@ -1201,6 +1256,66 @@ async def test_index_tools_failed_short_circuits_delta() -> None:
         )
 
     provider_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_index_tools_waits_out_a_timed_out_pass() -> None:
+    """No new pass, discovery included, until the retry time (#969)."""
+    entity = _index_entity()
+    rd = _index_runtime_data(tool_index_ready=False, tool_content_hashes={})
+    rd.tool_index_retry_after = monotonic() + 60
+
+    with patch.object(
+        entity, "_async_discover_provider_tools", new=AsyncMock()
+    ) as provider_mock:
+        await entity._async_index_tools(MagicMock(), rd, _loaded_llm_api("HassTurnOn"))
+
+    provider_mock.assert_not_called()
+    entity.hass.async_create_background_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_index_tools_retry_time_does_not_hold_back_a_ready_top_up() -> None:
+    """A ready index still writes a missing tool inline (#969)."""
+    entity = _index_entity()
+    rd = _index_runtime_data(tool_content_hashes={})
+    rd.tool_index_retry_after = monotonic() + 60
+
+    with (
+        patch(f"{_CONV}.async_dispatcher_send"),
+        patch(f"{_CONV}.gather_store_puts_in_chunks", new=AsyncMock()) as gather_mock,
+    ):
+        await entity._async_index_tools(
+            MagicMock(), rd, _loaded_llm_api("HassStartTimer")
+        )
+
+    gather_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "traceback"),
+    [(EmbeddingsTimedOutError("timed out"), False), (RuntimeError("boom"), True)],
+)
+async def test_a_top_up_an_unavailable_chain_refused_logs_no_traceback(
+    caplog: pytest.LogCaptureFixture, error: Exception, *, traceback: bool
+) -> None:
+    """The chain logged why; other write failures keep their traceback (#969)."""
+    entity = _index_entity()
+    rd = _index_runtime_data(tool_content_hashes={})
+
+    with (
+        patch(f"{_CONV}.async_dispatcher_send") as send,
+        patch(f"{_CONV}.gather_store_puts_in_chunks", new=AsyncMock(side_effect=error)),
+        caplog.at_level(logging.DEBUG),
+    ):
+        await entity._async_index_tools(
+            MagicMock(), rd, _loaded_llm_api("HassStartTimer")
+        )
+
+    assert any(r.exc_info for r in caplog.records) is traceback
+    assert send.call_args.args[2] == "ready"
+    assert "assist::HassStartTimer" not in rd.tool_content_hashes
 
 
 @pytest.mark.asyncio

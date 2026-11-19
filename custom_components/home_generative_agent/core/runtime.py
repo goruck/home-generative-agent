@@ -101,6 +101,10 @@ class HGAData:
     # written (#857): a failure of that write is the hold's, not a lasting
     # one, so it does not latch `tool_index_failed`.
     tool_index_rearmed: bool = False
+    # Monotonic time before which no new tool-index pass starts, after one
+    # timed out on the embedding provider (#969): each pass discovers every
+    # API's tools and pages through the index first.
+    tool_index_retry_after: float = 0.0
     # The background write of the tool index, when one is in flight. Held so
     # the unload can cancel and await it BEFORE the pool closes: a reload
     # (any options change) otherwise closes the pool under the write and the
