@@ -183,6 +183,7 @@ from homeassistant.components import conversation as ha_conversation  # noqa: E4
 from homeassistant.util import dt as dt_util  # noqa: E402
 
 from custom_components.home_generative_agent.agent.graph import (  # noqa: E402
+    State,
     _always_bound_local_tools,
 )
 from custom_components.home_generative_agent.agent.helpers import (  # noqa: E402
@@ -207,6 +208,7 @@ from custom_components.home_generative_agent.conversation import (  # noqa: E402
     _recommit_final_assistant_content,
     _run_tool_index_background,
     _streaming_failure_content,
+    _turn_input,
 )
 
 # ---------------------------------------------------------------------------
@@ -5253,3 +5255,50 @@ def test_memory_namespace_marks_only_a_users_own_memories(
 ) -> None:
     """The every-turn memory tool keys on this flag; "robot" must never get it."""
     assert HGAConversationEntity._memory_namespace(user_name, speaker) == expected
+
+
+# --- The summary of trimmed turns survives to the next turn (#1048) ---------
+# Every turn started with "summary": "" in the graph input, and an input key
+# replaces what the conversation's checkpoint holds. So the summary written at
+# the end of one turn was wiped at the start of the next, before the agent
+# read it: the trimmed turns were forgotten.
+
+
+def test_a_turn_input_does_not_set_the_summary() -> None:
+    turn = _turn_input([HumanMessage(content="Hello", id="h1")])
+
+    assert "summary" not in turn
+    # The per-turn fields are still reset.
+    assert turn["messages_to_remove"] == []
+    assert turn["selected_tools"] == []
+    assert turn.get("turn_memories") == {}
+
+
+@pytest.mark.asyncio
+async def test_the_summary_written_in_one_turn_is_read_in_the_next() -> None:
+    seen: list[str] = []
+
+    def _agent(state: State) -> dict[str, Any]:
+        seen.append(state.get("summary", ""))
+        return {}
+
+    def _summarize(state: State) -> dict[str, Any]:
+        earlier = state.get("summary", "")
+        return {"summary": f"{earlier}\nnote {len(seen)}".strip()}
+
+    graph = StateGraph(State)
+    graph.add_node("agent", _agent)
+    graph.add_node("summarize", _summarize)
+    graph.add_edge(START, "agent")
+    graph.add_edge("agent", "summarize")
+    graph.add_edge("summarize", END)
+    app = graph.compile(checkpointer=MemorySaver())
+    config: Any = {"configurable": {"thread_id": "one conversation"}}
+
+    for number in range(3):
+        await app.ainvoke(
+            _turn_input([HumanMessage(content="Hi", id=f"h{number}")]), config
+        )
+
+    # Each turn's agent reads what the turns before it wrote.
+    assert seen == ["", "note 1", "note 1\nnote 2"]

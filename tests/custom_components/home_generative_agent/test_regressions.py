@@ -1165,7 +1165,10 @@ def test_build_system_message_puts_volatile_context_after_stable_prefix() -> Non
             "text": (
                 "Current time is 15:09:20. Today's date is 2026-09-09.\n"
                 "<memories>\n[k]: v\n</memories>\n"
-                "<past_conversation_summary>\nearlier we talked\n"
+                "<past_conversation_summary>\n"
+                "(Notes on the earlier turns, oldest first. Where two "
+                "disagree, the later one is right.)\n"
+                "earlier we talked\n"
                 "</past_conversation_summary>"
             ),
         },

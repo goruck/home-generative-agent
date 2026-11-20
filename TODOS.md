@@ -786,6 +786,32 @@ v3.41.1 rather than deferred; see the TODO above.
 
 ---
 
+### A failed summarization request fails a turn that was already answered
+
+**What:** `_summarize_and_remove_messages` (`agent/graph.py`) does not catch the `HomeAssistantError` that `_invoke_model` raises on a timeout or provider error. The node runs after the chat model has answered, so the turn fails anyway, and every later turn past the context limit retries and fails the same way. An empty reply is handled (#1048: the earlier summary is kept); a raised error is not.
+
+**Why:** Found by the review of the #1048 fix. It was there before that change and is left out of it to keep the fix small.
+
+**How to apply:** Catch the error in the node, log it, and return the earlier summary. Decide whether the messages are removed (history stays bounded, those turns are lost) or kept for a bounded number of retries.
+
+**Effort:** S
+**Priority:** P2
+
+---
+
+### The conversation summary can keep `add_automation` bound for a whole conversation
+
+**What:** `_conversation_has_automation_context` (`agent/graph.py`) runs `_query_wants_automation` over the summary as well as the last few user turns. Since #1048 the summary is asked to record what the user asked for and earlier notes are kept until the summary is shortened, so one automation request early on may match on every later turn, past the `_AUTOMATION_CONTEXT_HUMAN_TURNS` window.
+
+**Why:** Found by the review of the #1048 fix; not confirmed against real summaries. The cost is the extra tool description on each turn and a chance that unrelated conditional phrasing is routed to `add_automation`.
+
+**How to apply:** Check real summaries against the regex first. If they match, stop scanning the summary once the request is older than the turn window, or scan only for an automation still in progress.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
 ## Explain / Prompts
 
 ### Sanitize area/entity strings before injecting into LLM prompts
