@@ -541,7 +541,7 @@
       "cannot_connect": "无法连接到服务。请检查密钥和 URL 后重试。",
       "invalid_pin": "PIN 必须是 4 到 10 位数字。",
       "llm_api_required": "请至少选择一个 API。智能体需要 LLM API 才能回答。",
-      "llm_api_unsupported": "所选的 API 都标记为 \"not supported yet\"，智能体将无法回答。请选择 Assist 或其他受支持的 API。",
+      "llm_api_admin_only": "所选的 API 都仅限管理员用户使用，语音卫星或非管理员用户将得不到回答。请同时选择 Assist 或其他 API。",
       "pin_required": "请输入 PIN，或关闭关键操作 PIN。",
       "tool_excluded_and_included": "同一个工具不能既被排除又被始终包含。请从其中一个列表中移除它。",
       "unknown": "意外错误。"
@@ -614,9 +614,9 @@
       "title": "备用嵌入提供方 {providers} 没有可比较的版本",
       "description": "Home Generative Agent 无法将备用嵌入提供方 **{providers}** 上 **{model}** 的版本与记忆存储的版本进行比较：主提供方 **{primary}** 的版本未知（启动时不可用，或其服务器没有在 `/api/show` 中给出权重），而存储记录中也没有与该备用提供方一致的版本。另一个版本的备用提供方会在记忆存储中混入不同模型，因此它保持暂停：主提供方不可用期间，保存记忆和摄像头描述会失败，记忆搜索只返回最近的记忆。\n\n要使用它，请在两台服务器上拉取相同的版本（例如在每台服务器上运行 `ollama pull {model}`），使用会给出权重的服务器（普通 Ollama 服务器即可），并在主提供方恢复后重新加载 Home Generative Agent。如果主提供方在启动时有响应，每 5 分钟会重新读取一次它的版本，读取到后会立即检查备用提供方；此问题随后会自动清除。"
     },
-    "llm_api_unsupported_selection": {
-      "title": "智能体无法加载所选的任何 LLM API",
-      "description": "**控制 Home Assistant** 中只选择了 {apis}，而 Home Generative Agent 暂不加载这些 API，因此每次对话都会失败并提示 \"No LLM APIs could be loaded\"。\n\n要修复此问题，请打开 **设置 → 设备与服务 → Home Generative Agent → 配置**，在 **控制 Home Assistant** 中选择 **Assist** 或其他受支持的 API。条目以智能体可加载的选择重新加载后，此问题会自动清除。"
+    "llm_api_admin_only_selection": {
+      "title": "智能体所选的 LLM API 仅对管理员用户加载",
+      "description": "**控制 Home Assistant** 中只选择了 {apis}，而 Home Assistant 仅在管理员用户发起的对话中加载这些 API。语音卫星、自动化或非管理员用户会收到 \"No LLM APIs could be loaded\"。\n\n要修复此问题，请打开 **设置 → 设备与服务 → Home Generative Agent → 配置**，在 **控制 Home Assistant** 中同时选择 **Assist** 或其他 API。条目以每次对话都能加载的选择重新加载后，此问题会自动清除。"
     }
   }
 }

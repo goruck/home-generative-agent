@@ -541,7 +541,7 @@
       "cannot_connect": "Ke službě se nelze připojit. Zkontrolujte klíče/URL a zkuste to znovu.",
       "invalid_pin": "PIN musí mít 4-10 číslic.",
       "llm_api_required": "Vyberte alespoň jedno API. Agent potřebuje LLM API, aby mohl odpovídat.",
-      "llm_api_unsupported": "Všechna vybraná API jsou označena \"not supported yet\", takže agent nemůže odpovídat. Vyberte Assist nebo jiné podporované API.",
+      "llm_api_admin_only": "Všechna vybraná API jsou jen pro správce, takže hlasový satelit ani uživatel bez práv správce by nedostal odpověď. Vyberte také Assist nebo jiné API.",
       "pin_required": "Zadejte PIN, nebo vypněte PIN pro kritické akce.",
       "tool_excluded_and_included": "Nástroj nemůže být zároveň vyloučený a vždy zahrnutý. Odeberte jej z jednoho ze dvou seznamů.",
       "unknown": "Neočekávaná chyba."
@@ -614,9 +614,9 @@
       "title": "Záložní poskytovatel embeddingů {providers} nemá s čím porovnat sestavení",
       "description": "Home Generative Agent nedokáže porovnat sestavení modelu **{model}**, které má záložní poskytovatel embeddingů **{providers}**, se sestavením úložiště paměti: sestavení primárního poskytovatele **{primary}** není známo (při spuštění nefungoval, nebo jeho server v `/api/show` neuvádí své váhy) a záznam úložiště neuvádí žádné sestavení, které by odpovídalo sestavení zálohy. Záloha s jiným sestavením by v úložišti paměti míchala modely, proto zůstává pozastavena: dokud primární poskytovatel nefunguje, ukládání vzpomínek a popisků z kamer selhává a vyhledávání v paměti se omezí na nedávné vzpomínky.\n\nChcete-li ji používat, stáhněte na oba servery stejné sestavení (například spusťte `ollama pull {model}` na každém z nich), používejte servery, které uvádějí své váhy (běžný server Ollama to dělá), a jakmile primární poskytovatel znovu funguje, znovu načtěte Home Generative Agent. Pokud primární poskytovatel při spuštění odpověděl, jeho sestavení se znovu čte každých 5 minut a záloha se ověří, jakmile se přečte; tento problém pak zmizí."
     },
-    "llm_api_unsupported_selection": {
-      "title": "Agent nemůže načíst žádné z vybraných LLM API",
-      "description": "Výběr **Ovládat Home Assistant** obsahuje pouze {apis}, které Home Generative Agent zatím nenačítá, takže každá konverzace selže s chybou \"No LLM APIs could be loaded\".\n\nOpravíte to v **Nastavení → Zařízení a služby → Home Generative Agent → Nastavit**, kde v poli **Ovládat Home Assistant** vyberte **Assist** nebo jiné podporované API. Tento problém zmizí, jakmile se položka znovu načte s výběrem, který agent dokáže načíst."
+    "llm_api_admin_only_selection": {
+      "title": "Vybraná LLM API agenta se načítají jen pro správce",
+      "description": "Výběr **Ovládat Home Assistant** obsahuje pouze {apis}, které Home Assistant načítá jen pro konverzaci zahájenou správcem. Hlasový satelit, automatizace nebo uživatel bez práv správce dostane chybu \"No LLM APIs could be loaded\".\n\nOpravíte to v **Nastavení → Zařízení a služby → Home Generative Agent → Nastavit**, kde v poli **Ovládat Home Assistant** vyberte také **Assist** nebo jiné API. Tento problém zmizí, jakmile se položka znovu načte s výběrem, který lze načíst pro každou konverzaci."
     }
   }
 }

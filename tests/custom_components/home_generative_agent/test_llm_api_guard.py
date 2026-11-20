@@ -2,7 +2,7 @@
 """
 Tests for the repair issue on an LLM API selection the agent cannot load.
 
-The Options form refuses a selection of only unsupported APIs (#998), but an
+The Options form refuses a selection of only admin-only APIs (#998), but an
 install that saved one before then fails every conversation with "No LLM APIs
 could be loaded" and nothing says why (#1037).
 """
@@ -23,6 +23,7 @@ import custom_components.home_generative_agent as hga_component
 from custom_components.home_generative_agent.const import DOMAIN
 from custom_components.home_generative_agent.core.llm_api_guard import (
     ISSUE_LLM_API_UNSUPPORTED,
+    ISSUE_TRANSLATION_KEY,
     async_clear_llm_api_issue,
     async_sync_llm_api_issue,
 )
@@ -54,7 +55,7 @@ def _issue(hass: HomeAssistant) -> ir.IssueEntry | None:
 
 
 @pytest.mark.asyncio
-async def test_a_selection_of_only_unsupported_apis_raises_the_issue(
+async def test_a_selection_of_only_admin_apis_raises_the_issue(
     hass: HomeAssistant,
 ) -> None:
     """Every turn fails on this selection, so setup says why."""
@@ -64,7 +65,7 @@ async def test_a_selection_of_only_unsupported_apis_raises_the_issue(
     issue = _issue(hass)
     assert issue is not None
     assert issue.severity == ir.IssueSeverity.ERROR
-    assert issue.translation_key == ISSUE_LLM_API_UNSUPPORTED
+    assert issue.translation_key == ISSUE_TRANSLATION_KEY
     assert issue.translation_placeholders == {"apis": "Home Assistant"}
 
 
@@ -119,7 +120,7 @@ def test_the_issue_has_a_title_and_description() -> None:
     root = Path(__file__).parents[3] / "custom_components" / DOMAIN
     for name in ("strings.json", "translations/en.json"):
         issues = json.loads((root / name).read_text(encoding="utf-8"))["issues"]
-        entry = issues[ISSUE_LLM_API_UNSUPPORTED]
+        entry = issues[ISSUE_TRANSLATION_KEY]
         assert entry["title"]
         assert "{apis}" in entry["description"]
 
