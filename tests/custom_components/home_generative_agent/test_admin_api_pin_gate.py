@@ -1,0 +1,500 @@
+# ruff: noqa: S101
+"""
+The PIN gate reads the tools of Home Assistant's admin-only API (#918).
+
+Home Assistant 2026.11's "Home Assistant" API (`homeassistant`) has a tool
+that calls any action, `homeassistant__call_action`, with the action, its
+target and its data as arguments. The gate reads that call as the service it
+names, the way it reads an automation step, and lets the API's read-only
+tools through.
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
+
+import pytest
+from homeassistant.core import Context
+from homeassistant.helpers import llm
+from homeassistant.setup import async_setup_component
+
+from custom_components.home_generative_agent.agent.graph import (
+    _is_critical_action,
+    _run_ha_tool,
+)
+from custom_components.home_generative_agent.agent.indirect_pin import (
+    CALL_ACTION_TOOL,
+    tool_origin,
+)
+from custom_components.home_generative_agent.agent.pin_messages import (
+    describe_pending_action,
+)
+from custom_components.home_generative_agent.agent.rule_entities import (
+    expand_critical_rules,
+)
+from custom_components.home_generative_agent.const import (
+    RECOMMENDED_CRITICAL_ACTIONS,
+)
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
+    from pytest_homeassistant.common import MockUser
+
+ADMIN_API = "homeassistant"
+
+pytestmark = pytest.mark.skipif(
+    not hasattr(llm, "LLM_API_HOME_ASSISTANT"),
+    reason="Home Assistant before 2026.11 has no admin-only API",
+)
+
+FRONT_DOOR = {"entity_id": "lock.front_door"}
+
+
+@pytest.fixture
+async def admin_api(hass: HomeAssistant, hass_admin_user: MockUser) -> SimpleNamespace:
+    """Set up a house and load the admin-only API for an admin's turn."""
+    hass.states.async_set("lock.front_door", "locked", {"friendly_name": "Front Door"})
+    hass.states.async_set("light.porch", "off", {"friendly_name": "Porch"})
+    hass.states.async_set(
+        "cover.garage_door",
+        "closed",
+        {"friendly_name": "Garage Door", "device_class": "garage"},
+    )
+    for domain, config in (
+        ("lock", {}),
+        ("light", {}),
+        ("cover", {}),
+        ("input_button", {"unlock": {}}),
+        ("input_boolean", {"home": {}}),
+    ):
+        assert await async_setup_component(hass, domain, {domain: config})
+    assert await async_setup_component(hass, "scene", {"scene": []})
+    assert await async_setup_component(
+        hass,
+        "script",
+        {
+            "script": {
+                "unlock_door": {
+                    "sequence": [{"action": "lock.unlock", "target": FRONT_DOOR}]
+                },
+                "porch": {
+                    "sequence": [
+                        {
+                            "action": "light.turn_on",
+                            "target": {"entity_id": "light.porch"},
+                        }
+                    ]
+                },
+            }
+        },
+    )
+    assert await async_setup_component(
+        hass,
+        "automation",
+        {
+            "automation": [
+                {
+                    "id": "arrive",
+                    "alias": "Unlock on arrival",
+                    "triggers": [
+                        {
+                            "trigger": "state",
+                            "entity_id": "input_boolean.home",
+                            "to": "on",
+                        }
+                    ],
+                    "actions": [{"action": "lock.unlock", "target": FRONT_DOOR}],
+                },
+                {
+                    "id": "button",
+                    "alias": "Button unlock",
+                    "triggers": [
+                        {"trigger": "state", "entity_id": "input_button.unlock"}
+                    ],
+                    "actions": [{"action": "lock.unlock", "target": FRONT_DOOR}],
+                },
+            ]
+        },
+    )
+    for domain in ("system_log", "search", "config", "llm"):
+        assert await async_setup_component(hass, domain, {})
+    await hass.async_block_till_done()
+    instance = await llm.async_get_api(
+        hass,
+        ADMIN_API,
+        llm.LLMContext(
+            platform="home_generative_agent",
+            context=Context(user_id=hass_admin_user.id),
+            language="en",
+            assistant="conversation",
+            device_id=None,
+        ),
+    )
+    # Stands in for MultiLLMAPI: importing conversation.py needs hassil.
+    return SimpleNamespace(
+        apis={ADMIN_API: instance},
+        routing_map={},
+        remote_home_assistants=frozenset(),
+    )
+
+
+def _held(
+    hass: HomeAssistant, api: SimpleNamespace, tool_name: str, args: dict[str, Any]
+) -> bool:
+    return _is_critical_action(
+        dict(args),
+        expand_critical_rules(hass, RECOMMENDED_CRITICAL_ACTIONS),
+        tool_name,
+        hass,
+        origin=tool_origin(api, tool_name),
+    )
+
+
+async def test_the_api_is_known_as_an_admin_one(admin_api: SimpleNamespace) -> None:
+    """The gate's branch is keyed on the API's own admin flag."""
+    origin = tool_origin(admin_api, CALL_ACTION_TOOL)
+
+    assert origin.admin_api
+    assert not origin.read_only
+    assert not origin.remote
+    assert CALL_ACTION_TOOL in {tool.name for tool in admin_api.apis[ADMIN_API].tools}
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param({"action": "lock.unlock", "target": FRONT_DOOR}, id="target"),
+        pytest.param({"action": "lock.unlock", "data": FRONT_DOOR}, id="data"),
+        pytest.param({"action": "lock.unlock"}, id="no-target"),
+        pytest.param(
+            {"action": "lock.unlock", "target": {"entity_id": "all"}}, id="all"
+        ),
+        pytest.param(
+            {"action": "lock.unlock", "target": {"area_id": "hall"}}, id="area"
+        ),
+        pytest.param(
+            {
+                "action": "lock.unlock",
+                "target": {"entity_id": "{{ 'lock.' ~ 'front_door' }}"},
+            },
+            id="templated-target",
+        ),
+        pytest.param(
+            {"action": "homeassistant.toggle", "target": FRONT_DOOR},
+            id="generic-toggle",
+        ),
+        pytest.param(
+            {
+                "action": "homeassistant.turn_on",
+                "target": {
+                    "entity_id": "{{ states.lock | map(attribute='entity_id') | list }}"
+                },
+            },
+            id="generic-templated",
+        ),
+        pytest.param(
+            {
+                "action": "homeassistant.turn_on",
+                "data": {"{{ 'entity_id' }}": "lock.front_door"},
+            },
+            id="templated-field-name",
+        ),
+        pytest.param(
+            {
+                "action": "cover.open_cover",
+                "target": {"entity_id": "cover.garage_door"},
+            },
+            id="garage",
+        ),
+        pytest.param(
+            {
+                "action": "cover.open_cover",
+                "data": {"{{ 'entity_id' }}": "cover.garage_door"},
+            },
+            id="garage-templated-field-name",
+        ),
+        pytest.param(
+            {"action": "cover.open_cover", "target": {"label_id": "doors"}},
+            id="garage-label",
+        ),
+        pytest.param(
+            {
+                "action": "script.turn_on",
+                "target": {"entity_id": "script.unlock_door"},
+            },
+            id="script",
+        ),
+        pytest.param({"action": "script.unlock_door"}, id="script-by-key"),
+        pytest.param(
+            {
+                "action": "script.turn_on",
+                "target": {"entity_id": "{{ 'script.unlock_door' }}"},
+            },
+            id="templated-script",
+        ),
+        pytest.param(
+            {
+                "action": "scene.apply",
+                "data": {"entities": {"lock.front_door": "unlocked"}},
+            },
+            id="scene",
+        ),
+        pytest.param(
+            {
+                "action": "automation.trigger",
+                "target": {"entity_id": "automation.unlock_on_arrival"},
+            },
+            id="automation",
+        ),
+        pytest.param(
+            {
+                "action": "input_button.press",
+                "target": {"entity_id": "input_button.unlock"},
+            },
+            id="button-starts-automation",
+        ),
+        pytest.param(
+            {
+                "action": "input_boolean.turn_on",
+                "target": {"entity_id": "input_boolean.home"},
+            },
+            id="helper-starts-automation",
+        ),
+        pytest.param({"action": "shell_command.open_garage"}, id="shell-command"),
+        pytest.param({"action": "rest_command.open_garage"}, id="rest-command"),
+        pytest.param({"action": "python_script.do_it"}, id="python-script"),
+        pytest.param(
+            {
+                "action": "conversation.process",
+                "data": {"text": "unlock the front door"},
+            },
+            id="another-agent",
+        ),
+        pytest.param(
+            {"action": "{{ 'lock.unlock' }}", "target": FRONT_DOOR},
+            id="templated-action",
+        ),
+        pytest.param({"target": FRONT_DOOR}, id="no-action"),
+        pytest.param({"action": ["lock.unlock"], "target": FRONT_DOOR}, id="list"),
+        pytest.param(
+            {"action": "light.turn_on", "service": "lock.unlock", "target": FRONT_DOOR},
+            id="second-name",
+        ),
+        pytest.param(
+            {
+                "action": "light.turn_on",
+                "target": {"entity_id": "light.porch"},
+                "entity_id": "lock.front_door",
+                "service": "unlock",
+            },
+            id="bare-second-name",
+        ),
+    ],
+)
+async def test_a_call_that_could_do_a_critical_action_is_held(
+    hass: HomeAssistant, admin_api: SimpleNamespace, args: dict[str, Any]
+) -> None:
+    """Each way the call-action tool could reach a guarded device is held."""
+    assert _held(hass, admin_api, CALL_ACTION_TOOL, args)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param(
+            {"action": "light.turn_on", "target": {"entity_id": "light.porch"}},
+            id="light",
+        ),
+        pytest.param(
+            {"action": "light.turn_on", "target": {"area_id": "porch"}},
+            id="light-by-area",
+        ),
+        pytest.param(
+            {
+                "action": "light.turn_on",
+                "target": {"entity_id": "light.porch"},
+                "data": {"brightness": "{{ 100 }}"},
+            },
+            id="templated-brightness",
+        ),
+        pytest.param({"action": "lock.lock", "target": FRONT_DOOR}, id="lock"),
+        pytest.param(
+            {
+                "action": "cover.close_cover",
+                "target": {"entity_id": "cover.garage_door"},
+            },
+            id="close-garage",
+        ),
+        pytest.param(
+            {"action": "script.turn_on", "target": {"entity_id": "script.porch"}},
+            id="harmless-script",
+        ),
+        pytest.param(
+            {
+                "action": "persistent_notification.create",
+                "data": {"message": "The washer is done."},
+            },
+            id="notification",
+        ),
+    ],
+)
+async def test_an_ordinary_call_runs_without_a_pin(
+    hass: HomeAssistant, admin_api: SimpleNamespace, args: dict[str, Any]
+) -> None:
+    """The tool's own name is not read as a service aimed at its targets."""
+    assert not _held(hass, admin_api, CALL_ACTION_TOOL, args)
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "args"),
+    [
+        (
+            "homeassistant__render_template",
+            {"template": "{{ states('lock.front_door') }}"},
+        ),
+        ("homeassistant__search_actions", {"query": "lock.unlock"}),
+        ("search__search", {"query": "front door lock"}),
+        ("system_log__get_entries", {}),
+        ("config__get_config_entries", {}),
+    ],
+)
+async def test_a_read_only_tool_is_never_held(
+    hass: HomeAssistant,
+    admin_api: SimpleNamespace,
+    tool_name: str,
+    args: dict[str, Any],
+) -> None:
+    """Naming a lock or its unlock service in a query reads nothing as a call."""
+    assert tool_origin(admin_api, tool_name).read_only
+    assert not _held(hass, admin_api, tool_name, args)
+
+
+async def test_every_tool_of_the_api_is_accounted_for(
+    admin_api: SimpleNamespace,
+) -> None:
+    """A tool Home Assistant adds to the API has to be looked at here first."""
+    writing = {
+        tool.name
+        for tool in admin_api.apis[ADMIN_API].tools
+        if not tool_origin(admin_api, tool.name).read_only
+    }
+
+    assert writing == {CALL_ACTION_TOOL, "config__reload_config_entry"}
+
+
+async def test_reloading_an_integration_needs_no_pin(
+    hass: HomeAssistant, admin_api: SimpleNamespace
+) -> None:
+    """Reloading a config entry moves no device."""
+    assert not _held(
+        hass, admin_api, "config__reload_config_entry", {"entry_id": "hue:8K2M"}
+    )
+
+
+async def test_the_same_name_on_another_api_is_still_read_by_its_name(
+    hass: HomeAssistant, admin_api: SimpleNamespace
+) -> None:
+    """Only the admin-only API's own tool is read by its arguments alone."""
+    args = {"action": "script.turn_on", "target": {"entity_id": "script.porch"}}
+
+    assert _held(hass, admin_api, CALL_ACTION_TOOL, args) is False
+    assert _is_critical_action(
+        dict(args),
+        expand_critical_rules(hass, RECOMMENDED_CRITICAL_ACTIONS),
+        CALL_ACTION_TOOL,
+        hass,
+    )
+
+
+@pytest.mark.usefixtures("admin_api")
+async def test_the_pin_line_names_the_action(hass: HomeAssistant) -> None:
+    """The user is told what the PIN allows, not the tool's name."""
+    line = describe_pending_action(
+        hass,
+        {
+            "tool_name": CALL_ACTION_TOOL,
+            "tool_args": {"action": "lock.unlock", "target": FRONT_DOOR},
+            "api_id": ADMIN_API,
+        },
+    )
+
+    assert "unlock" in line.lower()
+    assert "front door" in line.lower()
+
+
+def _turn(hass: HomeAssistant, api: SimpleNamespace) -> Any:
+    """Return the context a tool call runs in, with a PIN set."""
+
+    async def _call_tool(tool_input: llm.ToolInput) -> Any:
+        # The tool itself: APIInstance.async_call_tool imports the voice
+        # stack (hassil), which the test venv lacks.
+        instance = api.apis[ADMIN_API]
+        tool = next(t for t in instance.tools if t.name == tool_input.tool_name)
+        return await tool.async_call(hass, tool_input, instance.llm_context)
+
+    return cast(
+        "Any",
+        SimpleNamespace(
+            hass=hass,
+            config={"configurable": {"thread_id": "t1"}},
+            ha_llm_api=SimpleNamespace(
+                apis=api.apis,
+                routing_map={CALL_ACTION_TOOL: ADMIN_API},
+                remote_home_assistants=frozenset(),
+                async_call_tool=_call_tool,
+            ),
+            critical_actions=RECOMMENDED_CRITICAL_ACTIONS,
+            pin_enabled=True,
+            pin_hash="hash",
+            pin_salt="salt",
+            pending_actions={},
+            state={"messages": []},
+        ),
+    )
+
+
+async def test_an_ordinary_call_reaches_home_assistant_as_given(
+    hass: HomeAssistant, admin_api: SimpleNamespace
+) -> None:
+    """The call's target and data are sent on unchanged, and the action runs."""
+    assert await async_setup_component(hass, "input_text", {"input_text": {"note": {}}})
+    await hass.async_block_till_done()
+
+    result = await _run_ha_tool(
+        CALL_ACTION_TOOL,
+        {
+            "action": "input_text.set_value",
+            "target": {"entity_id": "input_text.note"},
+            "data": {"value": "{{ 'washer ' ~ 'done' }}"},
+        },
+        _turn(hass, admin_api),
+        {"id": "call1"},
+    )
+
+    assert result.status == "success", result.content
+    state = hass.states.get("input_text.note")
+    assert state is not None
+    assert state.state == "washer done"
+
+
+async def test_a_guarded_call_is_held_and_does_not_run(
+    hass: HomeAssistant, admin_api: SimpleNamespace
+) -> None:
+    """The lock stays locked, and the reply asks for the PIN."""
+    unlocked: list[Any] = []
+    hass.services.async_register("lock", "unlock", unlocked.append)
+    turn = _turn(hass, admin_api)
+
+    result = await _run_ha_tool(
+        CALL_ACTION_TOOL,
+        {"action": "lock.unlock", "target": FRONT_DOOR},
+        turn,
+        {"id": "call1"},
+    )
+
+    assert "requires_pin" in str(result.content)
+    assert unlocked == []
+    (held,) = turn.pending_actions.values()
+    assert held["api_id"] == ADMIN_API
+    assert held["tool_args"] == {"action": "lock.unlock", "target": FRONT_DOOR}

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import voluptuous as vol
@@ -30,6 +30,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SPEAKER_SENSORS,
     CONF_STT_HALLUCINATION_EXACT_PATTERNS,
     CONF_STT_HALLUCINATION_PATTERNS,
+    CONF_TOOL_EXCLUSIONS,
     CONF_VIDEO_ANALYZER_HOUSE_NOTIFICATION_COOLDOWN_S,
     CONF_VIDEO_ANALYZER_MODE,
     CONF_VIDEO_ANALYZER_NOTIFICATION_COOLDOWN_S,
@@ -133,6 +134,12 @@ def _llm_api_options(schema: dict[Any, Any]) -> dict[str, str]:
     return {opt["value"]: opt["label"] for opt in selector.config["options"]}
 
 
+def _tool_exclusion_values(schema: dict[Any, Any]) -> list[str]:
+    """Return the values the excluded-tools picker offers."""
+    selector = cast("Any", schema[_schema_key(schema, CONF_TOOL_EXCLUSIONS)])
+    return [opt["value"] for opt in selector.config["options"]]
+
+
 @pytest.mark.asyncio
 async def test_options_schema_preserves_stale_llm_api_ids(hass: Any) -> None:
     """
@@ -184,35 +191,46 @@ def _admin_api_registry() -> Any:
 
 
 @pytest.mark.asyncio
-async def test_options_schema_hides_an_admin_only_llm_api(hass: Any) -> None:
-    """An admin-only API is not offered: this integration does not load it."""
+async def test_options_schema_offers_an_admin_only_llm_api_labeled(hass: Any) -> None:
+    """An admin-only API is offered, and its label says who it loads for (#918)."""
     with _admin_api_registry():
         schema = await _schema_for_options(hass, {CONF_LLM_HASS_API: ["assist"]})
 
-    assert list(_llm_api_options(schema)) == ["assist"]
+    assert _llm_api_options(schema) == {
+        "assist": "Assist",
+        "homeassistant": "Home Assistant (admin users only)",
+    }
 
 
 @pytest.mark.asyncio
-async def test_options_schema_keeps_a_stored_admin_only_llm_api_labeled(
+async def test_options_schema_lists_an_admin_only_apis_tools_from_the_index(
     hass: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
     """
-    An admin-only API selected before it was hidden stays selected, labeled.
+    The form has no user, so the API's tools come from the tool index.
 
-    Dropping it from the selector would make the pre-filled form fail
-    validation on submit (#568's failure class), and deselecting it is the
-    user's call. Its tools are not listed: loading it with no user is refused.
+    Home Assistant refuses to load the API with no admin user, so the form
+    does not ask (and logs no failure). The tools an admin's turn indexed are
+    offered, so one can still be excluded.
     """
-    with _admin_api_registry():
+    get_api = AsyncMock(return_value=SimpleNamespace(tools=[]))
+    with (
+        _admin_api_registry(),
+        patch(
+            "custom_components.home_generative_agent.config_flow.llm.async_get_api",
+            new=get_api,
+        ),
+    ):
         schema = await _schema_for_options(
-            hass, {CONF_LLM_HASS_API: ["assist", "homeassistant"]}
+            hass,
+            {CONF_LLM_HASS_API: ["assist", "homeassistant"]},
+            indexed_keys={"homeassistant::homeassistant__call_action"},
         )
 
     assert _suggested_llm_apis(schema) == ["assist", "homeassistant"]
-    options = _llm_api_options(schema)
-    assert options["homeassistant"] == "homeassistant (not supported yet)"
-    assert "no longer available" not in options["homeassistant"]
+    assert [call.args[1] for call in get_api.await_args_list] == ["assist"]
     assert "Could not list tools of LLM API homeassistant" not in caplog.text
+    assert "homeassistant::homeassistant__call_action" in _tool_exclusion_values(schema)
 
 
 @pytest.mark.asyncio

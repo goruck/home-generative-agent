@@ -154,6 +154,7 @@ from .helpers import (
 )
 from .indirect_pin import (
     BUILTIN_INTENT,
+    CALL_ACTION_TOOL,
     OTHER_INTENT,
     RUN_SERVICES,
     SCENE_DOMAIN,
@@ -4461,6 +4462,18 @@ def _is_critical_action(  # noqa: PLR0911, PLR0912
             origin.tool_name or tool_name, tool_args, read_only_hint=origin.read_only
         )
 
+    # Home Assistant's admin-only API (#918). A tool it marks read-only only
+    # reads. Its call-action tool runs the service its arguments name, so it
+    # is read by them alone: by its name it would read as a
+    # `homeassistant.call_action` service aimed at whatever it targets.
+    name_is_no_service = False
+    if origin is not None and origin.admin_api:
+        if origin.read_only:
+            return False
+        name_is_no_service = (origin.tool_name or tool_name) == CALL_ACTION_TOOL
+        if name_is_no_service and not call_service_names(tool_args).dotted:
+            return True  # which service it runs cannot be read
+
     # An intent script's tool names no domain or service, and one may take
     # over a built-in intent's tool; what it runs is checked first, and only
     # ever adds a hold (#779).
@@ -4515,7 +4528,10 @@ def _is_critical_action(  # noqa: PLR0911, PLR0912
     if any(
         _named_service_is_critical(action, tool_args, entities, critical_actions, hass)
         for action in named_services(
-            tool_args, tool_name, hass, rule_domains(critical_actions)
+            tool_args,
+            "" if name_is_no_service else tool_name,
+            hass,
+            rule_domains(critical_actions),
         )
     ):
         return True

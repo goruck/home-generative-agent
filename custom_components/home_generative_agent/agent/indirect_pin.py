@@ -156,6 +156,8 @@ _INLINE_STATE_SERVICES = {"on": "turn_on", "off": "turn_off"}
 
 # The tool HA gives each script is `script__<object id>`: two parts.
 _SCRIPT_TOOL_PARTS = 2
+# The tool of Home Assistant's admin-only API that calls any action (#918).
+CALL_ACTION_TOOL = f"homeassistant{TOOL_NAMESPACE_SEP}call_action"
 _OBJECT_ID = re.compile(r"[a-z0-9_]+")
 
 # Target states that name one service when a scene reproduces them. Any other
@@ -243,6 +245,9 @@ class ToolOrigin:
     # The tool's own name at its API: a remote Home Assistant's tools reach
     # the agent under their server's name (#843).
     tool_name: str | None = None
+    # An API only an admin's turn can load, such as Home Assistant's own
+    # "Home Assistant" API (#918).
+    admin_api: bool = False
 
 
 def tool_origin(
@@ -316,6 +321,8 @@ def tool_origin(
         remote=remote,
         read_only=read_only,
         tool_name=own,
+        admin_api=getattr(getattr(instance, "api", None), "requires_admin", False)
+        is True,
     )
 
 

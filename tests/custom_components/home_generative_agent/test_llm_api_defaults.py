@@ -185,14 +185,15 @@ def _admin_api_registry() -> Any:
 
 
 @pytest.mark.asyncio
-async def test_options_flow_refuses_a_selection_of_only_unsupported_apis(
+async def test_options_flow_refuses_a_selection_of_only_admin_apis(
     hass: Any,
 ) -> None:
     """
-    A selection holding only APIs the agent does not load is refused.
+    A selection holding only admin-only APIs is refused.
 
-    It is not empty, so the empty-selection check passed it, and every
-    conversation then failed with "No LLM APIs could be loaded" (#998).
+    It is not empty, so the empty-selection check passed it, and a voice
+    satellite's conversation, or one by a user who is not an admin, then
+    failed with "No LLM APIs could be loaded" (#998, #918).
     """
     flow = _options_flow(
         hass, {CONF_LLM_HASS_API: [llm.LLM_API_ASSIST, "homeassistant"]}
@@ -205,22 +206,22 @@ async def test_options_flow_refuses_a_selection_of_only_unsupported_apis(
         )
 
     assert result["type"] == FlowResultType.FORM
-    assert result["errors"] == {"base": "llm_api_unsupported"}
+    assert result["errors"] == {"base": "llm_api_admin_only"}
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "selection",
     [
-        pytest.param([llm.LLM_API_ASSIST, "homeassistant"], id="with-a-supported"),
+        pytest.param([llm.LLM_API_ASSIST, "homeassistant"], id="with-one-for-everyone"),
         # Unregistered is often a transient MCP outage, kept on purpose (#568).
         pytest.param(["homeassistant", "mcp-gone"], id="with-an-unregistered"),
     ],
 )
-async def test_options_flow_saves_an_unsupported_api_beside_another(
+async def test_options_flow_saves_an_admin_only_api_beside_another(
     hass: Any, selection: list[str]
 ) -> None:
-    """An unsupported API is refused only when nothing else is selected."""
+    """An admin-only API is refused only when nothing else is selected."""
     flow = _options_flow(hass, {CONF_LLM_HASS_API: [llm.LLM_API_ASSIST]})
 
     with _admin_api_registry():
