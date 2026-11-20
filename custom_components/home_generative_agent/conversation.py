@@ -1539,7 +1539,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         if not active_apis:
             msg = (
                 "No LLM APIs could be loaded. "
-                f"Failed: {', '.join(failed_apis)}. "
+                + (f"Failed: {', '.join(failed_apis)}. " if failed_apis else "")
                 + (
                     f"For admin users only: {', '.join(admin_only_apis)}. "
                     if admin_only_apis
@@ -3072,6 +3072,20 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 discovered_api_ids.update(
                     api.id for api in registered_apis if llm_api_requires_admin(api)
                 )
+                # A full pass run by an admin's turn has the API in hand:
+                # its tools are indexed now, so that turn can retrieve them.
+                if llm_api is not None:
+                    for api_id, api_instance in llm_api.apis.items():
+                        if api_id in discovered_api_ids:
+                            self._queue_api_instance_tools(
+                                api_id,
+                                api_instance,
+                                runtime_data,
+                                index_tasks,
+                                new_hashes,
+                                seen_keys,
+                                remote_judged=llm_api.remote_home_assistants,
+                            )
                 # 1. Index Providers
                 await self._async_discover_provider_tools(
                     llm_context,

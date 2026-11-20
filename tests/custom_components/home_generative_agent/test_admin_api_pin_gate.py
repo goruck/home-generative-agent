@@ -16,10 +16,15 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from homeassistant.core import Context
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import llm
 from homeassistant.setup import async_setup_component
 
+from custom_components.home_generative_agent.agent.automation_pin import (
+    find_critical_automation_calls,
+)
 from custom_components.home_generative_agent.agent.graph import (
+    _get_allowed_api_ids,
     _is_critical_action,
     _run_ha_tool,
 )
@@ -117,7 +122,8 @@ async def admin_api(hass: HomeAssistant, hass_admin_user: MockUser) -> SimpleNam
             ]
         },
     )
-    for domain in ("system_log", "search", "config", "llm"):
+    hass.states.async_set("cover.shade", "closed", {"friendly_name": "Shade"})
+    for domain in ("system_log", "system_health", "search", "config", "llm"):
         assert await async_setup_component(hass, domain, {})
     await hass.async_block_till_done()
     instance = await llm.async_get_api(
@@ -261,6 +267,86 @@ async def test_the_api_is_known_as_an_admin_one(admin_api: SimpleNamespace) -> N
             },
             id="helper-starts-automation",
         ),
+        # Home Assistant renders a field's name, and the rendered one replaces
+        # the same name given plainly: each of these acted on the second
+        # (#918 review). Any templated field name is held.
+        pytest.param(
+            {
+                "action": "cover.open_cover",
+                "data": {
+                    "entity_id": "cover.shade",
+                    "entity_id{# #}": "cover.garage_door",
+                },
+            },
+            id="comment-field-name-garage",
+        ),
+        pytest.param(
+            {
+                "action": "script.turn_on",
+                "data": {
+                    "entity_id": "script.porch",
+                    "entity_id{# #}": "script.unlock_door",
+                },
+            },
+            id="comment-field-name-script",
+        ),
+        pytest.param(
+            {
+                "action": "homeassistant.toggle",
+                "data": {
+                    "entity_id": "light.porch",
+                    "entity_id{##}": "cover.garage_door",
+                },
+            },
+            id="comment-field-name-generic",
+        ),
+        pytest.param(
+            {
+                "action": "scene.apply",
+                "data": {
+                    "entities": {"light.porch": "on"},
+                    "entities{##}": {"lock.front_door": "unlocked"},
+                },
+            },
+            id="comment-field-name-scene",
+        ),
+        pytest.param(
+            {
+                "action": "scene.apply",
+                "data": {
+                    "entities": {"light.porch": "on", "lock.front_door{##}": "unlocked"}
+                },
+            },
+            id="comment-field-name-nested",
+        ),
+        pytest.param(
+            {
+                "action": "input_boolean.turn_on",
+                "data": {
+                    "entity_id": "input_boolean.other",
+                    "entity_id{##}": "input_boolean.home",
+                },
+            },
+            id="comment-field-name-helper",
+        ),
+        pytest.param(
+            {
+                "action": "cover.open_cover",
+                "target": {
+                    "entity_id": "cover.shade",
+                    "{% if true %}entity_id{% endif %}": "cover.garage_door",
+                },
+            },
+            id="statement-field-name-target",
+        ),
+        pytest.param(
+            {
+                "action": "light.turn_on",
+                "target": {"entity_id": "light.porch"},
+                "data": {"brightness{# #}": 100},
+            },
+            id="comment-field-name-harmless",
+        ),
         pytest.param({"action": "shell_command.open_garage"}, id="shell-command"),
         pytest.param({"action": "rest_command.open_garage"}, id="rest-command"),
         pytest.param({"action": "python_script.do_it"}, id="python-script"),
@@ -370,10 +456,16 @@ async def test_a_read_only_tool_is_never_held(
     assert not _held(hass, admin_api, tool_name, args)
 
 
-async def test_every_tool_of_the_api_is_accounted_for(
+async def test_the_tools_that_can_write_are_the_two_looked_at(
     admin_api: SimpleNamespace,
 ) -> None:
-    """A tool Home Assistant adds to the API has to be looked at here first."""
+    """
+    A writing tool added to the integrations set up here has to be looked at.
+
+    Not every integration that adds tools to the API is set up (`history`
+    needs the recorder, `hassio` a supervisor), and a custom one may add its
+    own; a tool not read here is read as any other tool is.
+    """
     writing = {
         tool.name
         for tool in admin_api.apis[ADMIN_API].tools
@@ -498,3 +590,62 @@ async def test_a_guarded_call_is_held_and_does_not_run(
     (held,) = turn.pending_actions.values()
     assert held["api_id"] == ADMIN_API
     assert held["tool_args"] == {"action": "lock.unlock", "target": FRONT_DOOR}
+
+
+async def test_a_guarded_call_behind_a_comment_field_name_does_not_run(
+    hass: HomeAssistant, admin_api: SimpleNamespace
+) -> None:
+    """The decoy target is not what Home Assistant would act on (#918 review)."""
+    opened: list[Any] = []
+    hass.services.async_register("cover", "open_cover", opened.append)
+    turn = _turn(hass, admin_api)
+
+    result = await _run_ha_tool(
+        CALL_ACTION_TOOL,
+        {
+            "action": "cover.open_cover",
+            "data": {"entity_id": "cover.shade", "entity_id{# #}": "cover.garage_door"},
+        },
+        turn,
+        {"id": "call1"},
+    )
+
+    assert "requires_pin" in str(result.content)
+    assert opened == []
+    assert len(turn.pending_actions) == 1
+
+
+@pytest.mark.usefixtures("admin_api")
+async def test_an_automation_step_with_a_comment_field_name_is_held(
+    hass: HomeAssistant,
+) -> None:
+    """The same step in an automation the agent writes is held too."""
+    step = cv.script_action(
+        {
+            "action": "cover.open_cover",
+            "data": {"entity_id": "cover.shade", "entity_id{# #}": "cover.garage_door"},
+        }
+    )
+
+    assert find_critical_automation_calls(
+        {"actions": [step]}, expand_critical_rules(hass, RECOMMENDED_CRITICAL_ACTIONS)
+    )
+
+
+def test_retrieval_skips_an_api_the_turn_did_not_load() -> None:
+    """A satellite's turn does not spend retrieval places on the admin API's tools."""
+    config: Any = {
+        "configurable": {
+            "options": {"llm_hass_api": ["assist", ADMIN_API]},
+            "ha_llm_api": SimpleNamespace(apis={"assist": object()}),
+        }
+    }
+
+    assert _get_allowed_api_ids(config) == {"assist", "hga_local"}
+    config["configurable"]["ha_llm_api"] = SimpleNamespace(
+        apis={"assist": object(), ADMIN_API: object()}
+    )
+    assert _get_allowed_api_ids(config) == {"assist", ADMIN_API, "hga_local"}
+    # With no API to read (a test, a robot run), the configured ones as before.
+    del config["configurable"]["ha_llm_api"]
+    assert _get_allowed_api_ids(config) == {"assist", ADMIN_API, "hga_local"}

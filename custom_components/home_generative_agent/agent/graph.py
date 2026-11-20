@@ -167,6 +167,7 @@ from .indirect_pin import (
     calls_a_service,
     collect_started_automations,
     has_service,
+    has_templated_key,
     intent_scripts_are_critical,
     is_script_like_tool,
     named_services,
@@ -966,8 +967,15 @@ class RawTool(TypedDict):
 
 def _get_allowed_api_ids(config: RunnableConfig) -> set[str]:
     """Determine which API IDs are allowed based on configuration."""
-    opts = config.get("configurable", {}).get("options", {})
-    return set(active_llm_api_ids(opts)) | {"hga_local"}
+    configurable = config.get("configurable", {})
+    allowed = set(active_llm_api_ids(configurable.get("options", {})))
+    # An API this turn did not load has no tool to call: an admin-only one on
+    # a satellite's turn (#918), or one that failed to load. Its index rows
+    # would only take the places of tools the turn can use.
+    loaded = getattr(configurable.get("ha_llm_api"), "apis", None)
+    if isinstance(loaded, Mapping):
+        allowed &= set(loaded)
+    return allowed | {"hga_local"}
 
 
 def _get_live_tool_ids(config: RunnableConfig) -> set[tuple[str, str]] | None:
@@ -4471,8 +4479,12 @@ def _is_critical_action(  # noqa: PLR0911, PLR0912
         if origin.read_only:
             return False
         name_is_no_service = (origin.tool_name or tool_name) == CALL_ACTION_TOOL
-        if name_is_no_service and not call_service_names(tool_args).dotted:
-            return True  # which service it runs cannot be read
+        if name_is_no_service and (
+            not call_service_names(tool_args).dotted or has_templated_key(tool_args)
+        ):
+            # Which service it runs, or which field a templated name
+            # becomes, cannot be read.
+            return True
 
     # An intent script's tool names no domain or service, and one may take
     # over a built-in intent's tool; what it runs is checked first, and only

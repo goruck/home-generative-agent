@@ -202,7 +202,9 @@ def _unverifiable(service: str, reason: str) -> CriticalAutomationCall:
 def _is_template(value: Any) -> bool:
     """Return True if a config value is (or contains) a template."""
     if isinstance(value, str):
-        return "{{" in value or "{%" in value
+        # A comment counts, as it does for Home Assistant (`is_template_string`):
+        # a field named `entity_id{# #}` renders to `entity_id` (#918 review).
+        return "{{" in value or "{%" in value or "{#" in value
     # Validated dynamic templates are Template objects, not strings.
     return hasattr(value, "template")
 

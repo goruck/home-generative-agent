@@ -561,6 +561,40 @@ async def test_index_tools_leaves_an_admin_only_api_to_the_turn_that_loads_it() 
     assert "homeassistant" in evict.await_args.args[2]
 
 
+@pytest.mark.asyncio
+async def test_index_tools_full_pass_on_an_admins_turn_indexes_its_tools() -> None:
+    """
+    A full pass run by a turn that loaded the admin-only API indexes it.
+
+    Left to the next turn's top-up, the admin's first turn after a restart
+    could not retrieve the API's tools (#918 review).
+    """
+    entity = _index_entity()
+    rd = _index_runtime_data(tool_index_ready=False, tool_content_hashes={})
+    admin_instance = MagicMock()
+    assist_instance = MagicMock()
+    llm_api = MagicMock()
+    llm_api.apis = {"assist": assist_instance, "homeassistant": admin_instance}
+    queue = MagicMock()
+
+    with (
+        patch.object(entity, "_async_discover_provider_tools", new=AsyncMock()),
+        patch.object(entity, "_async_discover_local_tools", new=AsyncMock()),
+        patch.object(entity, "_async_evict_stale_tool_index_rows", new=AsyncMock()),
+        patch.object(entity, "_queue_api_instance_tools", new=queue),
+        patch(
+            f"{_CONV}.llm.async_get_apis",
+            return_value=[_plain_api("assist"), _admin_api("homeassistant")],
+        ),
+        patch(f"{_CONV}.async_dispatcher_send"),
+    ):
+        await entity._async_index_tools(MagicMock(), rd, llm_api)
+
+    assert [call.args[:2] for call in queue.call_args_list] == [
+        ("homeassistant", admin_instance)
+    ]
+
+
 # ---------------------------------------------------------------------------
 # _run_tool_index_background failure path
 # ---------------------------------------------------------------------------

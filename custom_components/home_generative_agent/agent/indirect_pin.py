@@ -158,6 +158,30 @@ _INLINE_STATE_SERVICES = {"on": "turn_on", "off": "turn_off"}
 _SCRIPT_TOOL_PARTS = 2
 # The tool of Home Assistant's admin-only API that calls any action (#918).
 CALL_ACTION_TOOL = f"homeassistant{TOOL_NAMESPACE_SEP}call_action"
+
+
+def has_templated_key(value: object) -> bool:
+    """
+    Return True if a field name anywhere in a call's arguments is a template.
+
+    Home Assistant renders the names of an action's fields as it renders
+    their values, and a name rendered later replaces the same name given
+    plainly: `{"entity_id": "cover.shade", "entity_id{# #}": "cover.garage"}`
+    opens the garage. A call that names a field so cannot be read (#918
+    review).
+    """
+    if isinstance(value, Mapping):
+        return any(
+            not isinstance(key, str)
+            or any(mark in key for mark in _TEMPLATE_MARKS)
+            or has_templated_key(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(has_templated_key(item) for item in value)
+    return False
+
+
 _OBJECT_ID = re.compile(r"[a-z0-9_]+")
 
 # Target states that name one service when a scene reproduces them. Any other
@@ -1079,7 +1103,8 @@ def _stored_call(call: str, entity_id: str) -> CriticalAutomationCall:
 # `<domain>.<service>` the way HA spells a service.
 _SERVICE_NAME_SHAPE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
 _SERVICE_SLUG = re.compile(r"^[a-z0-9_]+$")
-_TEMPLATE_MARKS = ("{{", "{%")
+# A comment is one too, as it is for Home Assistant (#918 review).
+_TEMPLATE_MARKS = ("{{", "{%", "{#")
 # Spaces and zero-width characters, which a tool may strip from a name.
 _NAME_SPACE = re.compile(r"[\s\u200b-\u200d\u2060\ufeff]+")
 # Domains whose services a tool may send to another Home Assistant, or that
