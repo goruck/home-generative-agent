@@ -371,3 +371,24 @@ async def test_a_try_that_began_before_it_answered_does_not_undo_that() -> None:
 
     assert calls == 3
     assert fallback.ainvoke.await_count == 1
+
+
+@pytest.mark.parametrize("wrapper", [FallbackChatModel, FallbackVLM])
+@pytest.mark.asyncio
+async def test_a_fallback_that_uses_up_the_time_ends_the_call_as_a_timeout(
+    wrapper: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The provider moved last is not tried in the margin, hiding the timeout."""
+    model, primary, fallback = _chain(httpx.ConnectTimeout(""), wrapper)
+
+    async def _hang(*_a: Any, **_k: Any) -> None:
+        await asyncio.sleep(30)
+
+    with skipping_unreachable_providers(), model_call_budget(180):
+        await model.ainvoke(["first"])
+        fallback.ainvoke.side_effect = _hang
+        monkeypatch.setattr(fallback_module, "member_timeout", lambda **_k: 0.05)
+        with pytest.raises(TimeoutError):
+            await model.ainvoke(["second"])
+
+    assert primary.ainvoke.await_count == 1

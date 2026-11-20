@@ -1109,12 +1109,16 @@ def _handle_member_failure(  # noqa: PLR0913
     deadline: float | None,
     split: bool,
     half_open: bool = False,
+    took_the_rest: bool = False,
 ) -> bool:
     """
     Log and count a failed member; announce the provider tried next.
 
     Returns True when the call should stop here: the budget was not split and
     this member used it up, so the next provider would get only the margin.
+    The same holds for a member given all that was left ahead of the ones
+    this turn could not reach (`took_the_rest`): one of those refusing in the
+    margin would replace this member's timeout as the call's error.
     A failed half-open try (#881) is logged at debug, since its breaker
     opening was logged already and an outage would repeat it every few
     seconds, unless the provider lacks the model; it leaves the cooldown as
@@ -1124,7 +1128,7 @@ def _handle_member_failure(  # noqa: PLR0913
     _model, _deployment, provider_id = wrapper.chain[i]
     lone = len(wrapper.chain) == 1
     now = asyncio.get_running_loop().time()
-    spent = not split and deadline is not None and now >= deadline
+    spent = (not split or took_the_rest) and deadline is not None and now >= deadline
     if lone:
         # A lone provider's caller reports the error, as it did before every
         # model was wrapped (#828); there is no next provider to announce.
@@ -1422,6 +1426,7 @@ class FallbackChatModel:
                     deadline=deadline,
                     split=split,
                     half_open=half_open,
+                    took_the_rest=sharing < len(members) and pos == sharing - 1,
                 ):
                     break
                 continue
@@ -1546,6 +1551,7 @@ class FallbackVLM:
                     deadline=deadline,
                     split=split,
                     half_open=half_open,
+                    took_the_rest=sharing < len(members) and pos == sharing - 1,
                 ):
                     break
                 continue
