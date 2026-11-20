@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import httpx
 import httpx2
 import openai
@@ -49,6 +50,10 @@ def _chain(
     return model, primary, fallback
 
 
+def _raise(err: Exception) -> Any:
+    raise err
+
+
 def _api_connection_error(cause: Exception) -> Exception:
     err = openai.APIConnectionError(request=httpx2.Request("POST", "https://api"))
     err.__cause__ = cause
@@ -65,6 +70,14 @@ def _api_connection_error(cause: Exception) -> Exception:
         (ConnectionError("Failed to connect to Ollama."), True),
         (ConnectionRefusedError(111, "Connection refused"), True),
         (_api_connection_error(httpx2.ConnectError("refused")), True),
+        # The Gemini client connects through aiohttp.
+        (aiohttp.ConnectionTimeoutError(), True),
+        (
+            aiohttp.ClientConnectorError(MagicMock(), OSError(113, "No route to host")),
+            True,
+        ),
+        (aiohttp.ServerDisconnectedError(), False),
+        (aiohttp.SocketTimeoutError(), False),
         # Connected, then went quiet or dropped: not evidence it is unreachable.
         (httpx.ReadTimeout(""), False),
         (httpx.RemoteProtocolError("Server disconnected"), False),
@@ -132,19 +145,42 @@ async def test_a_provider_that_was_reached_is_tried_again(err: Exception) -> Non
 
 
 @pytest.mark.asyncio
-async def test_a_chain_is_never_emptied() -> None:
-    """With every member unreachable, each is still tried on the next call."""
+async def test_it_is_tried_last_when_the_fallback_cannot_answer() -> None:
+    """A fallback that fails costs nothing new: the primary is still tried."""
     model, primary, fallback = _chain(httpx.ConnectTimeout(""))
-    fallback.ainvoke.side_effect = httpx.ConnectError("refused")
-    fallback.ainvoke.return_value = None
+    order: list[str] = []
+    primary.ainvoke.side_effect = lambda *_a, **_k: (
+        order.append("air") or _raise(httpx.ConnectTimeout(""))
+    )
+    fallback.ainvoke.side_effect = lambda *_a, **_k: (
+        order.append("mini") or _raise(httpx.ReadTimeout(""))
+    )
 
     with skipping_unreachable_providers():
         for _call in range(2):
             with pytest.raises(HomeAssistantError):
                 await model.ainvoke(["hello"])
 
-    assert primary.ainvoke.await_count == 2
-    assert fallback.ainvoke.await_count == 2
+    assert order == ["air", "mini", "mini", "air"]
+
+
+@pytest.mark.asyncio
+async def test_an_answer_puts_it_back_in_its_place() -> None:
+    """It woke up mid-turn and answered when the fallback failed."""
+    model, primary, fallback = _chain(httpx.ConnectTimeout(""))
+
+    with skipping_unreachable_providers():
+        await model.ainvoke(["first"])
+        primary.ainvoke.side_effect = None
+        primary.ainvoke.return_value = _Reply()
+        fallback.ainvoke.side_effect = httpx.ReadTimeout("")
+        await model.ainvoke(["second"])  # mini fails, air answers
+        fallback.ainvoke.reset_mock(side_effect=True)
+        fallback.ainvoke.return_value = _Reply()
+        await model.ainvoke(["third"])
+
+    assert primary.ainvoke.await_count == 3
+    assert fallback.ainvoke.await_count == 0
 
 
 @pytest.mark.asyncio
@@ -210,20 +246,61 @@ async def test_two_turns_at_once_do_not_share_it() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_skipped_call_still_counts_toward_the_breaker() -> None:
-    """Three calls of one turn opened the breaker before; they still do."""
-    breaker = CircuitBreaker(threshold=3, window_seconds=60, cooldown_seconds=120)
-    model, primary, _fallback = _chain(httpx.ConnectTimeout(""), breaker=breaker)
+async def test_a_call_not_made_is_not_counted_by_any_breaker() -> None:
+    """One failed connection is one failure, for the chain that saw it."""
+    chat_breaker = CircuitBreaker(threshold=3, window_seconds=60, cooldown_seconds=120)
+    vlm_breaker = CircuitBreaker(threshold=1, window_seconds=60, cooldown_seconds=120)
+    chat, primary, _ = _chain(httpx.ConnectTimeout(""), breaker=chat_breaker)
+    vlm, vlm_primary, _ = _chain(httpx.ConnectTimeout(""), FallbackVLM, vlm_breaker)
+
+    with skipping_unreachable_providers():
+        for _call in range(4):
+            await chat.ainvoke(["hello"])
+            await vlm.ainvoke(["frame"])
+
+    assert primary.ainvoke.await_count == 1
+    assert vlm_primary.ainvoke.await_count == 0
+    assert chat_breaker.is_available("air")
+    assert vlm_breaker.is_available("air")
+
+
+@pytest.mark.asyncio
+async def test_a_task_that_outlives_the_turn_tries_it_again() -> None:
+    """A camera worker started by a tool's state change keeps the context."""
+    model, primary, _fallback = _chain(httpx.ConnectTimeout(""))
+    turn_over = asyncio.Event()
+
+    async def _worker() -> None:
+        await turn_over.wait()
+        await model.ainvoke(["frame"])
+        await model.ainvoke(["frame"])
 
     with skipping_unreachable_providers():
         await model.ainvoke(["first"])
-        await model.ainvoke(["second"])
-        assert breaker.is_available("air")
-        await model.ainvoke(["third"])
+        worker = asyncio.create_task(_worker())
+    turn_over.set()
+    await worker
 
-    assert primary.ainvoke.await_count == 1
-    assert not breaker.is_available("air")
-    # The breaker now holds it out of the next turn, as it did before.
+    assert primary.ainvoke.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_half_open_tries_keep_the_order_the_breaker_chose() -> None:
+    """With every breaker open, the primary is still the first one tried (#881)."""
+    breaker = CircuitBreaker(
+        threshold=1, window_seconds=60, cooldown_seconds=120, probe_interval_seconds=0
+    )
+    model, primary, fallback = _chain(httpx.ConnectTimeout(""), breaker=breaker)
+    fallback.ainvoke.side_effect = httpx.ReadTimeout("")
+    order: list[str] = []
+
     with skipping_unreachable_providers():
-        await model.ainvoke(["next turn"])
-    assert primary.ainvoke.await_count == 1
+        with pytest.raises(HomeAssistantError):
+            await model.ainvoke(["first"])  # opens both breakers
+        primary.ainvoke.side_effect = lambda *_a, **_k: order.append("air") or _Reply()
+        fallback.ainvoke.side_effect = lambda *_a, **_k: (
+            order.append("mini") or _Reply()
+        )
+        await model.ainvoke(["second"])
+
+    assert order == ["air"]
