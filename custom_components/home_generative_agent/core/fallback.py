@@ -8,9 +8,12 @@ import logging
 import math
 import re
 from collections import Counter
+from contextlib import contextmanager
+from contextvars import ContextVar
 from time import monotonic
 from typing import TYPE_CHECKING, Any, cast
 
+import aiohttp
 from homeassistant.exceptions import HomeAssistantError
 from langchain_core.messages import HumanMessage
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
@@ -29,6 +32,7 @@ if TYPE_CHECKING:
         Awaitable,
         Callable,
         Collection,
+        Generator,
         Iterable,
         Sequence,
     )
@@ -67,6 +71,9 @@ except ImportError:
 _HTTP_TRANSPORT_ERRORS: tuple[type[Exception], ...] = ()
 _HTTP_TIMEOUTS: tuple[type[Exception], ...] = ()
 _HTTP_POOL_TIMEOUTS: tuple[type[Exception], ...] = ()
+# aiohttp's ConnectionTimeoutError is left out: it also covers a wait for a
+# free slot in our own connection pool.
+_CONNECT_ERRORS: tuple[type[Exception], ...] = (aiohttp.ClientConnectorError,)
 for _http_module in ("httpx", "httpx2"):
     try:
         _http = importlib.import_module(_http_module)
@@ -75,6 +82,7 @@ for _http_module in ("httpx", "httpx2"):
     _HTTP_TRANSPORT_ERRORS += (_http.TransportError,)
     _HTTP_TIMEOUTS += (_http.TimeoutException,)
     _HTTP_POOL_TIMEOUTS += (_http.PoolTimeout,)
+    _CONNECT_ERRORS += (_http.ConnectError, _http.ConnectTimeout)
 FALLBACK_RETRYABLE_EXCEPTIONS += _HTTP_TRANSPORT_ERRORS
 
 try:
@@ -369,6 +377,100 @@ def is_connection_error(err: BaseException) -> bool:
             return True
         seen = seen.__cause__
     return False
+
+
+def never_connected(err: BaseException) -> bool:
+    """
+    Return True if no connection to the provider was made at all.
+
+    A refused connection, an address nothing answers at, or a server that
+    takes the attempt and never completes it (a sleeping Mac, #1026). The
+    Ollama client raises a plain ``ConnectionError`` for the first two, and
+    the Gemini client connects through aiohttp. A connection that was made
+    and then dropped or went quiet does not count.
+    """
+    seen: BaseException | None = err
+    for _ in range(_MAX_CAUSE_DEPTH):
+        if seen is None:
+            return False
+        if isinstance(seen, (ConnectionRefusedError, *_CONNECT_ERRORS)):
+            return True
+        if type(seen) is ConnectionError:
+            return True
+        seen = seen.__cause__
+    return False
+
+
+class _TurnScope:
+    """The providers one conversation turn could not connect to."""
+
+    def __init__(self) -> None:
+        self.unreachable: set[str] = set()
+        # When each provider last answered, on the loop's clock: a try that
+        # began before that and fails after it says nothing new.
+        self.answered_at: dict[str, float] = {}
+        # A task the turn started keeps this object after the turn has ended
+        # (a camera worker started from a state change a tool caused), so the
+        # turn's end closes it: what the turn learned stops applying.
+        self.closed = False
+
+
+# A turn that uses a tool calls the model at least twice, and each call waited
+# out the connect timeout on a sleeping server before its fallback answered
+# (#1027). The scope lives for one turn and changes only the order that turn's
+# calls try a chain in, unlike the stall tracker and the circuit breakers, so
+# it cannot hold a provider out of another feature. Tasks the turn starts
+# share it.
+_turn_scope: ContextVar[_TurnScope | None] = ContextVar("hga_turn_scope", default=None)
+
+
+@contextmanager
+def skipping_unreachable_providers() -> Generator[None]:
+    """Try last, in the calls made inside, a provider one of them could not reach."""
+    scope = _TurnScope()
+    token = _turn_scope.set(scope)
+    try:
+        yield
+    finally:
+        scope.closed = True
+        scope.unreachable.clear()
+        _turn_scope.reset(token)
+
+
+def _open_turn() -> _TurnScope | None:
+    """Return the turn's scope while the turn is running, else None."""
+    scope = _turn_scope.get()
+    return None if scope is None or scope.closed else scope
+
+
+def _unreachable_last(
+    wrapper: FallbackChatModel | FallbackVLM, members: list[int], probes: list[str]
+) -> tuple[list[int], int]:
+    """
+    Move the members an earlier call of this turn could not connect to last.
+
+    They are still tried when every other member fails, so a fallback that
+    cannot answer costs nothing new. Nothing is counted against a member for
+    being moved, and a call made of half-open tries keeps its order, which
+    the breaker chose (#881).
+
+    Also returns how many members share the caller's time. The moved ones do
+    not: the member ahead of them gets all that is left, as it did when it
+    was tried after them, and they get what it leaves.
+    """
+    scope = _open_turn()
+    if scope is None or not scope.unreachable or probes:
+        return members, len(members)
+    unreachable = scope.unreachable
+    first = [i for i in members if wrapper.chain[i][2] not in unreachable]
+    last = [i for i in members if wrapper.chain[i][2] in unreachable]
+    if not first or not last:
+        return members, len(members)
+    LOGGER.debug(
+        "Not reached earlier in this turn, so tried last: %s",
+        ", ".join(wrapper.chain[i][2] for i in last),
+    )
+    return first + last, len(first)
 
 
 def _is_retryable(err: Exception) -> bool:
@@ -1007,12 +1109,16 @@ def _handle_member_failure(  # noqa: PLR0913
     deadline: float | None,
     split: bool,
     half_open: bool = False,
+    took_the_rest: bool = False,
 ) -> bool:
     """
     Log and count a failed member; announce the provider tried next.
 
     Returns True when the call should stop here: the budget was not split and
     this member used it up, so the next provider would get only the margin.
+    The same holds for a member given all that was left ahead of the ones
+    this turn could not reach (`took_the_rest`): one of those refusing in the
+    margin would replace this member's timeout as the call's error.
     A failed half-open try (#881) is logged at debug, since its breaker
     opening was logged already and an outage would repeat it every few
     seconds, unless the provider lacks the model; it leaves the cooldown as
@@ -1022,7 +1128,7 @@ def _handle_member_failure(  # noqa: PLR0913
     _model, _deployment, provider_id = wrapper.chain[i]
     lone = len(wrapper.chain) == 1
     now = asyncio.get_running_loop().time()
-    spent = not split and deadline is not None and now >= deadline
+    spent = (not split or took_the_rest) and deadline is not None and now >= deadline
     if lone:
         # A lone provider's caller reports the error, as it did before every
         # model was wrapped (#828); there is no next provider to announce.
@@ -1043,6 +1149,14 @@ def _handle_member_failure(  # noqa: PLR0913
         _log_provider_failure(kind, provider_id, i + 1, len(wrapper.chain), err)
     if wrapper.circuit_breaker and not half_open:
         wrapper.circuit_breaker.record_failure(provider_id)
+    scope = _open_turn()
+    if (
+        scope is not None
+        and not lone
+        and never_connected(err)
+        and started >= scope.answered_at.get(provider_id, 0.0)
+    ):
+        scope.unreachable.add(provider_id)
     # Only a long wait is evidence of a hang: a slow model missing a short
     # Sentinel deadline, or our own connection pool timing out, is not a
     # stalled provider.
@@ -1077,6 +1191,11 @@ def _record_answer(
         circuit_breaker.record_success(provider_id)
     if stall_tracker:
         stall_tracker.record_success(provider_id)
+    # It answered, whichever chain asked: the turn tries it in place again.
+    scope = _open_turn()
+    if scope is not None:
+        scope.unreachable.discard(provider_id)
+        scope.answered_at[provider_id] = asyncio.get_running_loop().time()
 
 
 class FallbackChatModel:
@@ -1242,12 +1361,13 @@ class FallbackChatModel:
             raise _no_member_error(
                 self.chain, "LLM", self.circuit_breaker, self.stall_tracker
             )
+        members, sharing = _unreachable_last(self, members, probes)
         last_err: Exception | None = None
         split = budget_is_split()
         taken = False
         for pos, i in enumerate(members):
             model, _deployment, provider_id = self.chain[i]
-            timeout_s = member_timeout(last=pos == len(members) - 1)
+            timeout_s = member_timeout(last=pos >= sharing - 1)
             if _budget_used_up(timeout_s):
                 break
             # Closed meanwhile by another call's answer: tried as usual.
@@ -1306,6 +1426,7 @@ class FallbackChatModel:
                     deadline=deadline,
                     split=split,
                     half_open=half_open,
+                    took_the_rest=sharing < len(members) and pos == sharing - 1,
                 ):
                     break
                 continue
@@ -1391,12 +1512,13 @@ class FallbackVLM:
             raise _no_member_error(
                 self.chain, "VLM", self.circuit_breaker, self.stall_tracker
             )
+        members, sharing = _unreachable_last(self, members, probes)
         last_err: Exception | None = None
         split = budget_is_split()
         taken = False
         for pos, i in enumerate(members):
             model, _deployment, provider_id = self.chain[i]
-            timeout_s = member_timeout(last=pos == len(members) - 1)
+            timeout_s = member_timeout(last=pos >= sharing - 1)
             if _budget_used_up(timeout_s):
                 break
             # Closed meanwhile by another call's answer: tried as usual.
@@ -1429,6 +1551,7 @@ class FallbackVLM:
                     deadline=deadline,
                     split=split,
                     half_open=half_open,
+                    took_the_rest=sharing < len(members) and pos == sharing - 1,
                 ):
                     break
                 continue
