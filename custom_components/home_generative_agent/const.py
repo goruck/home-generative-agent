@@ -1296,6 +1296,16 @@ SPEAKER_UNKNOWN_PROMPT = (
     "do not address them by name."
 )
 
+# Added to a satellite turn. A reply that ends in a question makes the Assist
+# pipeline reopen the microphone, so a closing "Anything else?" costs the user
+# another turn, and stray noise heard then becomes a turn nobody made (#954).
+# The wording never mentions offers: a clause that named them made qwen3:8b
+# offer in 29 of 40 replies where it had offered in none.
+VOICE_TURN_PROMPT = (
+    "This reply will be spoken aloud. End it with a statement, not a question, "
+    "unless you need an answer before you can do what the user asked."
+)
+
 # Stable-prefix line naming the configured mobile push service, so an
 # automation that notifies the user's phone is written with the real service
 # on the first try instead of hunting for it with lookups the model has no
