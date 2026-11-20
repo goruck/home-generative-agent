@@ -154,6 +154,7 @@ from .core.fallback import (
     EMBEDDING_TIMEOUT_HOLD_S,
     EmbeddingsCircuitOpenError,
     EmbeddingsUnavailableError,
+    skipping_unreachable_providers,
 )
 from .core.memories import memory_user as memory_store_user
 from .core.pipeline_guard import async_check_pin_pipeline_conflict
@@ -2487,16 +2488,19 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         # stored prompt is then a live one (end_pin_turn, #974).
         pin_turn_id = ulid.ulid_now()
         try:
+            # A provider this turn cannot connect to is tried once, not once
+            # per model call (#1027).
             async with local_chat_session(deployment, category="chat"):
-                return await self._async_handle_message_active(
-                    user_input,
-                    chat_log,
-                    intent_response,
-                    llm_context,
-                    message_history,
-                    conversation_id,
-                    pin_turn_id=pin_turn_id,
-                )
+                with skipping_unreachable_providers():
+                    return await self._async_handle_message_active(
+                        user_input,
+                        chat_log,
+                        intent_response,
+                        llm_context,
+                        message_history,
+                        conversation_id,
+                        pin_turn_id=pin_turn_id,
+                    )
         finally:
             end_pin_turn(runtime_data.pending_actions, pin_turn_id)
 
