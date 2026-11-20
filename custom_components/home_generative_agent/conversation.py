@@ -3073,10 +3073,13 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     api.id for api in registered_apis if llm_api_requires_admin(api)
                 )
                 # A full pass run by an admin's turn has the API in hand:
-                # its tools are indexed now, so that turn can retrieve them.
+                # its tools are indexed in this pass, so their rows are kept
+                # and the next turn needs no top-up.
                 if llm_api is not None:
                     for api_id, api_instance in llm_api.apis.items():
-                        if api_id in discovered_api_ids:
+                        if api_id not in discovered_api_ids:
+                            continue
+                        try:
                             self._queue_api_instance_tools(
                                 api_id,
                                 api_instance,
@@ -3085,6 +3088,12 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                                 new_hashes,
                                 seen_keys,
                                 remote_judged=llm_api.remote_home_assistants,
+                            )
+                        except Exception as err:  # noqa: BLE001
+                            _LOGGER.warning(
+                                "Failed to queue tools of loaded API %s: %s",
+                                api_id,
+                                err,
                             )
                 # 1. Index Providers
                 await self._async_discover_provider_tools(

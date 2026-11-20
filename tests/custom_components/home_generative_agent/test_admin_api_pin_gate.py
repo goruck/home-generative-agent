@@ -21,6 +21,7 @@ from homeassistant.helpers import llm
 from homeassistant.setup import async_setup_component
 
 from custom_components.home_generative_agent.agent.automation_pin import (
+    _is_template,
     find_critical_automation_calls,
 )
 from custom_components.home_generative_agent.agent.graph import (
@@ -38,6 +39,7 @@ from custom_components.home_generative_agent.agent.pin_messages import (
 from custom_components.home_generative_agent.agent.rule_entities import (
     expand_critical_rules,
 )
+from custom_components.home_generative_agent.agent.template_actions import _templated
 from custom_components.home_generative_agent.const import (
     RECOMMENDED_CRITICAL_ACTIONS,
 )
@@ -649,3 +651,10 @@ def test_retrieval_skips_an_api_the_turn_did_not_load() -> None:
     # With no API to read (a test, a robot run), the configured ones as before.
     del config["configurable"]["ha_llm_api"]
     assert _get_allowed_api_ids(config) == {"assist", ADMIN_API, "hga_local"}
+
+
+@pytest.mark.parametrize("text", ["{{ x }}", "{% if x %}a{% endif %}", "a{# #}b"])
+def test_a_comment_is_a_template_wherever_templates_are_looked_for(text: str) -> None:
+    """Home Assistant renders all three forms (`is_template_string`)."""
+    assert _is_template(text)
+    assert _templated([text])

@@ -566,8 +566,8 @@ async def test_index_tools_full_pass_on_an_admins_turn_indexes_its_tools() -> No
     """
     A full pass run by a turn that loaded the admin-only API indexes it.
 
-    Left to the next turn's top-up, the admin's first turn after a restart
-    could not retrieve the API's tools (#918 review).
+    Its rows are then kept by the pass's eviction, and the next turn needs
+    no top-up (#918 review).
     """
     entity = _index_entity()
     rd = _index_runtime_data(tool_index_ready=False, tool_content_hashes={})
@@ -576,11 +576,12 @@ async def test_index_tools_full_pass_on_an_admins_turn_indexes_its_tools() -> No
     llm_api = MagicMock()
     llm_api.apis = {"assist": assist_instance, "homeassistant": admin_instance}
     queue = MagicMock()
+    evict = AsyncMock()
 
     with (
         patch.object(entity, "_async_discover_provider_tools", new=AsyncMock()),
         patch.object(entity, "_async_discover_local_tools", new=AsyncMock()),
-        patch.object(entity, "_async_evict_stale_tool_index_rows", new=AsyncMock()),
+        patch.object(entity, "_async_evict_stale_tool_index_rows", new=evict),
         patch.object(entity, "_queue_api_instance_tools", new=queue),
         patch(
             f"{_CONV}.llm.async_get_apis",
@@ -593,6 +594,9 @@ async def test_index_tools_full_pass_on_an_admins_turn_indexes_its_tools() -> No
     assert [call.args[:2] for call in queue.call_args_list] == [
         ("homeassistant", admin_instance)
     ]
+    # Handed the pass's seen keys, which is what keeps its rows from eviction.
+    assert evict.await_args is not None
+    assert queue.call_args.args[5] is evict.await_args.args[1]
 
 
 # ---------------------------------------------------------------------------
