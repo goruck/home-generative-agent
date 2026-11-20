@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import sys
 import types
@@ -64,6 +65,7 @@ _stub_ha_conversation()
 
 from custom_components.home_generative_agent import conversation as hga_conversation
 from custom_components.home_generative_agent.agent.helpers import chat_log_tool_result
+from custom_components.home_generative_agent.const import VOICE_TURN_PROMPT
 from custom_components.home_generative_agent.conversation import (
     _get_synthetic_rejections,
     _handle_on_chain_end,
@@ -73,6 +75,7 @@ from custom_components.home_generative_agent.conversation import (
     _sanitize_tool_result_dict,
     _stream_langgraph_to_ha,
     _voice_tool_acknowledgement,
+    _voice_turn_prompt,
     _with_tool_acknowledgement,
 )
 from custom_components.home_generative_agent.core.utils import extract_final
@@ -1200,6 +1203,42 @@ def test_acknowledgement_only_on_satellite_turns(
 
     assert _voice_tool_acknowledgement(options, user_input).text == expected
     assert _voice_tool_acknowledgement({}, user_input).text == ""
+
+
+@pytest.mark.parametrize(
+    ("satellite_id", "device_id", "spoken"),
+    [
+        ("assist_satellite.voice_pe", None, True),
+        (None, "voice_device", False),
+        (None, None, False),
+    ],
+)
+def test_only_a_satellite_turn_is_told_its_reply_is_spoken(
+    satellite_id: str | None, device_id: str | None, *, spoken: bool
+) -> None:
+    """A reply ending in a question reopens a satellite's microphone (#954)."""
+    user_input = cast(
+        "Any", types.SimpleNamespace(satellite_id=satellite_id, device_id=device_id)
+    )
+
+    assert _voice_turn_prompt(user_input) == (VOICE_TURN_PROMPT if spoken else "")
+
+
+def test_the_spoken_turn_instruction_keeps_needed_questions_and_names_no_offer() -> (
+    None
+):
+    """Naming offers in the clause made a local model offer more, not less."""
+    assert "not a question, unless you need an answer" in VOICE_TURN_PROMPT
+    assert "offer" not in VOICE_TURN_PROMPT.lower()
+
+
+def test_the_spoken_turn_instruction_reaches_the_volatile_prompt() -> None:
+    """It varies by turn, so it must stay out of the cached stable prefix."""
+    src = inspect.getsource(
+        hga_conversation.HGAConversationEntity._async_handle_message_active
+    )
+    joined = src[src.index('volatile_prompt = "\\n".join(') :]
+    assert "_voice_turn_prompt(user_input)" in joined[: joined.index("base_llm")]
 
 
 @pytest.mark.parametrize(

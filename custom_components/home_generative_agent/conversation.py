@@ -142,6 +142,7 @@ from .const import (
     VOICE_ACK_TIMING_TOOL_CALL,
     VOICE_ACK_TIMING_TURN_START,
     VOICE_ACK_TIMINGS,
+    VOICE_TURN_PROMPT,
 )
 from .core.conversation_helpers import (
     _convert_schema_json_to_yaml,
@@ -683,6 +684,17 @@ def _voice_tool_acknowledgement(
     if timing not in VOICE_ACK_TIMINGS:
         timing = RECOMMENDED_VOICE_ACK_TIMING
     return VoiceAck(text, str(timing))
+
+
+def _voice_turn_prompt(user_input: conversation.ConversationInput) -> str:
+    """
+    Return the instruction for a spoken turn; empty for a typed one.
+
+    Only a satellite turn counts, as for the acknowledgement: there a reply
+    ending in a question reopens the microphone (#954). It changes between
+    turns of one conversation, so it goes in the volatile part of the prompt.
+    """
+    return VOICE_TURN_PROMPT if user_input.satellite_id else ""
 
 
 def _get_stt_hallucination_patterns(
@@ -2589,7 +2601,14 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             llm_context, user_name, llm_api, has_tools=bool(tools)
         )
         volatile_prompt = "\n".join(
-            filter(None, [volatile_prompt, self._speaker_prompt(speaker)])
+            filter(
+                None,
+                [
+                    volatile_prompt,
+                    self._speaker_prompt(speaker),
+                    _voice_turn_prompt(user_input),
+                ],
+            )
         )
 
         # Use the already-configured chat model from __init__.py.
