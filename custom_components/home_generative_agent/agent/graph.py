@@ -225,7 +225,8 @@ _OPEN_STATE_RETRY_PHRASES: frozenset[str] = frozenset(
 class State(MessagesState):
     """Extend MessagesState."""
 
-    summary: str
+    # Not required: a turn's input leaves it out so the checkpoint's is kept.
+    summary: NotRequired[str]
     chat_model_usage_metadata: dict[str, Any]
     messages_to_remove: list[AnyMessage]
     selected_tools: list[dict[str, Any]]

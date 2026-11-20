@@ -1271,6 +1271,25 @@ class Speaker:
         return self.person or self.name or STATE_UNKNOWN
 
 
+def _turn_input(messages: list[AnyMessage]) -> State:
+    """
+    Return the graph input that starts a turn.
+
+    Every key given here replaces what the conversation's checkpoint holds, so
+    the per-turn fields are reset and ``summary`` is left out: giving it as ""
+    wiped the summary of the trimmed turns at the start of every turn, before
+    the agent read it (#1048).
+    """
+    return {
+        "messages": messages,
+        "chat_model_usage_metadata": {},
+        "messages_to_remove": [],
+        "selected_tools": [],
+        "tool_routing_map": {},
+        "turn_memories": {},
+    }
+
+
 class HGAConversationEntity(conversation.ConversationEntity, AbstractConversationAgent):
     """Home Generative Assistant conversation agent."""
 
@@ -2645,15 +2664,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             *message_history,
             HumanMessage(content=user_input.text, id=ulid.ulid_now()),
         ]
-        app_input: State = {
-            "messages": messages,
-            "summary": "",
-            "chat_model_usage_metadata": {},
-            "messages_to_remove": [],
-            "selected_tools": [],
-            "tool_routing_map": {},
-            "turn_memories": {},
-        }
+        app_input = _turn_input(messages)
 
         # Interact with agent app.
         if options.get(CONF_SCHEMA_FIRST_YAML, False):
