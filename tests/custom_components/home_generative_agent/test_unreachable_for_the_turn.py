@@ -20,12 +20,16 @@ import openai
 import pytest
 from homeassistant.exceptions import HomeAssistantError
 
+from custom_components.home_generative_agent.core import fallback as fallback_module
 from custom_components.home_generative_agent.core.fallback import (
     CircuitBreaker,
     FallbackChatModel,
     FallbackVLM,
     never_connected,
     skipping_unreachable_providers,
+)
+from custom_components.home_generative_agent.core.provider_stall import (
+    model_call_budget,
 )
 
 
@@ -71,13 +75,14 @@ def _api_connection_error(cause: Exception) -> Exception:
         (ConnectionRefusedError(111, "Connection refused"), True),
         (_api_connection_error(httpx2.ConnectError("refused")), True),
         # The Gemini client connects through aiohttp.
-        (aiohttp.ConnectionTimeoutError(), True),
         (
             aiohttp.ClientConnectorError(MagicMock(), OSError(113, "No route to host")),
             True,
         ),
         (aiohttp.ServerDisconnectedError(), False),
         (aiohttp.SocketTimeoutError(), False),
+        # Also raised while waiting for a slot in our own connection pool.
+        (aiohttp.ConnectionTimeoutError(), False),
         # Connected, then went quiet or dropped: not evidence it is unreachable.
         (httpx.ReadTimeout(""), False),
         (httpx.RemoteProtocolError("Server disconnected"), False),
@@ -304,3 +309,65 @@ async def test_half_open_tries_keep_the_order_the_breaker_chose() -> None:
         await model.ainvoke(["second"])
 
     assert order == ["air"]
+
+
+@pytest.mark.parametrize("wrapper", [FallbackChatModel, FallbackVLM])
+@pytest.mark.asyncio
+async def test_the_fallback_tried_first_keeps_all_the_time_that_is_left(
+    wrapper: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tried after the primary it got the rest of the budget, not half of it."""
+    model, _primary, fallback = _chain(httpx.ConnectTimeout(""), wrapper)
+    shares: list[float | None] = []
+    real = fallback_module.member_timeout
+
+    def _share(*, last: bool) -> float | None:
+        shares.append(real(last=last))
+        return shares[-1]
+
+    monkeypatch.setattr(fallback_module, "member_timeout", _share)
+
+    with skipping_unreachable_providers(), model_call_budget(180):
+        await model.ainvoke(["first"])
+        shares.clear()
+        await model.ainvoke(["second"])
+        assert shares[0] is not None
+        assert shares[0] > 150, "the fallback was given half"
+        shares.clear()
+        fallback.ainvoke.side_effect = httpx.ReadTimeout("")
+        with pytest.raises(HomeAssistantError):
+            await model.ainvoke(["third"])
+        # The provider moved last gets what the fallback left, not nothing.
+        assert len(shares) == 2
+        assert shares[1] is not None
+        assert shares[1] > 150
+
+
+@pytest.mark.asyncio
+async def test_a_try_that_began_before_it_answered_does_not_undo_that() -> None:
+    """Two calls at once: the slow one's connect timeout lands after an answer."""
+    model, primary, fallback = _chain(httpx.ConnectTimeout(""))
+    release = asyncio.Event()
+    calls = 0
+
+    async def _primary(*_a: Any, **_k: Any) -> _Reply:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await release.wait()
+            _raise(httpx.ConnectTimeout(""))
+        return _Reply()
+
+    primary.ainvoke.side_effect = _primary
+
+    with skipping_unreachable_providers():
+        stale = asyncio.create_task(model.ainvoke(["old"]))
+        await asyncio.sleep(0.01)
+        await model.ainvoke(["answers"])
+        await asyncio.sleep(0.01)
+        release.set()
+        await stale
+        await model.ainvoke(["after"])
+
+    assert calls == 3
+    assert fallback.ainvoke.await_count == 1

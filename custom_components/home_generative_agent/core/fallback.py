@@ -71,10 +71,9 @@ except ImportError:
 _HTTP_TRANSPORT_ERRORS: tuple[type[Exception], ...] = ()
 _HTTP_TIMEOUTS: tuple[type[Exception], ...] = ()
 _HTTP_POOL_TIMEOUTS: tuple[type[Exception], ...] = ()
-_CONNECT_ERRORS: tuple[type[Exception], ...] = (
-    aiohttp.ClientConnectorError,
-    aiohttp.ConnectionTimeoutError,
-)
+# aiohttp's ConnectionTimeoutError is left out: it also covers a wait for a
+# free slot in our own connection pool.
+_CONNECT_ERRORS: tuple[type[Exception], ...] = (aiohttp.ClientConnectorError,)
 for _http_module in ("httpx", "httpx2"):
     try:
         _http = importlib.import_module(_http_module)
@@ -407,6 +406,9 @@ class _TurnScope:
 
     def __init__(self) -> None:
         self.unreachable: set[str] = set()
+        # When each provider last answered, on the loop's clock: a try that
+        # began before that and fails after it says nothing new.
+        self.answered_at: dict[str, float] = {}
         # A task the turn started keeps this object after the turn has ended
         # (a camera worker started from a state change a tool caused), so the
         # turn's end closes it: what the turn learned stops applying.
@@ -435,15 +437,15 @@ def skipping_unreachable_providers() -> Generator[None]:
         _turn_scope.reset(token)
 
 
-def _turn_unreachable() -> set[str] | None:
-    """Return the open turn's unreachable providers, or None outside a turn."""
+def _open_turn() -> _TurnScope | None:
+    """Return the turn's scope while the turn is running, else None."""
     scope = _turn_scope.get()
-    return None if scope is None or scope.closed else scope.unreachable
+    return None if scope is None or scope.closed else scope
 
 
 def _unreachable_last(
     wrapper: FallbackChatModel | FallbackVLM, members: list[int], probes: list[str]
-) -> list[int]:
+) -> tuple[list[int], int]:
     """
     Move the members an earlier call of this turn could not connect to last.
 
@@ -451,19 +453,24 @@ def _unreachable_last(
     cannot answer costs nothing new. Nothing is counted against a member for
     being moved, and a call made of half-open tries keeps its order, which
     the breaker chose (#881).
+
+    Also returns how many members share the caller's time. The moved ones do
+    not: the member ahead of them gets all that is left, as it did when it
+    was tried after them, and they get what it leaves.
     """
-    unreachable = _turn_unreachable()
-    if not unreachable or probes:
-        return members
+    scope = _open_turn()
+    if scope is None or not scope.unreachable or probes:
+        return members, len(members)
+    unreachable = scope.unreachable
     first = [i for i in members if wrapper.chain[i][2] not in unreachable]
     last = [i for i in members if wrapper.chain[i][2] in unreachable]
     if not first or not last:
-        return members
+        return members, len(members)
     LOGGER.debug(
         "Not reached earlier in this turn, so tried last: %s",
         ", ".join(wrapper.chain[i][2] for i in last),
     )
-    return first + last
+    return first + last, len(first)
 
 
 def _is_retryable(err: Exception) -> bool:
@@ -1138,9 +1145,14 @@ def _handle_member_failure(  # noqa: PLR0913
         _log_provider_failure(kind, provider_id, i + 1, len(wrapper.chain), err)
     if wrapper.circuit_breaker and not half_open:
         wrapper.circuit_breaker.record_failure(provider_id)
-    unreachable = _turn_unreachable()
-    if unreachable is not None and not lone and never_connected(err):
-        unreachable.add(provider_id)
+    scope = _open_turn()
+    if (
+        scope is not None
+        and not lone
+        and never_connected(err)
+        and started >= scope.answered_at.get(provider_id, 0.0)
+    ):
+        scope.unreachable.add(provider_id)
     # Only a long wait is evidence of a hang: a slow model missing a short
     # Sentinel deadline, or our own connection pool timing out, is not a
     # stalled provider.
@@ -1176,9 +1188,10 @@ def _record_answer(
     if stall_tracker:
         stall_tracker.record_success(provider_id)
     # It answered, whichever chain asked: the turn tries it in place again.
-    unreachable = _turn_unreachable()
-    if unreachable:
-        unreachable.discard(provider_id)
+    scope = _open_turn()
+    if scope is not None:
+        scope.unreachable.discard(provider_id)
+        scope.answered_at[provider_id] = asyncio.get_running_loop().time()
 
 
 class FallbackChatModel:
@@ -1344,13 +1357,13 @@ class FallbackChatModel:
             raise _no_member_error(
                 self.chain, "LLM", self.circuit_breaker, self.stall_tracker
             )
-        members = _unreachable_last(self, members, probes)
+        members, sharing = _unreachable_last(self, members, probes)
         last_err: Exception | None = None
         split = budget_is_split()
         taken = False
         for pos, i in enumerate(members):
             model, _deployment, provider_id = self.chain[i]
-            timeout_s = member_timeout(last=pos == len(members) - 1)
+            timeout_s = member_timeout(last=pos >= sharing - 1)
             if _budget_used_up(timeout_s):
                 break
             # Closed meanwhile by another call's answer: tried as usual.
@@ -1494,13 +1507,13 @@ class FallbackVLM:
             raise _no_member_error(
                 self.chain, "VLM", self.circuit_breaker, self.stall_tracker
             )
-        members = _unreachable_last(self, members, probes)
+        members, sharing = _unreachable_last(self, members, probes)
         last_err: Exception | None = None
         split = budget_is_split()
         taken = False
         for pos, i in enumerate(members):
             model, _deployment, provider_id = self.chain[i]
-            timeout_s = member_timeout(last=pos == len(members) - 1)
+            timeout_s = member_timeout(last=pos >= sharing - 1)
             if _budget_used_up(timeout_s):
                 break
             # Closed meanwhile by another call's answer: tried as usual.
