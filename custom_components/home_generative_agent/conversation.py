@@ -699,6 +699,11 @@ def _voice_turn_prompt(user_input: conversation.ConversationInput) -> str:
     return VOICE_TURN_PROMPT if user_input.satellite_id else ""
 
 
+def _decline_entry(language: str | None) -> tuple[str, str, str] | None:
+    """Return the turn's language's entry of DECLINE_FOLLOW_UPS, if it has one."""
+    return DECLINE_FOLLOW_UPS.get((language or "").split("-")[0].lower())
+
+
 def _decline_reply(text: str, language: str | None) -> str | None:
     """
     Return the fixed line for a reply that only declines; None for any other.
@@ -706,32 +711,66 @@ def _decline_reply(text: str, language: str | None) -> str | None:
     The pattern is the turn's language's, and the whole reply has to match,
     so "No, the kitchen one" is left for the model (#954).
     """
-    entry = DECLINE_FOLLOW_UPS.get((language or "").split("-")[0].lower())
+    entry = _decline_entry(language)
     if entry is None:
         return None
-    pattern, reply = entry
     return (
-        reply
-        if re.fullmatch(rf"\W*(?:{pattern})\W*", text, flags=re.IGNORECASE)
+        entry[2]
+        if re.fullmatch(rf"\W*(?:{entry[0]})\W*", text, flags=re.IGNORECASE)
         else None
     )
 
 
-def _asks_a_question(message: object) -> bool:
-    """Return True for a reply of the agent's that ends by asking something."""
-    if not isinstance(message, AIMessage) or message.tool_calls:
+def _asks_if_there_is_more(text: object, language: str | None) -> bool:
+    """
+    Return True for a reply that ends by asking only whether there is more.
+
+    "Is there anything else I can help with?" is closed by a "No"; any other
+    question may need the "No" for something, and is the model's (#954).
+    """
+    entry = _decline_entry(language)
+    if entry is None or not isinstance(text, str):
         return False
+    text = text.rstrip()
+    if not text.endswith(_CONTINUE_MARKS):
+        return False
+    last_sentence = re.split(r"[.!?;\uff1f\n]", text[:-1])[-1]
+    return bool(re.search(entry[1], last_sentence, flags=re.IGNORECASE))
+
+
+def _message_text(message: object) -> str | None:
+    """Return the text of a reply of the agent's that calls no tool."""
+    if not isinstance(message, AIMessage) or message.tool_calls:
+        return None
     content = message.content
-    text = (
-        content
-        if isinstance(content, str)
-        else " ".join(
-            str(part.get("text", ""))
-            for part in content
-            if isinstance(part, dict) and part.get("type") == "text"
-        )
+    if isinstance(content, str):
+        return content
+    return " ".join(
+        str(part.get("text", ""))
+        for part in content
+        if isinstance(part, dict) and part.get("type") == "text"
     )
-    return text.rstrip().endswith(_CONTINUE_MARKS)
+
+
+def _reply_before_this_turn(
+    chat_log: conversation.ChatLog, agent_id: str
+) -> str | None:
+    """
+    Return what the conversation last heard, when this agent said it.
+
+    The chat log holds what was spoken, fixed lines included, by every agent
+    on the pipeline; its last entry is this turn's request.
+    """
+    for entry in reversed(chat_log.content):
+        if getattr(entry, "role", None) == "user":
+            continue
+        if (
+            getattr(entry, "role", None) == "assistant"
+            and getattr(entry, "agent_id", None) == agent_id
+        ):
+            return getattr(entry, "content", None)
+        return None
+    return None
 
 
 def _get_stt_hallucination_patterns(
@@ -2511,29 +2550,40 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         thread_id: str,
     ) -> conversation.ConversationResult | None:
         """
-        Answer a spoken "No" to the agent's question with a fixed line.
+        Answer a spoken "No" to the agent's closing question with a fixed line.
 
         A reply ending in a question reopens a satellite's microphone, and a
         bare decline then cost a model call, and a spoken acknowledgement
-        before it, to hear "OK" (#954). Only a satellite turn whose whole text
-        declines, said right after a reply of ours on this thread that asked
-        something, is answered here. A PIN prompt asks too, and its answer is
-        never taken from here: any held action on the thread leaves the turn
-        to the model. The exchange is saved to the thread, so the next turn
-        reads the question as answered. Returns None for a turn left to the
-        model, which includes any failure to read or save the thread.
+        before it, to hear "OK" (#954). Answered here is only a satellite
+        turn whose whole text declines, when the last thing the conversation
+        heard was this agent asking whether there is more to do, and the
+        speaker's thread ends with that question too: another voice's or
+        another agent's question is not this speaker's to close, and a fixed
+        line added after the model's reply is in the chat log only. A PIN
+        prompt asks too, and its answer is never taken from here: any held
+        action on the thread or conversation leaves the turn to the model.
+        The exchange is saved to the thread, so the next turn reads the
+        question as answered. Returns None for a turn left to the model,
+        which includes any failure to read or save the thread.
         """
+        language = user_input.language
         reply = (
-            _decline_reply(user_input.text, user_input.language)
+            _decline_reply(user_input.text, language)
             if user_input.satellite_id
             else None
         )
         runtime_data = self.entry.runtime_data
-        if reply is None or any(
-            thread_id in (action.get("thread_id"), action.get("voice_thread"))
-            or chat_log.conversation_id
-            in (action.get("thread_id"), action.get("voice_conversation"))
-            for action in runtime_data.pending_actions.values()
+        if (
+            reply is None
+            or not _asks_if_there_is_more(
+                _reply_before_this_turn(chat_log, self.entity_id), language
+            )
+            or any(
+                thread_id in (action.get("thread_id"), action.get("voice_thread"))
+                or chat_log.conversation_id
+                in (action.get("thread_id"), action.get("voice_conversation"))
+                for action in runtime_data.pending_actions.values()
+            )
         ):
             return None
         config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
@@ -2543,7 +2593,13 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             )
             state = await app.aget_state(config)
             history = state.values.get("messages") or []
-            if not history or not _asks_a_question(history[-1]):
+            # `next` is set when the turn before was cut short: its trimming
+            # is still owed, and writing as the last node would skip it.
+            if (
+                state.next
+                or not history
+                or not _asks_if_there_is_more(_message_text(history[-1]), language)
+            ):
                 return None
             await app.aupdate_state(
                 config,
