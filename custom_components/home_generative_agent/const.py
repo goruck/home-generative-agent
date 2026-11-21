@@ -1818,7 +1818,9 @@ ACTUATION_TOOL_PREFIXES = (
     "HassWaterHeater",
 )
 
-ACTUATION_LANGCHAIN_TOOLS = ("alarm_control",)
+# The last two are the tools of Home Assistant's admin-only API that change
+# something (#918); the rest of that API only reads.
+ACTUATION_LANGCHAIN_TOOLS = ("alarm_control", "call_action", "reload_config_entry")
 
 # Said when a turn ends with nothing to say: a model reply with no text and no
 # tool call, or a turn that committed no reply at all (#946).

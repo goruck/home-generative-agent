@@ -599,6 +599,39 @@ async def test_index_tools_full_pass_on_an_admins_turn_indexes_its_tools() -> No
     assert queue.call_args.args[5] is evict.await_args.args[1]
 
 
+@pytest.mark.asyncio
+async def test_index_tools_full_pass_keeps_admin_rows_when_reading_them_fails() -> None:
+    """
+    An admin API whose tools could not all be read keeps its rows.
+
+    The pass did not see every tool, so evicting the API's unseen rows would
+    drop live ones (#918 review).
+    """
+    entity = _index_entity()
+    rd = _index_runtime_data(tool_index_ready=False, tool_content_hashes={})
+    llm_api = MagicMock()
+    llm_api.apis = {"homeassistant": MagicMock()}
+    evict = AsyncMock()
+
+    with (
+        patch.object(entity, "_async_discover_provider_tools", new=AsyncMock()),
+        patch.object(entity, "_async_discover_local_tools", new=AsyncMock()),
+        patch.object(entity, "_async_evict_stale_tool_index_rows", new=evict),
+        patch.object(
+            entity, "_queue_api_instance_tools", new=MagicMock(side_effect=ValueError)
+        ),
+        patch(
+            f"{_CONV}.llm.async_get_apis",
+            return_value=[_plain_api("assist"), _admin_api("homeassistant")],
+        ),
+        patch(f"{_CONV}.async_dispatcher_send"),
+    ):
+        await entity._async_index_tools(MagicMock(), rd, llm_api)
+
+    assert evict.await_args is not None
+    assert "homeassistant" not in evict.await_args.args[2]
+
+
 # ---------------------------------------------------------------------------
 # _run_tool_index_background failure path
 # ---------------------------------------------------------------------------

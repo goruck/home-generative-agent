@@ -603,6 +603,9 @@ def _critical_action_guard(  # noqa: PLR0913
         # The tool's own name there, which a remote one's differs from (#843).
         "api_tool_name": origin.tool_name if origin is not None else None,
         "remote": origin is not None and origin.remote,
+        # A tool of Home Assistant's admin-only API (#918): one that is not
+        # its call-action tool names no device, so the line names the tool.
+        "admin_api": origin is not None and origin.admin_api,
     }
     action_id = register_pending_action(
         ctx.pending_actions,
@@ -4479,9 +4482,13 @@ def _is_critical_action(  # noqa: PLR0911, PLR0912
         if origin.read_only:
             return False
         name_is_no_service = (origin.tool_name or tool_name) == CALL_ACTION_TOOL
-        if name_is_no_service and (
-            not call_service_names(tool_args).dotted or has_templated_key(tool_args)
-        ):
+        if not name_is_no_service:
+            # A tool that changes something and names no service, such as
+            # `config__reload_config_entry`: reloading an entry makes its
+            # entities unavailable for a moment, and an automation may act
+            # on that. What it sets off cannot be read from its arguments.
+            return True
+        if not call_service_names(tool_args).dotted or has_templated_key(tool_args):
             # Which service it runs, or which field a templated name
             # becomes, cannot be read.
             return True

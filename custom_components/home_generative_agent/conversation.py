@@ -3095,6 +3095,9 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                                 api_id,
                                 err,
                             )
+                            # Its tools were not all read, so the rows of the
+                            # ones missed must not be dropped.
+                            discovered_api_ids.discard(api_id)
                 # 1. Index Providers
                 await self._async_discover_provider_tools(
                     llm_context,

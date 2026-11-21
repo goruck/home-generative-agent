@@ -29,6 +29,7 @@ from custom_components.home_generative_agent.agent.graph import (
     _is_critical_action,
     _run_ha_tool,
 )
+from custom_components.home_generative_agent.agent.helpers import is_actuation_tool
 from custom_components.home_generative_agent.agent.indirect_pin import (
     CALL_ACTION_TOOL,
     tool_origin,
@@ -477,13 +478,29 @@ async def test_the_tools_that_can_write_are_the_two_looked_at(
     assert writing == {CALL_ACTION_TOOL, "config__reload_config_entry"}
 
 
-async def test_reloading_an_integration_needs_no_pin(
+async def test_reloading_an_integration_needs_the_pin(
     hass: HomeAssistant, admin_api: SimpleNamespace
 ) -> None:
-    """Reloading a config entry moves no device."""
-    assert not _held(
+    """
+    A reload names no service, and what it sets off cannot be read.
+
+    Its entities go unavailable for a moment, which an automation may be
+    waiting for.
+    """
+    assert _held(
         hass, admin_api, "config__reload_config_entry", {"entry_id": "hue:8K2M"}
     )
+
+
+@pytest.mark.parametrize("tool_name", [CALL_ACTION_TOOL, "config__reload_config_entry"])
+def test_the_writing_tools_count_as_actuation(tool_name: str) -> None:
+    """A question about a state does not keep a tool that can change one."""
+    assert is_actuation_tool(tool_name)
+
+
+def test_a_reading_tool_is_not_actuation() -> None:
+    """The admin-only API's other tools stay available to a question."""
+    assert not is_actuation_tool("homeassistant__render_template")
 
 
 async def test_the_same_name_on_another_api_is_still_read_by_its_name(
@@ -515,6 +532,27 @@ async def test_the_pin_line_names_the_action(hass: HomeAssistant) -> None:
 
     assert "unlock" in line.lower()
     assert "front door" in line.lower()
+
+
+async def test_the_pin_line_names_a_tool_that_names_no_action(
+    hass: HomeAssistant,
+) -> None:
+    """A held reload reads as the tool and its arguments, not as a device."""
+    line = describe_pending_action(
+        hass,
+        {
+            "tool_name": "config__reload_config_entry",
+            "tool_args": {"entry_id": "hue:8K2M"},
+            "api_id": ADMIN_API,
+            "api_name": "Home Assistant",
+            "api_tool_name": "config__reload_config_entry",
+            "admin_api": True,
+        },
+    )
+
+    assert "reload_config_entry" in line
+    assert "hue:8K2M" in line
+    assert "Home Assistant" in line
 
 
 def _turn(hass: HomeAssistant, api: SimpleNamespace) -> Any:
