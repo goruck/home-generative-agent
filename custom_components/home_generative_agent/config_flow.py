@@ -40,9 +40,11 @@ from homeassistant.helpers.selector import (
 
 from .agent.helpers import (
     TOOL_KEY_SEP,
+    TOOL_NAMESPACE_SEP,
     active_llm_api_ids,
     admin_only_selection,
     api_id_is_form_representable,
+    base_tool_name,
     llm_api_requires_admin,
     normalize_api_tool_map,
     normalize_llm_api_value,
@@ -474,6 +476,55 @@ def _stale_selection_choices(
     return choices
 
 
+def _current_exclusion_names(selected: list[str], seen: set[str]) -> list[str]:
+    """
+    Replace an exclusion stored under a pre-2026.9 name with the tool it covers.
+
+    Home Assistant 2026.9 renamed its built-in tools to ``<domain>__<Name>``.
+    An exclusion saved before that holds the bare name (``HassTurnOff``) and
+    still excludes the renamed tool, because ``is_tool_excluded`` matches a bare
+    stored name by base name. The picker could not find the bare name among the
+    tools it lists, so it showed a working exclusion as "(not currently
+    available)" and the tool itself as not excluded (#950).
+
+    A bare name that covers exactly one listed tool of the same API is swapped
+    for that tool here, so the picker ticks the real tool and the next save
+    stores its current name. One that covers none stays as it is and keeps its
+    "not available" label, which is then true. One that covers several also
+    stays: it excludes all of them, and picking one would drop the others on
+    save.
+
+    Exclusions only. An always-included tool is matched by its exact name, so a
+    bare one there really does nothing.
+    """
+    by_base: dict[tuple[str, str], list[str]] = {}
+    for key in seen:
+        if (parts := split_tool_index_key(key)) is None:
+            continue
+        api_id, name = parts
+        if TOOL_NAMESPACE_SEP in name:
+            by_base.setdefault((api_id, base_tool_name(name)), []).append(key)
+
+    result: list[str] = []
+    for value in selected:
+        current = value
+        parts = split_tool_index_key(value)
+        if value not in seen and parts and TOOL_NAMESPACE_SEP not in parts[1]:
+            covered = by_base.get(parts, [])
+            if len(covered) == 1:
+                current = covered[0]
+            elif covered:
+                LOGGER.debug(
+                    "Stored tool exclusion %s covers %d current tools; keeping "
+                    "the stored name",
+                    sanitize_tool_text(value, limit=200),
+                    len(covered),
+                )
+        if current not in result:
+            result.append(current)
+    return result
+
+
 def _add_tool_picker(
     schema: VolDictType,
     conf_key: str,
@@ -583,7 +634,9 @@ async def _schema_for_options(
         indexed_keys,
     )
     selected_api_set = set(picker_apis)
-    selected_exclusions = _tool_map_as_list(opts.get(CONF_TOOL_EXCLUSIONS))
+    selected_exclusions = _current_exclusion_names(
+        _tool_map_as_list(opts.get(CONF_TOOL_EXCLUSIONS)), live_seen
+    )
     tool_exclusion_choices = live_choices + _stale_selection_choices(
         selected_exclusions, live_seen, api_names, selected_api_set
     )

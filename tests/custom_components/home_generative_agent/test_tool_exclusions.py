@@ -39,6 +39,7 @@ from custom_components.home_generative_agent.config_flow import (
 from custom_components.home_generative_agent.const import (
     CONF_MAX_MESSAGES_IN_CONTEXT,
     CONF_TOOL_EXCLUSIONS,
+    CONF_TOOL_INCLUSIONS,
     DOMAIN,
 )
 
@@ -1346,3 +1347,166 @@ def test_filter_excluded_tools_does_not_widen_a_namespaced_exclusion() -> None:
 
     assert [t.name for t in filtered.tools] == ["vendor__HassTurnOff"]
     assert dropped == ["intent__HassTurnOff"]
+
+
+# --------------------------------------------------------------------------
+# Exclusions stored under a pre-2026.9 tool name (#950)
+# --------------------------------------------------------------------------
+
+
+def _selected_exclusions(schema: dict[Any, Any]) -> list[str]:
+    """Return the exclusion picker's pre-filled selection."""
+    key = _schema_key(schema, CONF_TOOL_EXCLUSIONS)
+    return cast("Any", key).description["suggested_value"]
+
+
+@pytest.mark.asyncio
+async def test_a_bare_stored_exclusion_ticks_the_renamed_tool(hass: Any) -> None:
+    """
+    An exclusion saved as ``HassTurnOff`` shows as the tool it excludes.
+
+    It used to be listed as "HassTurnOff (not currently available)" beside an
+    unticked ``intent__HassTurnOff``, although that tool was excluded.
+    """
+    apis = [_FakeAPI(id="assist", name="Assist")]
+    instances = {
+        "assist": _api_instance(
+            [_FakeTool("intent__HassTurnOff"), _FakeTool("intent__HassTurnOn")]
+        )
+    }
+    get_apis, get_api = _patch_apis(apis, instances)
+
+    with get_apis, get_api:
+        schema = await _schema_for_options(
+            hass,
+            {
+                CONF_LLM_HASS_API: ["assist"],
+                CONF_TOOL_EXCLUSIONS: {"assist": ["HassTurnOff"]},
+            },
+        )
+
+    assert _selected_exclusions(schema) == ["assist::intent__HassTurnOff"]
+    assert _selector_options(schema) == [
+        {
+            "label": "Assist: intent__HassTurnOff",
+            "value": "assist::intent__HassTurnOff",
+        },
+        {"label": "Assist: intent__HassTurnOn", "value": "assist::intent__HassTurnOn"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_bare_stored_exclusion_with_no_current_tool_stays(hass: Any) -> None:
+    """A bare name that covers no listed tool keeps its "not available" label."""
+    apis = [_FakeAPI(id="assist", name="Assist")]
+    instances = {"assist": _api_instance([_FakeTool("intent__HassTurnOn")])}
+    get_apis, get_api = _patch_apis(apis, instances)
+
+    with get_apis, get_api:
+        schema = await _schema_for_options(
+            hass,
+            {
+                CONF_LLM_HASS_API: ["assist"],
+                CONF_TOOL_EXCLUSIONS: {"assist": ["HassTurnOff"]},
+            },
+        )
+
+    assert _selected_exclusions(schema) == ["assist::HassTurnOff"]
+    assert {
+        "label": f"Assist: HassTurnOff{_SUFFIX_NOT_AVAILABLE}",
+        "value": "assist::HassTurnOff",
+    } in _selector_options(schema)
+
+
+@pytest.mark.asyncio
+async def test_a_bare_stored_exclusion_covering_two_tools_stays(hass: Any) -> None:
+    """
+    A bare name that covers two tools is kept, since it excludes both.
+
+    Swapping it for one of them would stop excluding the other at the next
+    save.
+    """
+    apis = [_FakeAPI(id="assist", name="Assist")]
+    instances = {
+        "assist": _api_instance(
+            [_FakeTool("intent__HassTurnOff"), _FakeTool("lock__HassTurnOff")]
+        )
+    }
+    get_apis, get_api = _patch_apis(apis, instances)
+
+    with get_apis, get_api:
+        schema = await _schema_for_options(
+            hass,
+            {
+                CONF_LLM_HASS_API: ["assist"],
+                CONF_TOOL_EXCLUSIONS: {"assist": ["HassTurnOff"]},
+            },
+        )
+
+    assert _selected_exclusions(schema) == ["assist::HassTurnOff"]
+
+
+@pytest.mark.asyncio
+async def test_a_bare_name_is_matched_within_its_own_api_only(hass: Any) -> None:
+    """Another API's same-named tool is not ticked for this API's bare name."""
+    apis = [_FakeAPI(id="assist", name="Assist"), _FakeAPI(id="other", name="Other")]
+    instances = {
+        "assist": _api_instance([_FakeTool("intent__HassTurnOn")]),
+        "other": _api_instance([_FakeTool("intent__HassTurnOff")]),
+    }
+    get_apis, get_api = _patch_apis(apis, instances)
+
+    with get_apis, get_api:
+        schema = await _schema_for_options(
+            hass,
+            {
+                CONF_LLM_HASS_API: ["assist", "other"],
+                CONF_TOOL_EXCLUSIONS: {"assist": ["HassTurnOff"]},
+            },
+        )
+
+    assert _selected_exclusions(schema) == ["assist::HassTurnOff"]
+
+
+@pytest.mark.asyncio
+async def test_a_bare_and_a_current_exclusion_of_one_tool_tick_it_once(
+    hass: Any,
+) -> None:
+    """Both spellings of one exclusion become a single ticked tool."""
+    apis = [_FakeAPI(id="assist", name="Assist")]
+    instances = {"assist": _api_instance([_FakeTool("intent__HassTurnOff")])}
+    get_apis, get_api = _patch_apis(apis, instances)
+
+    with get_apis, get_api:
+        schema = await _schema_for_options(
+            hass,
+            {
+                CONF_LLM_HASS_API: ["assist"],
+                CONF_TOOL_EXCLUSIONS: {
+                    "assist": ["HassTurnOff", "intent__HassTurnOff"]
+                },
+            },
+        )
+
+    assert _selected_exclusions(schema) == ["assist::intent__HassTurnOff"]
+    assert len(_selector_options(schema)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_bare_always_included_tool_is_left_alone(hass: Any) -> None:
+    """An always-included tool is matched by exact name, so it is not swapped."""
+    apis = [_FakeAPI(id="assist", name="Assist")]
+    instances = {"assist": _api_instance([_FakeTool("intent__HassTurnOff")])}
+    get_apis, get_api = _patch_apis(apis, instances)
+
+    with get_apis, get_api:
+        schema = await _schema_for_options(
+            hass,
+            {
+                CONF_LLM_HASS_API: ["assist"],
+                CONF_TOOL_INCLUSIONS: {"assist": ["HassTurnOff"]},
+            },
+        )
+
+    key = _schema_key(schema, CONF_TOOL_INCLUSIONS)
+    assert cast("Any", key).description["suggested_value"] == ["assist::HassTurnOff"]
