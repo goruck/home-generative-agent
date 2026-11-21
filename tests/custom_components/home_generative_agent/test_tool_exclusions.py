@@ -28,8 +28,10 @@ from custom_components.home_generative_agent.agent.helpers import (
     tool_index_key,
 )
 from custom_components.home_generative_agent.config_flow import (
+    _NOTE_EXCLUDED_BY,
     _SUFFIX_NOT_AVAILABLE,
     _SUFFIX_NOT_SELECTED,
+    _SUFFIX_STILL_EXCLUDING,
     HomeGenerativeAgentOptionsFlow,
     _label_text,
     _list_as_tool_map,
@@ -39,6 +41,7 @@ from custom_components.home_generative_agent.config_flow import (
 from custom_components.home_generative_agent.const import (
     CONF_MAX_MESSAGES_IN_CONTEXT,
     CONF_TOOL_EXCLUSIONS,
+    CONF_TOOL_INCLUSIONS,
     DOMAIN,
 )
 
@@ -1346,3 +1349,343 @@ def test_filter_excluded_tools_does_not_widen_a_namespaced_exclusion() -> None:
 
     assert [t.name for t in filtered.tools] == ["vendor__HassTurnOff"]
     assert dropped == ["intent__HassTurnOff"]
+
+
+# --------------------------------------------------------------------------
+# Exclusions stored under a short pre-2026.9 tool name (#950)
+# --------------------------------------------------------------------------
+
+_OLD = {"assist": ["HassTurnOff"]}
+_EXCLUDED_BY_OLD = _NOTE_EXCLUDED_BY.format(name="HassTurnOff")
+_STALE_ROW = {
+    "label": f"Assist: HassTurnOff{_SUFFIX_STILL_EXCLUDING}",
+    "value": "assist::HassTurnOff",
+}
+
+
+def _selected_exclusions(schema: dict[Any, Any]) -> list[str]:
+    """Return the exclusion picker's pre-filled selection."""
+    key = _schema_key(schema, CONF_TOOL_EXCLUSIONS)
+    return cast("Any", key).description["suggested_value"]
+
+
+async def _assist_schema(
+    hass: Any,
+    tools: list[str],
+    options: dict[str, Any],
+    indexed_keys: set[str] | None = None,
+) -> dict[Any, Any]:
+    """Build the Options schema over an Assist API exposing ``tools``."""
+    get_apis, get_api = _patch_apis(
+        [_FakeAPI(id="assist", name="Assist")],
+        {"assist": _api_instance([_FakeTool(name) for name in tools])},
+    )
+    with get_apis, get_api:
+        return await _schema_for_options(
+            hass, {CONF_LLM_HASS_API: ["assist"], **options}, indexed_keys
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_short_stored_exclusion_names_the_tool_it_excludes(hass: Any) -> None:
+    """
+    An exclusion saved as ``HassTurnOff`` is shown as excluding the renamed tool.
+
+    It used to read "HassTurnOff (not currently available)" beside a plain
+    ``intent__HassTurnOff``, although that tool was excluded.
+    """
+    schema = await _assist_schema(
+        hass,
+        ["intent__HassTurnOff", "intent__HassTurnOn"],
+        {CONF_TOOL_EXCLUSIONS: _OLD},
+    )
+
+    assert _selector_options(schema) == [
+        {
+            "label": "Assist: intent__HassTurnOff" + _EXCLUDED_BY_OLD,
+            "value": "assist::intent__HassTurnOff",
+        },
+        {"label": "Assist: intent__HassTurnOn", "value": "assist::intent__HassTurnOn"},
+        _STALE_ROW,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_short_stored_exclusion_stays_the_selection(hass: Any) -> None:
+    """
+    The pre-filled selection is the stored name, not the tool it covers.
+
+    The stored name also covers same-named tools the form cannot list, so
+    swapping it for the listed one would stop excluding those at the next save.
+    """
+    schema = await _assist_schema(
+        hass, ["intent__HassTurnOff"], {CONF_TOOL_EXCLUSIONS: _OLD}
+    )
+
+    assert _selected_exclusions(schema) == ["assist::HassTurnOff"]
+
+
+@pytest.mark.asyncio
+async def test_saving_the_form_keeps_a_short_stored_exclusion(hass: Any) -> None:
+    """Opening the form and saving what it pre-filled stores the same name."""
+    flow = _options_flow(
+        hass, {CONF_LLM_HASS_API: ["assist"], CONF_TOOL_EXCLUSIONS: _OLD}
+    )
+    tools = ["intent__HassTurnOff", "lock__HassTurnOff", "intent__HassTurnOn"]
+    get_apis, get_api = _patch_apis(
+        [_FakeAPI(id="assist", name="Assist")],
+        {"assist": _api_instance([_FakeTool(name) for name in tools])},
+    )
+
+    with get_apis, get_api:
+        form = cast("dict[str, Any]", await flow.async_step_init())
+        picked = _selected_exclusions(form["data_schema"].schema)
+        result = cast(
+            "dict[str, Any]",
+            await flow.async_step_init(
+                {CONF_LLM_HASS_API: ["assist"], CONF_TOOL_EXCLUSIONS: picked}
+            ),
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    stored = result["data"][CONF_TOOL_EXCLUSIONS]
+    assert stored == _OLD
+    assert [name for name in tools if is_tool_excluded(name, stored["assist"])] == [
+        "intent__HassTurnOff",
+        "lock__HassTurnOff",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_short_exclusion_and_an_inclusion_of_the_tool_still_save(
+    hass: Any,
+) -> None:
+    """
+    A stored pair the form accepted before is not refused now.
+
+    ``HassTurnOff`` excluded and ``intent__HassTurnOff`` always included are
+    different picker values. The exclusion wins at run time; the form must not
+    start refusing every save over it.
+    """
+    options = {
+        CONF_LLM_HASS_API: ["assist"],
+        CONF_TOOL_EXCLUSIONS: _OLD,
+        CONF_TOOL_INCLUSIONS: {"assist": ["intent__HassTurnOff"]},
+    }
+    flow = _options_flow(hass, options)
+    get_apis, get_api = _patch_apis(
+        [_FakeAPI(id="assist", name="Assist")],
+        {"assist": _api_instance([_FakeTool("intent__HassTurnOff")])},
+    )
+
+    with get_apis, get_api:
+        result = cast(
+            "dict[str, Any]",
+            await flow.async_step_init(
+                {
+                    CONF_LLM_HASS_API: ["assist"],
+                    CONF_TOOL_EXCLUSIONS: ["assist::HassTurnOff"],
+                    CONF_TOOL_INCLUSIONS: ["assist::intent__HassTurnOff"],
+                }
+            ),
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_TOOL_EXCLUSIONS] == _OLD
+
+
+@pytest.mark.asyncio
+async def test_a_short_exclusion_marks_every_tool_it_covers(hass: Any) -> None:
+    """Two tools with the stored base name are both shown as excluded."""
+    schema = await _assist_schema(
+        hass,
+        ["intent__HassTurnOff", "lock__HassTurnOff"],
+        {CONF_TOOL_EXCLUSIONS: _OLD},
+    )
+
+    assert _selector_options(schema) == [
+        {
+            "label": "Assist: intent__HassTurnOff" + _EXCLUDED_BY_OLD,
+            "value": "assist::intent__HassTurnOff",
+        },
+        {
+            "label": "Assist: lock__HassTurnOff" + _EXCLUDED_BY_OLD,
+            "value": "assist::lock__HassTurnOff",
+        },
+        _STALE_ROW,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_short_exclusion_covering_nothing_listed_is_not_available(
+    hass: Any,
+) -> None:
+    """With no listed tool to cover, the stored name keeps its old label."""
+    schema = await _assist_schema(
+        hass, ["intent__HassTurnOn"], {CONF_TOOL_EXCLUSIONS: _OLD}
+    )
+
+    assert _selector_options(schema) == [
+        {"label": "Assist: intent__HassTurnOn", "value": "assist::intent__HassTurnOn"},
+        {
+            "label": f"Assist: HassTurnOff{_SUFFIX_NOT_AVAILABLE}",
+            "value": "assist::HassTurnOff",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_short_exclusion_marks_a_tool_listed_from_the_index(hass: Any) -> None:
+    """A device-gated tool the form only knows from the tool index is marked too."""
+    schema = await _assist_schema(
+        hass,
+        ["intent__HassTurnOn"],
+        {CONF_TOOL_EXCLUSIONS: {"assist": ["HassStartTimer"]}},
+        {"assist::intent__HassStartTimer"},
+    )
+
+    assert {
+        "label": "Assist: intent__HassStartTimer"
+        + _NOTE_EXCLUDED_BY.format(name="HassStartTimer"),
+        "value": "assist::intent__HassStartTimer",
+    } in _selector_options(schema)
+
+
+@pytest.mark.asyncio
+async def test_a_listed_short_name_still_marks_the_tool_it_covers(hass: Any) -> None:
+    """
+    A server listing both ``delete`` and ``x__delete`` shows both as excluded.
+
+    The stored ``delete`` is a listed tool here, so it is a plain ticked option;
+    the other tool it excludes must still say so.
+    """
+    schema = await _assist_schema(
+        hass, ["delete", "x__delete"], {CONF_TOOL_EXCLUSIONS: {"assist": ["delete"]}}
+    )
+
+    assert _selector_options(schema) == [
+        {"label": "Assist: delete", "value": "assist::delete"},
+        {
+            "label": "Assist: x__delete" + _NOTE_EXCLUDED_BY.format(name="delete"),
+            "value": "assist::x__delete",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_tool_ticked_itself_leaves_the_short_entry_still_excluding(
+    hass: Any,
+) -> None:
+    """
+    With both names stored, the tool is plain and the short entry says it applies.
+
+    Unticking only the tool would not bring it back, so the short entry must
+    not read "not currently available".
+    """
+    schema = await _assist_schema(
+        hass,
+        ["intent__HassTurnOff"],
+        {CONF_TOOL_EXCLUSIONS: {"assist": ["HassTurnOff", "intent__HassTurnOff"]}},
+    )
+
+    assert _selector_options(schema) == [
+        {
+            "label": "Assist: intent__HassTurnOff",
+            "value": "assist::intent__HassTurnOff",
+        },
+        _STALE_ROW,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_namespaced_exclusion_marks_no_other_tool(hass: Any) -> None:
+    """An exact stored name excludes that tool only, so nothing else is marked."""
+    schema = await _assist_schema(
+        hass,
+        ["intent__HassTurnOff", "lock__HassTurnOff"],
+        {CONF_TOOL_EXCLUSIONS: {"assist": ["intent__HassTurnOff"]}},
+    )
+
+    assert [option["label"] for option in _selector_options(schema)] == [
+        "Assist: intent__HassTurnOff",
+        "Assist: lock__HassTurnOff",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_another_apis_short_exclusion_marks_nothing_here(hass: Any) -> None:
+    """A short name excludes within its own API only."""
+    get_apis, get_api = _patch_apis(
+        [_FakeAPI(id="assist", name="Assist"), _FakeAPI(id="other", name="Other")],
+        {
+            "assist": _api_instance([_FakeTool("intent__HassTurnOn")]),
+            "other": _api_instance([_FakeTool("intent__HassTurnOff")]),
+        },
+    )
+
+    with get_apis, get_api:
+        schema = await _schema_for_options(
+            hass,
+            {CONF_LLM_HASS_API: ["assist", "other"], CONF_TOOL_EXCLUSIONS: _OLD},
+        )
+
+    assert {
+        "label": "Other: intent__HassTurnOff",
+        "value": "other::intent__HassTurnOff",
+    } in _selector_options(schema)
+
+
+@pytest.mark.asyncio
+async def test_the_always_included_picker_is_not_marked(hass: Any) -> None:
+    """
+    The notes belong to the exclusion picker only.
+
+    A short always-included name binds one matching tool, and an exclusion
+    beats it, so "included by" on every match would overstate it.
+    """
+    schema = await _assist_schema(
+        hass,
+        ["intent__HassTurnOff", "lock__HassTurnOff"],
+        {CONF_TOOL_INCLUSIONS: _OLD},
+    )
+
+    selector = schema[_schema_key(schema, CONF_TOOL_INCLUSIONS)]
+    assert cast("Any", selector).config["options"] == [
+        {
+            "label": "Assist: intent__HassTurnOff",
+            "value": "assist::intent__HassTurnOff",
+        },
+        {"label": "Assist: lock__HassTurnOff", "value": "assist::lock__HassTurnOff"},
+        {
+            "label": f"Assist: HassTurnOff{_SUFFIX_NOT_AVAILABLE}",
+            "value": "assist::HassTurnOff",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_each_picker_is_marked_from_its_own_selection(hass: Any) -> None:
+    """A short exclusion does not mark the always-included picker."""
+    schema = await _assist_schema(
+        hass, ["intent__HassTurnOff"], {CONF_TOOL_EXCLUSIONS: _OLD}
+    )
+
+    selector = schema[_schema_key(schema, CONF_TOOL_INCLUSIONS)]
+    assert cast("Any", selector).config["options"] == [
+        {
+            "label": "Assist: intent__HassTurnOff",
+            "value": "assist::intent__HassTurnOff",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_stored_name_in_the_note_is_defanged(hass: Any) -> None:
+    """The stored name shown in the note cannot carry parentheses of its own."""
+    schema = await _assist_schema(
+        hass, ["ns__a (b)"], {CONF_TOOL_EXCLUSIONS: {"assist": ["a (b)"]}}
+    )
+
+    assert _selector_options(schema)[0]["label"] == (
+        "Assist: ns__a [b] (excluded by a [b])"
+    )

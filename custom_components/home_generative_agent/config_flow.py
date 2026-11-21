@@ -43,6 +43,7 @@ from .agent.helpers import (
     active_llm_api_ids,
     admin_only_selection,
     api_id_is_form_representable,
+    base_tool_name,
     llm_api_requires_admin,
     normalize_api_tool_map,
     normalize_llm_api_value,
@@ -244,12 +245,17 @@ def _list_as_tool_map(values: list[Any]) -> dict[str, list[str]]:
     return normalize_api_tool_map(grouped)
 
 
-# Suffixes marking a stored exclusion whose tool is not in the live list. They
+# Suffixes marking a stored selection whose tool is not in the live list. They
 # are distinct on purpose -- see the three-state comment in
-# `_tool_exclusion_choices`. Named so the wording lives in one place: the tests
-# import these rather than re-spelling them.
+# `_stale_selection_choices`. Named so the wording lives in one place: the
+# tests import these rather than re-spelling them.
 _SUFFIX_NOT_SELECTED = " (API not selected)"
 _SUFFIX_NOT_AVAILABLE = " (not currently available)"
+# A stored exclusion with no ``__`` that is not itself listed but still
+# excludes a listed tool by its base name, and the note on that tool -- see
+# `_exclusion_choices`. ``{name}`` is the stored name, already defanged.
+_SUFFIX_STILL_EXCLUDING = " (not listed, still excluding)"
+_NOTE_EXCLUDED_BY = " (excluded by {name})"
 
 
 def _label_text(text: str) -> str:
@@ -288,7 +294,9 @@ def _tool_choice(
     stay byte-identical to the real tool name or the exclusion it encodes would
     silently stop matching at runtime.  The suffix is trusted text appended
     *after* both remote halves have been through ``_label_text``, so it is the
-    only parenthesised run the label can contain.
+    only parenthesised run this function puts in a label.
+    ``_exclusion_choices`` may then swap it or add one trusted note of its
+    own, whose remote half goes through ``_label_text`` as well.
     """
     return SelectOptionDict(
         label=f"{_label_text(api_name)}: {_label_text(tool_name)}{suffix}",
@@ -474,6 +482,63 @@ def _stale_selection_choices(
     return choices
 
 
+def _exclusion_choices(
+    live_choices: list[SelectOptionDict],
+    stale_choices: list[SelectOptionDict],
+    selected: list[str],
+) -> list[SelectOptionDict]:
+    """
+    Label the Excluded tools options with what a short stored name covers.
+
+    ``is_tool_excluded`` matches a stored name that carries no ``__`` against a
+    tool's base name too, so an exclusion saved as ``HassTurnOff`` before Home
+    Assistant 2026.9 still excludes ``intent__HassTurnOff``. The picker knew
+    only exact names: it showed the stored name as "(not currently available)"
+    and the tool it excludes as not excluded (#950).
+
+    Labels only. The pre-filled selection and what a save stores are left
+    alone, because the stored short name is wider than any one listed tool: it
+    also covers a same-named tool this form cannot list (one a device or an
+    admin turn adds) and the tool under its short name if a server goes back to
+    it. Swapping it for the listed tool would drop those at the next save.
+
+    The covered tool's label names the stored entry, unless the tool is ticked
+    itself, and the stored entry's label says it is still excluding whether or
+    not the tool is ticked too. Coverage is the rule ``is_tool_excluded``
+    applies: same API, and the stored name is the tool's ``base_tool_name``.
+
+    Exclusions only. A short always-included name is looked up differently
+    (``_tool_lookup_targets`` binds the first match, and an exclusion beats
+    it), so these labels would overstate it; that picker is left as it was.
+    """
+    chosen = set(selected)
+    covering: set[str] = set()
+    labelled: list[SelectOptionDict] = []
+    for choice in live_choices:
+        value = choice["value"]
+        parts = split_tool_index_key(value)
+        short_name = base_tool_name(parts[1]) if parts else ""
+        short_key = tool_index_key(parts[0], short_name) if parts else ""
+        # Covered by a *different*, shorter stored name: the tool's own name
+        # does not count, or every ticked tool would be "covered" by itself.
+        if parts is None or short_name == parts[1] or short_key not in chosen:
+            labelled.append(choice)
+            continue
+        covering.add(short_key)
+        if value in chosen:
+            labelled.append(choice)
+            continue
+        note = _NOTE_EXCLUDED_BY.format(name=_label_text(short_name))
+        labelled.append(SelectOptionDict(label=choice["label"] + note, value=value))
+
+    for choice in stale_choices:
+        label = choice["label"]
+        if choice["value"] in covering:
+            label = label.removesuffix(_SUFFIX_NOT_AVAILABLE) + _SUFFIX_STILL_EXCLUDING
+        labelled.append(SelectOptionDict(label=label, value=choice["value"]))
+    return labelled
+
+
 def _add_tool_picker(
     schema: VolDictType,
     conf_key: str,
@@ -584,8 +649,12 @@ async def _schema_for_options(
     )
     selected_api_set = set(picker_apis)
     selected_exclusions = _tool_map_as_list(opts.get(CONF_TOOL_EXCLUSIONS))
-    tool_exclusion_choices = live_choices + _stale_selection_choices(
-        selected_exclusions, live_seen, api_names, selected_api_set
+    tool_exclusion_choices = _exclusion_choices(
+        live_choices,
+        _stale_selection_choices(
+            selected_exclusions, live_seen, api_names, selected_api_set
+        ),
+        selected_exclusions,
     )
     selected_inclusions = _tool_map_as_list(opts.get(CONF_TOOL_INCLUSIONS))
     tool_inclusion_choices = live_choices + _stale_selection_choices(
@@ -974,7 +1043,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         These carry the device-gated tools an options form can never enumerate
         for itself (timer intents and friends, exposed only when the requesting
         device supports them), so the picker unions them in — see the
-        device-gated block in ``_tool_exclusion_choices``.
+        device-gated block in ``_live_tool_choices``.
 
         Best effort by design: the entry may not be loaded when the form opens,
         in which case there is no ``runtime_data`` and the picker simply falls
@@ -1140,8 +1209,11 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         form silently accepts a selection it will never honour. Checked on the
         submitted lists only: the merge-back of unrepresentable api ids cannot
         create an overlap, because those ids are never offered in either
-        picker, and a stored contradiction can only exist if this check let it
-        through in the first place.
+        picker. Exact names only: a short stored exclusion (``HassTurnOff``)
+        beside an always-included ``intent__HassTurnOff`` passes, as it always
+        has, and the exclusion wins at run time. The Excluded tools picker
+        says so in its labels (``_exclusion_choices``) rather than the form
+        refusing every save when it held the pair before.
         """
         excluded = user_input.get(CONF_TOOL_EXCLUSIONS)
         included = user_input.get(CONF_TOOL_INCLUSIONS)
