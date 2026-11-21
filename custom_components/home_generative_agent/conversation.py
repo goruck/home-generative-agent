@@ -121,6 +121,7 @@ from .const import (
     CONF_VOICE_TOOL_ACK,
     CONF_VOICE_TOOL_ACK_TIMING,
     CRITICAL_ACTION_PROMPT,
+    DECLINE_FOLLOW_UPS,
     DEFAULT_STT_HALLUCINATION_EXACT_PATTERNS,
     DEFAULT_STT_HALLUCINATION_PATTERNS,
     DOMAIN,
@@ -696,6 +697,41 @@ def _voice_turn_prompt(user_input: conversation.ConversationInput) -> str:
     turns of one conversation, so it goes in the volatile part of the prompt.
     """
     return VOICE_TURN_PROMPT if user_input.satellite_id else ""
+
+
+def _decline_reply(text: str, language: str | None) -> str | None:
+    """
+    Return the fixed line for a reply that only declines; None for any other.
+
+    The pattern is the turn's language's, and the whole reply has to match,
+    so "No, the kitchen one" is left for the model (#954).
+    """
+    entry = DECLINE_FOLLOW_UPS.get((language or "").split("-")[0].lower())
+    if entry is None:
+        return None
+    pattern, reply = entry
+    return (
+        reply
+        if re.fullmatch(rf"\W*(?:{pattern})\W*", text, flags=re.IGNORECASE)
+        else None
+    )
+
+
+def _asks_a_question(message: object) -> bool:
+    """Return True for a reply of the agent's that ends by asking something."""
+    if not isinstance(message, AIMessage) or message.tool_calls:
+        return False
+    content = message.content
+    text = (
+        content
+        if isinstance(content, str)
+        else " ".join(
+            str(part.get("text", ""))
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    )
+    return text.rstrip().endswith(_CONTINUE_MARKS)
 
 
 def _get_stt_hallucination_patterns(
@@ -2468,6 +2504,65 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             chat_log, _streaming_failure_content(stream_error)
         )
 
+    async def _async_answer_bare_decline(
+        self,
+        user_input: conversation.ConversationInput,
+        chat_log: conversation.ChatLog,
+        thread_id: str,
+    ) -> conversation.ConversationResult | None:
+        """
+        Answer a spoken "No" to the agent's question with a fixed line.
+
+        A reply ending in a question reopens a satellite's microphone, and a
+        bare decline then cost a model call, and a spoken acknowledgement
+        before it, to hear "OK" (#954). Only a satellite turn whose whole text
+        declines, said right after a reply of ours on this thread that asked
+        something, is answered here. A PIN prompt asks too, and its answer is
+        never taken from here: any held action on the thread leaves the turn
+        to the model. The exchange is saved to the thread, so the next turn
+        reads the question as answered. Returns None for a turn left to the
+        model, which includes any failure to read or save the thread.
+        """
+        reply = (
+            _decline_reply(user_input.text, user_input.language)
+            if user_input.satellite_id
+            else None
+        )
+        runtime_data = self.entry.runtime_data
+        if reply is None or any(
+            thread_id in (action.get("thread_id"), action.get("voice_thread"))
+            or chat_log.conversation_id
+            in (action.get("thread_id"), action.get("voice_conversation"))
+            for action in runtime_data.pending_actions.values()
+        ):
+            return None
+        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+        try:
+            app = workflow.compile(
+                store=runtime_data.store, checkpointer=runtime_data.checkpointer
+            )
+            state = await app.aget_state(config)
+            history = state.values.get("messages") or []
+            if not history or not _asks_a_question(history[-1]):
+                return None
+            await app.aupdate_state(
+                config,
+                {
+                    "messages": [
+                        HumanMessage(content=user_input.text, id=ulid.ulid_now()),
+                        AIMessage(content=reply, id=ulid.ulid_now()),
+                    ]
+                },
+                # The graph's last node: the thread is left as a finished
+                # turn leaves it, with nothing waiting to run.
+                as_node="summarize_and_remove_messages",
+            )
+        except Exception:
+            _LOGGER.debug("Bare decline left to the model", exc_info=True)
+            return None
+        await self._async_add_spoken_reply(chat_log, reply)
+        return conversation.async_get_result_from_chat_log(user_input, chat_log)
+
     async def _async_handle_message(
         self,
         user_input: conversation.ConversationInput,
@@ -2515,7 +2610,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         finally:
             end_pin_turn(runtime_data.pending_actions, pin_turn_id)
 
-    async def _async_handle_message_active(  # noqa: PLR0913, PLR0915
+    async def _async_handle_message_active(  # noqa: PLR0911, PLR0913, PLR0915
         self,
         user_input: conversation.ConversationInput,
         chat_log: conversation.ChatLog,
@@ -2557,6 +2652,13 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         pin_reply = start_pin_turn(
             runtime_data.pending_actions, thread_id, user_input.text, pin_turn_id
         )
+
+        if not message_history and (
+            declined := await self._async_answer_bare_decline(
+                user_input, chat_log, thread_id
+            )
+        ):
+            return declined
 
         # Multi-API initialization
         try:

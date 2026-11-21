@@ -1804,6 +1804,30 @@ AFFIRMATIVE_FOLLOW_UP_REGEX = (
 )
 MAX_AFFIRMATIVE_FOLLOW_UP_WORDS = 4
 
+# A spoken reply that only declines the agent's question ("Want me to turn it
+# off?" -> "No thanks") is answered with a fixed line and no model call (#954).
+# The whole reply has to match: "No, the kitchen one" still goes to the model.
+# Keyed by the turn's language, because a word declines in one and asks in
+# another ("ne" is "no" in Czech and "what" in Turkish). Each entry is the
+# pattern and the line said back.
+_DECLINE_SEP = r"[\s,]+"
+DECLINE_FOLLOW_UPS: dict[str, tuple[str, str]] = {
+    "en": (
+        (
+            r"no(?:[\s,]+no)?|nope|nah|no[\s,]+thanks|no[\s,]+thank\s+you|"
+            r"not\s+now|no[\s,]+that'?s\s+(?:all|ok|okay|fine)|"
+            r"no[\s,]+i'?m\s+(?:good|fine|ok|okay)"
+        ),
+        "OK.",
+    ),
+    "cs": (r"ne|nene|ne[\s,]+d[ií]ky|ne[\s,]+děkuji", "Dobře."),
+    "ru": (r"нет|нет[\s,]+спасибо|не\s+надо|не\s+нужно", "Хорошо."),
+    "tr": (
+        r"hay[ıi]r|yok|hay[ıi]r[\s,]+teşekkürler|hay[ıi]r[\s,]+sağ\s*ol",  # noqa: RUF001
+        "Tamam.",
+    ),
+}
+
 # Tool prefixes/names for actuation safety net
 ACTUATION_TOOL_PREFIXES = (
     "HassTurn",
