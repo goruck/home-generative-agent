@@ -198,37 +198,37 @@ def normalize_llm_api_value(raw: Any) -> list[str]:
     return [api_id for api_id in raw if isinstance(api_id, str) and api_id]
 
 
-def llm_api_is_supported(api: llm.API) -> bool:
+def llm_api_requires_admin(api: llm.API) -> bool:
     """
-    Return whether this integration offers, indexes and loads ``api``.
+    Return whether only an admin's turn can load ``api`` (#918).
 
-    Home Assistant 2026.11 added an admin-only LLM API, "Home Assistant"
-    (``homeassistant``), that manages Home Assistant itself (registries, logs,
-    automations, config entries) and is not bounded by entity exposure. Its
-    tools have not been checked against the Critical Action PIN gate, so an
-    API that requires an admin is left out everywhere until they are: not
-    offered in the options form, not indexed, and not loaded for a turn.
-    ``requires_admin`` does not exist before 2026.11, hence the default.
+    Home Assistant 2026.11 added such an API, "Home Assistant"
+    (``homeassistant``): it manages Home Assistant itself (logs, config
+    entries, any action) and is not bounded by entity exposure. Home
+    Assistant refuses to load it for a turn with no user, such as a voice
+    satellite's, or with a user who is not an admin. ``requires_admin`` does
+    not exist before 2026.11, hence the default.
     """
-    return not getattr(api, "requires_admin", False)
+    return getattr(api, "requires_admin", False) is True
 
 
-def unsupported_only_apis(hass: HomeAssistant, selected: list[str]) -> list[llm.API]:
+def admin_only_selection(hass: HomeAssistant, selected: list[str]) -> list[llm.API]:
     """
-    Return the selected APIs when every one is registered and unsupported.
+    Return the selected APIs when every one is registered and admin-only.
 
-    Such a selection loads nothing, so every conversation fails with "No LLM
-    APIs could be loaded". Empty otherwise: when the selection is empty, when
-    any selected API is supported, or when any selected id is not registered
-    (often a transient MCP outage, kept on purpose, #568). The Options form
-    refuses such a selection (#998) and setup raises a repair issue for a
-    stored one (#1037), both through this one rule.
+    Such a selection loads nothing for a voice satellite or a user who is not
+    an admin, so those conversations fail with "No LLM APIs could be loaded".
+    Empty otherwise: when the selection is empty, when any selected API loads
+    for everyone, or when any selected id is not registered (often a
+    transient MCP outage, kept on purpose, #568). The Options form refuses
+    such a selection (#998) and setup raises a repair issue for a stored one
+    (#1037), both through this one rule.
     """
     if not selected:
         return []
     registered = {api.id: api for api in llm.async_get_apis(hass)}
     apis = [registered.get(api_id) for api_id in selected]
-    if any(api is None or llm_api_is_supported(api) for api in apis):
+    if any(api is None or not llm_api_requires_admin(api) for api in apis):
         return []
     return [api for api in apis if api is not None]
 

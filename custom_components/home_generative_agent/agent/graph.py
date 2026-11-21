@@ -154,6 +154,7 @@ from .helpers import (
 )
 from .indirect_pin import (
     BUILTIN_INTENT,
+    CALL_ACTION_TOOL,
     OTHER_INTENT,
     RUN_SERVICES,
     SCENE_DOMAIN,
@@ -166,6 +167,7 @@ from .indirect_pin import (
     calls_a_service,
     collect_started_automations,
     has_service,
+    has_templated_key,
     intent_scripts_are_critical,
     is_script_like_tool,
     named_services,
@@ -601,6 +603,9 @@ def _critical_action_guard(  # noqa: PLR0913
         # The tool's own name there, which a remote one's differs from (#843).
         "api_tool_name": origin.tool_name if origin is not None else None,
         "remote": origin is not None and origin.remote,
+        # A tool of Home Assistant's admin-only API (#918): one that is not
+        # its call-action tool names no device, so the line names the tool.
+        "admin_api": origin is not None and origin.admin_api,
     }
     action_id = register_pending_action(
         ctx.pending_actions,
@@ -965,8 +970,15 @@ class RawTool(TypedDict):
 
 def _get_allowed_api_ids(config: RunnableConfig) -> set[str]:
     """Determine which API IDs are allowed based on configuration."""
-    opts = config.get("configurable", {}).get("options", {})
-    return set(active_llm_api_ids(opts)) | {"hga_local"}
+    configurable = config.get("configurable", {})
+    allowed = set(active_llm_api_ids(configurable.get("options", {})))
+    # An API this turn did not load has no tool to call: an admin-only one on
+    # a satellite's turn (#918), or one that failed to load. Its index rows
+    # would only take the places of tools the turn can use.
+    loaded = getattr(configurable.get("ha_llm_api"), "apis", None)
+    if isinstance(loaded, Mapping):
+        allowed &= set(loaded)
+    return allowed | {"hga_local"}
 
 
 def _get_live_tool_ids(config: RunnableConfig) -> set[tuple[str, str]] | None:
@@ -4461,6 +4473,26 @@ def _is_critical_action(  # noqa: PLR0911, PLR0912
             origin.tool_name or tool_name, tool_args, read_only_hint=origin.read_only
         )
 
+    # Home Assistant's admin-only API (#918). A tool it marks read-only only
+    # reads. Its call-action tool runs the service its arguments name, so it
+    # is read by them alone: by its name it would read as a
+    # `homeassistant.call_action` service aimed at whatever it targets.
+    name_is_no_service = False
+    if origin is not None and origin.admin_api:
+        if origin.read_only:
+            return False
+        name_is_no_service = (origin.tool_name or tool_name) == CALL_ACTION_TOOL
+        if not name_is_no_service:
+            # A tool that changes something and names no service, such as
+            # `config__reload_config_entry`: reloading an entry makes its
+            # entities unavailable for a moment, and an automation may act
+            # on that. What it sets off cannot be read from its arguments.
+            return True
+        if not call_service_names(tool_args).dotted or has_templated_key(tool_args):
+            # Which service it runs, or which field a templated name
+            # becomes, cannot be read.
+            return True
+
     # An intent script's tool names no domain or service, and one may take
     # over a built-in intent's tool; what it runs is checked first, and only
     # ever adds a hold (#779).
@@ -4515,7 +4547,10 @@ def _is_critical_action(  # noqa: PLR0911, PLR0912
     if any(
         _named_service_is_critical(action, tool_args, entities, critical_actions, hass)
         for action in named_services(
-            tool_args, tool_name, hass, rule_domains(critical_actions)
+            tool_args,
+            "" if name_is_no_service else tool_name,
+            hass,
+            rule_domains(critical_actions),
         )
     ):
         return True

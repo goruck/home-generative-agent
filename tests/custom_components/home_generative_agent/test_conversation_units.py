@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from homeassistant.const import CONF_LLM_HASS_API
-from homeassistant.exceptions import HomeAssistantError, TemplateError
+from homeassistant.exceptions import HomeAssistantError, TemplateError, Unauthorized
 from homeassistant.helpers import llm as ha_llm
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
@@ -431,20 +431,51 @@ def _plain_api(api_id: str) -> Any:
     return types.SimpleNamespace(id=api_id, name=api_id)
 
 
+def _refusing_all_but(instance: Any, *loadable: str) -> AsyncMock:
+    """Load the named APIs; refuse any other the way HA refuses a non-admin."""
+
+    async def _get_api(_hass: Any, api_id: str, _context: Any) -> Any:
+        if api_id in loadable:
+            return instance
+        raise Unauthorized
+
+    return AsyncMock(side_effect=_get_api)
+
+
 @pytest.mark.asyncio
-async def test_init_llm_apis_never_loads_an_admin_only_api(
+async def test_init_llm_apis_loads_an_admin_only_api_when_ha_allows_it() -> None:
+    """Home Assistant decides who is an admin; an admin's turn gets the API (#918)."""
+    entity = _excl_entity({CONF_LLM_HASS_API: ["assist", "homeassistant"]})
+    instance = _excl_api_instance(["HassTurnOn"])
+    context = MagicMock()
+    get_api = AsyncMock(return_value=instance)
+
+    with (
+        patch(
+            f"{_CONV}.llm.async_get_apis",
+            return_value=[_plain_api("assist"), _admin_api("homeassistant")],
+        ),
+        patch(f"{_CONV}.llm.async_get_api", new=get_api),
+    ):
+        multi = await entity._async_init_llm_apis(context)
+
+    assert list(multi.apis) == ["assist", "homeassistant"]
+    # Asked with the turn's own context, which carries the user HA checks.
+    assert all(call.args[2] is context for call in get_api.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_init_llm_apis_leaves_out_an_admin_only_api_ha_refuses(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """
-    An admin-only API stored before the options form hid it is not loaded.
+    A turn with no admin user goes on with the other APIs, quietly.
 
-    Its tools manage Home Assistant itself and have not been checked against
-    the Critical Action PIN gate, so it is skipped for every user, admin or
-    not, with a warning that says how to clear it.
+    A voice satellite's turn has no user at all, so a warning here would be
+    logged on every one of them.
     """
     entity = _excl_entity({CONF_LLM_HASS_API: ["assist", "homeassistant"]})
-    instance = _excl_api_instance(["HassTurnOn"])
-    get_api = AsyncMock(return_value=instance)
+    get_api = _refusing_all_but(_excl_api_instance(["HassTurnOn"]), "assist")
 
     with (
         patch(
@@ -457,44 +488,65 @@ async def test_init_llm_apis_never_loads_an_admin_only_api(
         multi = await entity._async_init_llm_apis(MagicMock())
 
     assert list(multi.apis) == ["assist"]
-    assert [call.args[1] for call in get_api.await_args_list] == ["assist"]
-    assert "Not loading LLM API homeassistant" in caplog.text
+    assert "homeassistant" not in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_init_llm_apis_only_an_admin_only_api_fails_loudly() -> None:
-    """With nothing else configured the turn fails, naming the skipped API."""
+async def test_init_llm_apis_only_an_admin_only_api_fails_naming_it() -> None:
+    """With nothing else configured a non-admin's turn fails, and says why."""
     entity = _excl_entity({CONF_LLM_HASS_API: ["homeassistant"]})
 
     with (
         patch(
             f"{_CONV}.llm.async_get_apis", return_value=[_admin_api("homeassistant")]
         ),
-        patch(f"{_CONV}.llm.async_get_api", new=AsyncMock()) as get_api,
-        pytest.raises(HomeAssistantError, match="Failed: homeassistant"),
+        patch(f"{_CONV}.llm.async_get_api", new=_refusing_all_but(None)),
+        pytest.raises(HomeAssistantError, match="For admin users only: homeassistant"),
     ):
         await entity._async_init_llm_apis(MagicMock())
 
-    get_api.assert_not_awaited()
+
+@pytest.mark.asyncio
+async def test_init_llm_apis_another_api_refusing_is_a_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Only an admin-only API's refusal is expected; any other is reported."""
+    entity = _excl_entity({CONF_LLM_HASS_API: ["assist", "mcp-abc"]})
+    get_api = _refusing_all_but(_excl_api_instance(["HassTurnOn"]), "assist")
+
+    with (
+        patch(
+            f"{_CONV}.llm.async_get_apis",
+            return_value=[_plain_api("assist"), _plain_api("mcp-abc")],
+        ),
+        patch(f"{_CONV}.llm.async_get_api", new=get_api),
+        caplog.at_level(logging.WARNING),
+    ):
+        multi = await entity._async_init_llm_apis(MagicMock())
+
+    assert list(multi.apis) == ["assist"]
+    assert "Could not load LLM API: mcp-abc" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_index_tools_skips_an_admin_only_api() -> None:
+async def test_index_tools_leaves_an_admin_only_api_to_the_turn_that_loads_it() -> None:
     """
-    Background indexing never asks for an admin-only API.
+    The full pass never asks for an admin-only API, and drops its old rows.
 
-    It runs with no user, so Home Assistant 2026.11 refuses it with
-    Unauthorized, which logged "Failed to index tool provider homeassistant"
-    on every startup; and a turn never loads it, so it has nothing to index.
+    It may run with no user, and Home Assistant then refuses the API. Its
+    tools are indexed by the top-up of an admin's turn; counting it as
+    discovered here evicts its rows, so a tool it no longer has does not stay
+    in the index (#918).
     """
     entity = _index_entity()
     rd = _index_runtime_data(tool_index_ready=False, tool_content_hashes={})
     discover = AsyncMock()
+    evict = AsyncMock()
 
     with (
         patch.object(entity, "_async_discover_provider_tools", new=discover),
         patch.object(entity, "_async_discover_local_tools", new=AsyncMock()),
-        patch.object(entity, "_async_evict_stale_tool_index_rows", new=AsyncMock()),
+        patch.object(entity, "_async_evict_stale_tool_index_rows", new=evict),
         patch(
             f"{_CONV}.llm.async_get_apis",
             return_value=[_plain_api("assist"), _admin_api("homeassistant")],
@@ -505,6 +557,79 @@ async def test_index_tools_skips_an_admin_only_api() -> None:
 
     assert discover.await_args is not None
     assert discover.await_args.args[2] == ["assist"]
+    assert evict.await_args is not None
+    assert "homeassistant" in evict.await_args.args[2]
+
+
+@pytest.mark.asyncio
+async def test_index_tools_full_pass_on_an_admins_turn_indexes_its_tools() -> None:
+    """
+    A full pass run by a turn that loaded the admin-only API indexes it.
+
+    Its rows are then kept by the pass's eviction, and the next turn needs
+    no top-up (#918 review).
+    """
+    entity = _index_entity()
+    rd = _index_runtime_data(tool_index_ready=False, tool_content_hashes={})
+    admin_instance = MagicMock()
+    assist_instance = MagicMock()
+    llm_api = MagicMock()
+    llm_api.apis = {"assist": assist_instance, "homeassistant": admin_instance}
+    queue = MagicMock()
+    evict = AsyncMock()
+
+    with (
+        patch.object(entity, "_async_discover_provider_tools", new=AsyncMock()),
+        patch.object(entity, "_async_discover_local_tools", new=AsyncMock()),
+        patch.object(entity, "_async_evict_stale_tool_index_rows", new=evict),
+        patch.object(entity, "_queue_api_instance_tools", new=queue),
+        patch(
+            f"{_CONV}.llm.async_get_apis",
+            return_value=[_plain_api("assist"), _admin_api("homeassistant")],
+        ),
+        patch(f"{_CONV}.async_dispatcher_send"),
+    ):
+        await entity._async_index_tools(MagicMock(), rd, llm_api)
+
+    assert [call.args[:2] for call in queue.call_args_list] == [
+        ("homeassistant", admin_instance)
+    ]
+    # Handed the pass's seen keys, which is what keeps its rows from eviction.
+    assert evict.await_args is not None
+    assert queue.call_args.args[5] is evict.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_index_tools_full_pass_keeps_admin_rows_when_reading_them_fails() -> None:
+    """
+    An admin API whose tools could not all be read keeps its rows.
+
+    The pass did not see every tool, so evicting the API's unseen rows would
+    drop live ones (#918 review).
+    """
+    entity = _index_entity()
+    rd = _index_runtime_data(tool_index_ready=False, tool_content_hashes={})
+    llm_api = MagicMock()
+    llm_api.apis = {"homeassistant": MagicMock()}
+    evict = AsyncMock()
+
+    with (
+        patch.object(entity, "_async_discover_provider_tools", new=AsyncMock()),
+        patch.object(entity, "_async_discover_local_tools", new=AsyncMock()),
+        patch.object(entity, "_async_evict_stale_tool_index_rows", new=evict),
+        patch.object(
+            entity, "_queue_api_instance_tools", new=MagicMock(side_effect=ValueError)
+        ),
+        patch(
+            f"{_CONV}.llm.async_get_apis",
+            return_value=[_plain_api("assist"), _admin_api("homeassistant")],
+        ),
+        patch(f"{_CONV}.async_dispatcher_send"),
+    ):
+        await entity._async_index_tools(MagicMock(), rd, llm_api)
+
+    assert evict.await_args is not None
+    assert "homeassistant" not in evict.await_args.args[2]
 
 
 # ---------------------------------------------------------------------------

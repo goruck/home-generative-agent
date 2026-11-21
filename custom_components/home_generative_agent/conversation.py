@@ -30,7 +30,7 @@ from homeassistant.components.conversation import (
 )
 from homeassistant.components.conversation.models import AbstractConversationAgent
 from homeassistant.const import MATCH_ALL, STATE_UNAVAILABLE, STATE_UNKNOWN
-from homeassistant.exceptions import HomeAssistantError, TemplateError
+from homeassistant.exceptions import HomeAssistantError, TemplateError, Unauthorized
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import intent, llm, template
@@ -61,7 +61,7 @@ from .agent.helpers import (
     is_actuation_tool,
     keep_pin_prompts,
     langchain_tool_parameters_json,
-    llm_api_is_supported,
+    llm_api_requires_admin,
     newest_pin_prompt,
     pending_action_expired,
     pin_length_number,
@@ -1499,21 +1499,27 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         active_apis: dict[str, llm.APIInstance] = {}
         remote_home_assistants: set[str] = set()
         failed_apis: list[str] = []
-        unsupported_api_ids = {
-            api.id for api in llm.async_get_apis(hass) if not llm_api_is_supported(api)
+        admin_only_apis: list[str] = []
+        admin_api_ids = {
+            api.id for api in llm.async_get_apis(hass) if llm_api_requires_admin(api)
         }
         for api_id in active_api_ids:
-            if api_id in unsupported_api_ids:
-                # Stored before the options form hid it; see llm_api_is_supported.
-                _LOGGER.warning(
-                    "Not loading LLM API %s: this integration does not support "
-                    "admin-only LLM APIs yet; deselect it in the options",
-                    api_id,
-                )
-                failed_apis.append(api_id)
-                continue
             try:
                 api = await llm.async_get_api(hass, api_id, llm_context)
+            except Unauthorized:
+                if api_id not in admin_api_ids:
+                    _LOGGER.warning("Could not load LLM API: %s", api_id)
+                    failed_apis.append(api_id)
+                    continue
+                # An admin-only API on a turn with no admin user, such as a
+                # voice satellite's: Home Assistant refuses it, and the turn
+                # goes on with the other APIs (#918).
+                _LOGGER.debug(
+                    "Not loading LLM API %s: this turn's user is not an admin",
+                    api_id,
+                )
+                admin_only_apis.append(api_id)
+                continue
             except HomeAssistantError:
                 _LOGGER.warning("Could not load LLM API: %s", api_id)
                 failed_apis.append(api_id)
@@ -1533,8 +1539,13 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         if not active_apis:
             msg = (
                 "No LLM APIs could be loaded. "
-                f"Failed: {', '.join(failed_apis)}. "
-                f"Configured: {', '.join(active_api_ids)}"
+                + (f"Failed: {', '.join(failed_apis)}. " if failed_apis else "")
+                + (
+                    f"For admin users only: {', '.join(admin_only_apis)}. "
+                    if admin_only_apis
+                    else ""
+                )
+                + f"Configured: {', '.join(active_api_ids)}"
             )
             raise HomeAssistantError(msg)
 
@@ -3048,13 +3059,45 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                             "Failed to queue tools of loaded API %s: %s", api_id, err
                         )
             else:
-                # An admin-only API is never loaded for a turn, so it has no
-                # tools to index (and loading it here, with no user, is refused).
+                # An admin-only API loads only for an admin's turn (#918), and
+                # this pass may have no user at all. Its tools are indexed by
+                # the top-up of a turn that loaded it; counting it as
+                # discovered here drops its rows, so a tool it no longer has
+                # does not stay in the index. An admin's next turn puts the
+                # live ones back, as a satellite's does for the timer tools.
+                registered_apis = llm.async_get_apis(self.hass)
                 all_available_api_ids = [
-                    api.id
-                    for api in llm.async_get_apis(self.hass)
-                    if llm_api_is_supported(api)
+                    api.id for api in registered_apis if not llm_api_requires_admin(api)
                 ]
+                discovered_api_ids.update(
+                    api.id for api in registered_apis if llm_api_requires_admin(api)
+                )
+                # A full pass run by an admin's turn has the API in hand:
+                # its tools are indexed in this pass, so their rows are kept
+                # and the next turn needs no top-up.
+                if llm_api is not None:
+                    for api_id, api_instance in llm_api.apis.items():
+                        if api_id not in discovered_api_ids:
+                            continue
+                        try:
+                            self._queue_api_instance_tools(
+                                api_id,
+                                api_instance,
+                                runtime_data,
+                                index_tasks,
+                                new_hashes,
+                                seen_keys,
+                                remote_judged=llm_api.remote_home_assistants,
+                            )
+                        except Exception as err:  # noqa: BLE001
+                            _LOGGER.warning(
+                                "Failed to queue tools of loaded API %s: %s",
+                                api_id,
+                                err,
+                            )
+                            # Its tools were not all read, so the rows of the
+                            # ones missed must not be dropped.
+                            discovered_api_ids.discard(api_id)
                 # 1. Index Providers
                 await self._async_discover_provider_tools(
                     llm_context,

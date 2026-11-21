@@ -41,15 +41,15 @@ from homeassistant.helpers.selector import (
 from .agent.helpers import (
     TOOL_KEY_SEP,
     active_llm_api_ids,
+    admin_only_selection,
     api_id_is_form_representable,
-    llm_api_is_supported,
+    llm_api_requires_admin,
     normalize_api_tool_map,
     normalize_llm_api_value,
     normalize_pin,
     sanitize_tool_text,
     split_tool_index_key,
     tool_index_key,
-    unsupported_only_apis,
 )
 from .const import (
     CONF_CRITICAL_ACTION_PIN,
@@ -327,7 +327,12 @@ async def _live_tool_choices(
         assistant=_CONVERSATION_DOMAIN,
         device_id=None,
     )
-    api_names = {api.id: api.name for api in llm.async_get_apis(hass)}
+    registered = llm.async_get_apis(hass)
+    api_names = {api.id: api.name for api in registered}
+    # Home Assistant lists an admin-only API's tools for an admin's turn only,
+    # and the form has no user to give it. Its choices come from the tool
+    # index below, once an admin's turn has loaded it (#918).
+    admin_api_ids = {api.id for api in registered if llm_api_requires_admin(api)}
     selected_set = set(selected_apis)
 
     choices: list[SelectOptionDict] = []
@@ -348,6 +353,8 @@ async def _live_tool_choices(
                 api_id,
                 TOOL_KEY_SEP,
             )
+            continue
+        if api_id in admin_api_ids:
             continue
         try:
             instance = await llm.async_get_api(hass, api_id, llm_context)
@@ -503,20 +510,20 @@ def _add_tool_picker(
 
 def _llm_api_selection_error(hass: HomeAssistant, raw: Any) -> str | None:
     """
-    Return the error for an LLM API selection that loads nothing, else None.
+    Return the error for an LLM API selection that leaves turns with none.
 
     An empty selection fails every conversation with "No LLM APIs could be
-    loaded" (issue #949), and so does one holding only APIs this integration
-    does not load (``llm_api_is_supported``), such as HA 2026.11's admin-only
-    "homeassistant" API kept selectable with a "(not supported yet)" label.
-    A stored id that is no longer registered is not counted against the
-    selection: that is often a transient MCP outage, kept on purpose (#568).
+    loaded" (issue #949). One holding only admin-only APIs, such as HA
+    2026.11's "homeassistant" API, fails the same way for a voice satellite
+    and for every user who is not an admin (#918). A stored id that is no
+    longer registered is not counted against the selection: that is often a
+    transient MCP outage, kept on purpose (#568).
     """
     selected = normalize_llm_api_value(raw)
     if not selected:
         return "llm_api_required"
-    if unsupported_only_apis(hass, selected):
-        return "llm_api_unsupported"
+    if admin_only_selection(hass, selected):
+        return "llm_api_admin_only"
     return None
 
 
@@ -537,27 +544,18 @@ async def _schema_for_options(
     # server's own `serverInfo.name` -- remote text, in a label, in the same
     # form whose tool picker sanitizes the identical value.
     registered_apis = llm.async_get_apis(hass)
+    # An admin-only API (HA 2026.11's "Home Assistant") says so in its label:
+    # it loads only for a turn whose user is an admin (#918).
     hass_apis = [
-        SelectOptionDict(label=sanitize_tool_text(api.name), value=api.id)
+        SelectOptionDict(
+            label=sanitize_tool_text(api.name)
+            + (" (admin users only)" if llm_api_requires_admin(api) else ""),
+            value=api.id,
+        )
         for api in registered_apis
-        if llm_api_is_supported(api)
     ]
     valid_api_ids = {api["value"] for api in hass_apis}
-    unsupported_api_ids = {
-        api.id for api in registered_apis if not llm_api_is_supported(api)
-    }
     selected_apis = normalize_llm_api_value(opts.get(CONF_LLM_HASS_API, []))
-    # An admin-only API selected before this release stays selected, labeled,
-    # for the same reason a stale one does below: the form must stay saveable
-    # and deselecting it is the user's call. It is not loaded for a turn.
-    if unsupported := [
-        api_id for api_id in selected_apis if api_id in unsupported_api_ids
-    ]:
-        hass_apis.extend(
-            SelectOptionDict(label=f"{api_id} (not supported yet)", value=api_id)
-            for api_id in unsupported
-        )
-        valid_api_ids.update(unsupported)
     # Stored ids that are no longer registered (e.g. a removed MCP server)
     # stay selected but are re-added as labeled selector options: without
     # them the pre-filled value fails SelectSelector validation on submit,
@@ -581,7 +579,7 @@ async def _schema_for_options(
     )
     live_choices, live_seen, api_names = await _live_tool_choices(
         hass,
-        [api_id for api_id in picker_apis if api_id not in unsupported_api_ids],
+        picker_apis,
         indexed_keys,
     )
     selected_api_set = set(picker_apis)

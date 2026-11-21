@@ -67,6 +67,7 @@ from .helpers import (
     sanitize_tool_text,
 )
 from .indirect_pin import (
+    CALL_ACTION_TOOL,
     bare_script_tool_entity_id,
     call_service_names,
     intent_script_handlers,
@@ -1106,11 +1107,16 @@ def _describe_line(  # noqa: PLR0911
     if tool_name == "add_automation":
         return _describe_automation(hass, action)
 
-    if action.get("remote"):
+    own_name = str(action.get("api_tool_name") or tool_name)
+    if action.get("remote") or (
+        action.get("admin_api") and own_name != CALL_ACTION_TOOL
+    ):
         # A remote Home Assistant's tool (#840): its devices cannot be named
         # from here, so the line names the tool, the server that runs it, and
         # the arguments the call sends there, as the agent wrote them (#840
-        # review): the user sees what the PIN approves.
+        # review): the user sees what the PIN approves. A tool of the
+        # admin-only API that names no action, such as its reload of a config
+        # entry, reads the same way (#918 review).
         raw = action.get("tool_args")
         args = _remote_args_text(raw if isinstance(raw, Mapping) else {})
         return pin_msg(

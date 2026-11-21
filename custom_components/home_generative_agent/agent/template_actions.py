@@ -1192,7 +1192,7 @@ def _texts(value: Any) -> Iterable[str]:
 
 
 def _templated(texts: Iterable[str]) -> bool:
-    return any("{{" in text or "{%" in text for text in texts)
+    return any("{{" in text or "{%" in text or "{#" in text for text in texts)
 
 
 def entities_of(hass: HomeAssistant, domain: str) -> list[str]:
