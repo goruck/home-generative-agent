@@ -1028,7 +1028,7 @@ async def test_json_request_format_logs_the_unsent_prompt_once(
             CONF_STT_REQUEST_FORMAT: STT_REQUEST_FORMAT_JSON,
         }
     )
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.WARNING):
         await _run(entity, [{"text": "ok"}])
         await _run(entity, [{"text": "ok"}])
 

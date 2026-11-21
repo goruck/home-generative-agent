@@ -370,17 +370,18 @@ class HGASttEntity(SpeechToTextEntity):
 
         The JSON shape has no prompt field. The form cannot tell which servers
         read the prompt, so this one case HGA knows about is said in the log,
-        once per entity (#968).
+        once per entity, so again after a restart or reload (#968). A warning,
+        like the translate fallback: Home Assistant drops info by default.
         """
         if not (use_json and prompt):
             return prompt
         if not self._logged_unsent_prompt:
             self._logged_unsent_prompt = True
-            LOGGER.info(
+            LOGGER.warning(
                 "STT provider %s has a Prompt set, but the JSON request format "
-                "has no prompt field, so it is not sent. Put vocabulary hints "
-                "in the extra request body if the server documents a field "
-                "for them, or clear the Prompt.",
+                "has no prompt field, so the Prompt field is not sent. If the "
+                "server documents a field for vocabulary hints, set it in the "
+                "extra request body; otherwise clear the Prompt.",
                 self.entity_id,
             )
         return None
