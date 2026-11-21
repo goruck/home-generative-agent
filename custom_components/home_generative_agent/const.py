@@ -1804,6 +1804,53 @@ AFFIRMATIVE_FOLLOW_UP_REGEX = (
 )
 MAX_AFFIRMATIVE_FOLLOW_UP_WORDS = 4
 
+# A spoken "No" to the agent's closing question ("Is there anything else I can
+# help with?" -> "No thanks") is answered with a fixed line and no model call
+# (#954). Keyed by the turn's language, because a word declines in one and
+# asks in another ("ne" is "no" in Czech and "what" in Turkish). Each entry:
+# - the declines, of which the whole reply has to be one: "No, the kitchen
+#   one" still goes to the model;
+# - what marks the agent's last sentence as asking only whether there is more
+#   to do. To any other question a "No" can be an instruction ("Should I
+#   leave it open?") or an answer a waiting task needs ("Do you want a
+#   condition on the automation?"), so those stay with the model;
+# - the line said back.
+_DECLINE_SEP = r"[\s,.!-]+"
+_APOSTROPHE = "['\u2019]?"
+DECLINE_FOLLOW_UPS: dict[str, tuple[str, str, str]] = {
+    "en": (
+        (
+            rf"no(?:{_DECLINE_SEP}no)?|nope|nah|no{_DECLINE_SEP}thanks|"
+            rf"no{_DECLINE_SEP}thank\s+you|not\s+now|"
+            rf"no{_DECLINE_SEP}that{_APOSTROPHE}s\s+(?:all|ok|okay|fine)|"
+            rf"no{_DECLINE_SEP}i{_APOSTROPHE}m\s+(?:good|fine|ok|okay)"
+        ),
+        r"\b(?:anything|something)\s+else\b|\bfurther\s+(?:help|assistance)\b",
+        "OK.",
+    ),
+    "cs": (
+        rf"ne|nene|ne{_DECLINE_SEP}d[ií]ky|ne{_DECLINE_SEP}děkuji",
+        r"\bještě\s+něco\b|\bněco\s+(?:dalšího|jiného)\b|\bs\s+něčím\s+(?:dalším|jiným)\b",
+        "Dobře.",
+    ),
+    "ru": (
+        rf"нет|нет{_DECLINE_SEP}спасибо|не\s+надо|не\s+нужно",
+        (
+            r"(?:что|чем)[-\s](?:нибудь|то)\s+ещ[её]\b|"
+            r"\bещ[её]\s+(?:что|чем)[-\s](?:нибудь|то)\b"  # noqa: RUF001
+        ),
+        "Хорошо.",
+    ),
+    "tr": (
+        (
+            rf"hay[ıi]r|yok|hay[ıi]r{_DECLINE_SEP}teşekkürler|"  # noqa: RUF001
+            rf"hay[ıi]r{_DECLINE_SEP}sağ\s*ol"  # noqa: RUF001
+        ),
+        r"\bbaşka\s+(?:bir\s+)?(?:şey|konuda|isteğiniz|yardım)",  # noqa: RUF001
+        "Tamam.",
+    ),
+}
+
 # Tool prefixes/names for actuation safety net
 ACTUATION_TOOL_PREFIXES = (
     "HassTurn",

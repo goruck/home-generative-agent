@@ -182,6 +182,9 @@ _ensure_trace_symbols()
 from homeassistant.components import conversation as ha_conversation  # noqa: E402
 from homeassistant.util import dt as dt_util  # noqa: E402
 
+from custom_components.home_generative_agent import (  # noqa: E402
+    conversation as conv_module,
+)
 from custom_components.home_generative_agent.agent.graph import (  # noqa: E402
     State,
     _always_bound_local_tools,
@@ -5427,3 +5430,362 @@ async def test_the_summary_written_in_one_turn_is_read_in_the_next() -> None:
 
     # Each turn's agent reads what the turns before it wrote.
     assert seen == ["", "note 1", "note 1\nnote 2"]
+
+
+# ---------------------------------------------------------------------------
+# A spoken "No" to the agent's closing question needs no model call (#954)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "language", "reply"),
+    [
+        ("No", "en", "OK."),
+        ("no.", "en", "OK."),
+        (" No, thanks! ", "en", "OK."),
+        ("No. Thank you.", "en", "OK."),
+        ("No thank you", "en-GB", "OK."),
+        ("Nope", "en", "OK."),
+        ("no, that's all", "en", "OK."),
+        ("No, that’s all", "en", "OK."),  # noqa: RUF001
+        ("No I'm good", "en", "OK."),
+        ("Ne, díky", "cs", "Dobře."),
+        ("Нет, спасибо", "ru", "Хорошо."),
+        ("Hayır", "tr", "Tamam."),  # noqa: RUF001
+        ("HAYIR", "tr", "Tamam."),
+        # Something more than a decline is the model's to answer.
+        ("No, the kitchen one", "en", None),
+        ("No turn on the fan instead", "en", None),
+        ("Not the garage", "en", None),
+        ("Yes", "en", None),
+        ("November", "en", None),
+        ("", "en", None),
+        # "Ne" is "what" in Turkish and "no" only in Czech.
+        ("Ne", "tr", None),
+        ("Ne", "cs", "Dobře."),
+        # A language with no pattern, or none given.
+        ("Nein", "de", None),
+        ("No", None, None),
+    ],
+)
+def test_decline_reply(text: str, language: str | None, reply: str | None) -> None:
+    assert conv_module._decline_reply(text, language) == reply
+
+
+@pytest.mark.parametrize(
+    ("text", "language", "closing"),
+    [
+        ("Is there anything else I can help with?", "en", True),
+        ("The light is off. Anything else?  ", "en", True),
+        ("Done. Would you like me to do something else?", "en", True),
+        ("Do you need further assistance?", "en", True),
+        ("Mohu pro vás udělat ještě něco?", "cs", True),
+        ("Могу ли я помочь чем-нибудь ещё?", "ru", True),  # noqa: RUF001
+        ("Başka bir şey var mı?", "tr", True),  # noqa: RUF001
+        # A "No" to these is an instruction, or an answer a task waits for.
+        ("The garage door is open. Should I leave it open?", "en", False),
+        ("Do you want a condition on the automation?", "en", False),
+        ("Want me to turn it off?", "en", False),
+        ("Did you mean the kitchen light?", "en", False),
+        # The closing words are not in the sentence that asks.
+        ("I found nothing else. Should I keep looking?", "en", False),
+        ("Is there anything else? I can also lock up.", "en", False),
+        ("Anything else is fine.", "en", False),
+        # The other language's words, a language with none, and no reply.
+        ("Anything else?", "cs", False),
+        ("Sonst noch etwas?", "de", False),
+        (None, "en", False),
+    ],
+)
+def test_asks_if_there_is_more(
+    text: str | None, language: str, *, closing: bool
+) -> None:
+    assert conv_module._asks_if_there_is_more(text, language) is closing
+
+
+@pytest.mark.parametrize(
+    ("message", "text"),
+    [
+        (AIMessage(content="Anything else?"), "Anything else?"),
+        (
+            AIMessage(content=[{"type": "text", "text": "Anything else?"}]),
+            "Anything else?",
+        ),
+        (
+            AIMessage(
+                content="Anything else?",
+                tool_calls=[{"name": "t", "args": {}, "id": "1"}],
+            ),
+            None,
+        ),
+        (HumanMessage(content="Anything else?"), None),
+        (ToolMessage(content="Anything else?", tool_call_id="1"), None),
+    ],
+)
+def test_message_text(message: Any, text: str | None) -> None:
+    assert conv_module._message_text(message) == text
+
+
+_DECLINE_THREAD = "conv1"
+_DECLINE_AGENT = "conversation.hga"
+_CLOSER = "The porch light is on. Is there anything else I can help with?"
+
+
+def _entry(role: str, content: str, agent_id: str | None = None) -> Any:
+    return types.SimpleNamespace(role=role, content=content, agent_id=agent_id)
+
+
+def _decline_chat_log(
+    heard: str | None = _CLOSER, *, agent_id: str = _DECLINE_AGENT, text: str = "No"
+) -> Any:
+    """Return a chat log whose last reply is ``heard``, then this turn's text."""
+    content = [_entry("user", "Is the porch light on?")]
+    if heard is not None:
+        content.append(_entry("assistant", heard, agent_id))
+    content.append(_entry("user", text))
+    return types.SimpleNamespace(conversation_id=_DECLINE_THREAD, content=content)
+
+
+async def _decline_entity(
+    last_reply: str | None = _CLOSER, pending: dict[str, Any] | None = None
+) -> tuple[Any, Any, Any]:
+    """Return an entity whose thread ends with ``last_reply``, and its app."""
+    saver = MemorySaver()
+    app = conv_module.workflow.compile(checkpointer=saver)
+    config: Any = {"configurable": {"thread_id": _DECLINE_THREAD}}
+    if last_reply is not None:
+        await app.aupdate_state(
+            config,
+            {
+                "messages": [
+                    HumanMessage(content="Is the porch light on?", id="h1"),
+                    AIMessage(content=last_reply, id="a1"),
+                ]
+            },
+            as_node="summarize_and_remove_messages",
+        )
+    entity = HGAConversationEntity.__new__(HGAConversationEntity)
+    entity.hass = MagicMock()
+    entity.entity_id = _DECLINE_AGENT
+    entity.entry = cast(
+        "Any",
+        types.SimpleNamespace(
+            runtime_data=types.SimpleNamespace(
+                pending_actions=pending or {}, store=None, checkpointer=saver
+            )
+        ),
+    )
+    entity._async_add_spoken_reply = AsyncMock()
+    return entity, app, config
+
+
+@pytest.fixture
+def decline_result(monkeypatch: pytest.MonkeyPatch) -> object:
+    """Stand in for the result Home Assistant builds from the chat log."""
+    result = object()
+    monkeypatch.setattr(
+        conv_module.conversation,
+        "async_get_result_from_chat_log",
+        MagicMock(return_value=result),
+        raising=False,
+    )
+    return result
+
+
+def _spoken(text: str, *, satellite: str | None = "assist_satellite.kitchen") -> Any:
+    user_input = _user_input(text)
+    user_input.satellite_id = satellite
+    return user_input
+
+
+async def test_a_spoken_no_to_a_closing_question_is_answered_and_saved(
+    decline_result: object,
+) -> None:
+    """The fixed line is spoken, and the thread holds the exchange."""
+    entity, app, config = await _decline_entity()
+    chat_log = _decline_chat_log(text="No thanks.")
+
+    answered = await entity._async_answer_bare_decline(
+        _spoken("No thanks."), chat_log, _DECLINE_THREAD
+    )
+
+    assert answered is decline_result
+    entity._async_add_spoken_reply.assert_awaited_once_with(chat_log, "OK.")
+    state = await app.aget_state(config)
+    assert [(m.type, m.content) for m in state.values["messages"]] == [
+        ("human", "Is the porch light on?"),
+        ("ai", _CLOSER),
+        ("human", "No thanks."),
+        ("ai", "OK."),
+    ]
+    # Nothing is left waiting to run on the thread.
+    assert state.next == ()
+
+
+@pytest.mark.usefixtures("decline_result")
+async def test_a_second_no_goes_to_the_model() -> None:
+    """After the fixed line neither the log nor the thread ends with a question."""
+    entity, _app, _config = await _decline_entity()
+    assert await entity._async_answer_bare_decline(
+        _spoken("No"), _decline_chat_log(), _DECLINE_THREAD
+    )
+
+    assert not await entity._async_answer_bare_decline(
+        _spoken("No"), _decline_chat_log("OK."), _DECLINE_THREAD
+    )
+
+
+_OFFER = "Yes. Want me to turn it off?"
+
+
+@pytest.mark.parametrize(
+    ("thread_reply", "chat_log", "text", "satellite"),
+    [
+        # A question whose "No" may be an instruction.
+        (_OFFER, _decline_chat_log(_OFFER), "No", "assist_satellite.kitchen"),
+        # Nothing was asked.
+        (
+            "The porch light is on.",
+            _decline_chat_log("The porch light is on."),
+            "No",
+            "assist_satellite.kitchen",
+        ),
+        # A new conversation.
+        (None, _decline_chat_log(None), "No", "assist_satellite.kitchen"),
+        # More than a decline.
+        (_CLOSER, _decline_chat_log(), "No, dim it", "assist_satellite.kitchen"),
+        # A typed turn costs no microphone and gets the model's answer.
+        (_CLOSER, _decline_chat_log(), "No", None),
+        # Another agent on the pipeline spoke last.
+        (
+            _CLOSER,
+            _decline_chat_log("Anything else?", agent_id="conversation.home_assistant"),
+            "No",
+            "assist_satellite.kitchen",
+        ),
+        # Another voice's thread asked; this speaker's did not.
+        (
+            "The porch light is on.",
+            _decline_chat_log(),
+            "No",
+            "assist_satellite.kitchen",
+        ),
+        # A fixed line followed the model's question, so the reply heard
+        # ended with a statement.
+        (
+            _CLOSER,
+            _decline_chat_log(f"{_CLOSER} A request to unlock is waiting for a PIN."),
+            "No",
+            "assist_satellite.kitchen",
+        ),
+    ],
+)
+async def test_other_turns_are_left_to_the_model(
+    thread_reply: str | None, chat_log: Any, text: str, satellite: str | None
+) -> None:
+    entity, app, config = await _decline_entity(thread_reply)
+    before = (await app.aget_state(config)).values.get("messages", [])
+
+    answered = await entity._async_answer_bare_decline(
+        _spoken(text, satellite=satellite), chat_log, _DECLINE_THREAD
+    )
+
+    assert answered is None
+    entity._async_add_spoken_reply.assert_not_awaited()
+    assert (await app.aget_state(config)).values.get("messages", []) == before
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        {"thread_id": _DECLINE_THREAD},
+        {"thread_id": "conv1:anna", "voice_thread": _DECLINE_THREAD},
+        {"thread_id": "conv1:anna", "voice_conversation": _DECLINE_THREAD},
+    ],
+)
+async def test_a_no_while_an_action_is_held_goes_to_the_model(
+    action: dict[str, Any],
+) -> None:
+    """A held action's PIN prompt is never answered from here."""
+    entity, _app, _config = await _decline_entity(pending={"held": action})
+
+    assert not await entity._async_answer_bare_decline(
+        _spoken("No"), _decline_chat_log(), _DECLINE_THREAD
+    )
+    entity._async_add_spoken_reply.assert_not_awaited()
+
+
+async def test_a_turn_cut_short_is_left_to_the_model() -> None:
+    """The thread still owes the last turn's trimming, which a write would skip."""
+    entity, app, config = await _decline_entity(None)
+    await app.aupdate_state(
+        config,
+        {
+            "messages": [
+                HumanMessage(content="Is the porch light on?", id="h1"),
+                AIMessage(content=_CLOSER, id="a1"),
+            ]
+        },
+        as_node="tool_loop_guard",
+    )
+    assert (await app.aget_state(config)).next
+
+    assert not await entity._async_answer_bare_decline(
+        _spoken("No"), _decline_chat_log(), _DECLINE_THREAD
+    )
+
+
+async def test_a_thread_that_cannot_be_read_leaves_the_turn_to_the_model() -> None:
+    entity, _app, _config = await _decline_entity()
+    entity.entry.runtime_data.checkpointer = types.SimpleNamespace()
+
+    assert not await entity._async_answer_bare_decline(
+        _spoken("No"), _decline_chat_log(), _DECLINE_THREAD
+    )
+    entity._async_add_spoken_reply.assert_not_awaited()
+
+
+async def test_the_handler_answers_a_decline_before_anything_else_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No API load, no acknowledgement and no model run for a bare decline."""
+    ran = AsyncMock()
+    entity, chat_log = _schema_first_turn(monkeypatch, {}, "conv1", ran)
+    result = object()
+    entity._async_answer_bare_decline = AsyncMock(return_value=result)
+    entity._async_speak_turn_start_ack = AsyncMock()
+
+    assert (
+        await HGAConversationEntity._async_handle_message(
+            entity, _spoken("No"), chat_log
+        )
+        is result
+    )
+    entity._async_answer_bare_decline.assert_awaited_once()
+    entity._async_init_llm_apis.assert_not_awaited()
+    entity._async_speak_turn_start_ack.assert_not_awaited()
+    ran.assert_not_awaited()
+
+
+async def test_the_handler_leaves_a_decline_after_another_agents_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another agent's turn is still to be read in, so the model gets this one."""
+    ran = AsyncMock()
+    entity, chat_log = _schema_first_turn(monkeypatch, {}, "conv1", ran)
+    entity._async_get_message_history = MagicMock(
+        return_value=[HumanMessage(content="x"), AIMessage(content="Which one?")]
+    )
+    entity._async_answer_bare_decline = AsyncMock()
+    entity._async_finish_reply = AsyncMock()
+    monkeypatch.setattr(
+        conv_module.conversation,
+        "async_get_result_from_chat_log",
+        MagicMock(),
+        raising=False,
+    )
+
+    await HGAConversationEntity._async_handle_message(entity, _spoken("No"), chat_log)
+
+    entity._async_answer_bare_decline.assert_not_awaited()
+    ran.assert_awaited_once()
