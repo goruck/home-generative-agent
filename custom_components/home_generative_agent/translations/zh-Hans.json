@@ -149,6 +149,7 @@
             "extra_body": "额外请求体（JSON，可选）"
           },
           "data_description": {
+            "prompt": "随音频一起发送的词汇提示，例如模型容易写错的名称。是否生效取决于服务器。OpenAI 会使用它。部分 OpenAI 兼容服务器会接受但忽略它（OpenRouter 即如此），而面向 OpenAI 兼容服务器提供的 JSON 请求格式不会发送它。被忽略时不会显示任何错误。",
             "request_format": "音频的发送方式。分段上传是 OpenAI 自己的格式，到处都能用。带 base64 音频的 JSON 是 OpenRouter 原生的转写格式——只有你的服务器文档说明支持时才选它。它没有翻译接口，也会忽略上面的提示词字段。",
             "extra_body": "一个合并进请求体的 JSON 对象，用于 HGA 没有提供的字段。在 OpenRouter 上，关键词偏置等提供商选项就写在这里，而且需要使用 JSON 请求格式。完整示例见文档的 STT 部分。不确定就留空。"
           }

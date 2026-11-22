@@ -323,7 +323,7 @@ HGA provides a built-in STT engine — no separate STT integration required. Two
 5. On **Model & advanced options**, pick a model and set optional fields:
    - model: recommended `gpt-4o-mini-transcribe` (OpenAI) or `deepdml/faster-whisper-large-v3-turbo-ct2` (Local; any custom model ID your server exposes can be typed in)
    - `language` (optional): e.g. `en` or `en-US`
-   - `prompt` (optional): hints for domain-specific vocabulary
+   - `prompt` (optional): hints for domain-specific vocabulary. Whether it does anything depends on the server: OpenAI uses it, some OpenAI-compatible servers accept it and ignore it (OpenRouter does), and the JSON request format does not send it. Nothing is reported when it is ignored, except that HGA logs a warning when a prompt is set together with the JSON request format, once after each start or reload.
    - `temperature` (optional): 0–1
    - `translate`: on OpenAI only `whisper-1` supports it (other models fall back to transcription); local whisper servers support it for every model
    - `extra request body` (optional): a JSON **object** merged into the request body, for parameters HGA does not expose as fields. It is merged last, so it can also override a parameter set above (`model` or `response_format`, say). It cannot set `stream`, `file` or `input_audio` — HGA owns how the audio and the response are carried. Invalid JSON, JSON that is not an object, or one of those three keys keeps you on the form.

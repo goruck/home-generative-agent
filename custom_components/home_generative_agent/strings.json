@@ -149,6 +149,7 @@
             "extra_body": "Extra request body (JSON, optional)"
           },
           "data_description": {
+            "prompt": "Vocabulary hints sent with the audio, such as names the model gets wrong. Whether it has any effect depends on the server. OpenAI uses it. Some OpenAI-compatible servers accept it and ignore it (OpenRouter does), and the JSON request format, offered for OpenAI-compatible servers, does not send it. No error is shown when it is ignored.",
             "request_format": "How the audio is sent. Multipart upload is OpenAI's own shape and works everywhere. JSON with base64 audio is OpenRouter's native transcription shape - pick it only if your server documents it. It has no translations endpoint and ignores the Prompt field above.",
             "extra_body": "A JSON object merged into the request body, for fields HGA does not expose. On OpenRouter this is where provider options such as keyword biasing go, and those need the JSON request format. See the STT section of the documentation for a worked example. Leave blank if unsure."
           }

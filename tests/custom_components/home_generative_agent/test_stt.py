@@ -1013,6 +1013,56 @@ async def test_json_request_format_omits_the_prompt() -> None:
     assert "prompt" not in seen["posts"][0]["body"]
 
 
+_UNSENT_PROMPT = "has a Prompt set, but the JSON request format"
+
+
+@pytest.mark.usefixtures("patched_client")
+async def test_json_request_format_logs_the_unsent_prompt_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A prompt that is not sent is said in the log, once per entity (#968)."""
+    entity, _ = _make_local_entity(
+        model={
+            CONF_STT_MODEL_NAME: "microsoft/mai-transcribe-2",
+            CONF_STT_PROMPT: "smart home",
+            CONF_STT_REQUEST_FORMAT: STT_REQUEST_FORMAT_JSON,
+        }
+    )
+    with caplog.at_level(logging.WARNING):
+        await _run(entity, [{"text": "ok"}])
+        await _run(entity, [{"text": "ok"}])
+
+    assert caplog.text.count(_UNSENT_PROMPT) == 1
+
+
+@pytest.mark.usefixtures("patched_client")
+@pytest.mark.parametrize(
+    "model",
+    [
+        # JSON format, no prompt: nothing is being dropped.
+        {CONF_STT_REQUEST_FORMAT: STT_REQUEST_FORMAT_JSON},
+        # Multipart with a prompt: it is sent, whatever the server does with it.
+        {CONF_STT_PROMPT: "smart home"},
+    ],
+)
+async def test_no_unsent_prompt_log_when_nothing_is_dropped(
+    model: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    """The log line is only for a prompt set together with the JSON format."""
+    entity, _ = _make_local_entity(
+        model={CONF_STT_MODEL_NAME: "microsoft/mai-transcribe-2", **model}
+    )
+    reply: Any = (
+        {"text": "ok"}
+        if CONF_STT_REQUEST_FORMAT in model
+        else SimpleNamespace(text="ok")
+    )
+    with caplog.at_level(logging.INFO):
+        await _run(entity, [reply])
+
+    assert _UNSENT_PROMPT not in caplog.text
+
+
 @pytest.mark.usefixtures("patched_client")
 async def test_json_request_format_extra_body_is_merged_last() -> None:
     """Extra body overrides a built field, as documented."""

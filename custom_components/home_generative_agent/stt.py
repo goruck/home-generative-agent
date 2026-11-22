@@ -255,6 +255,7 @@ class HGASttEntity(SpeechToTextEntity):
         self._attr_unique_id = f"{entry.entry_id}_{subentry_id}"
         self._attr_name = self._subentry.title or "STT"
         self._clients = OpenAIClientCache(STT_REQUEST_TIMEOUT_S)
+        self._logged_unsent_prompt = False
 
     @property
     def supported_languages(self) -> list[str]:
@@ -363,6 +364,28 @@ class HGASttEntity(SpeechToTextEntity):
             LOGGER.warning("STT %s for %s", err, self.entity_id)
             return None
 
+    def _prompt_to_send(self, prompt: Any, *, use_json: bool) -> Any:
+        """
+        Return the Prompt this request can carry: none on the JSON format.
+
+        The JSON shape has no prompt field. The form cannot tell which servers
+        read the prompt, so this one case HGA knows about is said in the log,
+        once per entity, so again after a restart or reload (#968). A warning,
+        like the translate fallback: Home Assistant drops info by default.
+        """
+        if not (use_json and prompt):
+            return prompt
+        if not self._logged_unsent_prompt:
+            self._logged_unsent_prompt = True
+            LOGGER.warning(
+                "STT provider %s has a Prompt set, but the JSON request format "
+                "has no prompt field, so the Prompt field is not sent. If the "
+                "server documents a field for vocabulary hints, set it in the "
+                "extra request body; otherwise clear the Prompt.",
+                self.entity_id,
+            )
+        return None
+
     async def async_process_audio_stream(
         self, metadata: SpeechMetadata, stream: Any
     ) -> SpeechResult:
@@ -386,7 +409,6 @@ class HGASttEntity(SpeechToTextEntity):
         )
         model_name = model_data.get(CONF_STT_MODEL_NAME, default_model)
         language = model_data.get(CONF_STT_LANGUAGE)
-        prompt = model_data.get(CONF_STT_PROMPT)
         temperature = model_data.get(CONF_STT_TEMPERATURE)
         translate = bool(model_data.get(CONF_STT_TRANSLATE))
         response_format = model_data.get(CONF_STT_RESPONSE_FORMAT)
@@ -400,6 +422,9 @@ class HGASttEntity(SpeechToTextEntity):
         # to api.openai.com and fail every utterance.
         use_json = provider_type == "local" and (
             model_data.get(CONF_STT_REQUEST_FORMAT) == STT_REQUEST_FORMAT_JSON
+        )
+        prompt = self._prompt_to_send(
+            model_data.get(CONF_STT_PROMPT), use_json=use_json
         )
 
         audio_bytes = await _stream_to_bytes(stream)
