@@ -254,6 +254,7 @@ async def test_a_refused_selection_keeps_the_stored_apis_tools_listed(
             [SelectOptionDict(label="Assist: HassTurnOn", value="assist|HassTurnOn")],
             {"assist|HassTurnOn"},
             {"assist": "Assist"},
+            set(),
         )
     )
 
@@ -314,7 +315,7 @@ async def test_a_refused_selection_lists_a_data_held_selections_tools(
 ) -> None:
     """The refused-save pickers fall back to a selection held in data too."""
     flow = _data_held_flow(hass)
-    tools = AsyncMock(return_value=([], set(), {}))
+    tools = AsyncMock(return_value=([], set(), {}, set()))
 
     with patch(
         "custom_components.home_generative_agent.config_flow._live_tool_choices",

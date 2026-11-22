@@ -23,12 +23,18 @@ from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import llm
 from pytest_homeassistant.common import MockConfigEntry
 
-from custom_components.home_generative_agent.agent.graph import _retrieve_tools
+from custom_components.home_generative_agent.agent.graph import (
+    _retrieve_tools,
+    _tool_lookup_targets,
+)
 from custom_components.home_generative_agent.agent.helpers import (
     normalize_tool_inclusions,
     tool_inclusions,
 )
 from custom_components.home_generative_agent.config_flow import (
+    _NOTE_MATCHED_BY,
+    _NOTE_MATCHES,
+    _SUFFIX_MATCHES,
     _SUFFIX_NOT_AVAILABLE,
     HomeGenerativeAgentOptionsFlow,
     _schema_for_options,
@@ -238,6 +244,351 @@ async def test_inclusions_picker_is_omitted_when_there_is_nothing_to_list(
         schema = await _schema_for_options(hass, {})
 
     assert CONF_TOOL_INCLUSIONS not in [str(cast("Any", key).schema) for key in schema]
+
+
+# --------------------------------------------------------------------------
+# Inclusions stored under a short pre-2026.9 tool name (#950)
+# --------------------------------------------------------------------------
+
+_OLD = {"assist": ["HassTurnOff"]}
+_MATCHED_BY_OLD = _NOTE_MATCHED_BY.format(name="HassTurnOff")
+
+
+def _plain(name: str) -> dict[str, str]:
+    return {"label": f"Assist: {name}", "value": f"assist::{name}"}
+
+
+def _old_row(suffix: str) -> dict[str, str]:
+    return {"label": f"Assist: HassTurnOff{suffix}", "value": "assist::HassTurnOff"}
+
+
+async def _assist_inclusions(
+    hass: Any,
+    tools: list[str],
+    options: dict[str, Any],
+    indexed_keys: set[str] | None = None,
+) -> list[dict[str, str]]:
+    """Return the inclusion picker's options over an Assist API with ``tools``."""
+    get_apis, get_api = _patch_apis(
+        [_FakeAPI(id="assist", name="Assist")],
+        {"assist": _api_instance([_FakeTool(n) for n in tools], api_id="assist")},
+    )
+    with get_apis, get_api:
+        schema = await _schema_for_options(
+            hass, {CONF_LLM_HASS_API: ["assist"], **options}, indexed_keys
+        )
+    return _picker_options(schema, CONF_TOOL_INCLUSIONS)
+
+
+@pytest.mark.asyncio
+async def test_a_short_stored_inclusion_names_the_tool_it_binds(hass: Any) -> None:
+    """
+    An inclusion saved as ``HassTurnOff`` is shown as binding the renamed tool.
+
+    It used to read "HassTurnOff (not currently available)" beside a plain
+    ``intent__HassTurnOff``, although that tool was appended on every turn.
+    """
+    options = await _assist_inclusions(
+        hass,
+        ["intent__HassTurnOff", "intent__HassTurnOn"],
+        {CONF_TOOL_INCLUSIONS: _OLD},
+    )
+
+    assert options == [
+        {
+            "label": "Assist: intent__HassTurnOff" + _MATCHED_BY_OLD,
+            "value": "assist::intent__HassTurnOff",
+        },
+        _plain("intent__HassTurnOn"),
+        _old_row(_SUFFIX_MATCHES.format(name="intent__HassTurnOff")),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_short_stored_inclusion_stays_the_selection(hass: Any) -> None:
+    """Only labels change: the pre-filled selection is still the stored name."""
+    get_apis, get_api = _patch_apis(
+        [_FakeAPI(id="assist", name="Assist")],
+        {"assist": _api_instance([_FakeTool("intent__HassTurnOff")], api_id="assist")},
+    )
+    with get_apis, get_api:
+        schema = await _schema_for_options(
+            hass, {CONF_LLM_HASS_API: ["assist"], CONF_TOOL_INCLUSIONS: _OLD}
+        )
+
+    key = _schema_key(schema, CONF_TOOL_INCLUSIONS)
+    assert cast("Any", key).description["suggested_value"] == ["assist::HassTurnOff"]
+
+
+@pytest.mark.asyncio
+async def test_a_short_inclusion_names_only_the_first_tool_it_matches(
+    hass: Any,
+) -> None:
+    """A turn binds the first match in name order, so only that one is named."""
+    options = await _assist_inclusions(
+        hass,
+        ["lock__HassTurnOff", "intent__HassTurnOff"],
+        {CONF_TOOL_INCLUSIONS: _OLD},
+    )
+
+    assert options == [
+        {
+            "label": "Assist: intent__HassTurnOff" + _MATCHED_BY_OLD,
+            "value": "assist::intent__HassTurnOff",
+        },
+        _plain("lock__HassTurnOff"),
+        _old_row(_SUFFIX_MATCHES.format(name="intent__HassTurnOff")),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_short_inclusion_passes_over_an_excluded_tool(hass: Any) -> None:
+    """An excluded tool is never bound, so the next match is the one named."""
+    options = await _assist_inclusions(
+        hass,
+        ["intent__HassTurnOff", "lock__HassTurnOff"],
+        {
+            CONF_TOOL_INCLUSIONS: _OLD,
+            CONF_TOOL_EXCLUSIONS: {"assist": ["intent__HassTurnOff"]},
+        },
+    )
+
+    assert options == [
+        _plain("intent__HassTurnOff"),
+        {
+            "label": "Assist: lock__HassTurnOff" + _MATCHED_BY_OLD,
+            "value": "assist::lock__HassTurnOff",
+        },
+        _old_row(_SUFFIX_MATCHES.format(name="lock__HassTurnOff")),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_short_inclusion_that_is_also_excluded_binds_nothing(
+    hass: Any,
+) -> None:
+    """An exclusion beats an inclusion, so the old label stays."""
+    options = await _assist_inclusions(
+        hass,
+        ["intent__HassTurnOff"],
+        {CONF_TOOL_INCLUSIONS: _OLD, CONF_TOOL_EXCLUSIONS: _OLD},
+    )
+
+    assert options == [
+        _plain("intent__HassTurnOff"),
+        _old_row(_SUFFIX_NOT_AVAILABLE),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_short_inclusion_matching_nothing_listed_is_not_available(
+    hass: Any,
+) -> None:
+    """With no tool of that name listed, the entry reads as before."""
+    options = await _assist_inclusions(
+        hass, ["intent__HassTurnOn"], {CONF_TOOL_INCLUSIONS: _OLD}
+    )
+
+    assert options == [_plain("intent__HassTurnOn"), _old_row(_SUFFIX_NOT_AVAILABLE)]
+
+
+@pytest.mark.asyncio
+async def test_a_tool_ticked_itself_carries_no_included_by_note(hass: Any) -> None:
+    """A ticked tool already shows as included; the stored entry still says so."""
+    options = await _assist_inclusions(
+        hass,
+        ["intent__HassTurnOff"],
+        {CONF_TOOL_INCLUSIONS: {"assist": ["HassTurnOff", "intent__HassTurnOff"]}},
+    )
+
+    assert options == [
+        _plain("intent__HassTurnOff"),
+        _old_row(_SUFFIX_MATCHES.format(name="intent__HassTurnOff")),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_listed_short_name_binds_itself_and_marks_nothing(hass: Any) -> None:
+    """A stored name that is a listed tool is tried first, so nothing else is."""
+    options = await _assist_inclusions(
+        hass, ["delete", "fs__delete"], {CONF_TOOL_INCLUSIONS: {"assist": ["delete"]}}
+    )
+
+    assert options == [_plain("delete"), _plain("fs__delete")]
+
+
+@pytest.mark.asyncio
+async def test_another_apis_short_inclusion_marks_nothing_here(hass: Any) -> None:
+    """The stored name binds only a tool of its own API."""
+    options = await _assist_inclusions(
+        hass,
+        ["intent__HassTurnOff"],
+        {CONF_TOOL_INCLUSIONS: {"mcp-gone": ["HassTurnOff"]}},
+    )
+
+    assert options == [
+        _plain("intent__HassTurnOff"),
+        {
+            "label": f"mcp-gone: HassTurnOff{_SUFFIX_NOT_AVAILABLE}",
+            "value": "mcp-gone::HassTurnOff",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_inclusion_label_cannot_forge_the_trusted_note(hass: Any) -> None:
+    """Remote names in the note are defanged like the rest of the label."""
+    options = await _assist_inclusions(
+        hass, ["ns__a (b)"], {CONF_TOOL_INCLUSIONS: {"assist": ["a (b)"]}}
+    )
+
+    assert [o["label"] for o in options] == [
+        "Assist: ns__a [b] (matched by a [b])",
+        "Assist: a [b] (not listed, matches ns__a [b])",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_short_inclusion_prefers_a_tool_the_api_lists_now(hass: Any) -> None:
+    """
+    A tool known only from the tool index does not take the note.
+
+    Index rows outlive the tools they describe, so ``aaa__HassTurnOff`` may be
+    gone; a turn would then add ``intent__HassTurnOff``, the tool listed now.
+    """
+    options = await _assist_inclusions(
+        hass,
+        ["intent__HassTurnOff"],
+        {CONF_TOOL_INCLUSIONS: _OLD},
+        {"assist::aaa__HassTurnOff"},
+    )
+
+    assert options == [
+        {
+            "label": "Assist: intent__HassTurnOff" + _MATCHED_BY_OLD,
+            "value": "assist::intent__HassTurnOff",
+        },
+        _plain("aaa__HassTurnOff"),
+        _old_row(_SUFFIX_MATCHES.format(name="intent__HassTurnOff")),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_short_inclusion_falls_back_to_an_index_only_tool(hass: Any) -> None:
+    """With no tool of that name listed now, an indexed one is the match."""
+    options = await _assist_inclusions(
+        hass,
+        ["intent__HassTurnOn"],
+        {CONF_TOOL_INCLUSIONS: _OLD},
+        {"assist::intent__HassTurnOff"},
+    )
+
+    assert options == [
+        _plain("intent__HassTurnOn"),
+        {
+            "label": "Assist: intent__HassTurnOff" + _MATCHED_BY_OLD,
+            "value": "assist::intent__HassTurnOff",
+        },
+        _old_row(_SUFFIX_MATCHES.format(name="intent__HassTurnOff")),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_short_name_left_in_the_index_still_shows_its_match(
+    hass: Any,
+) -> None:
+    """
+    A stored name the index still lists is not taken for a tool that is there.
+
+    After a server renames ``delete`` to ``fs__delete`` the old index row
+    lingers, so the stored name is offered as if listed. A turn finds it gone
+    and adds ``fs__delete``; both rows say so.
+    """
+    options = await _assist_inclusions(
+        hass,
+        ["fs__delete"],
+        {CONF_TOOL_INCLUSIONS: {"assist": ["delete"]}},
+        {"assist::delete"},
+    )
+
+    assert options == [
+        {
+            "label": "Assist: fs__delete" + _NOTE_MATCHED_BY.format(name="delete"),
+            "value": "assist::fs__delete",
+        },
+        {
+            "label": "Assist: delete" + _NOTE_MATCHES.format(name="fs__delete"),
+            "value": "assist::delete",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_listed_name_on_an_api_that_could_not_be_listed_is_itself(
+    hass: Any,
+) -> None:
+    """
+    With the server unreachable every row is index-only, so none is a leftover.
+
+    A ticked ``search`` beside ``web__search`` is then the tool it names, and
+    neither row gets a note.
+    """
+    get_apis, get_api = _patch_apis(
+        [_FakeAPI(id="mcp-abc", name="My MCP Server")],
+        {"mcp-abc": TimeoutError("server unreachable")},
+    )
+    with get_apis, get_api:
+        schema = await _schema_for_options(
+            hass,
+            {
+                CONF_LLM_HASS_API: ["mcp-abc"],
+                CONF_TOOL_INCLUSIONS: {"mcp-abc": ["search"]},
+            },
+            {"mcp-abc::search", "mcp-abc::web__search"},
+        )
+
+    assert _picker_options(schema, CONF_TOOL_INCLUSIONS) == [
+        {"label": "My MCP Server: search", "value": "mcp-abc::search"},
+        {"label": "My MCP Server: web__search", "value": "mcp-abc::web__search"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_stored_name_matches_nothing(hass: Any) -> None:
+    """A tool named ``t__`` has an empty base name; no stored value matches it."""
+    options = await _assist_inclusions(
+        hass, ["t__"], {CONF_TOOL_INCLUSIONS: ["assist::"]}
+    )
+
+    assert [o["label"] for o in options if "matches" in o["label"]] == []
+    assert _plain("t__") in options
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tools", "excluded"),
+    [
+        (["lock__HassTurnOff", "intent__HassTurnOff"], []),
+        (["Zed__HassTurnOff", "a__HassTurnOff", "B__HassTurnOff"], []),
+        (["a__b__HassTurnOff", "a__HassTurnOff"], []),
+        (["intent__HassTurnOff", "lock__HassTurnOff"], ["intent__HassTurnOff"]),
+    ],
+)
+async def test_the_named_tool_is_the_one_a_turn_looks_up_first(
+    hass: Any, tools: list[str], excluded: list[str]
+) -> None:
+    """The picker's copy of the lookup order agrees with the turn's."""
+    options = await _assist_inclusions(
+        hass,
+        tools,
+        {CONF_TOOL_INCLUSIONS: _OLD, CONF_TOOL_EXCLUSIONS: {"assist": excluded}},
+    )
+
+    # An excluded tool is stripped from the API before a turn sees it.
+    live = {("assist", name) for name in tools if name not in excluded}
+    targets = _tool_lookup_targets("HassTurnOff", {"assist"}, live)
+    first = next(name for api_id, name in targets if (api_id, name) in live)
+    assert options[-1] == _old_row(_SUFFIX_MATCHES.format(name=first))
 
 
 # --------------------------------------------------------------------------
