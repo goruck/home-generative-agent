@@ -182,6 +182,20 @@ def test_extra_kwargs_are_ignored():
     assert "{" not in result
 
 
+@pytest.mark.parametrize("count", [1, 2, 4, 5, 12])
+def test_czech_batch_message_reads_right_for_every_count(count: int) -> None:
+    """
+    The Czech batch header does not inflect a noun by the count (#965).
+
+    "novinka / novinky / novinek" follows the count (1, 2-4, 5+), and the old
+    "{count} novinek" was wrong for 1-4, the usual batch size.
+    """
+    result = notif_msg(
+        _fake_hass("cs"), "batch_message", count=count, plural="s", type_summary="Pohyb"
+    )
+    assert result == f"Novinky z domova ({count}): Pohyb."
+
+
 # The exact kwarg names each notifier.py call site supplies per message key.
 # Every template's placeholders (in every language) must be a subset of these,
 # or notif_msg would have to fall back at notification time. Keys absent here

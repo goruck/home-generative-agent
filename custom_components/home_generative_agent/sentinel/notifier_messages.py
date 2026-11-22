@@ -403,7 +403,9 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "{summary} (závažnost {severity}) pro {entities}. {hint}"
         ),
         "batch_title": "Novinka z domova",
-        "batch_message": "{count} novinek z domova: {type_summary}.",
+        # Count in brackets: "novinka/novinky/novinek" changes with the count
+        # (1, 2-4, 5+), and "{count} novinek" was wrong for 1-4 (#965).
+        "batch_message": "Novinky z domova ({count}): {type_summary}.",
         "batch_more": "\u2026a dal\u0161\u00edch {count}",
         "also_line": "Také: {names}",
         "also_unknown_person": "Neznámá osoba na kameře {camera}",
