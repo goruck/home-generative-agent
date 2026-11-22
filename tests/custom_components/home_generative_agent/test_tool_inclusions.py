@@ -23,15 +23,19 @@ from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import llm
 from pytest_homeassistant.common import MockConfigEntry
 
-from custom_components.home_generative_agent.agent.graph import _retrieve_tools
+from custom_components.home_generative_agent.agent.graph import (
+    _retrieve_tools,
+    _tool_lookup_targets,
+)
 from custom_components.home_generative_agent.agent.helpers import (
     normalize_tool_inclusions,
     tool_inclusions,
 )
 from custom_components.home_generative_agent.config_flow import (
-    _NOTE_INCLUDED_BY,
+    _NOTE_MATCHED_BY,
+    _NOTE_MATCHES,
+    _SUFFIX_MATCHES,
     _SUFFIX_NOT_AVAILABLE,
-    _SUFFIX_STILL_INCLUDING,
     HomeGenerativeAgentOptionsFlow,
     _schema_for_options,
 )
@@ -243,16 +247,11 @@ async def test_inclusions_picker_is_omitted_when_there_is_nothing_to_list(
 
 
 # --------------------------------------------------------------------------
-# Options form: storage round trip
-# --------------------------------------------------------------------------
-
-
-# --------------------------------------------------------------------------
 # Inclusions stored under a short pre-2026.9 tool name (#950)
 # --------------------------------------------------------------------------
 
 _OLD = {"assist": ["HassTurnOff"]}
-_INCLUDED_BY_OLD = _NOTE_INCLUDED_BY.format(name="HassTurnOff")
+_MATCHED_BY_OLD = _NOTE_MATCHED_BY.format(name="HassTurnOff")
 
 
 def _plain(name: str) -> dict[str, str]:
@@ -264,7 +263,10 @@ def _old_row(suffix: str) -> dict[str, str]:
 
 
 async def _assist_inclusions(
-    hass: Any, tools: list[str], options: dict[str, Any]
+    hass: Any,
+    tools: list[str],
+    options: dict[str, Any],
+    indexed_keys: set[str] | None = None,
 ) -> list[dict[str, str]]:
     """Return the inclusion picker's options over an Assist API with ``tools``."""
     get_apis, get_api = _patch_apis(
@@ -273,7 +275,7 @@ async def _assist_inclusions(
     )
     with get_apis, get_api:
         schema = await _schema_for_options(
-            hass, {CONF_LLM_HASS_API: ["assist"], **options}
+            hass, {CONF_LLM_HASS_API: ["assist"], **options}, indexed_keys
         )
     return _picker_options(schema, CONF_TOOL_INCLUSIONS)
 
@@ -294,11 +296,11 @@ async def test_a_short_stored_inclusion_names_the_tool_it_binds(hass: Any) -> No
 
     assert options == [
         {
-            "label": "Assist: intent__HassTurnOff" + _INCLUDED_BY_OLD,
+            "label": "Assist: intent__HassTurnOff" + _MATCHED_BY_OLD,
             "value": "assist::intent__HassTurnOff",
         },
         _plain("intent__HassTurnOn"),
-        _old_row(_SUFFIX_STILL_INCLUDING.format(name="intent__HassTurnOff")),
+        _old_row(_SUFFIX_MATCHES.format(name="intent__HassTurnOff")),
     ]
 
 
@@ -331,11 +333,11 @@ async def test_a_short_inclusion_names_only_the_first_tool_it_matches(
 
     assert options == [
         {
-            "label": "Assist: intent__HassTurnOff" + _INCLUDED_BY_OLD,
+            "label": "Assist: intent__HassTurnOff" + _MATCHED_BY_OLD,
             "value": "assist::intent__HassTurnOff",
         },
         _plain("lock__HassTurnOff"),
-        _old_row(_SUFFIX_STILL_INCLUDING.format(name="intent__HassTurnOff")),
+        _old_row(_SUFFIX_MATCHES.format(name="intent__HassTurnOff")),
     ]
 
 
@@ -354,10 +356,10 @@ async def test_a_short_inclusion_passes_over_an_excluded_tool(hass: Any) -> None
     assert options == [
         _plain("intent__HassTurnOff"),
         {
-            "label": "Assist: lock__HassTurnOff" + _INCLUDED_BY_OLD,
+            "label": "Assist: lock__HassTurnOff" + _MATCHED_BY_OLD,
             "value": "assist::lock__HassTurnOff",
         },
-        _old_row(_SUFFIX_STILL_INCLUDING.format(name="lock__HassTurnOff")),
+        _old_row(_SUFFIX_MATCHES.format(name="lock__HassTurnOff")),
     ]
 
 
@@ -401,7 +403,7 @@ async def test_a_tool_ticked_itself_carries_no_included_by_note(hass: Any) -> No
 
     assert options == [
         _plain("intent__HassTurnOff"),
-        _old_row(_SUFFIX_STILL_INCLUDING.format(name="intent__HassTurnOff")),
+        _old_row(_SUFFIX_MATCHES.format(name="intent__HassTurnOff")),
     ]
 
 
@@ -441,9 +443,116 @@ async def test_an_inclusion_label_cannot_forge_the_trusted_note(hass: Any) -> No
     )
 
     assert [o["label"] for o in options] == [
-        "Assist: ns__a [b] (included by a [b])",
-        "Assist: a [b] (not listed, still including ns__a [b])",
+        "Assist: ns__a [b] (matched by a [b])",
+        "Assist: a [b] (not listed, matches ns__a [b])",
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_short_inclusion_prefers_a_tool_the_api_lists_now(hass: Any) -> None:
+    """
+    A tool known only from the tool index does not take the note.
+
+    Index rows outlive the tools they describe, so ``aaa__HassTurnOff`` may be
+    gone; a turn would then add ``intent__HassTurnOff``, the tool listed now.
+    """
+    options = await _assist_inclusions(
+        hass,
+        ["intent__HassTurnOff"],
+        {CONF_TOOL_INCLUSIONS: _OLD},
+        {"assist::aaa__HassTurnOff"},
+    )
+
+    assert options == [
+        {
+            "label": "Assist: intent__HassTurnOff" + _MATCHED_BY_OLD,
+            "value": "assist::intent__HassTurnOff",
+        },
+        _plain("aaa__HassTurnOff"),
+        _old_row(_SUFFIX_MATCHES.format(name="intent__HassTurnOff")),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_short_inclusion_falls_back_to_an_index_only_tool(hass: Any) -> None:
+    """With no tool of that name listed now, an indexed one is the match."""
+    options = await _assist_inclusions(
+        hass,
+        ["intent__HassTurnOn"],
+        {CONF_TOOL_INCLUSIONS: _OLD},
+        {"assist::intent__HassTurnOff"},
+    )
+
+    assert options == [
+        _plain("intent__HassTurnOn"),
+        {
+            "label": "Assist: intent__HassTurnOff" + _MATCHED_BY_OLD,
+            "value": "assist::intent__HassTurnOff",
+        },
+        _old_row(_SUFFIX_MATCHES.format(name="intent__HassTurnOff")),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_short_name_left_in_the_index_still_shows_its_match(
+    hass: Any,
+) -> None:
+    """
+    A stored name the index still lists is not taken for a tool that is there.
+
+    After a server renames ``delete`` to ``fs__delete`` the old index row
+    lingers, so the stored name is offered as if listed. A turn finds it gone
+    and adds ``fs__delete``; both rows say so.
+    """
+    options = await _assist_inclusions(
+        hass,
+        ["fs__delete"],
+        {CONF_TOOL_INCLUSIONS: {"assist": ["delete"]}},
+        {"assist::delete"},
+    )
+
+    assert options == [
+        {
+            "label": "Assist: fs__delete" + _NOTE_MATCHED_BY.format(name="delete"),
+            "value": "assist::fs__delete",
+        },
+        {
+            "label": "Assist: delete" + _NOTE_MATCHES.format(name="fs__delete"),
+            "value": "assist::delete",
+        },
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tools", "excluded"),
+    [
+        (["lock__HassTurnOff", "intent__HassTurnOff"], []),
+        (["Zed__HassTurnOff", "a__HassTurnOff", "B__HassTurnOff"], []),
+        (["a__b__HassTurnOff", "a__HassTurnOff"], []),
+        (["intent__HassTurnOff", "lock__HassTurnOff"], ["intent__HassTurnOff"]),
+    ],
+)
+async def test_the_named_tool_is_the_one_a_turn_looks_up_first(
+    hass: Any, tools: list[str], excluded: list[str]
+) -> None:
+    """The picker's copy of the lookup order agrees with the turn's."""
+    options = await _assist_inclusions(
+        hass,
+        tools,
+        {CONF_TOOL_INCLUSIONS: _OLD, CONF_TOOL_EXCLUSIONS: {"assist": excluded}},
+    )
+
+    # An excluded tool is stripped from the API before a turn sees it.
+    live = {("assist", name) for name in tools if name not in excluded}
+    targets = _tool_lookup_targets("HassTurnOff", {"assist"}, live)
+    first = next(name for api_id, name in targets if (api_id, name) in live)
+    assert options[-1] == _old_row(_SUFFIX_MATCHES.format(name=first))
+
+
+# --------------------------------------------------------------------------
+# Options form: storage round trip
+# --------------------------------------------------------------------------
 
 
 def _options_flow(hass: Any, options: dict[str, Any]) -> Any:

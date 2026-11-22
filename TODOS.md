@@ -2,6 +2,18 @@
 
 ## Agent
 
+### An always-included short name ticked beside its renamed tool fetches that tool twice
+
+**What:** `_append_included_tools` (`agent/graph.py`) records what it bound under the stored name (`bound.add((api_id, name))`), not the fetched tool's name. With `HassTurnOff` and `intent__HassTurnOff` both ticked, `intent__HassTurnOff` is fetched and appended twice and the later dedupe in `_format_and_dedupe_tools` drops the copy.
+
+**Why:** Claude adversarial pass, review of the #950 inclusion labels (2026-11-21). Not caused by that change and harmless today: one extra store read per turn, no duplicate reaches the model.
+
+**How to apply:** Record `(fetched["api_id"], fetched["name"])` in `bound` and `bound_api_by_name` as well, and add a test with both names ticked that counts the candidates.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
 ### An empty reply with a PIN line leaves the round's other results unsaid
 
 **What:** When the model's reply after a tool round is empty and a fixed PIN line will be the reply, `_empty_reply_fallback` (`agent/graph.py`) adds nothing, so the line alone is the reply. The round's other results go unmentioned: in "turn on the porch light and unlock the front door", a failed light is never told, only "say your PIN to unlock the front door".
