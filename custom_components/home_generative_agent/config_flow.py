@@ -593,6 +593,10 @@ def _inclusion_choices(
     # stored composite value -> the listed tool it matches (value, tool name).
     # Sorted with the enumerated tools first, then by name: the first hit wins.
     matched: dict[str, tuple[str, str]] = {}
+    live_values = {choice["value"] for choice in live_choices}
+    enumerated_apis = {
+        parts[0] for value in enumerated if (parts := split_tool_index_key(value))
+    }
     for choice in sorted(
         live_choices, key=lambda c: (c["value"] not in enumerated, c["value"])
     ):
@@ -604,12 +608,17 @@ def _inclusion_choices(
         short_name = base_tool_name(tool_name)
         short_key = tool_index_key(api_id, short_name)
         if (
-            short_name == tool_name
+            not short_name
+            or short_name == tool_name
             or short_key not in chosen
             or short_key in matched
             # A stored name an API lists is tried first on a turn and is that
-            # tool; one known only from the index may be a leftover row.
+            # tool. One known only from the index may be a leftover row, but
+            # only where the API was listed: for an API the form could not
+            # list (unreachable, admin-only) every row is index-only, and a
+            # listed name is taken for the tool it names.
             or short_key in enumerated
+            or (short_key in live_values and api_id not in enumerated_apis)
             # Also true when the stored short name is itself excluded.
             or is_tool_excluded(tool_name, excluded_by_api.get(api_id, ()))
         ):

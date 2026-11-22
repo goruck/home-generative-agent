@@ -2,6 +2,18 @@
 
 ## Agent
 
+### An always-included short name is not checked against exclusions after the lookup
+
+**What:** `_append_included_tools` (`agent/graph.py`) runs `is_tool_excluded` on the stored name only. A stored `HassTurnOff` with `intent__HassTurnOff` excluded skips that tool only because the live tool list and the fallback set were stripped of exclusions earlier; the fetched tool's own name is never checked. The other force-injection site checks the fetched name.
+
+**Why:** Claude adversarial pass, review of the #950 inclusion labels (2026-11-21). Predates that change. Not shown to be reachable: whether every source `_get_tool_by_name` reads is always filtered was not traced. The function's docstring says the exclusion must not depend on an optional filter.
+
+**How to apply:** After the fetch, `continue` when `is_tool_excluded(fetched["name"], excluded_names.get(api_id, ()))`; add a test with `live_tool_ids=None` and an unfiltered fallback set.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** None
+
 ### An always-included short name ticked beside its renamed tool fetches that tool twice
 
 **What:** `_append_included_tools` (`agent/graph.py`) records what it bound under the stored name (`bound.add((api_id, name))`), not the fetched tool's name. With `HassTurnOff` and `intent__HassTurnOff` both ticked, `intent__HassTurnOff` is fetched and appended twice and the later dedupe in `_format_and_dedupe_tools` drops the copy.

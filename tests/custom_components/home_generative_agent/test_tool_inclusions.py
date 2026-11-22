@@ -524,6 +524,47 @@ async def test_a_short_name_left_in_the_index_still_shows_its_match(
 
 
 @pytest.mark.asyncio
+async def test_a_listed_name_on_an_api_that_could_not_be_listed_is_itself(
+    hass: Any,
+) -> None:
+    """
+    With the server unreachable every row is index-only, so none is a leftover.
+
+    A ticked ``search`` beside ``web__search`` is then the tool it names, and
+    neither row gets a note.
+    """
+    get_apis, get_api = _patch_apis(
+        [_FakeAPI(id="mcp-abc", name="My MCP Server")],
+        {"mcp-abc": TimeoutError("server unreachable")},
+    )
+    with get_apis, get_api:
+        schema = await _schema_for_options(
+            hass,
+            {
+                CONF_LLM_HASS_API: ["mcp-abc"],
+                CONF_TOOL_INCLUSIONS: {"mcp-abc": ["search"]},
+            },
+            {"mcp-abc::search", "mcp-abc::web__search"},
+        )
+
+    assert _picker_options(schema, CONF_TOOL_INCLUSIONS) == [
+        {"label": "My MCP Server: search", "value": "mcp-abc::search"},
+        {"label": "My MCP Server: web__search", "value": "mcp-abc::web__search"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_stored_name_matches_nothing(hass: Any) -> None:
+    """A tool named ``t__`` has an empty base name; no stored value matches it."""
+    options = await _assist_inclusions(
+        hass, ["t__"], {CONF_TOOL_INCLUSIONS: ["assist::"]}
+    )
+
+    assert [o["label"] for o in options if "matches" in o["label"]] == []
+    assert _plain("t__") in options
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tools", "excluded"),
     [
