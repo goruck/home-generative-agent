@@ -12,6 +12,7 @@ import pytest
 from custom_components.home_generative_agent.sentinel import owed
 from custom_components.home_generative_agent.sentinel.models import (
     AnomalyFinding,
+    FindingAction,
     Severity,
     anomaly_finding_from_dict,
 )
@@ -292,6 +293,21 @@ def test_an_unreadable_stored_finding_is_skipped(
 def test_a_stored_finding_round_trips() -> None:
     finding = _admins("eve", tokens=("t1",))
     assert anomaly_finding_from_dict(finding.as_dict()) == finding
+
+
+def test_a_stored_finding_comes_back_without_its_actions() -> None:
+    """A finding read back describes the past: it is told, never acted on."""
+    finding = replace(
+        _admins("eve", tokens=("t1",)),
+        actions=(FindingAction("switch.turn_off", ("switch.drier",)),),
+    )
+    stored = finding.as_dict()
+    assert stored["actions"] == [
+        {"service": "switch.turn_off", "entity_ids": ["switch.drier"]}
+    ]
+    assert anomaly_finding_from_dict(stored).actions == ()
+    # A finding with none is stored as before: no new key.
+    assert "actions" not in _admins("eve", tokens=("t1",)).as_dict()
 
 
 def test_a_held_back_replay_does_not_say_sentinel_was_silenced() -> None:

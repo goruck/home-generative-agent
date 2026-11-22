@@ -10,10 +10,12 @@ the options yet (#789), so nothing here can act.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from homeassistant.setup import async_setup_component
 
 from custom_components.home_generative_agent.const import (
     ACTION_POLICY_AUTO_EXECUTE,
@@ -44,6 +46,7 @@ from custom_components.home_generative_agent.flows.sentinel_subentry_flow import
 from custom_components.home_generative_agent.sentinel.execution import (
     SentinelExecutionService,
 )
+from custom_components.home_generative_agent.sentinel.models import FindingAction
 from custom_components.home_generative_agent.sentinel.notifier import canary_line
 
 from .test_execution_service import _make_finding, _make_snapshot
@@ -251,6 +254,197 @@ def test_dry_run_reports_without_the_execution_switch() -> None:
     assert live.block_reason == "auto_execution_disabled"
 
 
+# Explicit actions (#789)
+# ---------------------------------------------------------------------------
+
+
+def _evaluate_actions(
+    actions: tuple[FindingAction, ...],
+    allowed: list[str],
+    *,
+    advice: list[str] | None = None,
+    hass: HomeAssistant | None = None,
+    **options: Any,
+) -> Any:
+    """Evaluate a finding a sensor triggered, carrying *actions*."""
+    svc = SentinelExecutionService(
+        {
+            **_ACTING,
+            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: allowed,
+            **options,
+        },
+        hass=hass,
+    )
+    trigger = "binary_sensor.front_door"
+    finding = replace(
+        _make_finding(
+            confidence=0.9, suggested_actions=advice, triggering_entities=[trigger]
+        ),
+        actions=actions,
+    )
+    snapshot = _make_snapshot(entity_id=trigger, last_changed=_RECENT)
+    return svc.evaluate(finding, snapshot, 2, _NOW)
+
+
+def test_a_service_named_in_the_advice_never_runs() -> None:
+    """A stored or model-written `lock.lock` string is advice, never a call."""
+    result = _evaluate_actions((), ["lock"], advice=["lock.lock", "switch.turn_off"])
+    assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
+    assert result.block_reason == "no_executable_action"
+
+
+def test_an_action_on_its_own_target_runs() -> None:
+    """The target need not be what triggered the finding."""
+    result = _evaluate_actions(
+        (FindingAction("switch.turn_off", ("switch.drier",)),), ["switch.turn_off"]
+    )
+    assert result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        FindingAction("switch.turn_off", ()),
+        FindingAction("switch", ("switch.drier",)),
+        FindingAction("switch.turn_off", ("all",)),
+        FindingAction("switch.turn_off", ("switch.drier", "")),
+        FindingAction("switch.turn_off", ("Switch.Drier",)),
+        FindingAction("switch.turn_off", ("switch.",)),
+        FindingAction("switch.turn_off", ("switch.bad id",)),
+        FindingAction("switch.turn_off", ("switch.a.b",)),
+        FindingAction("switch.turn_off", ("light.hall",)),
+        FindingAction("homeassistant.toggle", ("Cover.garage",)),
+    ],
+)
+def test_a_malformed_action_stops_every_action(action: FindingAction) -> None:
+    """No target, no service or a non-entity target: nothing runs."""
+    result = _evaluate_actions(
+        (FindingAction("switch.turn_off", ("switch.kettle",)), action),
+        ["switch"],
+    )
+    assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
+    assert result.block_reason == "malformed_action"
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        FindingAction("homeassistant.turn_on", ("cover.garage",)),
+        FindingAction("homeassistant.turn_off", ("switch.drier", "lock.front_door")),
+        FindingAction("lock.unlock", ("lock.front_door",)),
+        FindingAction("cover.close_cover", ("cover.blind",)),
+    ],
+)
+def test_the_floor_reads_the_targets_of_the_action(action: FindingAction) -> None:
+    """The finding's trigger is a door sensor; the floor judges what is called."""
+    no_pin_rules: dict[str, Any] = {CONF_CRITICAL_ACTIONS: []}
+    result = _evaluate_actions(
+        (action,), ["homeassistant", "lock", "cover"], **no_pin_rules
+    )
+    assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
+    assert result.block_reason == "critical_action"
+
+
+def test_a_pin_rule_reads_the_targets_of_the_action() -> None:
+    """A sensor triggers; the PIN rule is matched against what is called."""
+    rules: dict[str, Any] = {
+        CONF_CRITICAL_ACTIONS: [
+            {"domain": "switch", "service": "turn_on", "entity_match": "garage"}
+        ]
+    }
+    held = _evaluate_actions(
+        (FindingAction("switch.turn_on", ("switch.porch", "switch.garage_relay")),),
+        ["switch"],
+        **rules,
+    )
+    assert held.block_reason == "critical_action"
+    free = _evaluate_actions(
+        (FindingAction("switch.turn_on", ("switch.porch",)),), ["switch"], **rules
+    )
+    assert free.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+
+
+async def test_what_the_target_starts_is_read_too(hass: HomeAssistant) -> None:
+    """A sensor triggers; the switch called is followed to what it opens (#831)."""
+    hass.states.async_set("switch.porch", "off")
+    hass.states.async_set("cover.garage_door", "closed", {"device_class": "garage"})
+    assert await async_setup_component(
+        hass,
+        "template",
+        {
+            "template": [
+                {
+                    "switch": {
+                        "name": "Opener",
+                        "state": "{{ false }}",
+                        "turn_on": [
+                            {
+                                "action": "cover.open_cover",
+                                "target": {"entity_id": "cover.garage_door"},
+                            }
+                        ],
+                        "turn_off": [],
+                    }
+                }
+            ]
+        },
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get("switch.opener") is not None
+
+    held = _evaluate_actions(
+        (FindingAction("switch.turn_on", ("switch.porch", "switch.opener")),),
+        ["switch"],
+        hass=hass,
+    )
+    assert held.block_reason == "critical_action"
+    free = _evaluate_actions(
+        (FindingAction("switch.turn_on", ("switch.porch",)),), ["switch"], hass=hass
+    )
+    assert free.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+
+
+@pytest.mark.parametrize("state", [None, "unavailable"])
+async def test_a_target_home_assistant_would_skip_stops_the_action(
+    hass: HomeAssistant, state: str | None
+) -> None:
+    """It would drop the entity and return: a call recorded as done, not made."""
+    hass.states.async_set("switch.kettle", "on")
+    if state is not None:
+        hass.states.async_set("switch.drier", state)
+    result = _evaluate_actions(
+        (FindingAction("switch.turn_off", ("switch.kettle", "switch.drier")),),
+        ["switch"],
+        hass=hass,
+    )
+    assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
+    assert result.block_reason == "target_unavailable"
+
+
+def test_the_dry_run_line_keeps_each_service_with_its_own_devices() -> None:
+    """Two services on different devices do not read as each on every device."""
+    actions = [
+        FindingAction("switch.turn_off", ("switch.drier",)),
+        FindingAction("light.turn_on", ("light.porch",)),
+    ]
+    assert canary_line(actions, None) == (
+        "Dry run: Sentinel would have run switch.turn_off on Drier. "
+        "Dry run: Sentinel would have run light.turn_on on Porch."
+    )
+
+
+def test_the_dry_run_line_names_the_targets_not_the_trigger() -> None:
+    """A dry run says which device would have been switched, once each."""
+    actions = [
+        FindingAction("switch.turn_off", ("switch.drier", "switch.iron")),
+        FindingAction("switch.turn_off", ("switch.drier",)),
+    ]
+    assert canary_line(actions, None) == (
+        "Dry run: Sentinel would have run switch.turn_off on Drier, Iron."
+    )
+
+
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Dry-run line in the notification
 # ---------------------------------------------------------------------------
@@ -261,7 +455,7 @@ def test_the_dry_run_line_names_the_action_and_the_device() -> None:
     finding = _make_finding(
         suggested_actions=["lock.lock"], triggering_entities=["lock.front_door"]
     )
-    line = canary_line(finding, ["lock.lock"], None)
+    line = canary_line(list(finding.actions), None)
     assert line == "Dry run: Sentinel would have run lock.lock on Front Door."
 
 

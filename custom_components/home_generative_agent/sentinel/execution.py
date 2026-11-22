@@ -15,8 +15,13 @@ Guardrail evaluation order
                                         ``blocked`` (unavailable)
 4. Sensitivity flag                   → ``handoff``
 5. Confidence below threshold         → ``prompt_user``
-6. Actions: none callable, one not
-   allowlisted, or one critical (a
+6. Actions: the finding carries none
+   (its suggested actions are advice,
+   never called), one is not a targeted
+   ``domain.service`` call on entities
+   of that domain, a target is missing
+   or unavailable, one is not
+   allowlisted, or one is critical (a
    PIN rule, a script/scene/automation
    it starts, an alarm panel or cover,
    a lock action but lock.lock)       → ``prompt_user``
@@ -36,6 +41,8 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.const import STATE_UNAVAILABLE
+from homeassistant.core import valid_entity_id
 from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.const import (
@@ -73,7 +80,10 @@ if TYPE_CHECKING:
 
     from homeassistant.core import HomeAssistant
 
-    from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
+    from custom_components.home_generative_agent.sentinel.models import (
+        AnomalyFinding,
+        FindingAction,
+    )
     from custom_components.home_generative_agent.snapshot.schema import (
         FullStateSnapshot,
     )
@@ -82,7 +92,7 @@ LOGGER = logging.getLogger(__name__)
 
 # Minimum autonomy level required for auto-execution.
 _MIN_AUTO_EXECUTE_LEVEL: int = 2
-# A suggested action Sentinel can call; anything else is advice to the user.
+# The form of a service Sentinel can call.
 _SERVICE_ACTION = re.compile(r"[a-z0-9_]+\.[a-z0-9_]+")
 # Domains Sentinel never acts on by itself, whatever the rules or allowlist:
 # an alarm panel guards itself with its own code, and a cover can be a door,
@@ -100,9 +110,41 @@ _FLOOR_RULES: tuple[dict[str, str], ...] = (
 )
 
 
-def executable_actions(finding: AnomalyFinding) -> list[str]:
-    """Return the suggested actions Sentinel can call: ``domain.service`` ones."""
-    return [a for a in finding.suggested_actions if _SERVICE_ACTION.fullmatch(a)]
+def executable_actions(finding: AnomalyFinding) -> list[FindingAction]:
+    """
+    Return the actions Sentinel can call for *finding*.
+
+    Only the finding's own ``actions``, which rule code builds with their
+    targets. Its ``suggested_actions`` are advice and are never called,
+    whatever they look like (#789).
+    """
+    return list(finding.actions)
+
+
+def is_callable_action(action: FindingAction) -> bool:
+    """
+    Return True for a ``domain.service`` action on entities of that domain.
+
+    Every target must be a whole, lower-case entity id, as Home Assistant
+    writes them: it lower-cases what it is given, so ``Cover.garage`` would
+    slip past a floor that reads domains and still move the cover. An entity
+    service acts only on its own domain, so a target of another domain is a
+    call that does nothing and reads as done; only ``homeassistant.*`` takes
+    any domain, and the floor judges its targets.
+    """
+    service = action.service
+    targets = action.entity_ids
+    if not isinstance(service, str) or _SERVICE_ACTION.fullmatch(service) is None:
+        return False
+    if not isinstance(targets, tuple) or not targets:
+        return False
+    domain = service.split(".", 1)[0]
+    for entity_id in targets:
+        if not isinstance(entity_id, str) or not valid_entity_id(entity_id):
+            return False
+        if domain not in (_GENERIC_DOMAIN, entity_id.split(".", 1)[0]):
+            return False
+    return True
 
 
 def level_increase_pin_required(options: Mapping[str, Any]) -> bool:
@@ -556,12 +598,17 @@ class SentinelExecutionService:
 
     def _actions_block_reason(self, finding: AnomalyFinding) -> str | None:
         """
-        Return why *finding*'s suggested actions cannot run on their own, or None.
+        Return why *finding*'s actions cannot run on their own, or None.
 
-        Only ``domain.service`` actions are ever called (advisory text such as
-        ``check_camera`` is not), so only those must be on the allowlist; with
-        none, there is nothing to run and the user decides. An empty allowlist
-        permits nothing. A critical action never runs without a person,
+        Only the finding's ``actions`` are ever called (its suggested actions
+        are advice), so only those must be on the allowlist; with none, there
+        is nothing to run and the user decides. An action that is not a
+        targeted call (``is_callable_action``) stops them all, as does a
+        target Home Assistant has no state for or holds unavailable. The
+        reasons returned are ``no_executable_action``, ``malformed_action``,
+        ``target_unavailable``, ``service_not_allowlisted`` and
+        ``critical_action``. An empty allowlist permits nothing. A critical action never
+        runs without a person,
         whatever the allowlist says: one a Critical Action PIN rule covers,
         one the automation screener holds (a script, scene or automation it
         would start), any alarm panel or cover action, and any lock action
@@ -570,6 +617,12 @@ class SentinelExecutionService:
         actions = executable_actions(finding)
         if not actions:
             return "no_executable_action"
+        if not all(is_callable_action(action) for action in actions):
+            LOGGER.debug("Auto-execute blocked: malformed action in %s.", actions)
+            return "malformed_action"
+        if (missing := self._unavailable_targets(actions)) is not None:
+            LOGGER.debug("Auto-execute blocked: %s cannot be acted on.", missing)
+            return "target_unavailable"
         allowed: list[str] = list(
             self._options.get(
                 CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
@@ -578,18 +631,38 @@ class SentinelExecutionService:
             or []
         )
         for action in actions:
-            if action not in allowed and action.split(".", 1)[0] not in allowed:
+            service = action.service
+            if service not in allowed and service.split(".", 1)[0] not in allowed:
                 LOGGER.debug(
                     "Auto-execute blocked: service %s not in allowlist %s.",
-                    action,
+                    service,
                     allowed,
                 )
                 return "service_not_allowlisted"
-        if self._is_critical(finding, actions):
+        if self._is_critical(actions):
             return "critical_action"
         return None
 
-    def _is_critical(self, finding: AnomalyFinding, actions: list[str]) -> bool:
+    def _unavailable_targets(self, actions: list[FindingAction]) -> str | None:
+        """
+        Return a target Home Assistant would skip, or None.
+
+        Home Assistant drops a missing or unavailable entity from a service
+        call and returns normally, so the call would be recorded as done with
+        nothing acted on. The data-quality gate reads the finding's triggering
+        entities, which are often not the targets.
+        """
+        states = getattr(self._hass, "states", None)
+        if states is None:
+            return None
+        for action in actions:
+            for entity_id in action.entity_ids:
+                state = states.get(entity_id)
+                if state is None or state.state == STATE_UNAVAILABLE:
+                    return entity_id
+        return None
+
+    def _is_critical(self, actions: list[FindingAction]) -> bool:
         """Return True if any action needs a person: a PIN-gated or alarm call."""
         from custom_components.home_generative_agent.agent.automation_pin import (  # noqa: PLC0415
             find_critical_automation_calls,
@@ -604,29 +677,32 @@ class SentinelExecutionService:
             expand_critical_rules,
         )
 
-        target_domains = {e.split(".", 1)[0] for e in finding.triggering_entities}
         for action in actions:
-            domain = action.split(".", 1)[0]
+            service = action.service
+            domain = service.split(".", 1)[0]
             if domain in _NEVER_AUTO_DOMAINS or (
-                domain == "lock" and action != _SAFE_LOCK_SERVICE
+                domain == "lock" and service != _SAFE_LOCK_SERVICE
             ):
-                LOGGER.debug("Auto-execute blocked: %s needs a person.", action)
+                LOGGER.debug("Auto-execute blocked: %s needs a person.", service)
                 return True
             # `homeassistant.*` runs each target's own service: the floor
-            # applies to the targets' domains.
+            # applies to the domains of this action's targets.
+            target_domains = {e.split(".", 1)[0] for e in action.entity_ids}
             if domain == _GENERIC_DOMAIN and target_domains & {
                 *_NEVER_AUTO_DOMAINS,
                 "lock",
             }:
-                LOGGER.debug("Auto-execute blocked: %s on %s.", action, target_domains)
+                LOGGER.debug("Auto-execute blocked: %s on %s.", service, target_domains)
                 return True
         # Extended as the PIN gate extends them (#773): a rule's word also
         # reaches entities by device class, name and group.
         rules = expand_critical_rules(
             self._hass, resolve_critical_action_policy(self._options).critical_actions
         )
-        target = {"entity_id": list(finding.triggering_entities)}
-        steps = [{"action": action, "target": target} for action in actions]
+        steps = [
+            {"action": a.service, "target": {"entity_id": list(a.entity_ids)}}
+            for a in actions
+        ]
         found = find_critical_automation_calls({"actions": steps}, rules)
         if not found:
             # What the call starts runs too: a template switch's actions, a
@@ -637,7 +713,7 @@ class SentinelExecutionService:
             except Exception:
                 LOGGER.exception(
                     "Auto-execute blocked: could not check what %s starts.",
-                    ", ".join(actions),
+                    ", ".join(a.service for a in actions),
                 )
                 return True
         if found:

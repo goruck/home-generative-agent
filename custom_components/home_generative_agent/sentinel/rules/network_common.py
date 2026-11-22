@@ -270,7 +270,8 @@ def make_finding(  # noqa: PLR0913
     sentence; both are attached for the notifier and the audit trail but
     excluded from the anomaly-id hash, so pending-prompt and snooze identity
     survive a changing count. ``suggested_actions`` must not contain a dot:
-    the engine treats ``a.b`` strings as ``domain.service`` calls.
+    advice that reads as ``domain.service`` looks like a call, though no
+    suggested action is ever called (#789).
     """
     entities = list(triggering_entities)
     actions = list(suggested_actions)

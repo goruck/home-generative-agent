@@ -24,6 +24,7 @@ import custom_components.home_generative_agent as hga_component
 import custom_components.home_generative_agent.core.utils as utils_mod
 from custom_components.home_generative_agent.audit.store import AuditStore
 from custom_components.home_generative_agent.core.stop_latch import StopLatch
+from custom_components.home_generative_agent.sentinel import engine as engine_mod
 from custom_components.home_generative_agent.sentinel.auth_inventory import (
     AuthInventory,
 )
@@ -39,7 +40,9 @@ from custom_components.home_generative_agent.sentinel.discovery_store import (
 from custom_components.home_generative_agent.sentinel.engine import (
     SentinelEngine,
     _auto_execute_finding,
+    outcome_may_have_acted,
 )
+from custom_components.home_generative_agent.sentinel.models import FindingAction
 from custom_components.home_generative_agent.sentinel.network_inventory import (
     NetworkInventory,
 )
@@ -49,6 +52,8 @@ from custom_components.home_generative_agent.sentinel.proposal_store import (
 from custom_components.home_generative_agent.sentinel.suppression import (
     SuppressionManager,
 )
+
+from .sentinel_actions import service_actions
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -109,6 +114,7 @@ def _finding(actions: list[str]) -> Any:
         anomaly_id="f1",
         suggested_actions=actions,
         triggering_entities=["lock.front_door"],
+        actions=service_actions(actions, ["lock.front_door"]),
     )
 
 
@@ -202,12 +208,13 @@ async def test_a_stop_the_service_turned_into_an_error_runs_no_more_actions() ->
     """A cancel a service call converted to an error stops the next action."""
     hass = MagicMock()
 
+    run = asyncio.current_task()
+    assert run is not None
+
     async def _call(*_args: Any, **_kwargs: Any) -> None:
-        task = asyncio.current_task()
-        assert task is not None
-        task.cancel()  # the stop's cancel lands during the call...
+        run.cancel()  # the stop's cancel lands on the run during the call...
         with suppress(asyncio.CancelledError):
-            await asyncio.sleep(0)  # ...and the integration catches it
+            await asyncio.sleep(1)  # ...is passed on, and the integration catches it
         msg = "service failed"
         raise RuntimeError(msg)
 
@@ -220,8 +227,103 @@ async def test_a_stop_the_service_turned_into_an_error_runs_no_more_actions() ->
     # The call may have acted: it is recorded as attempted, so the run keeps
     # its cooldown and audit; the next action does not run.
     assert hass.services.async_call.await_count == 1
-    assert [a["status"] for a in outcome["actions"]] == ["error", "stopped"]
+    assert [a["status"] for a in outcome["actions"]] == ["timeout", "stopped"]
     assert outcome["status"] == "error"
+    assert "service failed" in outcome["actions"][0]["error"]
+    # Uncertain, so it uses up the hourly limit and the duplicate check.
+    assert outcome_may_have_acted(outcome)
+    run.uncancel()  # the cancel this test sent itself
+
+
+@pytest.mark.asyncio
+async def test_a_stop_during_a_call_keeps_the_record_of_what_ran() -> None:
+    """The call is cancelled, and the actions before it are not forgotten."""
+    hass = MagicMock()
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def _call(domain: str, *_args: Any, **_kwargs: Any) -> None:
+        if domain == "lock":
+            return
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    hass.services.async_call = _call
+    finding = _finding(["lock.lock", "switch.turn_off", "light.turn_off"])
+    run = asyncio.create_task(
+        _auto_execute_finding(hass, cast("Any", finding), "exec-1")
+    )
+    await started.wait()
+    run.cancel()
+
+    outcome = await run
+
+    assert cancelled.is_set()
+    assert [a["status"] for a in outcome["actions"]] == ["ok", "timeout", "stopped"]
+    assert outcome["status"] == "partial"
+    assert outcome_may_have_acted(outcome)
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_holds_on_through_a_stop_is_still_collected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second cancel during the grace wait leaves no call unowned."""
+    monkeypatch.setattr(engine_mod, "_ACTION_CANCEL_GRACE_S", 5.0)
+    hass = MagicMock()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _call(*_args: Any, **_kwargs: Any) -> None:
+        started.set()
+        while not release.is_set():
+            with suppress(asyncio.CancelledError):
+                await release.wait()
+        msg = "device said no"
+        raise RuntimeError(msg)
+
+    hass.services.async_call = _call
+    run = asyncio.create_task(
+        _auto_execute_finding(hass, cast("Any", _finding(["lock.lock"])), "exec-1")
+    )
+    await started.wait()
+    run.cancel()  # the stop...
+    await asyncio.sleep(0.01)
+    run.cancel()  # ...and its repeat, while the grace wait runs
+
+    outcome = await run
+
+    assert [a["status"] for a in outcome["actions"]] == ["timeout"]
+    assert len(engine_mod._GIVEN_UP) == 1
+    release.set()
+    await asyncio.sleep(0.01)
+    assert not engine_mod._GIVEN_UP
+    assert not engine_mod._CALLS
+
+
+@pytest.mark.asyncio
+async def test_a_call_made_as_the_engine_stops_never_reaches_the_service() -> None:
+    """A stop between making the call's task and its first step runs nothing."""
+    hass = MagicMock()
+    hass.services.async_call = AsyncMock()
+    asked = 0
+
+    def _refuses(_what: str) -> bool:
+        nonlocal asked
+        asked += 1
+        return asked > 1  # allowed in the loop, stopped by the time the call runs
+
+    outcome = await _auto_execute_finding(
+        hass, cast("Any", _finding(["lock.lock"])), "exec-1", refuses=_refuses
+    )
+
+    hass.services.async_call.assert_not_awaited()
+    assert [a["status"] for a in outcome["actions"]] == ["stopped"]
+    assert outcome["status"] == "stopped"
 
 
 @pytest.mark.asyncio
@@ -851,3 +953,21 @@ def test_the_latch_warns_once(caplog: pytest.LogCaptureFixture) -> None:
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
     assert "issue #988" in warnings[0].getMessage()
+
+
+def test_a_call_from_a_closed_loop_holds_no_device_and_breaks_no_stop() -> None:
+    """A call an event loop left behind can never end: it is forgotten."""
+    loop = asyncio.new_event_loop()
+    stale = loop.create_future()
+    loop.close()
+    engine_mod._CALLS[stale] = ("switch.turn_off", ("switch.drier",))
+    engine_mod._GIVEN_UP.add(stale)
+    try:
+        engine_mod.cancel_outstanding_calls()  # does not raise
+        action = FindingAction("switch.turn_off", ("switch.drier",))
+        assert engine_mod._not_callable_now(None, action) is None
+        assert stale not in engine_mod._CALLS
+        assert stale not in engine_mod._GIVEN_UP
+    finally:
+        engine_mod._CALLS.pop(stale, None)
+        engine_mod._GIVEN_UP.discard(stale)
