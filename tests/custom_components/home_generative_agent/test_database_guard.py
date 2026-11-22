@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from types import MappingProxyType
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from homeassistant.config_entries import (
@@ -87,7 +87,6 @@ def _prepare_entry(hass: Any, monkeypatch: pytest.MonkeyPatch) -> MockConfigEntr
     """Create the entry and patch the fallback harness (no database URI)."""
     entry = MockConfigEntry(domain=DOMAIN, data={})
     entry.add_to_hass(hass)
-    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
     _patch_setup_dependencies(hass, monkeypatch, _fallback_setup_data())
     return entry
 
@@ -441,8 +440,9 @@ async def _setup_with_database_subentry(
         ],
     )
     entry.add_to_hass(hass)
-    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
     # The domain setup HA runs before any entry: it registers the watcher.
+    # No http server in this fixture; the cards are not what is under test.
+    monkeypatch.setattr(hga_component, "_async_register_http", AsyncMock())
     assert await hga_component.async_setup(hass, {}) is True
     _patch_setup_dependencies(hass, monkeypatch, _fallback_setup_data())
     _patch_configured_database(monkeypatch, _ReachablePool)
@@ -568,7 +568,8 @@ async def _fail_setup_on_the_database(
         ],
     )
     entry.add_to_hass(hass)
-    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
+    # No http server in this fixture; the cards are not what is under test.
+    monkeypatch.setattr(hga_component, "_async_register_http", AsyncMock())
     assert await hga_component.async_setup(hass, {}) is True
     _patch_setup_dependencies(hass, monkeypatch, _fallback_setup_data())
     _patch_configured_database(monkeypatch, _UnreachablePool)

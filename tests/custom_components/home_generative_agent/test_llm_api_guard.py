@@ -132,7 +132,6 @@ async def test_setup_reports_an_unloadable_llm_api_selection(
     """Setup raises the issue, and unload drops it until the next setup."""
     entry = MockConfigEntry(domain=DOMAIN, data={})
     entry.add_to_hass(hass)
-    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
     data = _fallback_setup_data()
     data.options[CONF_LLM_HASS_API] = ["homeassistant"]
     _patch_setup_dependencies(hass, monkeypatch, data)

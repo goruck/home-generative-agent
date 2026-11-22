@@ -3201,7 +3201,6 @@ async def _setup_two_ollama_servers(  # noqa: PLR0913
         entry.add_to_hass(hass)
     if record_check:
         entry.mock_state(hass, ConfigEntryState.LOADED)
-    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
     data = _fallback_setup_data()
     data.options[CONF_EMBEDDING_MODEL_PROVIDER] = "ollama"
     data.options[CONF_OLLAMA_EMBEDDING_MODEL] = "configured-embed"
@@ -3513,7 +3512,6 @@ async def test_setup_with_two_secondaries_syncs_the_one_it_left_out(
     """One read as another build, one unread: the issue names the first now."""
     entry = MockConfigEntry(domain=DOMAIN, data={})
     entry.add_to_hass(hass)
-    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
     data = _fallback_setup_data()
     data.options[CONF_EMBEDDING_MODEL_PROVIDER] = "ollama"
     data.options[CONF_OLLAMA_EMBEDDING_MODEL] = "configured-embed"
@@ -3700,7 +3698,6 @@ async def test_setup_leaves_a_standing_issue_to_the_record_check(
     )
     issue_id = er._other_build_issue_id(entry.entry_id)
     registry.async_ignore(DOMAIN, issue_id, ignore=True)
-    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
     data = _fallback_setup_data()
     data.options[CONF_EMBEDDING_MODEL_PROVIDER] = "ollama"
     data.options[CONF_OLLAMA_EMBEDDING_MODEL] = "configured-embed"
@@ -3892,7 +3889,6 @@ async def test_setup_without_a_database_asks_no_digest(
     """Nothing embeds without a database, so no server is asked."""
     entry = MockConfigEntry(domain=DOMAIN, data={})
     entry.add_to_hass(hass)
-    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
     data = _fallback_setup_data()
     data.options[CONF_EMBEDDING_MODEL_PROVIDER] = "ollama"
     _patch_setup_dependencies(hass, monkeypatch, data)
@@ -3916,7 +3912,6 @@ async def test_a_non_ollama_primary_is_fingerprinted_by_its_model(
     """OpenAI's configured embedding model goes into the fingerprint."""
     entry = MockConfigEntry(domain=DOMAIN, data={})
     entry.add_to_hass(hass)
-    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
     data = _fallback_setup_data()
     _patch_setup_dependencies(hass, monkeypatch, data)
 
