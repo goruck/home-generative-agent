@@ -35,6 +35,8 @@ from custom_components.home_generative_agent.snapshot.schema import (
     validate_snapshot,
 )
 
+from .sentinel_actions import service_actions
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -58,6 +60,9 @@ def _make_finding(  # noqa: PLR0913
         evidence={},
         suggested_actions=suggested_actions or [],
         is_sensitive=is_sensitive,
+        actions=service_actions(
+            suggested_actions, triggering_entities or ["binary_sensor.front_door"]
+        ),
     )
 
 

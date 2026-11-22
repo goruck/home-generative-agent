@@ -102,7 +102,10 @@ if TYPE_CHECKING:
 
     from custom_components.home_generative_agent.audit.store import AuditStore
     from custom_components.home_generative_agent.notify.actions import ActionHandler
-    from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
+    from custom_components.home_generative_agent.sentinel.models import (
+        AnomalyFinding,
+        FindingAction,
+    )
     from custom_components.home_generative_agent.snapshot.schema import (
         FullStateSnapshot,
     )
@@ -2530,19 +2533,18 @@ def _name_owners(
     return owners
 
 
-def canary_line(
-    finding: AnomalyFinding, actions: list[str], hass: HomeAssistant | None
-) -> str:
+def canary_line(actions: list[FindingAction], hass: HomeAssistant | None) -> str:
     """
     Return the line naming what auto-execution would have run (#783).
 
     Canary mode records the decision without acting; this puts it in the
     notification, where a user reviewing Sentinel before turning execution
-    on reads it. Devices are named as Home Assistant names them.
+    on reads it. The devices are the actions' own targets, named as Home
+    Assistant names them.
     """
     states = getattr(hass, "states", None)
     names = []
-    for entity_id in finding.triggering_entities:
+    for entity_id in dict.fromkeys(e for a in actions for e in a.entity_ids):
         state = states.get(entity_id) if states is not None else None
         name = getattr(state, "name", None)
         if not isinstance(name, str) or not name.strip():
@@ -2551,7 +2553,7 @@ def canary_line(
     return notif_msg(
         hass,
         "canary_would_run",
-        actions=", ".join(actions),
+        actions=", ".join(dict.fromkeys(a.service for a in actions)),
         targets=", ".join(names) or notif_msg(hass, "fallback_unknown_entity"),
     )
 

@@ -50,6 +50,8 @@ from custom_components.home_generative_agent.sentinel.suppression import (
     SuppressionManager,
 )
 
+from .sentinel_actions import service_actions
+
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
@@ -109,6 +111,7 @@ def _finding(actions: list[str]) -> Any:
         anomaly_id="f1",
         suggested_actions=actions,
         triggering_entities=["lock.front_door"],
+        actions=service_actions(actions, ["lock.front_door"]),
     )
 
 

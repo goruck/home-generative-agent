@@ -1316,9 +1316,7 @@ class SentinelEngine:
         """Return the dry-run line for a finding canary mode would have run."""
         if not canary_would_execute:
             return {}
-        return {
-            "canary_line": canary_line(finding, executable_actions(finding), self._hass)
-        }
+        return {"canary_line": canary_line(executable_actions(finding), self._hass)}
 
     # ---------------------------------------------------------------------- #
     # Lifecycle
@@ -3273,6 +3271,11 @@ class SentinelEngine:
         return True
 
 
+# How long one automatic service call may take. Without a limit, a device
+# that never answers a blocking call stalls every later Sentinel run (#789).
+_ACTION_CALL_TIMEOUT_S = 10.0
+
+
 async def _auto_execute_finding(
     hass: Any,
     finding: AnomalyFinding,
@@ -3281,10 +3284,12 @@ async def _auto_execute_finding(
     refuses: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
     """
-    Execute suggested actions for *finding* by calling HA services.
+    Run *finding*'s actions by calling HA services.
 
-    Only actions in ``domain.service`` format are dispatched.  Actions that
-    are advisory strings (no ``.``) are silently skipped.
+    Only the finding's ``actions`` are called, each on its own targets (#789);
+    its suggested actions are advice. Each call is given
+    ``_ACTION_CALL_TIMEOUT_S``: a device that never answers is recorded as an
+    error, which says it may still have acted, and the run goes on.
 
     *refuses*, when given, is asked before each call; an action it refuses is
     recorded as ``"stopped"`` and not run (#988).
@@ -3311,27 +3316,44 @@ async def _auto_execute_finding(
         # Before each call, not once: the engine can stop while an earlier
         # action's blocking call runs (#988).
         if stopping or (refuses is not None and refuses("auto-execute action")):
-            results.append({"service": action, "status": "stopped", "error": None})
+            results.append(
+                {
+                    "service": action.service,
+                    "entity_ids": list(action.entity_ids),
+                    "status": "stopped",
+                    "error": None,
+                }
+            )
             continue
-        domain, _, service = action.partition(".")
-        service_data: dict[str, Any] = {}
-        if finding.triggering_entities:
-            service_data["entity_id"] = (
-                finding.triggering_entities[0]
-                if len(finding.triggering_entities) == 1
-                else list(finding.triggering_entities)
+        name = action.service
+        domain, _, service = name.partition(".")
+        targets = list(action.entity_ids)
+        if not service or not targets:
+            # The gate refuses these; never an untargeted call from here.
+            results.append(
+                {
+                    "service": name,
+                    "entity_ids": targets,
+                    "status": "error",
+                    "error": "not a targeted service call",
+                }
             )
+            continue
         try:
-            await hass.services.async_call(
-                domain,
-                service,
-                service_data,
-                blocking=True,
+            async with asyncio.timeout(_ACTION_CALL_TIMEOUT_S):
+                await hass.services.async_call(
+                    domain,
+                    service,
+                    {"entity_id": targets},
+                    blocking=True,
+                )
+            results.append(
+                {"service": name, "entity_ids": targets, "status": "ok", "error": None}
             )
-            results.append({"service": action, "status": "ok", "error": None})
             LOGGER.info(
-                "Auto-executed service %s for finding %s (execution_id=%s).",
-                action,
+                "Auto-executed service %s on %s for finding %s (execution_id=%s).",
+                name,
+                ", ".join(targets),
                 finding.anomaly_id,
                 execution_id,
             )
@@ -3339,12 +3361,25 @@ async def _auto_execute_finding(
             # A stop the service turned into an error: the call may have
             # acted, so it is recorded as attempted, and no more run (#988).
             stopping = cancel_requested()
-            results.append({"service": action, "status": "error", "error": str(exc)})
+            error = (
+                f"no answer within {_ACTION_CALL_TIMEOUT_S:g} s; "
+                "the device may still have acted"
+                if isinstance(exc, TimeoutError)
+                else str(exc)
+            )
+            results.append(
+                {
+                    "service": name,
+                    "entity_ids": targets,
+                    "status": "error",
+                    "error": error,
+                }
+            )
             LOGGER.warning(
                 "Auto-execute service %s failed for finding %s: %s.",
-                action,
+                name,
                 finding.anomaly_id,
-                exc,
+                error,
             )
 
     ok_count = sum(1 for r in results if r["status"] == "ok")

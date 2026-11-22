@@ -203,6 +203,25 @@ def build_anomaly_id(
 
 
 @dataclass(frozen=True)
+class FindingAction:
+    """
+    A service call a finding's rule proposes, with the entities it acts on.
+
+    Built by rule code only. A finding's ``suggested_actions`` are advice for
+    the user and the explanation; nothing in them is ever called (#789). The
+    targets are named here because they are often not the triggering
+    entities: a power sensor triggers, the plug behind it is switched off.
+    """
+
+    service: str
+    entity_ids: tuple[str, ...]
+
+    def as_dict(self) -> dict[str, Any]:
+        """Serialize the action for the audit record."""
+        return {"service": self.service, "entity_ids": list(self.entity_ids)}
+
+
+@dataclass(frozen=True)
 class AnomalyFinding:
     """Structured anomaly finding."""
 
@@ -215,6 +234,8 @@ class AnomalyFinding:
     suggested_actions: list[str]
     is_sensitive: bool
     detected_at: datetime = field(default_factory=dt_util.utcnow)
+    # What Sentinel may call by itself for this finding, gates permitting.
+    actions: tuple[FindingAction, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize the finding for storage/notifications."""
@@ -228,6 +249,7 @@ class AnomalyFinding:
             "suggested_actions": list(self.suggested_actions),
             "is_sensitive": self.is_sensitive,
             "detected_at": _as_iso(self.detected_at),
+            "actions": [action.as_dict() for action in self.actions],
         }
 
 
@@ -274,6 +296,8 @@ def anomaly_finding_from_dict(data: Mapping[str, Any]) -> AnomalyFinding:
     Rebuild a finding saved with ``AnomalyFinding.as_dict``.
 
     Raises KeyError, TypeError or ValueError when ``data`` is not one.
+    Its ``actions`` are not restored: a saved finding describes the past, so
+    one read back is told to the user and never acted on (#789).
     """
     severity = data["severity"]
     if severity not in SEVERITY_RANK:

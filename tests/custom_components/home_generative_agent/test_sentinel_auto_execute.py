@@ -3,15 +3,23 @@
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from custom_components.home_generative_agent.sentinel import engine as engine_module
 from custom_components.home_generative_agent.sentinel.engine import (
     _auto_execute_finding,
 )
-from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
+from custom_components.home_generative_agent.sentinel.models import (
+    AnomalyFinding,
+    FindingAction,
+)
+
+from .sentinel_actions import service_actions
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -35,6 +43,10 @@ def _make_finding(
         evidence={},
         suggested_actions=suggested_actions if suggested_actions is not None else [],
         is_sensitive=False,
+        actions=service_actions(
+            suggested_actions,
+            ["lock.front_door"] if triggering_entities is None else triggering_entities,
+        ),
     )
 
 
@@ -96,7 +108,7 @@ async def test_auto_execute_domain_service_calls_ha() -> None:
     hass.services.async_call.assert_called_once_with(
         "lock",
         "lock",
-        {"entity_id": "lock.front_door"},
+        {"entity_id": ["lock.front_door"]},
         blocking=True,
     )
 
@@ -178,20 +190,76 @@ async def test_auto_execute_mixed_advisory_and_service() -> None:
 
 
 @pytest.mark.asyncio
-async def test_auto_execute_no_triggering_entities_omits_entity_id() -> None:
-    """Finding with empty triggering_entities calls service without entity_id."""
+async def test_an_action_without_a_target_is_never_called() -> None:
+    """Home Assistant would run an untargeted call on the whole domain."""
     hass = _make_hass()
-    finding = _make_finding(
-        suggested_actions=["lock.lock"],
-        triggering_entities=[],
-    )
+    finding = _make_finding(suggested_actions=["lock.lock"], triggering_entities=[])
 
     result = await _auto_execute_finding(hass, finding, "exec_008")
 
-    assert result["status"] == "success"
-    hass.services.async_call.assert_called_once_with(
-        "lock",
-        "lock",
-        {},
-        blocking=True,
+    assert result["status"] == "error"
+    assert result["actions"][0]["error"] == "not a targeted service call"
+    hass.services.async_call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_service_named_in_the_advice_is_never_called() -> None:
+    """Only a finding's own actions run; its suggested actions are advice."""
+    hass = _make_hass()
+    finding = replace(_make_finding(suggested_actions=["lock.lock"]), actions=())
+
+    result = await _auto_execute_finding(hass, finding, "exec_009")
+
+    assert result["status"] == "no_actions"
+    hass.services.async_call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_an_action_goes_to_its_own_targets_not_the_trigger() -> None:
+    """A power sensor triggers; the plug behind it is what gets switched off."""
+    hass = _make_hass()
+    finding = replace(
+        _make_finding(triggering_entities=["sensor.drier_power", "person.andy"]),
+        actions=(FindingAction("switch.turn_off", ("switch.drier",)),),
     )
+
+    result = await _auto_execute_finding(hass, finding, "exec_010")
+
+    assert result["status"] == "success"
+    assert result["actions"][0]["entity_ids"] == ["switch.drier"]
+    hass.services.async_call.assert_called_once_with(
+        "switch", "turn_off", {"entity_id": ["switch.drier"]}, blocking=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_never_answers_is_given_up_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hung device costs one timeout, and the next action still runs."""
+    monkeypatch.setattr(engine_module, "_ACTION_CALL_TIMEOUT_S", 0.01)
+    calls: list[str] = []
+
+    async def _call(domain: str, service: str, *_a: Any, **_k: Any) -> None:
+        calls.append(f"{domain}.{service}")
+        if domain == "switch":
+            await asyncio.Event().wait()
+
+    hass = MagicMock()
+    hass.services.async_call = _call
+    finding = replace(
+        _make_finding(),
+        actions=(
+            FindingAction("switch.turn_off", ("switch.drier",)),
+            FindingAction("lock.lock", ("lock.front_door",)),
+        ),
+    )
+
+    result = await _auto_execute_finding(hass, finding, "exec_011")
+
+    assert calls == ["switch.turn_off", "lock.lock"]
+    assert result["status"] == "partial"
+    hung, done = result["actions"]
+    assert hung["status"] == "error"
+    assert "the device may still have acted" in hung["error"]
+    assert done["status"] == "ok"

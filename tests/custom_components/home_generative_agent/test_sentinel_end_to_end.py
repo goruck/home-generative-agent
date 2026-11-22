@@ -57,6 +57,8 @@ from custom_components.home_generative_agent.snapshot.schema import (
     validate_snapshot,
 )
 
+from .sentinel_actions import service_actions
+
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
@@ -391,7 +393,7 @@ async def test_sentinel_canary_mode_does_not_consume_live_auto_execute(
     hass.services.async_call.assert_called_once_with(
         "lock",
         "lock",
-        {"entity_id": "lock.front_door"},
+        {"entity_id": ["lock.front_door"]},
         blocking=True,
     )
     assert len(audit.calls) >= 2
@@ -486,6 +488,7 @@ class StubAutoExecRule:
                 evidence={},
                 suggested_actions=["lock.lock"],
                 is_sensitive=False,
+                actions=service_actions(["lock.lock"], ["lock.front_door"]),
             )
         ]
 
@@ -576,7 +579,7 @@ async def test_live_auto_execute_calls_ha_service(
     hass.services.async_call.assert_called_once_with(
         "lock",
         "lock",
-        {"entity_id": "lock.front_door"},
+        {"entity_id": ["lock.front_door"]},
         blocking=True,
     )
 
@@ -695,6 +698,7 @@ async def test_live_auto_execute_failure_does_not_consume_retry(
         "actions": [
             {
                 "service": "lock.lock",
+                "entity_ids": ["lock.front_door"],
                 "status": "error",
                 "error": "temporary HA failure",
             }
@@ -703,7 +707,14 @@ async def test_live_auto_execute_failure_does_not_consume_retry(
     }
     assert second_outcome == {
         "status": "success",
-        "actions": [{"service": "lock.lock", "status": "ok", "error": None}],
+        "actions": [
+            {
+                "service": "lock.lock",
+                "entity_ids": ["lock.front_door"],
+                "status": "ok",
+                "error": None,
+            }
+        ],
         "execution_id": second_outcome["execution_id"],
     }
 
