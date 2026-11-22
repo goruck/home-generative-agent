@@ -36,6 +36,10 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+# Rule ID -> the missing sensors last logged for it, so an unavailable-sensors
+# rule that cannot resolve is reported once, not at every run (#960).
+_UNRESOLVED_SENSORS_LOGGED: dict[str, tuple[str, ...]] = {}
+
 _SEVERITIES = {"low", "medium", "high"}
 # HA covers report "open"/"closed" rather than binary_sensor's "on"/"off";
 # both count as an open entry (issue #504 adversarial review).
@@ -620,17 +624,10 @@ def _eval_unavailable_sensors_while_home(
     if not isinstance(sensor_ids, list):
         return []
 
-    required_entities: list[SnapshotEntity] = []
-    resolved_sensor_ids: list[str] = []
-    for sensor_id in sensor_ids:
-        resolved_sensor_id = _resolve_sensor_entity_id(sensor_id, entity_map)
-        if resolved_sensor_id is None:
-            return []
-        entity = entity_map.get(resolved_sensor_id)
-        if entity is None:
-            return []
-        resolved_sensor_ids.append(resolved_sensor_id)
-        required_entities.append(entity)
+    resolved = _resolve_listed_sensors(rule, sensor_ids, entity_map)
+    if resolved is None:
+        return []
+    resolved_sensor_ids, required_entities = resolved
 
     findings: list[AnomalyFinding] = []
     for sensor_id, sensor in zip(resolved_sensor_ids, required_entities, strict=False):
@@ -658,17 +655,10 @@ def _eval_unavailable_sensors(
     if not isinstance(sensor_ids, list):
         return []
 
-    required_entities: list[SnapshotEntity] = []
-    resolved_sensor_ids: list[str] = []
-    for sensor_id in sensor_ids:
-        resolved_sensor_id = _resolve_sensor_entity_id(sensor_id, entity_map)
-        if resolved_sensor_id is None:
-            return []
-        entity = entity_map.get(resolved_sensor_id)
-        if entity is None:
-            return []
-        resolved_sensor_ids.append(resolved_sensor_id)
-        required_entities.append(entity)
+    resolved = _resolve_listed_sensors(rule, sensor_ids, entity_map)
+    if resolved is None:
+        return []
+    resolved_sensor_ids, required_entities = resolved
 
     if not required_entities:
         return []
@@ -746,6 +736,50 @@ def _resolve_sensor_entity_id(
     for candidate in (f"sensor.{sensor_id}", f"binary_sensor.{sensor_id}"):
         if candidate in entity_map:
             return candidate
+    return None
+
+
+def _resolve_listed_sensors(
+    rule: dict[str, Any],
+    sensor_ids: list[Any],
+    entity_map: Mapping[str, SnapshotEntity],
+) -> tuple[list[str], list[SnapshotEntity]] | None:
+    """
+    Resolve every sensor an unavailable-sensors rule lists, or none of them.
+
+    One sensor that Home Assistant no longer has (renamed, re-paired under a
+    new ID, removed) keeps the whole rule from firing; that is deliberate. It
+    used to do so with nothing logged, so an approved rule could be dead for
+    good and nobody knew (#960). The rule and its missing sensors are now
+    logged, once until the rule resolves again.
+    """
+    resolved_ids: list[str] = []
+    entities: list[SnapshotEntity] = []
+    missing: list[str] = []
+    for sensor_id in sensor_ids:
+        resolved_id = _resolve_sensor_entity_id(sensor_id, entity_map)
+        if resolved_id is None:
+            missing.append(str(sensor_id))
+            continue
+        resolved_ids.append(resolved_id)
+        entities.append(entity_map[resolved_id])
+
+    rule_id = str(rule.get("rule_id"))
+    if not missing:
+        _UNRESOLVED_SENSORS_LOGGED.pop(rule_id, None)
+        return resolved_ids, entities
+    logged = tuple(sorted(missing))
+    if _UNRESOLVED_SENSORS_LOGGED.get(rule_id) != logged:
+        _UNRESOLVED_SENSORS_LOGGED[rule_id] = logged
+        LOGGER.warning(
+            "Sentinel rule %s cannot fire: Home Assistant has no entity %s. "
+            "The rule stays inactive until every sensor it lists exists "
+            "again (a renamed or re-paired device gets a new entity ID). "
+            "Restore the entity ID, or deactivate the rule in the Sentinel "
+            "card and approve a new one for the current sensors (#960).",
+            rule_id,
+            ", ".join(logged),
+        )
     return None
 
 

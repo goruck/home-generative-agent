@@ -839,6 +839,70 @@ def test_dynamic_rule_unavailable_sensors_while_home_missing_required_entity() -
     assert findings == []
 
 
+@pytest.mark.parametrize(
+    "template_id", ["unavailable_sensors_while_home", "unavailable_sensors"]
+)
+def test_dynamic_rule_unavailable_sensors_logs_a_dead_rule_once(
+    template_id: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """
+    A rule that lists a sensor Home Assistant no longer has says so (#960).
+
+    It still does not fire, but it is logged with its missing sensors: once
+    while they stay missing, and again if it resolves and then breaks again.
+    """
+    derived = {
+        "now": "2026-02-01T00:00:00+00:00",
+        "timezone": "UTC",
+        "is_night": False,
+        "anyone_home": True,
+        "people_home": [],
+        "people_away": [],
+        "last_motion_by_area": {},
+    }
+    present = _base_entity("sensor.backyard_vmd3_0", "sensor", "unavailable")
+    gone = _base_entity("sensor.0x00158d0001a2b3c4", "sensor", "unavailable")
+    broken = _snapshot([present], [], derived)
+    whole = _snapshot([present, gone], [], derived)
+    rule_id = f"dead_rule_{template_id}"
+    rules = [
+        {
+            "rule_id": rule_id,
+            "template_id": template_id,
+            "params": {
+                "sensor_entity_ids": [
+                    "sensor.backyard_vmd3_0",
+                    "sensor.0x00158d0001a2b3c4",
+                ]
+            },
+            "severity": "low",
+            "confidence": 0.8,
+            "is_sensitive": False,
+            "suggested_actions": ["check_sensor"],
+        }
+    ]
+
+    def warnings() -> list[str]:
+        return [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelname == "WARNING" and rule_id in record.getMessage()
+        ]
+
+    with caplog.at_level("WARNING"):
+        assert evaluate_dynamic_rules(broken, rules) == []
+        assert evaluate_dynamic_rules(broken, rules) == []
+        assert len(warnings()) == 1
+        assert "sensor.0x00158d0001a2b3c4" in warnings()[0]
+        assert "sensor.backyard_vmd3_0" not in warnings()[0]
+
+        assert evaluate_dynamic_rules(whole, rules) != []
+        assert len(warnings()) == 1
+
+        assert evaluate_dynamic_rules(broken, rules) == []
+        assert len(warnings()) == 2
+
+
 def test_dynamic_rule_unavailable_sensors_while_home_legacy_entity_ids() -> None:
     snapshot = _snapshot(
         [
