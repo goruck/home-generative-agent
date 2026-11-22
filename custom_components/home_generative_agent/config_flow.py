@@ -44,6 +44,7 @@ from .agent.helpers import (
     admin_only_selection,
     api_id_is_form_representable,
     base_tool_name,
+    is_tool_excluded,
     llm_api_requires_admin,
     normalize_api_tool_map,
     normalize_llm_api_value,
@@ -256,6 +257,10 @@ _SUFFIX_NOT_AVAILABLE = " (not currently available)"
 # `_exclusion_choices`. ``{name}`` is the stored name, already defanged.
 _SUFFIX_STILL_EXCLUDING = " (not listed, still excluding)"
 _NOTE_EXCLUDED_BY = " (excluded by {name})"
+# The same pair for a stored always-included name -- see `_inclusion_choices`.
+# ``{name}`` is the tool it binds or the stored name, already defanged.
+_SUFFIX_STILL_INCLUDING = " (not listed, still including {name})"
+_NOTE_INCLUDED_BY = " (included by {name})"
 
 
 def _label_text(text: str) -> str:
@@ -509,7 +514,7 @@ def _exclusion_choices(
 
     Exclusions only. A short always-included name is looked up differently
     (``_tool_lookup_targets`` binds the first match, and an exclusion beats
-    it), so these labels would overstate it; that picker is left as it was.
+    it), so that picker has its own labels: see ``_inclusion_choices``.
     """
     chosen = set(selected)
     covering: set[str] = set()
@@ -535,6 +540,88 @@ def _exclusion_choices(
         label = choice["label"]
         if choice["value"] in covering:
             label = label.removesuffix(_SUFFIX_NOT_AVAILABLE) + _SUFFIX_STILL_EXCLUDING
+        labelled.append(SelectOptionDict(label=label, value=choice["value"]))
+    return labelled
+
+
+def _inclusion_choices(
+    live_choices: list[SelectOptionDict],
+    stale_choices: list[SelectOptionDict],
+    selected: list[str],
+    excluded: list[str],
+) -> list[SelectOptionDict]:
+    """
+    Label the Always-included tools options with what a short stored name binds.
+
+    An inclusion saved as ``HassTurnOff`` before Home Assistant 2026.9 still
+    binds a tool: ``_tool_lookup_targets`` tries the stored name, then every
+    live tool of that API whose ``base_tool_name`` is the stored name, in name
+    order, and the first one found is appended. The picker knew only exact
+    names, so it showed the stored name as "(not currently available)" beside
+    a plain ``intent__HassTurnOff`` that was in fact always included (#950).
+
+    Unlike a short exclusion, which covers every such tool, a short inclusion
+    binds one. So one tool is named, the first in name order among the listed
+    tools, on the stored entry and on the tool itself unless that tool is
+    ticked. An exclusion beats an inclusion: a stored name that is itself
+    excluded binds nothing and keeps its old label, and an excluded tool is
+    passed over for the next match, as it is on a turn.
+
+    Labels only, for the reason ``_exclusion_choices`` gives. The form cannot
+    list a tool a device or an admin turn adds, so on such a turn the stored
+    name may bind a same-named tool that sorts ahead of the one named here.
+    """
+    chosen = set(selected)
+    excluded_by_api: dict[str, set[str]] = {}
+    for value in excluded:
+        parts = split_tool_index_key(value)
+        if parts:
+            excluded_by_api.setdefault(parts[0], set()).add(parts[1])
+
+    # stored composite value -> the listed tool it binds (value, tool name).
+    bound: dict[str, tuple[str, str]] = {}
+    for choice in sorted(live_choices, key=lambda c: c["value"]):
+        value = choice["value"]
+        parts = split_tool_index_key(value)
+        if parts is None:
+            continue
+        api_id, tool_name = parts
+        short_name = base_tool_name(tool_name)
+        short_key = tool_index_key(api_id, short_name)
+        api_excluded = excluded_by_api.get(api_id, ())
+        if (
+            short_name == tool_name
+            or short_key not in chosen
+            or short_key in bound
+            or is_tool_excluded(short_name, api_excluded)
+            or is_tool_excluded(tool_name, api_excluded)
+        ):
+            continue
+        bound[short_key] = (value, tool_name)
+
+    live_values = {choice["value"] for choice in live_choices}
+    # A stored name that is itself listed is tried first on a turn, so it
+    # binds itself and nothing else.
+    bound = {key: hit for key, hit in bound.items() if key not in live_values}
+    noted = {value: split_tool_index_key(key) for key, (value, _name) in bound.items()}
+
+    labelled: list[SelectOptionDict] = []
+    for choice in live_choices:
+        value = choice["value"]
+        stored = noted.get(value)
+        if stored is None or value in chosen:
+            labelled.append(choice)
+            continue
+        note = _NOTE_INCLUDED_BY.format(name=_label_text(stored[1]))
+        labelled.append(SelectOptionDict(label=choice["label"] + note, value=value))
+
+    for choice in stale_choices:
+        label = choice["label"]
+        hit = bound.get(choice["value"])
+        if hit is not None and label.endswith(_SUFFIX_NOT_AVAILABLE):
+            label = label.removesuffix(
+                _SUFFIX_NOT_AVAILABLE
+            ) + _SUFFIX_STILL_INCLUDING.format(name=_label_text(hit[1]))
         labelled.append(SelectOptionDict(label=label, value=choice["value"]))
     return labelled
 
@@ -657,8 +744,13 @@ async def _schema_for_options(
         selected_exclusions,
     )
     selected_inclusions = _tool_map_as_list(opts.get(CONF_TOOL_INCLUSIONS))
-    tool_inclusion_choices = live_choices + _stale_selection_choices(
-        selected_inclusions, live_seen, api_names, selected_api_set
+    tool_inclusion_choices = _inclusion_choices(
+        live_choices,
+        _stale_selection_choices(
+            selected_inclusions, live_seen, api_names, selected_api_set
+        ),
+        selected_inclusions,
+        selected_exclusions,
     )
 
     video_analyzer_mode_opts: list[SelectOptionDict] = [

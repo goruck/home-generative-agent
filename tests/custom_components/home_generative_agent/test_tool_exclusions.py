@@ -1636,17 +1636,19 @@ async def test_another_apis_short_exclusion_marks_nothing_here(hass: Any) -> Non
 
 
 @pytest.mark.asyncio
-async def test_the_always_included_picker_is_not_marked(hass: Any) -> None:
+async def test_exclusion_notes_stay_out_of_the_always_included_picker(
+    hass: Any,
+) -> None:
     """
-    The notes belong to the exclusion picker only.
+    A short exclusion marks the exclusion picker only.
 
-    A short always-included name binds one matching tool, and an exclusion
-    beats it, so "included by" on every match would overstate it.
+    The always-included picker has its own labels for a short stored
+    inclusion (``_inclusion_choices``); a stored exclusion adds none there.
     """
     schema = await _assist_schema(
         hass,
         ["intent__HassTurnOff", "lock__HassTurnOff"],
-        {CONF_TOOL_INCLUSIONS: _OLD},
+        {CONF_TOOL_EXCLUSIONS: _OLD},
     )
 
     selector = schema[_schema_key(schema, CONF_TOOL_INCLUSIONS)]
@@ -1656,10 +1658,6 @@ async def test_the_always_included_picker_is_not_marked(hass: Any) -> None:
             "value": "assist::intent__HassTurnOff",
         },
         {"label": "Assist: lock__HassTurnOff", "value": "assist::lock__HassTurnOff"},
-        {
-            "label": f"Assist: HassTurnOff{_SUFFIX_NOT_AVAILABLE}",
-            "value": "assist::HassTurnOff",
-        },
     ]
 
 
