@@ -17,6 +17,7 @@ const HGA_MEMORY_I18N = {
     confirm_remove: "Delete this memory?",
     failed: "Failed: {msg}",
     admin_only: "Only an administrator can manage memories.",
+    not_loaded: "Home Generative Agent is not loaded.",
     title_label: "Title",
     title_helper: "Leave empty to show no title.",
     person_label: "Start with",
@@ -42,6 +43,7 @@ const HGA_MEMORY_I18N = {
     confirm_remove: "Удалить это воспоминание?",
     failed: "Ошибка: {msg}",
     admin_only: "Управлять воспоминаниями может только администратор.",
+    not_loaded: "Home Generative Agent не загружен.",
     title_label: "Заголовок",
     title_helper: "Оставьте пустым, чтобы не показывать заголовок.",
     person_label: "Начинать с",
@@ -243,10 +245,17 @@ class HgaMemoryCard extends HTMLElement {
       if (!current()) {
         return;
       }
-      this._error.textContent =
-        err?.code === "unauthorized"
-          ? this._t("admin_only")
-          : this._t("failed", { msg: err?.message || String(err) });
+      // The services exist only while an entry is loaded; the card itself
+      // loads at startup either way, so "Service ... not found" means that.
+      if (err?.code === "unauthorized") {
+        this._error.textContent = this._t("admin_only");
+      } else if (err?.code === "not_found") {
+        this._error.textContent = this._t("not_loaded");
+      } else {
+        this._error.textContent = this._t("failed", {
+          msg: err?.message || String(err),
+        });
+      }
     }
   }
 
