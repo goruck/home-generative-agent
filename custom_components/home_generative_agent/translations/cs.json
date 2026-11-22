@@ -149,8 +149,8 @@
             "extra_body": "Další tělo požadavku (JSON, volitelné)"
           },
           "data_description": {
-            "prompt": "Nápověda slovní zásoby posílaná se zvukem, například jména, která model přepisuje špatně. Zda má nějaký účinek, záleží na serveru. OpenAI ji používá. Některé servery kompatibilní s OpenAI ji přijmou a ignorují (například OpenRouter) a formát požadavku JSON, nabízený u serverů kompatibilních s OpenAI, ji neodesílá. Když je ignorována, žádná chyba se nezobrazí.",
-            "request_format": "Jak se odesílá zvuk. Nahrání multipart je vlastní formát OpenAI a funguje všude. JSON se zvukem v base64 je nativní formát přepisu služby OpenRouter - zvolte jej jen tehdy, pokud jej váš server dokumentuje. Nemá koncový bod pro překlad a ignoruje pole Pokyn výše.",
+            "prompt": "Nápověda ke slovní zásobě posílaná se zvukem, například jména, která model přepisuje špatně. Zda má nějaký účinek, záleží na serveru. OpenAI ji používá. Některé servery kompatibilní s OpenAI ji přijmou a ignorují (například OpenRouter) a formát požadavku JSON, nabízený u serverů kompatibilních s OpenAI, ji neodesílá. Když je ignorována, žádná chyba se nezobrazí.",
+            "request_format": "Jak se odesílá zvuk. Nahrání multipart je vlastní formát OpenAI a funguje všude. JSON se zvukem v base64 je nativní formát přepisu služby OpenRouter - zvolte jej jen tehdy, pokud jej váš server dokumentuje. Nemá koncový bod pro překlad a ignoruje pole Prompt výše.",
             "extra_body": "Objekt JSON vložený do těla požadavku pro pole, která HGA nenabízí. U služby OpenRouter sem patří volby poskytovatele, například upřednostnění klíčových slov, a ty vyžadují formát požadavku JSON. Ukázku najdete v části STT v dokumentaci. Pokud si nejste jisti, nechte prázdné."
           }
         }
