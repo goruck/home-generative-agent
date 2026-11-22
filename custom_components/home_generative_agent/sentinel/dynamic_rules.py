@@ -36,9 +36,10 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
-# Rule ID -> the missing sensors last logged for it, so an unavailable-sensors
-# rule that cannot resolve is reported once, not at every run (#960).
-_UNRESOLVED_SENSORS_LOGGED: dict[str, tuple[str, ...]] = {}
+# How much of a rule's missing sensor IDs one warning shows (#960). The IDs
+# are stored rule parameters a model proposed, so they are capped and quoted.
+_UNRESOLVED_ID_MAX_CHARS = 100
+_UNRESOLVED_IDS_SHOWN = 10
 
 _SEVERITIES = {"low", "medium", "high"}
 # HA covers report "open"/"closed" rather than binary_sensor's "on"/"off";
@@ -53,9 +54,16 @@ def evaluate_dynamic_rules(  # noqa: PLR0913
     dow_data: dict[str, dict[str, tuple[float, int]]] | None = None,
     dow_min_samples: int = RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     global_drift_pct: float = RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
+    unresolved_log: dict[str, tuple[str, ...]] | None = None,
 ) -> list[AnomalyFinding]:
     """
     Evaluate generated rules deterministically.
+
+    *unresolved_log* is the caller's record of rules that list a sensor with
+    no state, ``{rule_id: missing sensor IDs}``. The Sentinel engine passes
+    its own, and each such rule is then logged once while it stays that way
+    (#960). Without it nothing is logged or recorded, which is what a preview
+    of a rule that is not active yet needs.
 
     *baselines* is an optional mapping ``{entity_id: {metric: float}}``
     populated by ``SentinelBaselineUpdater``.  When ``None``, baseline-driven
@@ -72,6 +80,7 @@ def evaluate_dynamic_rules(  # noqa: PLR0913
         activity["camera_entity_id"]: activity
         for activity in snapshot["camera_activity"]
     }
+    run_unresolved: dict[str, set[str]] = {}
     template_evaluators = {
         "alarm_disarmed_open_entry": lambda rule: _eval_alarm_disarmed_open_entry(
             snapshot, rule, entity_map
@@ -162,11 +171,11 @@ def evaluate_dynamic_rules(  # noqa: PLR0913
         ),
         "unavailable_sensors_while_home": (
             lambda rule: _eval_unavailable_sensors_while_home(
-                snapshot, rule, entity_map
+                snapshot, rule, entity_map, run_unresolved
             )
         ),
         "unavailable_sensors": lambda rule: _eval_unavailable_sensors(
-            snapshot, rule, entity_map
+            snapshot, rule, entity_map, run_unresolved
         ),
         # Issue #265 — baseline-driven detectors
         "baseline_deviation": (
@@ -222,6 +231,8 @@ def evaluate_dynamic_rules(  # noqa: PLR0913
         if evaluator is None:
             continue
         findings.extend(evaluator(rule))
+    if unresolved_log is not None:
+        _report_unresolved_sensors(unresolved_log, run_unresolved)
     # Overlapping night + day away-motion rules on the same sensors emit two
     # findings for a night motion event. Deduplicating HERE was tried and
     # reverted (issue #518 verification round 5): the evaluator runs before
@@ -616,16 +627,17 @@ def _eval_unavailable_sensors_while_home(
     snapshot: FullStateSnapshot,
     rule: dict[str, Any],
     entity_map: Mapping[str, SnapshotEntity],
+    unresolved: dict[str, set[str]],
 ) -> list[AnomalyFinding]:
-    if not snapshot["derived"]["anyone_home"]:
-        return []
     params = _rule_params(rule)
     sensor_ids = params.get("sensor_entity_ids")
     if not isinstance(sensor_ids, list):
         return []
 
-    resolved = _resolve_listed_sensors(rule, sensor_ids, entity_map)
-    if resolved is None:
+    # Before the presence check, so a rule that cannot fire is reported while
+    # the home is empty too, and is not reported afresh at every return.
+    resolved = _resolve_listed_sensors(rule, sensor_ids, entity_map, unresolved)
+    if resolved is None or not snapshot["derived"]["anyone_home"]:
         return []
     resolved_sensor_ids, required_entities = resolved
 
@@ -649,13 +661,14 @@ def _eval_unavailable_sensors(
     snapshot: FullStateSnapshot,
     rule: dict[str, Any],
     entity_map: Mapping[str, SnapshotEntity],
+    unresolved: dict[str, set[str]],
 ) -> list[AnomalyFinding]:
     params = _rule_params(rule)
     sensor_ids = params.get("sensor_entity_ids")
     if not isinstance(sensor_ids, list):
         return []
 
-    resolved = _resolve_listed_sensors(rule, sensor_ids, entity_map)
+    resolved = _resolve_listed_sensors(rule, sensor_ids, entity_map, unresolved)
     if resolved is None:
         return []
     resolved_sensor_ids, required_entities = resolved
@@ -743,15 +756,16 @@ def _resolve_listed_sensors(
     rule: dict[str, Any],
     sensor_ids: list[Any],
     entity_map: Mapping[str, SnapshotEntity],
+    unresolved: dict[str, set[str]],
 ) -> tuple[list[str], list[SnapshotEntity]] | None:
     """
     Resolve every sensor an unavailable-sensors rule lists, or none of them.
 
-    One sensor that Home Assistant no longer has (renamed, re-paired under a
-    new ID, removed) keeps the whole rule from firing; that is deliberate. It
-    used to do so with nothing logged, so an approved rule could be dead for
-    good and nobody knew (#960). The rule and its missing sensors are now
-    logged, once until the rule resolves again.
+    One listed sensor with no state (renamed, re-paired under a new ID,
+    disabled, removed) keeps the whole rule from firing; that is deliberate.
+    It used to do so with nothing said, so an approved rule could be dead for
+    good and nobody knew (#960). The missing sensors are noted in
+    *unresolved* under the rule's ID for the caller to report.
     """
     resolved_ids: list[str] = []
     entities: list[SnapshotEntity] = []
@@ -763,24 +777,48 @@ def _resolve_listed_sensors(
             continue
         resolved_ids.append(resolved_id)
         entities.append(entity_map[resolved_id])
-
-    rule_id = str(rule.get("rule_id"))
     if not missing:
-        _UNRESOLVED_SENSORS_LOGGED.pop(rule_id, None)
         return resolved_ids, entities
-    logged = tuple(sorted(missing))
-    if _UNRESOLVED_SENSORS_LOGGED.get(rule_id) != logged:
-        _UNRESOLVED_SENSORS_LOGGED[rule_id] = logged
-        LOGGER.warning(
-            "Sentinel rule %s cannot fire: Home Assistant has no entity %s. "
-            "The rule stays inactive until every sensor it lists exists "
-            "again (a renamed or re-paired device gets a new entity ID). "
-            "Restore the entity ID, or deactivate the rule in the Sentinel "
-            "card and approve a new one for the current sensors (#960).",
-            rule_id,
-            ", ".join(logged),
-        )
+    rule_id = rule.get("rule_id")
+    if isinstance(rule_id, str) and rule_id:
+        unresolved.setdefault(rule_id, set()).update(missing)
     return None
+
+
+def _report_unresolved_sensors(
+    logged: dict[str, tuple[str, ...]], run_unresolved: dict[str, set[str]]
+) -> None:
+    """
+    Log each rule that lists a sensor with no state, once while that lasts.
+
+    *logged* is replaced by this run's result, so a rule that resolved, was
+    deactivated or was removed is forgotten and is reported again if it
+    breaks again.
+    """
+    current = {
+        rule_id: tuple(sorted(missing)) for rule_id, missing in run_unresolved.items()
+    }
+    for rule_id, missing in current.items():
+        if logged.get(rule_id) == missing:
+            continue
+        shown = ", ".join(
+            repr(sensor_id[:_UNRESOLVED_ID_MAX_CHARS])
+            for sensor_id in missing[:_UNRESOLVED_IDS_SHOWN]
+        )
+        if len(missing) > _UNRESOLVED_IDS_SHOWN:
+            shown += f" and {len(missing) - _UNRESOLVED_IDS_SHOWN} more"
+        LOGGER.warning(
+            "Sentinel rule %r cannot fire: Home Assistant has no state for "
+            "%s. The rule stays inactive until every sensor it lists has a "
+            "state again (a renamed, re-paired, disabled or removed entity "
+            "has none). Restore the entity, or deactivate the rule in the "
+            "Sentinel card and approve a new one for the current sensors "
+            "(#960).",
+            rule_id[:_UNRESOLVED_ID_MAX_CHARS],
+            shown,
+        )
+    logged.clear()
+    logged.update(current)
 
 
 def _resolve_required_entities(

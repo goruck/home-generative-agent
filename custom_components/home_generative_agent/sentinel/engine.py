@@ -469,6 +469,8 @@ class SentinelEngine:
         self._audit_store = audit_store
         self._explainer = explainer
         self._rule_registry = rule_registry
+        # Dynamic rules last logged as listing a sensor with no state (#960).
+        self._unresolved_rule_sensors: dict[str, tuple[str, ...]] = {}
         self._entry_id = entry_id
         self._triage_service = triage_service
         # Explanations share the per-run model-call limit (#866): calls made
@@ -2203,6 +2205,8 @@ class SentinelEngine:
 
         if self._rule_registry is not None:
             dynamic_rules = self._rule_registry.list_rules()
+            if not dynamic_rules:
+                self._unresolved_rule_sensors.clear()
             if dynamic_rules:
                 baselines: dict[str, dict[str, float]] = {}
                 dow_data: dict[str, dict[str, tuple[float, int]]] | None = None
@@ -2238,6 +2242,7 @@ class SentinelEngine:
                     dow_data=dow_data,
                     dow_min_samples=dow_min_samples,
                     global_drift_pct=global_drift_pct,
+                    unresolved_log=self._unresolved_rule_sensors,
                 )
                 sustained_minutes = _coerce_int(
                     self._options.get(CONF_SENTINEL_BASELINE_SUSTAINED_MINUTES),
