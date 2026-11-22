@@ -2206,8 +2206,9 @@ class SentinelEngine:
         if self._rule_registry is not None:
             dynamic_rules = self._rule_registry.list_rules()
             if not dynamic_rules:
+                # No rule is left to be reported as dead; see the call below.
                 self._unresolved_rule_sensors.clear()
-            if dynamic_rules:
+            else:
                 baselines: dict[str, dict[str, float]] = {}
                 dow_data: dict[str, dict[str, tuple[float, int]]] | None = None
                 if self._baseline_updater is not None:

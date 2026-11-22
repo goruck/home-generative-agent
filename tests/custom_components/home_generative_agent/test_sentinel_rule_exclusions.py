@@ -608,3 +608,65 @@ async def test_timed_run_exposes_triggers_excluded_stat(
     await engine._timed_run()
 
     assert engine.run_stats["triggers_excluded"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# Dead dynamic rules are reported by the engine (#960)
+# --------------------------------------------------------------------------- #
+
+
+class _ListRegistry:
+    """A rule registry that serves whatever the test puts in ``rules``."""
+
+    def __init__(self) -> None:
+        self.rules: list[dict[str, Any]] = []
+
+    def list_rules(self, *, include_disabled: bool = False) -> list[dict[str, Any]]:
+        return list(self.rules)
+
+
+@pytest.mark.asyncio
+async def test_engine_reports_a_dead_dynamic_rule_once_and_forgets_it(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """
+    The engine owns the record of dead rules it has logged (#960).
+
+    A rule listing a sensor with no state is logged once across runs. When no
+    rule is left the record is dropped, so the rule is logged again if it
+    comes back still broken.
+    """
+    _patch_snapshot(monkeypatch, _open_door_snapshot())
+    engine = _make_engine({})
+    registry = _ListRegistry()
+    engine._rule_registry = cast("Any", registry)
+    dead_rule = {
+        "rule_id": "dead_rule_engine",
+        "template_id": "unavailable_sensors",
+        "params": {"sensor_entity_ids": ["sensor.gone_after_repair"]},
+        "severity": "low",
+        "confidence": 0.8,
+        "is_sensitive": False,
+        "suggested_actions": ["check_sensor"],
+    }
+
+    def warnings() -> int:
+        return sum(
+            "dead_rule_engine" in record.getMessage()
+            and "cannot fire" in record.getMessage()
+            for record in caplog.records
+        )
+
+    with caplog.at_level("WARNING"):
+        registry.rules = [dead_rule]
+        await engine._run_once()
+        await engine._run_once()
+        assert warnings() == 1
+
+        registry.rules = []
+        await engine._run_once()
+        assert engine._unresolved_rule_sensors == {}
+
+        registry.rules = [dead_rule]
+        await engine._run_once()
+        assert warnings() == 2

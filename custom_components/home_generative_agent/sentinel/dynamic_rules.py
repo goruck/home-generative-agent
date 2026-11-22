@@ -779,9 +779,8 @@ def _resolve_listed_sensors(
         entities.append(entity_map[resolved_id])
     if not missing:
         return resolved_ids, entities
-    rule_id = rule.get("rule_id")
-    if isinstance(rule_id, str) and rule_id:
-        unresolved.setdefault(rule_id, set()).update(missing)
+    # An ID that is not text (an old or hand-edited store) is still reported.
+    unresolved.setdefault(str(rule.get("rule_id")), set()).update(missing)
     return None
 
 
