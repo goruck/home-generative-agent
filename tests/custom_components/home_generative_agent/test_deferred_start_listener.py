@@ -113,7 +113,6 @@ async def _setup_with_deferred_start(
     hass.set_state(CoreState.not_running)
     entry = MockConfigEntry(domain=DOMAIN, data={})
     entry.add_to_hass(hass)
-    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
 
     data = _fallback_setup_data()
     data.options[CONF_VIDEO_ANALYZER_MODE] = VIDEO_ANALYZER_MODE_NOTIFY_ON_ANOMALY
@@ -143,7 +142,6 @@ async def _setup_with_deferred_sentinel_start(
     hass.set_state(CoreState.not_running)
     entry = MockConfigEntry(domain=DOMAIN, data={})
     entry.add_to_hass(hass)
-    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
 
     data = _fallback_setup_data()
     data.options[CONF_SENTINEL_ENABLED] = True
@@ -560,7 +558,6 @@ async def test_a_failed_setup_closes_the_openai_http_client(
     hass.set_state(CoreState.not_running)
     entry = MockConfigEntry(domain=DOMAIN, data={})
     entry.add_to_hass(hass)
-    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
 
     data = _fallback_setup_data()
     _patch_setup_dependencies(hass, monkeypatch, data)

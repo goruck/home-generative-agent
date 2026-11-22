@@ -310,7 +310,6 @@ async def _set_up(hass: Any, monkeypatch: pytest.MonkeyPatch, data: Any) -> Any:
     """Set the entry up and return its runtime data."""
     entry = MockConfigEntry(domain=DOMAIN, data={})
     entry.add_to_hass(hass)
-    hass.data.setdefault(DOMAIN, {})["http_registered"] = True
     data.options[CONF_SENTINEL_TRIAGE_ENABLED] = True
     data.options[CONF_EXPLAIN_ENABLED] = True
     _patch_setup_dependencies(hass, monkeypatch, data)

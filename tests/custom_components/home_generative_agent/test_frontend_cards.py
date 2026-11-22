@@ -15,6 +15,8 @@ from pytest_homeassistant.common import MockConfigEntry
 import custom_components.home_generative_agent as hga
 from custom_components.home_generative_agent.const import DOMAIN, HGA_FRONTEND_CARDS
 
+from .test_fallback_setup import _fallback_setup_data, _patch_setup_dependencies
+
 COMPONENT_DIR = Path(hga.__file__).parent
 
 
@@ -78,6 +80,9 @@ async def test_domain_setup_serves_and_loads_the_cards(hass: Any) -> None:
     assert [config.url_path for config in paths] == ["/hga-card", "/hga-enroll-card"]
     assert all(Path(config.path) == COMPONENT_DIR / "www" for config in paths)
     assert len(add_url.call_args_list) == len(HGA_FRONTEND_CARDS)
+    # The enroll card's endpoint, so its upload is not a bare 404.
+    (view,) = hass.http.register_view.call_args.args
+    assert view.url == "/api/home_generative_agent/enroll"
 
 
 async def test_cards_load_when_entry_setup_fails(hass: Any) -> None:
@@ -109,6 +114,27 @@ async def test_cards_load_when_entry_setup_fails(hass: Any) -> None:
     assert register.await_count == 1
 
 
+async def test_entry_setup_registers_nothing_a_second_time(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A route registered twice raises, which would fail a healthy entry.
+
+    Domain setup owns the card files and the enroll endpoint; a complete entry
+    setup after it adds neither again.
+    """
+    register = _http_spy(hass)
+    with patch.object(hga, "add_extra_js_url"):
+        await hga.async_setup(hass, {})
+        entry = MockConfigEntry(domain=DOMAIN, data={})
+        entry.add_to_hass(hass)
+        _patch_setup_dependencies(hass, monkeypatch, _fallback_setup_data())
+        assert await hga.async_setup_entry(hass, entry) is True
+
+    assert register.await_count == 1
+    assert hass.http.register_view.call_count == 1
+
+
 async def test_a_card_failure_does_not_stop_the_integration(
     hass: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -117,7 +143,7 @@ async def test_a_card_failure_does_not_stop_the_integration(
     register.side_effect = RuntimeError("route already registered")
 
     assert await hga.async_setup(hass, {}) is True
-    assert "Could not load the HGA dashboard cards" in caplog.text
+    assert "Could not register the HGA dashboard cards" in caplog.text
 
 
 async def test_missing_card_files_are_reported(

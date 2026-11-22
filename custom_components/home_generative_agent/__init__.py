@@ -490,8 +490,9 @@ async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
     # Here and not in entry setup, so the cards load when an entry's setup
     # fails early (database or provider unreachable). A dashboard would
     # otherwise show "Custom element doesn't exist" with nothing in the log
-    # pointing at the cards.
-    await _async_register_frontend_cards(hass)
+    # pointing at the cards. The enroll card's endpoint comes with them: it
+    # answers "not loaded" itself, where an unregistered route is a bare 404.
+    await _async_register_http(hass)
     return True
 
 
@@ -1555,15 +1556,20 @@ async def _async_load_frontend_cards(hass: HomeAssistant) -> None:
         add_extra_js_url(hass, f"{HGA_CARD_STATIC_PATH}/{card}?v={version}")
 
 
-async def _async_register_frontend_cards(hass: HomeAssistant) -> None:
+async def _async_register_http(hass: HomeAssistant) -> None:
     """
-    Serve the dashboard card files and load them, once per Home Assistant run.
+    Register the enroll endpoint and the dashboard cards, once per run.
 
-    Called from ``async_setup``. A failure here is logged and swallowed: a
-    False or an exception from ``async_setup`` would keep every config entry
-    from loading, and the cards are not worth the agent.
+    Called from ``async_setup``: aiohttp routes cannot be removed, so nothing
+    here may belong to one config entry. The view resolves the currently
+    loaded entry per request (see EnrollPersonView).
+
+    A failure here is logged and swallowed: a False or an exception from
+    ``async_setup`` would keep every config entry from loading, and the cards
+    are not worth the agent.
     """
     try:
+        hass.http.register_view(EnrollPersonView(hass))
         www_dir = await hass.async_add_executor_job(_resolve_www_dir)
         if www_dir is None:
             LOGGER.warning(
@@ -1586,8 +1592,8 @@ async def _async_register_frontend_cards(hass: HomeAssistant) -> None:
         await _async_load_frontend_cards(hass)
     except Exception:
         LOGGER.exception(
-            "Could not load the HGA dashboard cards; the rest of the "
-            "integration is unaffected"
+            "Could not register the HGA dashboard cards or the enroll "
+            "endpoint; the rest of the integration is unaffected"
         )
 
 
@@ -4897,11 +4903,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     # Registered once per Home Assistant run: aiohttp routes cannot be removed,
     # so the view resolves the currently loaded entry per request instead of
     # pinning the one that happened to register it (see EnrollPersonView).
-    # The card files and their URLs are registered in `async_setup`.
-    if not hass.data[DOMAIN].get("http_registered"):
-        hass.http.register_view(EnrollPersonView(hass))
-        hass.data[DOMAIN]["http_registered"] = True
-
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # Describe only the Ollama servers a chain uses and that answered: with a
