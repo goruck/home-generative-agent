@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
-from homeassistant.const import EVENT_STATE_CHANGED
+from homeassistant.const import EVENT_STATE_CHANGED, STATE_UNAVAILABLE
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
@@ -1443,6 +1443,8 @@ class SentinelEngine:
         """
         # The latch first: nothing below may be skipped by a failing step.
         self._latch.close()
+        # Calls Sentinel stopped waiting for must not act after the stop.
+        cancel_outstanding_calls()
         self._suppression.close(self._latch)
         self._audit_store.close()
         if self._auth_inventory is not None:
@@ -3273,36 +3275,53 @@ class SentinelEngine:
 # How long one automatic service call may take. Without a limit, a device
 # that never answers a blocking call stalls every later Sentinel run (#789).
 _ACTION_CALL_TIMEOUT_S = 10.0
-# How long a call the engine's stop cancelled is given to end.
-_ACTION_CANCEL_GRACE_S = 2.0
-# Calls given up on, kept until they end so their result is logged and no
-# task is dropped while it runs.
-_LATE_CALLS: set[asyncio.Future[Any]] = set()
+# How long a call the engine's stop cancelled is given to end. Shorter than
+# the stop's own wait (CANCEL_WAIT_S), whose repeat cancel would cut it off.
+_ACTION_CANCEL_GRACE_S = 1.0
+# Every automatic call still running, with its service and targets: held
+# from the moment it is made, so its result is always collected, a second
+# call on a device is refused while the first runs, and a stop ends them.
+_CALLS: dict[asyncio.Future[Any], tuple[str, tuple[str, ...]]] = {}
+# Those Sentinel stopped waiting for; how each ended is logged.
+_GIVEN_UP: set[asyncio.Future[Any]] = set()
+# What a call returns when the engine stopped before it reached the service.
+_NOT_RUN = object()
+_STOPPED_MID_CALL = (
+    "Sentinel stopped while the call ran; the device may still have acted"
+)
 
 
 def outcome_may_have_acted(outcome: Mapping[str, Any]) -> bool:
     """
     Return True when an action of *outcome* ran, or may have.
 
-    A call that got no answer in time may still have acted, so it counts
-    against the hourly limit and the duplicate check like one that ran.
+    A call that got no answer in time, or that a stop cut off, may still
+    have acted, so it counts against the hourly limit and the duplicate
+    check like one that ran.
     """
     return outcome["status"] in {"success", "partial"} or any(
         result["status"] == "timeout" for result in outcome["actions"]
     )
 
 
-def _watch_late_call(task: asyncio.Future[Any], name: str, targets: list[str]) -> None:
-    """Log how a call Sentinel stopped waiting for ended."""
+def cancel_outstanding_calls() -> None:
+    """Cancel every automatic call still running: a stopped engine acts no more."""
+    for task in list(_CALLS):
+        task.cancel()
 
-    def _ended(done: asyncio.Future[Any]) -> None:
-        _LATE_CALLS.discard(done)
-        if done.cancelled():
-            how = "was cancelled"
-        elif (exc := done.exception()) is not None:
-            how = f"failed: {exc}"
-        else:
-            how = "finished"
+
+def _call_ended(task: asyncio.Future[Any]) -> None:
+    """Collect an ended call's result; log it when nobody waited for it."""
+    name, targets = _CALLS.pop(task, ("?", ()))
+    given_up = task in _GIVEN_UP
+    _GIVEN_UP.discard(task)
+    if task.cancelled():
+        how = "was cancelled"
+    elif (exc := task.exception()) is not None:
+        how = f"failed: {exc!r}"
+    else:
+        how = "finished"
+    if given_up:
         LOGGER.warning(
             "Automatic action %s on %s %s after Sentinel stopped waiting for it.",
             name,
@@ -3310,49 +3329,95 @@ def _watch_late_call(task: asyncio.Future[Any], name: str, targets: list[str]) -
             how,
         )
 
-    _LATE_CALLS.add(task)
-    task.add_done_callback(_ended)
 
-
-async def _call_action(hass: Any, action: FindingAction) -> tuple[str, str | None]:
+def _not_callable_now(hass: Any, action: FindingAction) -> str | None:
     """
-    Call *action* and return its status (ok, error, timeout) and error text.
+    Return why *action* must not be called at this moment, or None.
+
+    Checked again here, per action: the gate looked once, and an earlier
+    action of the same finding can take ten seconds. Home Assistant skips a
+    missing or unavailable entity and returns normally, which would be
+    recorded as done. A device whose earlier call has not ended is not
+    called again, so calls never overlap or pile up on it.
+    """
+    states = getattr(hass, "states", None)
+    busy = {entity_id for _name, targets in _CALLS.values() for entity_id in targets}
+    for entity_id in action.entity_ids:
+        if entity_id in busy:
+            return f"an earlier call on {entity_id} has not ended"
+        if states is None:
+            continue
+        state = states.get(entity_id)
+        if state is None or getattr(state, "state", None) == STATE_UNAVAILABLE:
+            return f"{entity_id} is missing or unavailable"
+    return None
+
+
+async def _call_action(
+    hass: Any, action: FindingAction, refuses: Callable[[str], bool] | None
+) -> tuple[str, str | None]:
+    """
+    Call *action*; return its status (ok, error, timeout, stopped) and error.
 
     The call runs as a task of its own and is waited for, not cancelled, at
     the limit: cancelling does not bound a service that holds on to the
     cancel, and it cuts a slow but working device off half-way. A call given
     up on runs on, and how it ended is logged.
+
+    A stop of the engine cancels the call and is not passed on: the caller
+    gets ``"timeout"`` (the device may have acted) and keeps the record of
+    this action and of those before it, so a reloaded engine does not run
+    them again (#988). The engine's stop cancels the run again if it goes on.
     """
     name = action.service
     domain, _, service = name.partition(".")
     targets = list(action.entity_ids)
-    task = asyncio.ensure_future(
-        hass.services.async_call(domain, service, {"entity_id": targets}, blocking=True)
-    )
+
+    async def _run() -> Any:
+        # Asked here too: a stop can land after the task is made and before
+        # it first runs, and nothing may start acting after that (#988).
+        if refuses is not None and refuses("auto-execute action"):
+            return _NOT_RUN
+        return await hass.services.async_call(
+            domain, service, {"entity_id": targets}, blocking=True
+        )
+
+    task = asyncio.ensure_future(_run())
+    # Owned before any wait that can be cancelled.
+    _CALLS[task] = (name, tuple(targets))
+    task.add_done_callback(_call_ended)
+    stopped = False
     try:
         done, _ = await asyncio.wait({task}, timeout=_ACTION_CALL_TIMEOUT_S)
     except asyncio.CancelledError:
-        # The engine is stopping: the call is cancelled with it, as when it
-        # was awaited directly. A service that turns the cancel into an error
-        # or a result has still been attempted, and is recorded (#988).
+        stopped = True
         task.cancel()
-        done, _ = await asyncio.wait({task}, timeout=_ACTION_CANCEL_GRACE_S)
-        if not done:
-            _watch_late_call(task, name, targets)
-        if not done or task.cancelled():
-            raise
+        try:
+            done, _ = await asyncio.wait({task}, timeout=_ACTION_CANCEL_GRACE_S)
+        except asyncio.CancelledError:
+            done = {task} if task.done() else set()
     if not done:
-        _watch_late_call(task, name, targets)
-        unanswered = (
+        _GIVEN_UP.add(task)
+    return _call_result(task, stopped=stopped)
+
+
+def _call_result(task: asyncio.Future[Any], *, stopped: bool) -> tuple[str, str | None]:
+    """Return the status and error text of a call that ended or was given up on."""
+    unknown = (
+        _STOPPED_MID_CALL
+        if stopped
+        else (
             f"no answer within {_ACTION_CALL_TIMEOUT_S:g} s; "
             "the device may still have acted"
         )
-        return "timeout", unanswered
+    )
+    if not task.done():
+        return "timeout", unknown
     if task.cancelled():
-        return "error", "the call was cancelled"
+        return ("timeout", unknown) if stopped else ("error", "the call was cancelled")
     if (exc := task.exception()) is not None:
-        return "error", str(exc)
-    return "ok", None
+        return "error", str(exc) or type(exc).__name__
+    return ("stopped", None) if task.result() is _NOT_RUN else ("ok", None)
 
 
 async def _auto_execute_finding(
@@ -3369,7 +3434,8 @@ async def _auto_execute_finding(
     its suggested actions are advice. If any of them is not a targeted call,
     none runs, as at the gate. Each call is given ``_ACTION_CALL_TIMEOUT_S``:
     a device that never answers is recorded as ``"timeout"``, which says it
-    may still have acted, and the run goes on.
+    may still have acted, and the run goes on. So is a call the engine's stop
+    cut off; the actions after it are ``"stopped"``.
 
     *refuses*, when given, is asked before each call; an action it refuses is
     recorded as ``"stopped"`` and not run (#988).
@@ -3422,8 +3488,20 @@ async def _auto_execute_finding(
         if stopping or (refuses is not None and refuses("auto-execute action")):
             results.append(_result(action, "stopped", None))
             continue
-        status, error = await _call_action(hass, action)
+        if (reason := _not_callable_now(hass, action)) is not None:
+            results.append(_result(action, "error", f"not called: {reason}"))
+            LOGGER.warning(
+                "Auto-execute service %s not called for finding %s: %s.",
+                action.service,
+                finding.anomaly_id,
+                reason,
+            )
+            continue
+        status, error = await _call_action(hass, action, refuses)
         results.append(_result(action, status, error))
+        # After every call, whatever it returned: a stop that landed during
+        # it, even one the service turned into a result, ends the rest (#988).
+        stopping = cancel_requested()
         targets = ", ".join(action.entity_ids)
         if status == "ok":
             LOGGER.info(
@@ -3433,20 +3511,18 @@ async def _auto_execute_finding(
                 finding.anomaly_id,
                 execution_id,
             )
-            continue
-        # A failed or unanswered call, or a stop the service turned into an
-        # error: the call may have acted, so it is recorded as attempted;
-        # after a stop no more run (#988).
-        stopping = cancel_requested()
-        LOGGER.warning(
-            "Auto-execute service %s on %s failed for finding %s "
-            "(execution_id=%s): %s.",
-            action.service,
-            targets,
-            finding.anomaly_id,
-            execution_id,
-            error,
-        )
+        elif status != "stopped":
+            # A failed, unanswered or cut-off call may have acted: it is
+            # recorded as attempted.
+            LOGGER.warning(
+                "Auto-execute service %s on %s failed for finding %s "
+                "(execution_id=%s): %s.",
+                action.service,
+                targets,
+                finding.anomaly_id,
+                execution_id,
+                error,
+            )
 
     ok_count = sum(1 for r in results if r["status"] == "ok")
     tried_count = sum(1 for r in results if r["status"] in {"error", "timeout"})

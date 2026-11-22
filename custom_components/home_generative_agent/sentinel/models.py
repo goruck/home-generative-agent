@@ -216,6 +216,11 @@ class FindingAction:
     service: str
     entity_ids: tuple[str, ...]
 
+    def __post_init__(self) -> None:
+        """Keep the targets as a tuple, whatever sequence a rule passed."""
+        if isinstance(self.entity_ids, list):
+            object.__setattr__(self, "entity_ids", tuple(self.entity_ids))
+
     def as_dict(self) -> dict[str, Any]:
         """Serialize the action for the audit record."""
         return {"service": self.service, "entity_ids": list(self.entity_ids)}

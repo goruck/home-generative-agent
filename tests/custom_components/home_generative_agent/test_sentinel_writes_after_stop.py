@@ -24,6 +24,7 @@ import custom_components.home_generative_agent as hga_component
 import custom_components.home_generative_agent.core.utils as utils_mod
 from custom_components.home_generative_agent.audit.store import AuditStore
 from custom_components.home_generative_agent.core.stop_latch import StopLatch
+from custom_components.home_generative_agent.sentinel import engine as engine_mod
 from custom_components.home_generative_agent.sentinel.auth_inventory import (
     AuthInventory,
 )
@@ -39,6 +40,7 @@ from custom_components.home_generative_agent.sentinel.discovery_store import (
 from custom_components.home_generative_agent.sentinel.engine import (
     SentinelEngine,
     _auto_execute_finding,
+    outcome_may_have_acted,
 )
 from custom_components.home_generative_agent.sentinel.network_inventory import (
     NetworkInventory,
@@ -230,13 +232,15 @@ async def test_a_stop_the_service_turned_into_an_error_runs_no_more_actions() ->
 
 
 @pytest.mark.asyncio
-async def test_a_stop_during_a_call_cancels_the_call() -> None:
-    """The run's cancel is passed on to the service call, and ends the run."""
+async def test_a_stop_during_a_call_keeps_the_record_of_what_ran() -> None:
+    """The call is cancelled, and the actions before it are not forgotten."""
     hass = MagicMock()
     started = asyncio.Event()
     cancelled = asyncio.Event()
 
-    async def _call(*_args: Any, **_kwargs: Any) -> None:
+    async def _call(domain: str, *_args: Any, **_kwargs: Any) -> None:
+        if domain == "lock":
+            return
         started.set()
         try:
             await asyncio.Event().wait()
@@ -245,15 +249,77 @@ async def test_a_stop_during_a_call_cancels_the_call() -> None:
             raise
 
     hass.services.async_call = _call
+    finding = _finding(["lock.lock", "switch.turn_off", "light.turn_off"])
     run = asyncio.create_task(
-        _auto_execute_finding(hass, cast("Any", _finding(["lock.lock"])), "exec-1")
+        _auto_execute_finding(hass, cast("Any", finding), "exec-1")
     )
     await started.wait()
     run.cancel()
 
-    with pytest.raises(asyncio.CancelledError):
-        await run
+    outcome = await run
+
     assert cancelled.is_set()
+    assert [a["status"] for a in outcome["actions"]] == ["ok", "timeout", "stopped"]
+    assert outcome["status"] == "partial"
+    assert outcome_may_have_acted(outcome)
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_holds_on_through_a_stop_is_still_collected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second cancel during the grace wait leaves no call unowned."""
+    monkeypatch.setattr(engine_mod, "_ACTION_CANCEL_GRACE_S", 5.0)
+    hass = MagicMock()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _call(*_args: Any, **_kwargs: Any) -> None:
+        started.set()
+        while not release.is_set():
+            with suppress(asyncio.CancelledError):
+                await release.wait()
+        msg = "device said no"
+        raise RuntimeError(msg)
+
+    hass.services.async_call = _call
+    run = asyncio.create_task(
+        _auto_execute_finding(hass, cast("Any", _finding(["lock.lock"])), "exec-1")
+    )
+    await started.wait()
+    run.cancel()  # the stop...
+    await asyncio.sleep(0.01)
+    run.cancel()  # ...and its repeat, while the grace wait runs
+
+    outcome = await run
+
+    assert [a["status"] for a in outcome["actions"]] == ["timeout"]
+    assert len(engine_mod._GIVEN_UP) == 1
+    release.set()
+    await asyncio.sleep(0.01)
+    assert not engine_mod._GIVEN_UP
+    assert not engine_mod._CALLS
+
+
+@pytest.mark.asyncio
+async def test_a_call_made_as_the_engine_stops_never_reaches_the_service() -> None:
+    """A stop between making the call's task and its first step runs nothing."""
+    hass = MagicMock()
+    hass.services.async_call = AsyncMock()
+    asked = 0
+
+    def _refuses(_what: str) -> bool:
+        nonlocal asked
+        asked += 1
+        return asked > 1  # allowed in the loop, stopped by the time the call runs
+
+    outcome = await _auto_execute_finding(
+        hass, cast("Any", _finding(["lock.lock"])), "exec-1", refuses=_refuses
+    )
+
+    hass.services.async_call.assert_not_awaited()
+    assert [a["status"] for a in outcome["actions"]] == ["stopped"]
+    assert outcome["status"] == "stopped"
 
 
 @pytest.mark.asyncio

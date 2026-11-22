@@ -265,12 +265,31 @@ async def test_a_call_that_never_answers_is_given_up_on(
     assert "the device may still have acted" in hung["error"]
     assert done["status"] == "ok"
     # Not cancelled at the limit: a slow device is left to finish.
-    (late,) = engine_module._LATE_CALLS
+    (late,) = engine_module._GIVEN_UP
     assert not late.done()
     assert outcome_may_have_acted(result)
-    late.cancel()
+
+    # While it runs, the device is not called again.
+    again = await _auto_execute_finding(
+        hass,
+        replace(
+            _make_finding(),
+            actions=(FindingAction("switch.turn_on", ("switch.drier",)),),
+        ),
+        "exec_011b",
+    )
+    assert calls == ["switch.turn_off", "lock.lock"]
+    assert again["actions"][0]["error"] == (
+        "not called: an earlier call on switch.drier has not ended"
+    )
+    assert not outcome_may_have_acted(again)
+
+    # A stopped engine ends it, and its result is collected.
+    engine_module.cancel_outstanding_calls()
     await asyncio.gather(late, return_exceptions=True)
-    assert not engine_module._LATE_CALLS
+    await asyncio.sleep(0)
+    assert not engine_module._GIVEN_UP
+    assert not engine_module._CALLS
 
 
 @pytest.mark.asyncio
@@ -293,9 +312,9 @@ async def test_a_call_that_only_timed_out_still_counts_as_attempted(
 
     assert result["status"] == "error"
     assert outcome_may_have_acted(result)
-    for late in list(engine_module._LATE_CALLS):
-        late.cancel()
-        await asyncio.gather(late, return_exceptions=True)
+    late = list(engine_module._GIVEN_UP)
+    engine_module.cancel_outstanding_calls()
+    await asyncio.gather(*late, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -338,3 +357,42 @@ async def test_a_malformed_action_stops_the_valid_one_beside_it(
     assert [a["status"] for a in result["actions"]] == ["error", "error"]
     assert not outcome_may_have_acted(result)
     hass.services.async_call.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_target_gone_since_the_gate_is_not_called() -> None:
+    """Home Assistant would skip it and return: recorded as not called."""
+    hass = _make_hass()
+    hass.states.get = lambda entity_id: (
+        None if entity_id == "switch.drier" else MagicMock(state="on")
+    )
+    finding = replace(
+        _make_finding(),
+        actions=(
+            FindingAction("switch.turn_off", ("switch.drier",)),
+            FindingAction("lock.lock", ["lock.front_door"]),  # type: ignore[arg-type]
+        ),
+    )
+
+    result = await _auto_execute_finding(hass, finding, "exec_015")
+
+    assert [a["status"] for a in result["actions"]] == ["error", "ok"]
+    assert result["actions"][0]["error"] == (
+        "not called: switch.drier is missing or unavailable"
+    )
+    hass.services.async_call.assert_called_once_with(
+        "lock", "lock", {"entity_id": ["lock.front_door"]}, blocking=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_failure_with_no_message_still_says_what_failed() -> None:
+    """An exception with no text is named by its type."""
+    hass = _make_hass(service_raises=KeyError())
+    finding = replace(
+        _make_finding(), actions=(FindingAction("switch.turn_off", ("switch.drier",)),)
+    )
+
+    result = await _auto_execute_finding(hass, finding, "exec_016")
+
+    assert result["actions"][0]["error"] == "KeyError"
