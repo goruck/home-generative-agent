@@ -13,6 +13,7 @@ import pytest
 from custom_components.home_generative_agent.sentinel import engine as engine_module
 from custom_components.home_generative_agent.sentinel.engine import (
     _auto_execute_finding,
+    outcome_may_have_acted,
 )
 from custom_components.home_generative_agent.sentinel.models import (
     AnomalyFinding,
@@ -161,7 +162,7 @@ async def test_auto_execute_partial_failure() -> None:
     hass = MagicMock()
     hass.services.async_call = AsyncMock(side_effect=_side_effect)
     finding = _make_finding(
-        suggested_actions=["lock.lock", "notify.notify"],
+        suggested_actions=["lock.lock", "switch.turn_off"],
         triggering_entities=["lock.front_door"],
     )
 
@@ -198,7 +199,7 @@ async def test_an_action_without_a_target_is_never_called() -> None:
     result = await _auto_execute_finding(hass, finding, "exec_008")
 
     assert result["status"] == "error"
-    assert result["actions"][0]["error"] == "not a targeted service call"
+    assert result["actions"][0]["error"].startswith("not a targeted service call")
     hass.services.async_call.assert_not_called()
 
 
@@ -260,6 +261,80 @@ async def test_a_call_that_never_answers_is_given_up_on(
     assert calls == ["switch.turn_off", "lock.lock"]
     assert result["status"] == "partial"
     hung, done = result["actions"]
-    assert hung["status"] == "error"
+    assert hung["status"] == "timeout"
     assert "the device may still have acted" in hung["error"]
     assert done["status"] == "ok"
+    # Not cancelled at the limit: a slow device is left to finish.
+    (late,) = engine_module._LATE_CALLS
+    assert not late.done()
+    assert outcome_may_have_acted(result)
+    late.cancel()
+    await asyncio.gather(late, return_exceptions=True)
+    assert not engine_module._LATE_CALLS
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_only_timed_out_still_counts_as_attempted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """It may have acted, so it uses up the hourly limit and duplicate check."""
+    monkeypatch.setattr(engine_module, "_ACTION_CALL_TIMEOUT_S", 0.01)
+
+    async def _call(*_a: Any, **_k: Any) -> None:
+        await asyncio.Event().wait()
+
+    hass = MagicMock()
+    hass.services.async_call = _call
+    finding = replace(
+        _make_finding(), actions=(FindingAction("switch.turn_off", ("switch.drier",)),)
+    )
+
+    result = await _auto_execute_finding(hass, finding, "exec_012")
+
+    assert result["status"] == "error"
+    assert outcome_may_have_acted(result)
+    for late in list(engine_module._LATE_CALLS):
+        late.cancel()
+        await asyncio.gather(late, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_call_does_not_count_as_attempted() -> None:
+    """A call Home Assistant refused did nothing: it may be tried again."""
+    hass = _make_hass(service_raises=RuntimeError("no such service"))
+    finding = replace(
+        _make_finding(), actions=(FindingAction("switch.turn_off", ("switch.drier",)),)
+    )
+
+    result = await _auto_execute_finding(hass, finding, "exec_013")
+
+    assert result["status"] == "error"
+    assert not outcome_may_have_acted(result)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        FindingAction("switch", ("switch.drier",)),
+        FindingAction("switch.turn_off", ("Switch.Drier",)),
+        FindingAction("switch.turn_off", ("switch.bad id",)),
+        FindingAction("switch.turn_off", ("light.hall",)),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_malformed_action_stops_the_valid_one_beside_it(
+    bad: FindingAction,
+) -> None:
+    """As at the gate: part of a finding's actions never runs without the rest."""
+    hass = _make_hass()
+    finding = replace(
+        _make_finding(),
+        actions=(FindingAction("lock.lock", ("lock.front_door",)), bad),
+    )
+
+    result = await _auto_execute_finding(hass, finding, "exec_014")
+
+    assert result["status"] == "error"
+    assert [a["status"] for a in result["actions"]] == ["error", "error"]
+    assert not outcome_may_have_acted(result)
+    hass.services.async_call.assert_not_called()

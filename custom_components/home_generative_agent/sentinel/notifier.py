@@ -96,7 +96,7 @@ from custom_components.home_generative_agent.snapshot.network import sanitize_la
 
 if TYPE_CHECKING:
     import asyncio
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from homeassistant.core import Event, HomeAssistant
 
@@ -2543,19 +2543,33 @@ def canary_line(actions: list[FindingAction], hass: HomeAssistant | None) -> str
     Assistant names them.
     """
     states = getattr(hass, "states", None)
+    # One sentence per service, each with its own devices: two services on
+    # different devices must not read as each service on every device.
+    by_service: dict[str, list[str]] = {}
+    for action in actions:
+        by_service.setdefault(action.service, []).extend(action.entity_ids)
+    return " ".join(
+        notif_msg(
+            hass,
+            "canary_would_run",
+            actions=service,
+            targets=", ".join(_canary_names(dict.fromkeys(entity_ids), states))
+            or notif_msg(hass, "fallback_unknown_entity"),
+        )
+        for service, entity_ids in by_service.items()
+    )
+
+
+def _canary_names(entity_ids: Iterable[str], states: Any) -> list[str]:
+    """Return the dry-run line's device names, as Home Assistant names them."""
     names = []
-    for entity_id in dict.fromkeys(e for a in actions for e in a.entity_ids):
+    for entity_id in entity_ids:
         state = states.get(entity_id) if states is not None else None
         name = getattr(state, "name", None)
         if not isinstance(name, str) or not name.strip():
             name = _friendly_entity(entity_id)
         names.append(" ".join(name.split())[:_CANARY_NAME_MAX_LEN])
-    return notif_msg(
-        hass,
-        "canary_would_run",
-        actions=", ".join(dict.fromkeys(a.service for a in actions)),
-        targets=", ".join(names) or notif_msg(hass, "fallback_unknown_entity"),
-    )
+    return names
 
 
 def _also_text(names: list[str], more: int, hass: HomeAssistant | None) -> str:

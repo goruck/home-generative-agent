@@ -249,7 +249,12 @@ class AnomalyFinding:
             "suggested_actions": list(self.suggested_actions),
             "is_sensitive": self.is_sensitive,
             "detected_at": _as_iso(self.detected_at),
-            "actions": [action.as_dict() for action in self.actions],
+            # Only when there are some: a stored finding keeps its shape.
+            **(
+                {"actions": [action.as_dict() for action in self.actions]}
+                if self.actions
+                else {}
+            ),
         }
 
 

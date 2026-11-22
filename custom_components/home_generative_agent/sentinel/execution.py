@@ -17,9 +17,11 @@ Guardrail evaluation order
 5. Confidence below threshold         → ``prompt_user``
 6. Actions: the finding carries none
    (its suggested actions are advice,
-   never called), one names no target,
-   one is not allowlisted, or one is
-   critical (a
+   never called), one is not a targeted
+   ``domain.service`` call on entities
+   of that domain, a target is missing
+   or unavailable, one is not
+   allowlisted, or one is critical (a
    PIN rule, a script/scene/automation
    it starts, an alarm panel or cover,
    a lock action but lock.lock)       → ``prompt_user``
@@ -39,6 +41,8 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.const import STATE_UNAVAILABLE
+from homeassistant.core import valid_entity_id
 from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.const import (
@@ -117,14 +121,30 @@ def executable_actions(finding: AnomalyFinding) -> list[FindingAction]:
     return list(finding.actions)
 
 
-def _is_callable(action: FindingAction) -> bool:
-    """Return True for a ``domain.service`` action that names its targets."""
-    return (
-        isinstance(action.service, str)
-        and _SERVICE_ACTION.fullmatch(action.service) is not None
-        and bool(action.entity_ids)
-        and all(isinstance(e, str) and "." in e for e in action.entity_ids)
-    )
+def is_callable_action(action: FindingAction) -> bool:
+    """
+    Return True for a ``domain.service`` action on entities of that domain.
+
+    Every target must be a whole, lower-case entity id, as Home Assistant
+    writes them: it lower-cases what it is given, so ``Cover.garage`` would
+    slip past a floor that reads domains and still move the cover. An entity
+    service acts only on its own domain, so a target of another domain is a
+    call that does nothing and reads as done; only ``homeassistant.*`` takes
+    any domain, and the floor judges its targets.
+    """
+    service = action.service
+    targets = action.entity_ids
+    if not isinstance(service, str) or _SERVICE_ACTION.fullmatch(service) is None:
+        return False
+    if not isinstance(targets, tuple) or not targets:
+        return False
+    domain = service.split(".", 1)[0]
+    for entity_id in targets:
+        if not isinstance(entity_id, str) or not valid_entity_id(entity_id):
+            return False
+        if domain not in (_GENERIC_DOMAIN, entity_id.split(".", 1)[0]):
+            return False
+    return True
 
 
 def level_increase_pin_required(options: Mapping[str, Any]) -> bool:
@@ -582,10 +602,12 @@ class SentinelExecutionService:
 
         Only the finding's ``actions`` are ever called (its suggested actions
         are advice), so only those must be on the allowlist; with none, there
-        is nothing to run and the user decides. An action that names no
-        target, or whose service is not ``domain.service``, stops them all:
-        Home Assistant would run an untargeted call on every entity of the
-        domain. An empty allowlist permits nothing. A critical action never
+        is nothing to run and the user decides. An action that is not a
+        targeted call (``is_callable_action``) stops them all, as does a
+        target Home Assistant has no state for or holds unavailable. The
+        reasons returned are ``no_executable_action``, ``malformed_action``,
+        ``target_unavailable``, ``service_not_allowlisted`` and
+        ``critical_action``. An empty allowlist permits nothing. A critical action never
         runs without a person,
         whatever the allowlist says: one a Critical Action PIN rule covers,
         one the automation screener holds (a script, scene or automation it
@@ -595,9 +617,12 @@ class SentinelExecutionService:
         actions = executable_actions(finding)
         if not actions:
             return "no_executable_action"
-        if not all(_is_callable(action) for action in actions):
+        if not all(is_callable_action(action) for action in actions):
             LOGGER.debug("Auto-execute blocked: malformed action in %s.", actions)
             return "malformed_action"
+        if (missing := self._unavailable_targets(actions)) is not None:
+            LOGGER.debug("Auto-execute blocked: %s cannot be acted on.", missing)
+            return "target_unavailable"
         allowed: list[str] = list(
             self._options.get(
                 CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
@@ -616,6 +641,25 @@ class SentinelExecutionService:
                 return "service_not_allowlisted"
         if self._is_critical(actions):
             return "critical_action"
+        return None
+
+    def _unavailable_targets(self, actions: list[FindingAction]) -> str | None:
+        """
+        Return a target Home Assistant would skip, or None.
+
+        Home Assistant drops a missing or unavailable entity from a service
+        call and returns normally, so the call would be recorded as done with
+        nothing acted on. The data-quality gate reads the finding's triggering
+        entities, which are often not the targets.
+        """
+        states = getattr(self._hass, "states", None)
+        if states is None:
+            return None
+        for action in actions:
+            for entity_id in action.entity_ids:
+                state = states.get(entity_id)
+                if state is None or state.state == STATE_UNAVAILABLE:
+                    return entity_id
         return None
 
     def _is_critical(self, actions: list[FindingAction]) -> bool:

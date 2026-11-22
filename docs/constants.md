@@ -358,7 +358,7 @@ The model Sentinel's triage, discovery and explanation calls run on when a **Sen
 
 | Constant | Config key | Default | Purpose |
 |---|---|---|---|
-| `RECOMMENDED_SENTINEL_AUTO_EXECUTION_ENABLED` | `sentinel_auto_execution_enabled` | `False` | Allow Sentinel to execute suggested actions autonomously (requires autonomy level ≥ 2). Not settable from the options yet. |
+| `RECOMMENDED_SENTINEL_AUTO_EXECUTION_ENABLED` | `sentinel_auto_execution_enabled` | `False` | Allow Sentinel to run a finding's own actions (the service calls and targets its rule names) autonomously (requires autonomy level ≥ 2). Not settable from the options yet. |
 | `RECOMMENDED_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE` | `sentinel_auto_execute_default_min_confidence` | `0.70` | Minimum finding confidence score required for auto-execution |
 | `RECOMMENDED_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR` | `sentinel_auto_execute_max_actions_per_hour` | `5` | Rate cap on autonomous actions to prevent runaway execution |
 | `RECOMMENDED_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES` | `sentinel_execution_idempotency_window_minutes` | `15` | Duplicate-execution suppression window; the same action on the same finding will not fire twice within this period |
@@ -370,6 +370,7 @@ The model Sentinel's triage, discovery and explanation calls run on when a **Sen
 | Constant | File | Value | Purpose |
 |---|---|---|---|
 | `_MIN_AUTO_EXECUTE_LEVEL` | `sentinel/execution.py` | `2` | Minimum autonomy level required for any auto-execution attempt |
+| `_ACTION_CALL_TIMEOUT_S` | `sentinel/engine.py` | `10.0` | Seconds one automatic service call is waited for before it is recorded as unanswered (it may still have acted) |
 
 ---
 

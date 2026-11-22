@@ -205,12 +205,13 @@ async def test_a_stop_the_service_turned_into_an_error_runs_no_more_actions() ->
     """A cancel a service call converted to an error stops the next action."""
     hass = MagicMock()
 
+    run = asyncio.current_task()
+    assert run is not None
+
     async def _call(*_args: Any, **_kwargs: Any) -> None:
-        task = asyncio.current_task()
-        assert task is not None
-        task.cancel()  # the stop's cancel lands during the call...
+        run.cancel()  # the stop's cancel lands on the run during the call...
         with suppress(asyncio.CancelledError):
-            await asyncio.sleep(0)  # ...and the integration catches it
+            await asyncio.sleep(1)  # ...is passed on, and the integration catches it
         msg = "service failed"
         raise RuntimeError(msg)
 
@@ -225,6 +226,34 @@ async def test_a_stop_the_service_turned_into_an_error_runs_no_more_actions() ->
     assert hass.services.async_call.await_count == 1
     assert [a["status"] for a in outcome["actions"]] == ["error", "stopped"]
     assert outcome["status"] == "error"
+    run.uncancel()  # the cancel this test sent itself
+
+
+@pytest.mark.asyncio
+async def test_a_stop_during_a_call_cancels_the_call() -> None:
+    """The run's cancel is passed on to the service call, and ends the run."""
+    hass = MagicMock()
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def _call(*_args: Any, **_kwargs: Any) -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    hass.services.async_call = _call
+    run = asyncio.create_task(
+        _auto_execute_finding(hass, cast("Any", _finding(["lock.lock"])), "exec-1")
+    )
+    await started.wait()
+    run.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await run
+    assert cancelled.is_set()
 
 
 @pytest.mark.asyncio

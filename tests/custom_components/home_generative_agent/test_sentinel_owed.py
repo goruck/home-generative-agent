@@ -306,6 +306,8 @@ def test_a_stored_finding_comes_back_without_its_actions() -> None:
         {"service": "switch.turn_off", "entity_ids": ["switch.drier"]}
     ]
     assert anomaly_finding_from_dict(stored).actions == ()
+    # A finding with none is stored as before: no new key.
+    assert "actions" not in _admins("eve", tokens=("t1",)).as_dict()
 
 
 def test_a_held_back_replay_does_not_say_sentinel_was_silenced() -> None:

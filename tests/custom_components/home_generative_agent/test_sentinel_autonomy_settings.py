@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from homeassistant.setup import async_setup_component
 
 from custom_components.home_generative_agent.const import (
     ACTION_POLICY_AUTO_EXECUTE,
@@ -307,6 +308,12 @@ def test_an_action_on_its_own_target_runs() -> None:
         FindingAction("switch", ("switch.drier",)),
         FindingAction("switch.turn_off", ("all",)),
         FindingAction("switch.turn_off", ("switch.drier", "")),
+        FindingAction("switch.turn_off", ("Switch.Drier",)),
+        FindingAction("switch.turn_off", ("switch.",)),
+        FindingAction("switch.turn_off", ("switch.bad id",)),
+        FindingAction("switch.turn_off", ("switch.a.b",)),
+        FindingAction("switch.turn_off", ("light.hall",)),
+        FindingAction("homeassistant.toggle", ("Cover.garage",)),
     ],
 )
 def test_a_malformed_action_stops_every_action(action: FindingAction) -> None:
@@ -336,6 +343,94 @@ def test_the_floor_reads_the_targets_of_the_action(action: FindingAction) -> Non
     )
     assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
     assert result.block_reason == "critical_action"
+
+
+def test_a_pin_rule_reads_the_targets_of_the_action() -> None:
+    """A sensor triggers; the PIN rule is matched against what is called."""
+    rules: dict[str, Any] = {
+        CONF_CRITICAL_ACTIONS: [
+            {"domain": "switch", "service": "turn_on", "entity_match": "garage"}
+        ]
+    }
+    held = _evaluate_actions(
+        (FindingAction("switch.turn_on", ("switch.porch", "switch.garage_relay")),),
+        ["switch"],
+        **rules,
+    )
+    assert held.block_reason == "critical_action"
+    free = _evaluate_actions(
+        (FindingAction("switch.turn_on", ("switch.porch",)),), ["switch"], **rules
+    )
+    assert free.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+
+
+async def test_what_the_target_starts_is_read_too(hass: HomeAssistant) -> None:
+    """A sensor triggers; the switch called is followed to what it opens (#831)."""
+    hass.states.async_set("switch.porch", "off")
+    hass.states.async_set("cover.garage_door", "closed", {"device_class": "garage"})
+    assert await async_setup_component(
+        hass,
+        "template",
+        {
+            "template": [
+                {
+                    "switch": {
+                        "name": "Opener",
+                        "state": "{{ false }}",
+                        "turn_on": [
+                            {
+                                "action": "cover.open_cover",
+                                "target": {"entity_id": "cover.garage_door"},
+                            }
+                        ],
+                        "turn_off": [],
+                    }
+                }
+            ]
+        },
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get("switch.opener") is not None
+
+    held = _evaluate_actions(
+        (FindingAction("switch.turn_on", ("switch.porch", "switch.opener")),),
+        ["switch"],
+        hass=hass,
+    )
+    assert held.block_reason == "critical_action"
+    free = _evaluate_actions(
+        (FindingAction("switch.turn_on", ("switch.porch",)),), ["switch"], hass=hass
+    )
+    assert free.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+
+
+@pytest.mark.parametrize("state", [None, "unavailable"])
+async def test_a_target_home_assistant_would_skip_stops_the_action(
+    hass: HomeAssistant, state: str | None
+) -> None:
+    """It would drop the entity and return: a call recorded as done, not made."""
+    hass.states.async_set("switch.kettle", "on")
+    if state is not None:
+        hass.states.async_set("switch.drier", state)
+    result = _evaluate_actions(
+        (FindingAction("switch.turn_off", ("switch.kettle", "switch.drier")),),
+        ["switch"],
+        hass=hass,
+    )
+    assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
+    assert result.block_reason == "target_unavailable"
+
+
+def test_the_dry_run_line_keeps_each_service_with_its_own_devices() -> None:
+    """Two services on different devices do not read as each on every device."""
+    actions = [
+        FindingAction("switch.turn_off", ("switch.drier",)),
+        FindingAction("light.turn_on", ("light.porch",)),
+    ]
+    assert canary_line(actions, None) == (
+        "Dry run: Sentinel would have run switch.turn_off on Drier. "
+        "Dry run: Sentinel would have run light.turn_on on Porch."
+    )
 
 
 def test_the_dry_run_line_names_the_targets_not_the_trigger() -> None:
