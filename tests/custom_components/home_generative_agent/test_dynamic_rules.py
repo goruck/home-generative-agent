@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
 from custom_components.home_generative_agent.sentinel.dynamic_rules import (
+    evaluate_dynamic_rule,
     evaluate_dynamic_rules,
 )
 from custom_components.home_generative_agent.sentinel.rule_registry import RuleRegistry
@@ -837,6 +838,165 @@ def test_dynamic_rule_unavailable_sensors_while_home_missing_required_entity() -
     ]
     findings = evaluate_dynamic_rules(snapshot, rules)
     assert findings == []
+
+
+_DEAD_RULE_DERIVED = {
+    "now": "2026-02-01T00:00:00+00:00",
+    "timezone": "UTC",
+    "is_night": False,
+    "anyone_home": True,
+    "people_home": [],
+    "people_away": [],
+    "last_motion_by_area": {},
+}
+_DEAD_RULE_PRESENT = "sensor.backyard_vmd3_0"
+_DEAD_RULE_GONE = "sensor.0x00158d0001a2b3c4"
+
+
+def _dead_rule(template_id: str, rule_id: str | None = None) -> dict[str, Any]:
+    return {
+        "rule_id": rule_id or f"dead_rule_{template_id}",
+        "template_id": template_id,
+        "params": {"sensor_entity_ids": [_DEAD_RULE_PRESENT, _DEAD_RULE_GONE]},
+        "severity": "low",
+        "confidence": 0.8,
+        "is_sensitive": False,
+        "suggested_actions": ["check_sensor"],
+    }
+
+
+def _dead_rule_snapshot(
+    *entity_ids: str, anyone_home: bool = True
+) -> FullStateSnapshot:
+    return _snapshot(
+        [_base_entity(entity_id, "sensor", "unavailable") for entity_id in entity_ids],
+        [],
+        {**_DEAD_RULE_DERIVED, "anyone_home": anyone_home},
+    )
+
+
+def _dead_rule_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "WARNING" and "cannot fire" in record.getMessage()
+    ]
+
+
+@pytest.mark.parametrize(
+    "template_id", ["unavailable_sensors_while_home", "unavailable_sensors"]
+)
+def test_dynamic_rule_unavailable_sensors_logs_a_dead_rule_once(
+    template_id: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """
+    A rule that lists a sensor with no state says so (#960).
+
+    It still does not fire, but it is logged with its missing sensors: once
+    while they stay missing, again when the missing set changes, and again
+    if it resolves and then breaks again.
+    """
+    broken = _dead_rule_snapshot(_DEAD_RULE_PRESENT)
+    whole = _dead_rule_snapshot(_DEAD_RULE_PRESENT, _DEAD_RULE_GONE)
+    empty = _dead_rule_snapshot()
+    rules = [_dead_rule(template_id)]
+    log: dict[str, tuple[str, ...]] = {}
+
+    with caplog.at_level("WARNING"):
+        assert evaluate_dynamic_rules(broken, rules, unresolved_log=log) == []
+        assert evaluate_dynamic_rules(broken, rules, unresolved_log=log) == []
+        warnings = _dead_rule_warnings(caplog)
+        assert len(warnings) == 1
+        assert rules[0]["rule_id"] in warnings[0]
+        assert f"'{_DEAD_RULE_GONE}'" in warnings[0]
+        assert _DEAD_RULE_PRESENT not in warnings[0]
+
+        assert evaluate_dynamic_rules(empty, rules, unresolved_log=log) == []
+        warnings = _dead_rule_warnings(caplog)
+        assert len(warnings) == 2
+        assert f"'{_DEAD_RULE_GONE}', '{_DEAD_RULE_PRESENT}'" in warnings[1]
+
+        assert evaluate_dynamic_rules(whole, rules, unresolved_log=log) != []
+        assert log == {}
+        assert len(_dead_rule_warnings(caplog)) == 2
+
+        assert evaluate_dynamic_rules(broken, rules, unresolved_log=log) == []
+        assert len(_dead_rule_warnings(caplog)) == 3
+
+
+def test_dynamic_rule_preview_of_a_dead_rule_logs_and_records_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    A preview must not use up the warning the active rule needs (#960).
+
+    Previewing a proposal evaluates it with no record. If that logged, the
+    message would name a rule that is not active, and the engine's own first
+    run of the approved rule would then stay silent.
+    """
+    broken = _dead_rule_snapshot(_DEAD_RULE_PRESENT)
+    rule = _dead_rule("unavailable_sensors")
+    log: dict[str, tuple[str, ...]] = {}
+
+    with caplog.at_level("WARNING"):
+        assert evaluate_dynamic_rule(broken, rule) == []
+        assert _dead_rule_warnings(caplog) == []
+
+        assert evaluate_dynamic_rules(broken, [rule], unresolved_log=log) == []
+        assert len(_dead_rule_warnings(caplog)) == 1
+
+
+def test_dynamic_rule_dead_rule_is_forgotten_when_it_leaves_the_run(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A rule deactivated while broken is reported again when it comes back."""
+    broken = _dead_rule_snapshot(_DEAD_RULE_PRESENT)
+    rules = [_dead_rule("unavailable_sensors")]
+    log: dict[str, tuple[str, ...]] = {}
+
+    with caplog.at_level("WARNING"):
+        evaluate_dynamic_rules(broken, rules, unresolved_log=log)
+        evaluate_dynamic_rules(broken, [], unresolved_log=log)
+        assert log == {}
+        evaluate_dynamic_rules(broken, rules, unresolved_log=log)
+        assert len(_dead_rule_warnings(caplog)) == 2
+
+
+def test_dynamic_rule_dead_while_home_rule_is_logged_once_across_departures(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Nobody home: the rule is still reported, and not again at each return."""
+    away = _dead_rule_snapshot(_DEAD_RULE_PRESENT, anyone_home=False)
+    home = _dead_rule_snapshot(_DEAD_RULE_PRESENT)
+    rules = [_dead_rule("unavailable_sensors_while_home")]
+    log: dict[str, tuple[str, ...]] = {}
+
+    with caplog.at_level("WARNING"):
+        assert evaluate_dynamic_rules(away, rules, unresolved_log=log) == []
+        assert len(_dead_rule_warnings(caplog)) == 1
+        assert evaluate_dynamic_rules(home, rules, unresolved_log=log) == []
+        assert evaluate_dynamic_rules(away, rules, unresolved_log=log) == []
+        assert len(_dead_rule_warnings(caplog)) == 1
+
+
+def test_dynamic_rule_dead_rule_warning_quotes_and_caps_what_it_shows(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Stored IDs are rule text a model proposed: quoted, cut and counted."""
+    rule = _dead_rule("unavailable_sensors")
+    rule["params"]["sensor_entity_ids"] = [
+        "sensor.a\nforged line",
+        "sensor." + "x" * 300,
+        *(f"sensor.gone_{index:02d}" for index in range(12)),
+    ]
+    log: dict[str, tuple[str, ...]] = {}
+
+    with caplog.at_level("WARNING"):
+        evaluate_dynamic_rules(_dead_rule_snapshot(), [rule], unresolved_log=log)
+    (warning,) = _dead_rule_warnings(caplog)
+    assert "\n" not in warning
+    assert "x" * 101 not in warning
+    assert "and 4 more" in warning
 
 
 def test_dynamic_rule_unavailable_sensors_while_home_legacy_entity_ids() -> None:
