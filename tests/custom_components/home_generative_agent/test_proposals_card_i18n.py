@@ -155,6 +155,32 @@ def test_card_t_inserts_parameter_values_literally() -> None:
     ]
 
 
+def test_card_says_not_loaded_when_the_services_are_missing() -> None:
+    """
+    A missing service means no entry is loaded, and the card says so.
+
+    The card loads at startup whether or not entry setup succeeds, so Home
+    Assistant's "Service ... not found" is what a failed setup looks like here.
+    """
+    not_found = {
+        "code": "not_found",
+        "message": "Service home_generative_agent.get_dynamic_rules not found.",
+    }
+    out = _run_card(
+        {"language": "cs"},
+        [
+            ("_errorText", [not_found]),
+            ("_errorText", [{"code": "home_assistant_error", "message": "boom"}]),
+            ("_errorText", [{}]),
+        ],
+    )
+    assert out["results"] == [
+        "Home Generative Agent není načten.",
+        "boom",
+        "neznámá chyba",
+    ]
+
+
 def test_card_language_resolution_and_fallbacks() -> None:
     """hass.language wins, then hass.locale.language, then English."""
     assert _run_card(None, [])["lang"] == "en"

@@ -14,6 +14,7 @@ const HGA_PROPOSALS_I18N = {
     load_fail_history: "Failed to load proposal history.",
     refresh_failed: "Refresh failed: {msg}",
     unknown_error: "unknown error",
+    not_loaded: "Home Generative Agent is not loaded.",
     no_discovery: "No discovery candidates.",
     no_filtered: "No filtered discovery candidates.",
     no_pending: "No pending proposal drafts.",
@@ -97,6 +98,7 @@ const HGA_PROPOSALS_I18N = {
     load_fail_history: "Historii návrhů se nepodařilo načíst.",
     refresh_failed: "Obnovení selhalo: {msg}",
     unknown_error: "neznámá chyba",
+    not_loaded: "Home Generative Agent není načten.",
     no_discovery: "Žádní kandidáti.",
     no_filtered: "Žádní odfiltrovaní kandidáti.",
     no_pending: "Žádné čekající návrhy.",
@@ -183,6 +185,7 @@ const HGA_PROPOSALS_I18N = {
     load_fail_history: "加载提案历史失败。",
     refresh_failed: "刷新失败：{msg}",
     unknown_error: "未知错误",
+    not_loaded: "Home Generative Agent 未加载。",
     no_discovery: "没有候选。",
     no_filtered: "没有已过滤的候选。",
     no_pending: "没有待处理的提案草稿。",
@@ -1161,7 +1164,7 @@ class HgaProposalsCard extends HTMLElement {
       proposalsPending.innerHTML = `<div class="meta">${this._t("load_fail_pending")}</div>`;
       proposalsHistory.innerHTML = `<div class="meta">${this._t("load_fail_history")}</div>`;
       status.textContent = this._t("refresh_failed", {
-        msg: err?.message || this._t("unknown_error"),
+        msg: this._errorText(err),
       });
       return;
     } finally {
@@ -1273,7 +1276,7 @@ class HgaProposalsCard extends HTMLElement {
             await this._load();
           } catch (err) {
             status.textContent = this._t("promote_failed", {
-              msg: err?.message || this._t("unknown_error"),
+              msg: this._errorText(err),
             });
           }
         });
@@ -1399,7 +1402,7 @@ class HgaProposalsCard extends HTMLElement {
             await this._load();
           } catch (err) {
             status.textContent = this._t("approve_failed", {
-              msg: err?.message || this._t("unknown_error"),
+              msg: this._errorText(err),
             });
           }
         });
@@ -1420,7 +1423,7 @@ class HgaProposalsCard extends HTMLElement {
             await this._load();
           } catch (err) {
             status.textContent = this._t("reject_failed", {
-              msg: err?.message || this._t("unknown_error"),
+              msg: this._errorText(err),
             });
           }
         });
@@ -1501,7 +1504,7 @@ class HgaProposalsCard extends HTMLElement {
                 await this._load();
               } catch (err) {
                 status.textContent = this._t("reactivate_failed", {
-                  msg: err?.message || this._t("unknown_error"),
+                  msg: this._errorText(err),
                 });
               }
             });
@@ -1523,7 +1526,7 @@ class HgaProposalsCard extends HTMLElement {
                 await this._load();
               } catch (err) {
                 status.textContent = this._t("deactivate_failed", {
-                  msg: err?.message || this._t("unknown_error"),
+                  msg: this._errorText(err),
                 });
               }
             });
@@ -1582,6 +1585,15 @@ class HgaProposalsCard extends HTMLElement {
       return "en";
     }
     return HGA_PROPOSALS_I18N[lang] ? lang : "en";
+  }
+
+  _errorText(err) {
+    // The services exist only while an entry is loaded; the card itself loads
+    // at startup either way, so "Service ... not found" means that.
+    if (err?.code === "not_found") {
+      return this._t("not_loaded");
+    }
+    return err?.message || this._t("unknown_error");
   }
 
   _t(key, params = {}) {
