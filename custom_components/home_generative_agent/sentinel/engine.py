@@ -1444,7 +1444,10 @@ class SentinelEngine:
         # The latch first: nothing below may be skipped by a failing step.
         self._latch.close()
         # Calls Sentinel stopped waiting for must not act after the stop.
-        cancel_outstanding_calls()
+        try:
+            cancel_outstanding_calls()
+        except Exception:
+            LOGGER.exception("Cancelling Sentinel's running action calls failed.")
         self._suppression.close(self._latch)
         self._audit_store.close()
         if self._auth_inventory is not None:
@@ -3304,9 +3307,22 @@ def outcome_may_have_acted(outcome: Mapping[str, Any]) -> bool:
     )
 
 
+def _running_calls() -> dict[asyncio.Future[Any], tuple[str, tuple[str, ...]]]:
+    """
+    Return the calls still running, forgetting those whose loop is gone.
+
+    A call left behind by an event loop that has closed can never end, so it
+    would hold its devices busy for good and cannot be cancelled.
+    """
+    for task in [t for t in _CALLS if t.get_loop().is_closed()]:
+        del _CALLS[task]
+        _GIVEN_UP.discard(task)
+    return _CALLS
+
+
 def cancel_outstanding_calls() -> None:
     """Cancel every automatic call still running: a stopped engine acts no more."""
-    for task in list(_CALLS):
+    for task in list(_running_calls()):
         task.cancel()
 
 
@@ -3341,7 +3357,11 @@ def _not_callable_now(hass: Any, action: FindingAction) -> str | None:
     called again, so calls never overlap or pile up on it.
     """
     states = getattr(hass, "states", None)
-    busy = {entity_id for _name, targets in _CALLS.values() for entity_id in targets}
+    busy = {
+        entity_id
+        for _name, targets in _running_calls().values()
+        for entity_id in targets
+    }
     for entity_id in action.entity_ids:
         if entity_id in busy:
             return f"an earlier call on {entity_id} has not ended"
@@ -3416,7 +3436,10 @@ def _call_result(task: asyncio.Future[Any], *, stopped: bool) -> tuple[str, str 
     if task.cancelled():
         return ("timeout", unknown) if stopped else ("error", "the call was cancelled")
     if (exc := task.exception()) is not None:
-        return "error", str(exc) or type(exc).__name__
+        failure = str(exc) or type(exc).__name__
+        # A service that turned the stop's cancel into an error may have
+        # acted before it: as uncertain as one that never answered.
+        return ("timeout", f"{unknown} ({failure})") if stopped else ("error", failure)
     return ("stopped", None) if task.result() is _NOT_RUN else ("ok", None)
 
 

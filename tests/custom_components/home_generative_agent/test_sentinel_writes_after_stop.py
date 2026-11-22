@@ -42,6 +42,7 @@ from custom_components.home_generative_agent.sentinel.engine import (
     _auto_execute_finding,
     outcome_may_have_acted,
 )
+from custom_components.home_generative_agent.sentinel.models import FindingAction
 from custom_components.home_generative_agent.sentinel.network_inventory import (
     NetworkInventory,
 )
@@ -226,8 +227,11 @@ async def test_a_stop_the_service_turned_into_an_error_runs_no_more_actions() ->
     # The call may have acted: it is recorded as attempted, so the run keeps
     # its cooldown and audit; the next action does not run.
     assert hass.services.async_call.await_count == 1
-    assert [a["status"] for a in outcome["actions"]] == ["error", "stopped"]
+    assert [a["status"] for a in outcome["actions"]] == ["timeout", "stopped"]
     assert outcome["status"] == "error"
+    assert "service failed" in outcome["actions"][0]["error"]
+    # Uncertain, so it uses up the hourly limit and the duplicate check.
+    assert outcome_may_have_acted(outcome)
     run.uncancel()  # the cancel this test sent itself
 
 
@@ -949,3 +953,21 @@ def test_the_latch_warns_once(caplog: pytest.LogCaptureFixture) -> None:
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
     assert "issue #988" in warnings[0].getMessage()
+
+
+def test_a_call_from_a_closed_loop_holds_no_device_and_breaks_no_stop() -> None:
+    """A call an event loop left behind can never end: it is forgotten."""
+    loop = asyncio.new_event_loop()
+    stale = loop.create_future()
+    loop.close()
+    engine_mod._CALLS[stale] = ("switch.turn_off", ("switch.drier",))
+    engine_mod._GIVEN_UP.add(stale)
+    try:
+        engine_mod.cancel_outstanding_calls()  # does not raise
+        action = FindingAction("switch.turn_off", ("switch.drier",))
+        assert engine_mod._not_callable_now(None, action) is None
+        assert stale not in engine_mod._CALLS
+        assert stale not in engine_mod._GIVEN_UP
+    finally:
+        engine_mod._CALLS.pop(stale, None)
+        engine_mod._GIVEN_UP.discard(stale)
