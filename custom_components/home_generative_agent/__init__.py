@@ -487,6 +487,11 @@ async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
     # Watches every entry of the domain, including one whose setup attempts
     # all fail and so never registers a listener of its own (#870, #883).
     async_watch_database_deletion(hass)
+    # Here and not in entry setup, so the cards load when an entry's setup
+    # fails early (database or provider unreachable). A dashboard would
+    # otherwise show "Custom element doesn't exist" with nothing in the log
+    # pointing at the cards.
+    await _async_register_frontend_cards(hass)
     return True
 
 
@@ -1548,6 +1553,42 @@ async def _async_load_frontend_cards(hass: HomeAssistant) -> None:
     version = (await async_get_integration(hass, DOMAIN)).version
     for card in HGA_FRONTEND_CARDS:
         add_extra_js_url(hass, f"{HGA_CARD_STATIC_PATH}/{card}?v={version}")
+
+
+async def _async_register_frontend_cards(hass: HomeAssistant) -> None:
+    """
+    Serve the dashboard card files and load them, once per Home Assistant run.
+
+    Called from ``async_setup``. A failure here is logged and swallowed: a
+    False or an exception from ``async_setup`` would keep every config entry
+    from loading, and the cards are not worth the agent.
+    """
+    try:
+        www_dir = await hass.async_add_executor_job(_resolve_www_dir)
+        if www_dir is None:
+            LOGGER.warning(
+                "The dashboard card files were not found, so the HGA cards "
+                "will not load; reinstall the integration to restore them"
+            )
+            return
+        await hass.http.async_register_static_paths(
+            [
+                # Canonical prefix for all HGA frontend card modules.
+                StaticPathConfig(
+                    HGA_CARD_STATIC_PATH, str(www_dir), cache_headers=True
+                ),
+                # Backward-compatible alias for existing enroll card resources.
+                StaticPathConfig(
+                    HGA_CARD_STATIC_PATH_LEGACY, str(www_dir), cache_headers=True
+                ),
+            ]
+        )
+        await _async_load_frontend_cards(hass)
+    except Exception:
+        LOGGER.exception(
+            "Could not load the HGA dashboard cards; the rest of the "
+            "integration is unaffected"
+        )
 
 
 def _top_p_if_set(top_p: float | None) -> dict[str, float]:
@@ -4856,27 +4897,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     # Registered once per Home Assistant run: aiohttp routes cannot be removed,
     # so the view resolves the currently loaded entry per request instead of
     # pinning the one that happened to register it (see EnrollPersonView).
+    # The card files and their URLs are registered in `async_setup`.
     if not hass.data[DOMAIN].get("http_registered"):
         hass.http.register_view(EnrollPersonView(hass))
-        www_dir = await hass.async_add_executor_job(_resolve_www_dir)
-        if www_dir is not None:
-            await hass.http.async_register_static_paths(
-                [
-                    # Canonical prefix for all HGA frontend card modules.
-                    StaticPathConfig(
-                        HGA_CARD_STATIC_PATH,
-                        str(www_dir),
-                        cache_headers=True,
-                    ),
-                    # Backward-compatible alias for existing enroll card resources.
-                    StaticPathConfig(
-                        HGA_CARD_STATIC_PATH_LEGACY,
-                        str(www_dir),
-                        cache_headers=True,
-                    ),
-                ]
-            )
-            await _async_load_frontend_cards(hass)
         hass.data[DOMAIN]["http_registered"] = True
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
