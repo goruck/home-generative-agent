@@ -19,7 +19,6 @@ from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.const import (
     ACTION_POLICY_AUTO_EXECUTE,
-    ACTION_POLICY_BLOCKED,
     CONF_EXPLAIN_ENABLED,
     CONF_SENTINEL_APPLIANCE_DURATION_MIN,
     CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
@@ -108,6 +107,7 @@ from .baseline import CYCLICAL_LOAD_HINTS
 from .correlator import SentinelCorrelator
 from .dynamic_rules import evaluate_dynamic_rules
 from .execution import (
+    MIN_AUTO_EXECUTE_LEVEL,
     SentinelExecutionService,
     executable_actions,
     is_callable_action,
@@ -187,7 +187,6 @@ from .suppression import (
     SUPPRESSION_REASON_NOT_SUPPRESSED,
     SUPPRESSION_REASON_NOTIFIER_DUPLICATE,
     SUPPRESSION_REASON_PENDING_PROMPT,
-    SUPPRESSION_REASON_POLICY_BLOCKED,
     SUPPRESSION_REASON_TRIAGE_SUPPRESSED,
     SUPPRESSION_REASON_TYPE_COOLDOWN,
     SUPPRESSION_REASON_USER_SNOOZE_7D,
@@ -265,7 +264,6 @@ _FINAL_SUPPRESSION_REASONS: frozenset[str] = frozenset(
         SUPPRESSION_REASON_USER_SNOOZE_7D,
         SUPPRESSION_REASON_USER_SNOOZE_PERMANENT,
         SUPPRESSION_REASON_TRIAGE_SUPPRESSED,
-        SUPPRESSION_REASON_POLICY_BLOCKED,
     }
 )
 
@@ -1473,23 +1471,49 @@ class SentinelEngine:
         outcome = await _auto_execute_finding(
             self._hass, finding, execution_id, refuses=self._action_refused
         )
-        if outcome["status"] == "stopped":
+        # Only a stop ends the run. A level lowered before the first call
+        # also leaves every action "stopped": that finding is then sent and
+        # audited like any other, with nothing run (#789).
+        if outcome["status"] == "stopped" and self._stopping("auto-execute action"):
             raise asyncio.CancelledError
         return outcome
 
-    def _action_refused(self, effect: str) -> bool:
+    def _stopping(self, effect: str) -> bool:
         """
-        Return True when an auto-execute action must not run (#988).
+        Return True from the moment stop() begins (#988).
 
-        From the moment stop() begins, not only once the latch closes after
-        its wait: a run still acting then is one that caught its cancel, and
-        it would act on the options being replaced. A cancel that has not
-        landed yet counts the same.
+        Not only once the latch closes after its wait: a run still acting
+        then is one that caught its cancel, and it would act on the options
+        being replaced. A cancel that has not landed yet counts the same.
         """
         if self._stopped or cancel_requested():
             LOGGER.debug("Sentinel is stopping; not running a late %s.", effect)
             return True
         return self._latch.refuses(effect)
+
+    def _action_refused(self, effect: str) -> bool:
+        """
+        Return True when an auto-execute action must not run.
+
+        While the engine stops (see ``_stopping``), and once Sentinel may no
+        longer act: the level was read once, before the finding's first
+        action, a call can take seconds, and a level lowered meanwhile (or a
+        raised one that ran out) must stop the actions after it (#789).
+        """
+        if self._stopping(effect):
+            return True
+        if self._suppression.is_read_only or (
+            self._entry_id is not None
+            and self.get_autonomy_level(self._entry_id) < MIN_AUTO_EXECUTE_LEVEL
+        ):
+            LOGGER.info(
+                "Sentinel may no longer act (autonomy level below %d, or its "
+                "state cannot be saved); not running a %s.",
+                MIN_AUTO_EXECUTE_LEVEL,
+                effect,
+            )
+            return True
+        return False
 
     def _forget_run_now(self, task: asyncio.Task[None]) -> None:
         """Drop the finished on-demand run, once it has really ended."""
@@ -2268,7 +2292,7 @@ class SentinelEngine:
         all_findings = self._with_hvac_context(all_findings, snapshot)
 
         # Whether this run's auth-change finding reached the user: None when
-        # there was none, False when suppression/triage/policy stopped it.
+        # there was none, False when suppression or triage stopped it.
         auth_change_delivered: bool | None = None
         new_device_alert_settled = False
         settled_client_keys: list[str] = []
@@ -2791,7 +2815,7 @@ class SentinelEngine:
         Route a finding or compound finding through suppression and dispatch.
 
         Returns True when the notifier was handed the finding (delivered), False
-        when suppression, triage, or policy stopped it; callers that must know
+        when suppression or triage stopped it; callers that must know
         whether an alert reached the user (the auth inventory commit) rely on it.
         A push the notifier drops as a repeat still returns True: the same
         anomaly reached the user within its cooldown. Only the audit label
@@ -2872,10 +2896,33 @@ class SentinelEngine:
             )
         )
 
+        # Execution policy, decided before any model is asked. The evaluator
+        # changes no state; live execution is committed only after the HA
+        # service call was made.
+        canary_mode = bool(
+            self._options.get(
+                CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
+                RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
+            )
+        )
+        exec_result = self._execution_service.evaluate_canary(
+            finding, snapshot, effective_autonomy, now
+        )
+        will_act = exec_result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+
         # LLM triage pass (Level 1+): may suppress the finding.
         triage_result: TriageDecision | None = None
-        # Not a replay: what was owed is not the model's to drop.
-        if effective_autonomy >= 1 and self._triage_service is not None and not replay:
+        # Not a replay: what was owed is not the model's to drop. Nor a
+        # finding whose action runs (or, in a dry run, would): a model must
+        # not be able to cancel it, and with no model call there is no wait
+        # between reading the autonomy level and acting on it (#789). One
+        # whose action is refused is an alert like any other.
+        if (
+            effective_autonomy >= 1
+            and self._triage_service is not None
+            and not replay
+            and not will_act
+        ):
             triage_result = await self._triage_finding(
                 self._triage_service,
                 finding,
@@ -2896,32 +2943,12 @@ class SentinelEngine:
             triage_result.triage_confidence if triage_result else None
         )
 
-        # Execution policy evaluation.
-        canary_mode = bool(
-            self._options.get(
-                CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
-                RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
-            )
-        )
-        # Use the side-effect-free evaluator here; live execution state is
-        # committed only after the HA service call actually succeeds.
-        exec_result = self._execution_service.evaluate_canary(
-            finding, snapshot, effective_autonomy, now
-        )
-
         # Canary: record would_auto_execute without acting.
-        canary_would_execute: bool | None = None
-        if canary_mode:
-            canary_would_execute = (
-                exec_result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
-            )
+        canary_would_execute: bool | None = will_act if canary_mode else None
 
         # Live auto-execute: call HA services when policy approves and canary is off.
         action_outcome: dict[str, Any] | None = None
-        if (
-            exec_result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
-            and not canary_mode
-        ):
+        if will_act and not canary_mode:
             action_outcome = await self._auto_execute(finding, exec_result.execution_id)
             if exec_result.execution_id is not None and outcome_may_have_acted(
                 action_outcome
@@ -2935,26 +2962,6 @@ class SentinelEngine:
         # the alert is sent.
         stamps = cooldown_stamps(self._suppression.state, finding)
         register_finding(self._suppression.state, finding, now)
-
-        # BLOCKED findings: audit and skip notification — no pending user action.
-        if exec_result.action_policy_path == ACTION_POLICY_BLOCKED:
-            await self._suppression.async_save()
-            await _append_finding_audit(
-                self._audit_store,
-                snapshot,
-                finding,
-                None,
-                SUPPRESSION_REASON_POLICY_BLOCKED,
-                triage_decision=triage_decision_value,
-                triage_reason_code=triage_reason_code_value,
-                triage_confidence=triage_confidence_value,
-                data_quality=exec_result.data_quality,
-                action_policy_path=exec_result.action_policy_path,
-                autonomy_level_at_decision=effective_autonomy,
-                trigger_source=trigger_source,
-            )
-            self._last_dispatch_reason = SUPPRESSION_REASON_POLICY_BLOCKED
-            return False
 
         register_prompt(self._suppression.state, finding, now)
         await self._suppression.async_save()
@@ -3027,8 +3034,7 @@ class SentinelEngine:
         ones that line named are registered as pending prompts, and the named
         ones only once the push went out.  A constituent the user never saw
         comes due again after its cooldown instead of waiting out the prompt
-        TTL behind its partner (issue #723); it is shown or named then unless
-        the push is policy-blocked.
+        TTL behind its partner (issue #723); it is shown or named then.
 
         A constituent held back only by its own reminder clock (the pending
         prompt from an earlier push, and any cooldown) may be named too when
@@ -3091,8 +3097,8 @@ class SentinelEngine:
                 RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
             )
         )
-        # Use the side-effect-free evaluator here; live execution state is
-        # committed only after the HA service call actually succeeds.
+        # The evaluator changes no state; live execution is committed only
+        # after the HA service call was made.
         exec_result = self._execution_service.evaluate_canary(
             best, snapshot, effective_autonomy, now
         )
@@ -3105,23 +3111,6 @@ class SentinelEngine:
         ]
         for constituent, _reason in passing:
             register_finding(self._suppression.state, constituent, now)
-
-        # BLOCKED findings: audit and skip notification — no pending user action.
-        if exec_result.action_policy_path == ACTION_POLICY_BLOCKED:
-            await self._suppression.async_save()
-            await _append_finding_audit(
-                self._audit_store,
-                snapshot,
-                compound,
-                None,
-                SUPPRESSION_REASON_POLICY_BLOCKED,
-                data_quality=exec_result.data_quality,
-                action_policy_path=exec_result.action_policy_path,
-                autonomy_level_at_decision=effective_autonomy,
-                trigger_source=trigger_source,
-                constituent_reasons=reasons,
-            )
-            return False
 
         # Before the cooldown and prompt are saved, as for a single finding:
         # a stop that refused every action ends the run here, so the reloaded
@@ -3152,16 +3141,15 @@ class SentinelEngine:
         if (explainer := self._explainer_for(explain_enabled, best)) is not None:
             explanation = await self._async_explanation(explainer, best, None)
 
-        # A partner the policy would auto-execute or block is never named:
-        # holding it would delay its action by the prompt TTL, or announce a
-        # finding the policy keeps from the user.  It is shown on its own.
+        # A partner the policy would auto-execute is never named: holding it
+        # would delay its action by the prompt TTL.  It is shown on its own.
         def _nameable(constituent: AnomalyFinding) -> bool:
-            return self._execution_service.evaluate_canary(
-                constituent, snapshot, effective_autonomy, now
-            ).action_policy_path not in {
-                ACTION_POLICY_AUTO_EXECUTE,
-                ACTION_POLICY_BLOCKED,
-            }
+            return (
+                self._execution_service.evaluate_canary(
+                    constituent, snapshot, effective_autonomy, now
+                ).action_policy_path
+                != ACTION_POLICY_AUTO_EXECUTE
+            )
 
         # A partner not due yet may be named by its condition when only its
         # own reminder clock holds it (#736). Worked out after the awaits
@@ -3461,7 +3449,8 @@ async def _auto_execute_finding(
     cut off; the actions after it are ``"stopped"``.
 
     *refuses*, when given, is asked before each call; an action it refuses is
-    recorded as ``"stopped"`` and not run (#988).
+    recorded as ``"stopped"`` and not run: the engine is stopping (#988), or
+    Sentinel may no longer act because its level was lowered (#789).
 
     Returns an ``action_outcome`` dict with:
     - ``status``: ``"success"`` | ``"partial"`` (some ran, the rest failed,
@@ -3556,7 +3545,7 @@ async def _auto_execute_finding(
     elif tried_count:
         status = "error"
     else:
-        status = "stopped"  # none ran: the engine stopped first
+        status = "stopped"  # none ran: a stop, or Sentinel may no longer act
 
     return {
         "status": status,

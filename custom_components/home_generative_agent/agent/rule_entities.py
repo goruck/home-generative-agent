@@ -930,6 +930,38 @@ def _domain(entity_id: str) -> str:
     return entity_id.split(".", 1)[0]
 
 
+def guarded_relay_reach(
+    hass: HomeAssistant, domains: Collection[str]
+) -> tuple[set[str], list[str]]:
+    """
+    Return every entity a call on which reaches a relay under ``domains``.
+
+    For a floor that bars a domain whatever the rules say (Sentinel's, #789):
+    the switch under a switch_as_x wrapper of one of ``domains`` and what a
+    template cover or lock of them drives, with everything ``relay_reach``
+    counts as reaching it (a group holding it, a member of a group it is,
+    another wrapper of it, an entity not set up that could be either). Also
+    what could not be read, for a caller that must refuse when the answer is
+    incomplete: an unreadable switch_as_x entry or template is not logged
+    here, and the relay under it is not in the reach.
+
+    As complete as the readers it uses, which is not complete: see the limits
+    listed at ``SentinelExecutionService._critical_reason``.
+    """
+    problems: list[str] = []
+    wrapped = read_switch_wrappers(hass, problems)
+    drives = read_template_drives(hass, problems)
+    if not any(_domain(wrapper) in domains for wrapper in [*wrapped, *drives]):
+        return set(), problems
+    index = _EntityIndex(hass, wrapped, drives)
+    reach: set[str] = set()
+    for wrapper, relay in _relay_pairs(index):
+        if _domain(wrapper) in domains:
+            switches, wrappers = index.relay_reach(relay, wrapper)
+            reach |= switches | wrappers
+    return reach, problems
+
+
 def relay_wrappers_reached(hass: HomeAssistant, targets: Iterable[str]) -> list[str]:
     """
     Return the cover, valve and lock wrappers a call on ``targets`` can move.

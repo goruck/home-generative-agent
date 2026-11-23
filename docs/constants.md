@@ -309,7 +309,7 @@ The model Sentinel's triage, discovery and explanation calls run on when a **Sen
 | `RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES` | `sentinel_entity_cooldown_minutes` | `15` | Per-entity suppression window. Shorter than the rule cooldown to allow related entities to re-alert sooner. |
 | `RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES` | `sentinel_pending_prompt_ttl_minutes` | `240` (4 h) | How long a pending action prompt waits for a user response before expiring |
 | `RECOMMENDED_EXPLAIN_ENABLED` | `explain_enabled` | `False` | Generate LLM explanations for findings before notification |
-| `RECOMMENDED_SENTINEL_STALENESS_THRESHOLD_SECONDS` | `sentinel_staleness_threshold_seconds` | `1800` (s) | Snapshot entity data older than this is considered stale and may reduce finding confidence |
+| `RECOMMENDED_SENTINEL_STALENESS_THRESHOLD_SECONDS` | `sentinel_staleness_threshold_seconds` | `1800` (s) | Snapshot entity data older than this is stale: an automatic action is not run on it (the alert is still sent). Read as 0 to 7 days |
 | `RECOMMENDED_AUDIT_HOT_MAX_RECORDS` | `audit_hot_max_records` | `500` | Maximum records kept in the in-memory audit hot store. User-visible findings are preserved in preference to suppressed records when at capacity. A home that notifies more often than the cap holds fills it with notified findings, and from then on the oldest one is dropped as each new one arrives; that is the steady state, logged once at INFO. Raise the cap to keep a longer history. |
 | `AUDIT_SAVE_DELAY_SECS` | `audit/store.py` | `15` (s) | Longest an audit change waits before the store is written to disk. The first unsaved change opens the window and later ones share its write, so a steady stream of findings cannot postpone it. Records of an actuation and user responses are written immediately. A pending write is flushed on shutdown, and entry unload writes and closes the store so a late write cannot overwrite the reloaded entry's file. |
 | `RECOMMENDED_SENTINEL_CAMERA_ENTRY_LINKS` | `sentinel_camera_entry_links` | `{}` | Maps camera `entity_id` → list of entry/lock `entity_id`s in other HA areas. Used by the `camera_entry_unsecured` rule for cameras that physically overlook entries not in the same HA area (e.g. `{"camera.driveway": ["lock.front_door"]}`). |
@@ -359,7 +359,6 @@ The model Sentinel's triage, discovery and explanation calls run on when a **Sen
 | Constant | Config key | Default | Purpose |
 |---|---|---|---|
 | `RECOMMENDED_SENTINEL_AUTO_EXECUTION_ENABLED` | `sentinel_auto_execution_enabled` | `False` | Allow Sentinel to run a finding's own actions (the service calls and targets its rule names) autonomously (requires autonomy level ≥ 2). Not settable from the options yet. |
-| `RECOMMENDED_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE` | `sentinel_auto_execute_default_min_confidence` | `0.70` | Minimum finding confidence score required for auto-execution |
 | `RECOMMENDED_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR` | `sentinel_auto_execute_max_actions_per_hour` | `5` | Rate cap on autonomous actions to prevent runaway execution |
 | `RECOMMENDED_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES` | `sentinel_execution_idempotency_window_minutes` | `15` | Duplicate-execution suppression window; the same action on the same finding will not fire twice within this period |
 | `RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE` | `sentinel_auto_exec_canary_mode` | `False` | Report what auto-execution *would* do, as a line in the finding's notification, without executing (works whether or not live execution is on). Not settable from the options yet. |
@@ -369,7 +368,7 @@ The model Sentinel's triage, discovery and explanation calls run on when a **Sen
 
 | Constant | File | Value | Purpose |
 |---|---|---|---|
-| `_MIN_AUTO_EXECUTE_LEVEL` | `sentinel/execution.py` | `2` | Minimum autonomy level required for any auto-execution attempt |
+| `MIN_AUTO_EXECUTE_LEVEL` | `sentinel/execution.py` | `2` | Minimum autonomy level required for any auto-execution attempt |
 | `_ACTION_CALL_TIMEOUT_S` | `sentinel/engine.py` | `10.0` | Seconds one automatic service call is waited for before it is recorded as unanswered (it may still have acted) |
 
 ---
@@ -706,4 +705,4 @@ These constants live outside `const.py` in individual modules. They affect runti
 
 | Constant | Value | Purpose |
 |---|---|---|
-| `_MIN_AUTO_EXECUTE_LEVEL` | `2` | Autonomy level floor for any auto-execution attempt |
+| `MIN_AUTO_EXECUTE_LEVEL` | `2` | Autonomy level floor for any auto-execution attempt |

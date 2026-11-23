@@ -452,3 +452,21 @@ def test_the_real_notifier_is_told_when_sentinel_is_silent() -> None:
         entry_id="test-entry-1",
     )
     assert cast("Any", notifier)._silenced() is True
+
+
+async def test_a_lowered_level_stops_the_actions_still_to_run() -> None:
+    """The level is read again before each call, not once per finding (#789)."""
+    engine = _make_engine({CONF_SENTINEL_AUTONOMY_LEVEL: 2})
+    cast("Any", engine)._suppression._read_only = False
+    assert cast("Any", engine)._action_refused("auto-execute action") is False
+    engine.set_autonomy_level("test-entry-1", 1)
+    assert cast("Any", engine)._action_refused("auto-execute action") is True
+    # A lowered level is not a stop: the run goes on and the finding is sent.
+    assert cast("Any", engine)._stopping("auto-execute action") is False
+
+
+async def test_state_that_cannot_be_saved_stops_the_actions_still_to_run() -> None:
+    """Read-only suppression state runs Sentinel as at level 0."""
+    engine = _make_engine({CONF_SENTINEL_AUTONOMY_LEVEL: 2})
+    cast("Any", engine)._suppression._read_only = True
+    assert cast("Any", engine)._action_refused("auto-execute action") is True

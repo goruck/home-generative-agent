@@ -1240,15 +1240,29 @@ Since step 6 this also covers `radio_new_device_joined`, and since step 7 `netwo
 
 ---
 
-### Autonomy level is captured before the triage await and reused after it
+### An automatic action is judged on the run's snapshot, which can be minutes old
 
-**What:** `_dispatch_item` computes `effective_autonomy` at `sentinel/engine.py:1672`, then awaits `self._triage_service.triage(...)`, then passes that captured value into `self._execution_service.evaluate_canary(finding, snapshot, effective_autonomy, now)`. `now` is stale across the same await. Lowering the autonomy level -- or a temporary elevated level expiring -- while the model call is in flight still authorizes execution at the old level. The configurable triage timeout makes the window up to 120 seconds wide.
+**What:** A Sentinel run dispatches its findings one after another with one `snapshot` and one `now` (`sentinel/engine.py`, the dispatch loop in `_run_once`). Earlier findings in the run can each wait on triage, an explanation and the notifier. A later finding that carries an action is then approved by `evaluate_canary` on a condition, and a data-quality age, read when the run began. Only the action's targets are re-read live (`_unavailable_targets`, `_not_callable_now`). The autonomy level is no longer part of this: it is read with no wait before the gate and again before each call.
 
-**Why:** Codex adversarial pass, 2026-09-22; mechanically confirmed. Codex rated it P1; downgraded here because auto-execution additionally requires autonomy >= 2 (`_MIN_AUTO_EXECUTE_LEVEL`) *and* a non-empty `sentinel_auto_execute_allowed_services`, which defaults to `[]` meaning no service may be invoked at all. Note the window is *created* by triage: without it there is no await between the capture and the use.
+**Why:** Claude adversarial pass on the #789 gate rework, 2026-11-22. Latent: automatic actions are forced off and no rule builds an action. It replaces the entry "Autonomy level is captured before the triage await", whose level half that PR closed.
 
-**How to apply:** Re-read the autonomy level (and `now`) immediately before the execution-policy evaluation rather than reusing the pre-triage capture. Keep the captured value for the audit record, which should reflect the level the triage decision was made under.
+**How to apply:** Dispatch findings that carry actions before the others, or have the rule that builds an action re-check its condition against live state right before `_auto_execute` (the plug rule can re-read presence and the plug). Do this before live execution is offered (#789 step 4).
 
 **Effort:** S
+**Priority:** P2
+**Depends on:** None
+
+---
+
+### Sentinel's action gate passes its Home Assistant checks when built without `hass`
+
+**What:** `SentinelExecutionService(options)` with no `hass` skips the relay floor (`_relay_reason` returns None), `_unavailable_targets`, the entity expansion of the PIN rules and `stored_action_calls`. The engine always passes `hass` (`sentinel/engine.py`, the constructor), so only tests build it this way, and many of them assert `auto_execute` from it.
+
+**Why:** Security specialist on the #789 gate rework, 2026-11-22. A gate that says yes when it cannot look is the wrong default for a future caller.
+
+**How to apply:** Make `hass` a required argument and refuse in `_critical_reason` when it is None; give the tests in `test_execution_service.py` and `test_sentinel_autonomy_settings.py` that expect an approval a `hass` with states for their targets.
+
+**Effort:** S-M (about 30 test call sites)
 **Priority:** P3
 **Depends on:** None
 

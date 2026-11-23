@@ -128,7 +128,8 @@ def _relabel_downstream_suppressed(record: dict[str, Any]) -> dict[str, Any]:
     the user, making them permanently non-evictable and inflating notified
     KPIs.  A genuinely notified record can never carry
     ``triage_decision == "suppress"`` or ``action_policy_path == "blocked"``
-    (both engine branches return before notifying), so the relabel is
+    (both engine branches returned before notifying; the ``blocked`` one is
+    gone since #789, its old records remain), so the relabel is
     deterministic.  Idempotent; runs on every load because affected records
     are already ``version: 2``.
     """

@@ -11,13 +11,11 @@ from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.const import (
     ACTION_POLICY_AUTO_EXECUTE,
-    ACTION_POLICY_BLOCKED,
-    ACTION_POLICY_HANDOFF,
     ACTION_POLICY_PROMPT_USER,
     CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
-    CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE,
     CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
     CONF_SENTINEL_AUTO_EXECUTION_ENABLED,
+    CONF_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES,
     CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS,
     DATA_QUALITY_FRESH,
     DATA_QUALITY_STALE,
@@ -105,7 +103,6 @@ _NOW: datetime = cast("datetime", dt_util.parse_datetime("2025-01-01T01:00:00+00
 
 _FULL_OPTIONS: dict[str, Any] = {
     CONF_SENTINEL_AUTO_EXECUTION_ENABLED: True,
-    CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE: 0.70,
     CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR: 5,
     CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: ["light.turn_off"],
     CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS: 3600,
@@ -123,7 +120,7 @@ def test_autonomy_level_below_2_returns_prompt_user() -> None:
     snapshot = _make_snapshot()
 
     for level in (0, 1):
-        result = svc.evaluate(finding, snapshot, level, _NOW)
+        result = svc.evaluate_canary(finding, snapshot, level, _NOW)
         assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
         assert result.block_reason == "autonomy_level_below_2"
 
@@ -143,9 +140,9 @@ def test_stale_entity_returns_prompt_user_with_stale_quality() -> None:
     svc = SentinelExecutionService(opts)
     # Snapshot entity last_changed is 00:00:00, _NOW is 01:00:00 → 3600 s old
     snapshot = _make_snapshot(last_changed="2025-01-01T00:00:00+00:00")
-    finding = _make_finding()
+    finding = _make_finding(suggested_actions=["light.turn_off"])
 
-    result = svc.evaluate(finding, snapshot, 2, _NOW)
+    result = svc.evaluate_canary(finding, snapshot, 2, _NOW)
 
     assert result.data_quality == DATA_QUALITY_STALE
     assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
@@ -157,53 +154,63 @@ def test_stale_entity_returns_prompt_user_with_stale_quality() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_unavailable_entity_low_severity_returns_blocked() -> None:
-    """Entity not in snapshot → unavailable; low/medium severity → blocked."""
+@pytest.mark.parametrize("severity", ["low", "medium", "high"])
+def test_a_missing_sensor_stops_the_action_and_never_the_alert(
+    severity: Severity,
+) -> None:
+    """Entity not in the snapshot: the action does not run, the user is told."""
     svc = SentinelExecutionService(_FULL_OPTIONS)
     snapshot = _make_snapshot()  # has binary_sensor.front_door
     finding = _make_finding(
         triggering_entities=["lock.missing_lock"],  # not in snapshot
-        severity="medium",
+        severity=severity,
+        suggested_actions=["light.turn_off"],
     )
 
-    result = svc.evaluate(finding, snapshot, 2, _NOW)
-
-    assert result.data_quality == DATA_QUALITY_UNAVAILABLE
-    assert result.action_policy_path == ACTION_POLICY_BLOCKED
-
-
-def test_unavailable_entity_high_severity_returns_prompt_user() -> None:
-    """High-severity unavailable findings route to prompt_user (not blocked)."""
-    svc = SentinelExecutionService(_FULL_OPTIONS)
-    snapshot = _make_snapshot()
-    finding = _make_finding(
-        triggering_entities=["lock.missing_lock"],
-        severity="high",
-    )
-
-    result = svc.evaluate(finding, snapshot, 2, _NOW)
+    result = svc.evaluate_canary(finding, snapshot, 2, _NOW)
 
     assert result.data_quality == DATA_QUALITY_UNAVAILABLE
     assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
+    assert result.block_reason == "data_quality_unavailable"
 
 
 # ---------------------------------------------------------------------------
-# 3. Sensitivity gate
+# 3. What no longer gates an action (#789)
 # ---------------------------------------------------------------------------
 
 
-def test_sensitive_finding_returns_handoff() -> None:
-    """Sensitive findings are handed off to the conversation agent."""
-    # Fresh entity — entity last_changed at _NOW - 10s, threshold 3600
-    recent = "2025-01-01T00:59:50+00:00"
-    snapshot = _make_snapshot(last_changed=recent)
+def test_a_sensitive_finding_with_an_action_still_runs() -> None:
+    """`is_sensitive` governs what text is shared, not whether a rule may act."""
+    snapshot = _make_snapshot(last_changed="2025-01-01T00:59:50+00:00")
     svc = SentinelExecutionService(_FULL_OPTIONS)
-    finding = _make_finding(is_sensitive=True)
+    finding = _make_finding(is_sensitive=True, suggested_actions=["light.turn_off"])
 
-    result = svc.evaluate(finding, snapshot, 2, _NOW)
+    result = svc.evaluate_canary(finding, snapshot, 2, _NOW)
 
-    assert result.action_policy_path == ACTION_POLICY_HANDOFF
-    assert result.block_reason == "finding_sensitive"
+    assert result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+
+
+def test_confidence_does_not_gate_an_action() -> None:
+    """A model picks a discovered rule's confidence; it decides nothing here."""
+    snapshot = _make_snapshot(last_changed="2025-01-01T00:59:50+00:00")
+    svc = SentinelExecutionService(_FULL_OPTIONS)
+    finding = _make_finding(confidence=0.0, suggested_actions=["light.turn_off"])
+
+    result = svc.evaluate_canary(finding, snapshot, 2, _NOW)
+
+    assert result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+
+
+def test_a_finding_that_cannot_act_is_never_dropped_for_its_data() -> None:
+    """An alert about a sensor that is gone must still reach the user."""
+    snapshot = _make_snapshot(entity_id="binary_sensor.other")
+    svc = SentinelExecutionService(_FULL_OPTIONS)
+    finding = _make_finding(severity="low")
+
+    result = svc.evaluate_canary(finding, snapshot, 2, _NOW)
+
+    assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
+    assert result.block_reason == "no_executable_action"
 
 
 # ---------------------------------------------------------------------------
@@ -218,28 +225,10 @@ def test_auto_execution_disabled_returns_prompt_user() -> None:
     snapshot = _make_snapshot(last_changed=recent)
     finding = _make_finding()
 
-    result = svc.evaluate(finding, snapshot, 2, _NOW)
+    result = svc.evaluate_canary(finding, snapshot, 2, _NOW)
 
     assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
     assert result.block_reason == "auto_execution_disabled"
-
-
-# ---------------------------------------------------------------------------
-# 5. Confidence gate
-# ---------------------------------------------------------------------------
-
-
-def test_confidence_below_threshold_returns_prompt_user() -> None:
-    opts = {**_FULL_OPTIONS, CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE: 0.80}
-    svc = SentinelExecutionService(opts)
-    recent = "2025-01-01T00:59:50+00:00"
-    snapshot = _make_snapshot(last_changed=recent)
-    finding = _make_finding(confidence=0.75)  # below 0.80
-
-    result = svc.evaluate(finding, snapshot, 2, _NOW)
-
-    assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
-    assert result.block_reason == "confidence_below_threshold"
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +248,7 @@ def test_service_not_allowlisted_returns_prompt_user() -> None:
         suggested_actions=["lock.lock"]  # not allowlisted
     )
 
-    result = svc.evaluate(finding, snapshot, 2, _NOW)
+    result = svc.evaluate_canary(finding, snapshot, 2, _NOW)
 
     assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
     assert result.block_reason == "service_not_allowlisted"
@@ -275,7 +264,7 @@ def test_empty_allowlist_blocks_when_actions_present() -> None:
     snapshot = _make_snapshot(last_changed=recent)
     finding = _make_finding(suggested_actions=["light.turn_off"])
 
-    result = svc.evaluate(finding, snapshot, 2, _NOW)
+    result = svc.evaluate_canary(finding, snapshot, 2, _NOW)
 
     assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
     assert result.block_reason == "service_not_allowlisted"
@@ -292,7 +281,7 @@ def test_a_finding_with_nothing_to_run_is_left_to_the_user() -> None:
     snapshot = _make_snapshot(last_changed=recent)
     finding = _make_finding(suggested_actions=[])
 
-    result = svc.evaluate(finding, snapshot, 2, _NOW)
+    result = svc.evaluate_canary(finding, snapshot, 2, _NOW)
     assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
     assert result.block_reason == "no_executable_action"
 
@@ -319,33 +308,30 @@ def test_rate_limit_blocks_after_max_actions() -> None:
     ]
 
     finding = _make_finding(anomaly_id="fresh_a1", suggested_actions=["light.turn_off"])
-    result = svc.evaluate(finding, snapshot, 2, _NOW)
+    result = svc.evaluate_canary(finding, snapshot, 2, _NOW)
 
     assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
     assert result.block_reason == "rate_limit_exceeded"
 
 
-def test_expired_rate_limit_entries_are_pruned() -> None:
-    """Actions older than 1 hour are pruned before the rate check."""
-    opts = {
-        **_FULL_OPTIONS,
-        CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR: 2,
-        CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: [],
-    }
+def test_actions_older_than_an_hour_do_not_count() -> None:
+    """The hourly limit reads the last hour, and a commit drops the rest."""
+    opts = {**_FULL_OPTIONS, CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR: 2}
     svc = SentinelExecutionService(opts)
-    recent = "2025-01-01T00:59:50+00:00"
-    snapshot = _make_snapshot(last_changed=recent)
-
-    # Both old actions are >1 hour ago → pruned → rate not exceeded.
+    snapshot = _make_snapshot(last_changed="2025-01-01T00:59:50+00:00")
     svc._recent_action_times = [
         _NOW - timedelta(hours=2),
         _NOW - timedelta(hours=1, minutes=1),
     ]
+    finding = _make_finding(
+        anomaly_id="after_prune", suggested_actions=["light.turn_off"]
+    )
 
-    finding = _make_finding(anomaly_id="after_prune", suggested_actions=[])
-    result = svc.evaluate(finding, snapshot, 2, _NOW)
+    result = svc.evaluate_canary(finding, snapshot, 2, _NOW)
 
-    assert result.block_reason != "rate_limit_exceeded"
+    assert result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+    svc.commit_auto_execute(cast("str", result.execution_id), _NOW)
+    assert svc._recent_action_times == [_NOW]
 
 
 # ---------------------------------------------------------------------------
@@ -353,26 +339,110 @@ def test_expired_rate_limit_entries_are_pruned() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_idempotency_deduplicates_within_window() -> None:
-    """Second evaluate() call with same finding returns idempotency block."""
-    opts = {
-        **_FULL_OPTIONS,
-        CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: ["light.turn_off"],
-    }
-    svc = SentinelExecutionService(opts)
-    recent = "2025-01-01T00:59:50+00:00"
-    snapshot = _make_snapshot(last_changed=recent)
+def test_a_committed_action_is_a_duplicate_until_its_window_ends() -> None:
+    """The same decision is refused inside the window and allowed after it."""
+    svc = SentinelExecutionService(_FULL_OPTIONS)
+    snapshot = _make_snapshot(last_changed="2025-01-01T00:59:50+00:00")
     finding = _make_finding(
         anomaly_id="idem_test", suggested_actions=["light.turn_off"]
     )
 
-    first = svc.evaluate(finding, snapshot, 2, _NOW)
+    first = svc.evaluate_canary(finding, snapshot, 2, _NOW)
     assert first.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+    svc.commit_auto_execute(cast("str", first.execution_id), _NOW)
 
-    second = svc.evaluate(finding, snapshot, 2, _NOW)
+    second = svc.evaluate_canary(finding, snapshot, 2, _NOW)
     assert second.action_policy_path == ACTION_POLICY_PROMPT_USER
     assert second.block_reason == "idempotency_duplicate"
     assert second.execution_id == first.execution_id
+
+    svc._idempotency_window_reset_at -= 16 * 60  # the default window is 15 min
+    third = svc.evaluate_canary(finding, snapshot, 2, _NOW)
+    assert third.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+    # The next commit starts a new window holding only its own id.
+    svc.commit_auto_execute("next", _NOW)
+    assert svc._idempotency_seen == {"next"}
+
+
+@pytest.mark.parametrize("window", [0, -5, None, "soon"])
+def test_an_unusable_window_setting_does_not_break_the_gate(window: object) -> None:
+    """A hand-edited window of 0 divided by zero; the finding was never sent."""
+    opts = {
+        **_FULL_OPTIONS,
+        CONF_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES: window,
+        CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR: None,
+    }
+    svc = SentinelExecutionService(opts)
+    snapshot = _make_snapshot(last_changed="2025-01-01T00:59:50+00:00")
+    finding = _make_finding(suggested_actions=["light.turn_off"])
+
+    result = svc.evaluate_canary(finding, snapshot, 2, _NOW)
+
+    assert result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+    if not isinstance(window, str) and window is not None:
+        assert svc._idempotency_window_seconds() == 60
+
+
+@pytest.mark.parametrize(
+    ("limit", "reason"),
+    [
+        (-1, "rate_limit_exceeded"),
+        (0, "rate_limit_exceeded"),
+        ("x", None),
+    ],
+)
+def test_an_hourly_limit_is_read_as_a_whole_number_or_the_default(
+    limit: object, reason: str | None
+) -> None:
+    """Below zero is zero (nothing runs); not a number is the default."""
+    opts = {**_FULL_OPTIONS, CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR: limit}
+    svc = SentinelExecutionService(opts)
+    snapshot = _make_snapshot(last_changed="2025-01-01T00:59:50+00:00")
+    finding = _make_finding(suggested_actions=["light.turn_off"])
+
+    assert svc.evaluate_canary(finding, snapshot, 2, _NOW).block_reason == reason
+
+
+@pytest.mark.parametrize(
+    ("stored", "read"),
+    [("3.0", 3), ("1e3", 60), (2.9, 2), (-4, 0), ("x", 5), (None, 5), (10**9, 60)],
+)
+def test_a_numeric_setting_is_read_within_its_bounds(stored: object, read: int) -> None:
+    """Text that is a number is that number; anything else is the default."""
+    svc = SentinelExecutionService({"some_setting": stored})
+    assert svc._int_option("some_setting", 5, minimum=0, maximum=60) == read
+
+
+@pytest.mark.parametrize("allowed", [5, True, None, "light.turn_off", ["light", 1]])
+def test_an_allowlist_that_is_not_a_list_of_text_does_not_break_the_gate(
+    allowed: object,
+) -> None:
+    """A hand-edited allowlist raised, and the run's later findings went unsent."""
+    opts = {**_FULL_OPTIONS, CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: allowed}
+    svc = SentinelExecutionService(opts)
+    snapshot = _make_snapshot(last_changed="2025-01-01T00:59:50+00:00")
+    finding = _make_finding(suggested_actions=["light.turn_off"])
+
+    result = svc.evaluate_canary(finding, snapshot, 2, _NOW)
+
+    # Only the list holding the text "light" allows the action.
+    expected = None if isinstance(allowed, list) else "service_not_allowlisted"
+    assert result.block_reason == expected
+
+
+@pytest.mark.parametrize("threshold", ["soon", None, float("inf"), 10**18])
+def test_an_unusable_staleness_setting_does_not_break_the_gate(
+    threshold: object,
+) -> None:
+    """It raised out of the gate, before the finding was sent."""
+    opts = {**_FULL_OPTIONS, CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS: threshold}
+    svc = SentinelExecutionService(opts)
+    snapshot = _make_snapshot(last_changed="2025-01-01T00:59:50+00:00")
+    finding = _make_finding(suggested_actions=["light.turn_off"])
+
+    result = svc.evaluate_canary(finding, snapshot, 2, _NOW)
+
+    assert result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
 
 
 # ---------------------------------------------------------------------------
@@ -396,7 +466,7 @@ def test_all_guardrails_pass_returns_auto_execute() -> None:
         suggested_actions=["light.turn_off"],
     )
 
-    result = svc.evaluate(finding, snapshot, 2, _NOW)
+    result = svc.evaluate_canary(finding, snapshot, 2, _NOW)
 
     assert result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
     assert result.data_quality == DATA_QUALITY_FRESH
@@ -459,15 +529,15 @@ def test_data_quality_reads_when_a_power_sensor_last_reported(
 
 def test_policy_version_is_deterministic() -> None:
     svc = SentinelExecutionService(_FULL_OPTIONS)
-    v1 = svc._compute_policy_version(2, 0.70)
-    v2 = svc._compute_policy_version(2, 0.70)
+    v1 = svc._compute_policy_version(2)
+    v2 = svc._compute_policy_version(2)
     assert v1 == v2
 
 
 def test_policy_version_changes_on_config_change() -> None:
     svc = SentinelExecutionService(_FULL_OPTIONS)
-    v1 = svc._compute_policy_version(2, 0.70)
-    v2 = svc._compute_policy_version(3, 0.70)  # autonomy level changed
+    v1 = svc._compute_policy_version(2)
+    v2 = svc._compute_policy_version(3)  # autonomy level changed
     assert v1 != v2
 
 
@@ -505,65 +575,22 @@ def test_canary_no_side_effects_when_would_auto_execute() -> None:
     assert svc._idempotency_seen == seen_before
 
 
-def test_canary_distinguishable_from_live() -> None:
-    """Live evaluate() mutates state; evaluate_canary() does not."""
-    recent = "2025-01-01T00:59:50+00:00"
-    snapshot = _make_snapshot(last_changed=recent)
-    svc = SentinelExecutionService(
-        {
-            **_FULL_OPTIONS,
-            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: ["light.turn_off"],
-        }
-    )
-    finding = _make_finding(
-        anomaly_id="live_vs_canary",
-        confidence=0.95,
-        suggested_actions=["light.turn_off"],
-    )
-
-    # Canary first — no state change.
-    canary = svc.evaluate_canary(finding, snapshot, 2, _NOW)
-    assert canary.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
-    assert not svc._recent_action_times
-    assert not svc._idempotency_seen
-
-    # Live evaluate — mutates state.
-    live = svc.evaluate(finding, snapshot, 2, _NOW)
-    assert live.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
-    assert len(svc._recent_action_times) == 1
-    assert live.execution_id in svc._idempotency_seen
-
-
-def test_canary_rate_limit_is_read_only() -> None:
-    """Canary respects rate limit without consuming the slot."""
-    recent = "2025-01-01T00:59:50+00:00"
-    snapshot = _make_snapshot(last_changed=recent)
+def test_the_hourly_limit_counts_committed_actions_only() -> None:
+    """A decision takes no slot; an action that ran does."""
+    snapshot = _make_snapshot(last_changed="2025-01-01T00:59:50+00:00")
     max_actions = 2
     svc = SentinelExecutionService(
-        {
-            **_FULL_OPTIONS,
-            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: ["light.turn_off"],
-            CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR: max_actions,
-        }
+        {**_FULL_OPTIONS, CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR: max_actions}
     )
-    # Fill rate-limit bucket with live calls.
     for i in range(max_actions):
-        f = _make_finding(
-            anomaly_id=f"fill_{i}",
-            confidence=0.95,
-            suggested_actions=["light.turn_off"],
-        )
-        svc.evaluate(f, snapshot, 2, _NOW)
-    assert len(svc._recent_action_times) == max_actions
-
-    # Canary on a new finding should report rate_limit_exceeded without mutating.
-    new_finding = _make_finding(
-        anomaly_id="new_canary", confidence=0.95, suggested_actions=["light.turn_off"]
-    )
-    result = svc.evaluate_canary(new_finding, snapshot, 2, _NOW)
+        f = _make_finding(anomaly_id=f"fill_{i}", suggested_actions=["light.turn_off"])
+        approved = svc.evaluate_canary(f, snapshot, 2, _NOW)
+        assert approved.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+        svc.commit_auto_execute(cast("str", approved.execution_id), _NOW)
+    one_more = _make_finding(anomaly_id="over", suggested_actions=["light.turn_off"])
+    result = svc.evaluate_canary(one_more, snapshot, 2, _NOW)
     assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
     assert result.block_reason == "rate_limit_exceeded"
-    # Still the same count — canary didn't add another slot.
     assert len(svc._recent_action_times) == max_actions
 
 

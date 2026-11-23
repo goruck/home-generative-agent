@@ -298,11 +298,6 @@ SENTINEL_OCCUPANCY_ARMED_STATES: frozenset[str] = frozenset(
 CONF_SENTINEL_AUTO_EXECUTION_ENABLED = "sentinel_auto_execution_enabled"
 RECOMMENDED_SENTINEL_AUTO_EXECUTION_ENABLED: bool = False
 
-CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE = (
-    "sentinel_auto_execute_default_min_confidence"
-)
-RECOMMENDED_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE: float = 0.70
-
 CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR = (
     "sentinel_auto_execute_max_actions_per_hour"
 )
@@ -1645,9 +1640,7 @@ SNOOZE_PERMANENT = "permanent"
 
 # Action policy values written to audit records and consumed by the execution service.
 ACTION_POLICY_PROMPT_USER = "prompt_user"
-ACTION_POLICY_HANDOFF = "handoff"
 ACTION_POLICY_AUTO_EXECUTE = "auto_execute"
-ACTION_POLICY_BLOCKED = "blocked"
 
 # Data quality tags written to action audit payloads.
 DATA_QUALITY_FRESH = "fresh"
