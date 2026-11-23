@@ -29,8 +29,9 @@ Guardrail evaluation order
 No path here ends in silence: a finding whose action is refused is still
 sent to the user. No model takes part: neither ``is_sensitive`` (which
 governs what reaches a model or a notification) nor ``confidence`` (which a
-model chooses for a discovered rule) is read, and the engine asks no model
-about a finding whose action this gate approves (#789). The gate is reached
+model chooses for a discovered rule) is read, and the engine does not send
+a finding whose action this gate approves to LLM triage (#789); its
+explanation is written after the action ran. The gate is reached
 only by a finding the engine would notify about: one a cooldown, snooze,
 quiet hours or a pending prompt holds back does not act either.
 """
@@ -355,6 +356,16 @@ class SentinelExecutionService:
         value = max(minimum, value)
         return value if maximum is None else min(maximum, value)
 
+    def _allowed_services(self) -> list[str]:
+        """Return the allowlist, sorted; anything in it but text allows nothing."""
+        allowed = self._options.get(
+            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
+            RECOMMENDED_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
+        )
+        if not isinstance(allowed, (list, tuple, set, frozenset)):
+            return []
+        return sorted(item for item in allowed if isinstance(item, str))
+
     def _idempotency_window_seconds(self) -> int:
         """Return the idempotency window, never less than a minute."""
         return 60 * self._int_option(
@@ -449,13 +460,7 @@ class SentinelExecutionService:
         if (missing := self._unavailable_targets(actions)) is not None:
             LOGGER.debug("Auto-execute blocked: %s cannot be acted on.", missing)
             return "target_unavailable"
-        allowed: list[str] = list(
-            self._options.get(
-                CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
-                RECOMMENDED_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
-            )
-            or []
-        )
+        allowed = self._allowed_services()
         for action in actions:
             service = action.service
             if service not in allowed and service.split(".", 1)[0] not in allowed:
@@ -648,12 +653,7 @@ class SentinelExecutionService:
         Any change in execution-relevant config automatically produces a
         different hash, invalidating existing idempotency keys.
         """
-        allowed: list[str] = sorted(
-            self._options.get(
-                CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
-                RECOMMENDED_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
-            )
-        )
+        allowed = self._allowed_services()
         policy: dict[str, Any] = {
             "allowed_services": allowed,
             "autonomy_level": autonomy_level,

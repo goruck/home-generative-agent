@@ -389,7 +389,6 @@ def test_an_unusable_window_setting_does_not_break_the_gate(window: object) -> N
         (-1, "rate_limit_exceeded"),
         (0, "rate_limit_exceeded"),
         ("x", None),
-        ("3.0", None),
     ],
 )
 def test_an_hourly_limit_is_read_as_a_whole_number_or_the_default(
@@ -402,6 +401,33 @@ def test_an_hourly_limit_is_read_as_a_whole_number_or_the_default(
     finding = _make_finding(suggested_actions=["light.turn_off"])
 
     assert svc.evaluate_canary(finding, snapshot, 2, _NOW).block_reason == reason
+
+
+@pytest.mark.parametrize(
+    ("stored", "read"),
+    [("3.0", 3), ("1e3", 60), (2.9, 2), (-4, 0), ("x", 5), (None, 5), (10**9, 60)],
+)
+def test_a_numeric_setting_is_read_within_its_bounds(stored: object, read: int) -> None:
+    """Text that is a number is that number; anything else is the default."""
+    svc = SentinelExecutionService({"some_setting": stored})
+    assert svc._int_option("some_setting", 5, minimum=0, maximum=60) == read
+
+
+@pytest.mark.parametrize("allowed", [5, True, None, "light.turn_off", ["light", 1]])
+def test_an_allowlist_that_is_not_a_list_of_text_does_not_break_the_gate(
+    allowed: object,
+) -> None:
+    """A hand-edited allowlist raised, and the run's later findings went unsent."""
+    opts = {**_FULL_OPTIONS, CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: allowed}
+    svc = SentinelExecutionService(opts)
+    snapshot = _make_snapshot(last_changed="2025-01-01T00:59:50+00:00")
+    finding = _make_finding(suggested_actions=["light.turn_off"])
+
+    result = svc.evaluate_canary(finding, snapshot, 2, _NOW)
+
+    # Only the list holding the text "light" allows the action.
+    expected = None if isinstance(allowed, list) else "service_not_allowlisted"
+    assert result.block_reason == expected
 
 
 @pytest.mark.parametrize("threshold", ["soon", None, float("inf"), 10**18])

@@ -3449,7 +3449,8 @@ async def _auto_execute_finding(
     cut off; the actions after it are ``"stopped"``.
 
     *refuses*, when given, is asked before each call; an action it refuses is
-    recorded as ``"stopped"`` and not run (#988).
+    recorded as ``"stopped"`` and not run: the engine is stopping (#988), or
+    Sentinel may no longer act because its level was lowered (#789).
 
     Returns an ``action_outcome`` dict with:
     - ``status``: ``"success"`` | ``"partial"`` (some ran, the rest failed,
@@ -3544,7 +3545,7 @@ async def _auto_execute_finding(
     elif tried_count:
         status = "error"
     else:
-        status = "stopped"  # none ran: the engine stopped first
+        status = "stopped"  # none ran: a stop, or Sentinel may no longer act
 
     return {
         "status": status,

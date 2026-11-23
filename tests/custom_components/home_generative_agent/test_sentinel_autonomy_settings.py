@@ -610,6 +610,7 @@ async def test_a_member_of_a_wrapped_switch_group_never_runs(
     )
     hass.states.async_set("switch.gate_a", "off")
     hass.states.async_set("switch.gate_b", "off")
+    hass.states.async_set("switch.drier", "on")
 
     held = _evaluate_actions(
         (FindingAction("switch.turn_on", ("switch.gate_a",)),),
@@ -618,6 +619,13 @@ async def test_a_member_of_a_wrapped_switch_group_never_runs(
         **no_pin_rules,
     )
     assert held.block_reason == "critical_action"
+    free = _evaluate_actions(
+        (FindingAction("switch.turn_off", ("switch.drier",)),),
+        ["switch"],
+        hass=hass,
+        **no_pin_rules,
+    )
+    assert free.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
 
 
 async def test_a_switch_wrapped_as_a_light_is_not_held(hass: HomeAssistant) -> None:
