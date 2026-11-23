@@ -474,6 +474,9 @@
     "database_unreachable": {
       "message": "Cannot reach the PostgreSQL database yet: {error}. Home Assistant will keep retrying; check that the database is running and that the Database settings (host, port, user, password, database name) are correct."
     },
+    "database_file_missing": {
+      "message": "The PostgreSQL server could not load an extension library: {error}. This usually means a PostgreSQL upgrade on the database server removed the pgvector library while the extension stayed enabled. Reinstall pgvector for the server's PostgreSQL version. Home Assistant will keep retrying, and the integration starts on its own once the server can load the library."
+    },
     "database_invalid_settings": {
       "message": "The Database settings were rejected before connecting: {error}. Fix the extra connection parameters (or other Database settings) in the Database subentry; the integration reloads when you save them."
     }

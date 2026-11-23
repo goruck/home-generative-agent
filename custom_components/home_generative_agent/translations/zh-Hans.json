@@ -474,6 +474,9 @@
     "database_unreachable": {
       "message": "暂时无法连接到 PostgreSQL 数据库：{error}。Home Assistant 会持续重试；请检查数据库是否在运行，以及数据库设置（主机、端口、用户、密码、数据库名称）是否正确。"
     },
+    "database_file_missing": {
+      "message": "PostgreSQL 服务器无法加载扩展库：{error}。这通常表示数据库服务器上的 PostgreSQL 升级删除了 pgvector 库，而该扩展仍处于启用状态。请为服务器的 PostgreSQL 版本重新安装 pgvector。Home Assistant 会持续重试，服务器能够加载该库后，集成会自动启动。"
+    },
     "database_invalid_settings": {
       "message": "数据库设置在连接前就被拒绝：{error}。请在数据库子条目中修正额外的连接参数（或其他数据库设置）；保存后集成会重新加载。"
     }

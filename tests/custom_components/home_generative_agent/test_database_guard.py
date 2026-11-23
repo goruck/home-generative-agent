@@ -55,6 +55,7 @@ from custom_components.home_generative_agent.const import (
 )
 from custom_components.home_generative_agent.core import face_guard, pipeline_guard
 from custom_components.home_generative_agent.core.database_guard import (
+    DATABASE_FILE_MISSING,
     DATABASE_INVALID_SETTINGS,
     DATABASE_UNREACHABLE,
     ISSUE_DATABASE_NOT_CONFIGURED,
@@ -65,8 +66,10 @@ from custom_components.home_generative_agent.core.database_guard import (
     async_clear_database_issue,
     async_ensure_pgvector,
     async_sync_database_issue,
+    database_retry_error,
     database_unreachable,
     is_connection_failure,
+    is_setup_retryable,
 )
 from custom_components.home_generative_agent.core.db_utils import build_postgres_uri
 from custom_components.home_generative_agent.core.face_api import FaceServiceError
@@ -340,6 +343,36 @@ def test_server_side_operational_errors_are_not_retried(err: Exception) -> None:
     Retrying it would loop every 10 minutes behind a "cannot reach" message.
     """
     assert not is_connection_failure(err)
+
+
+def test_missing_server_file_is_retried_but_is_not_a_connection_failure() -> None:
+    """Pgvector's library removed by a server upgrade is retried (#1071)."""
+    err = pg_errors.UndefinedFile('could not access file "$libdir/vector"')
+    assert is_setup_retryable(err)
+    assert not is_connection_failure(err)
+    assert database_retry_error(err).translation_key == DATABASE_FILE_MISSING
+
+
+def test_setup_retry_keeps_the_unreachable_message_for_connection_failures() -> None:
+    """A connection failure still says the database cannot be reached."""
+    err = OperationalError("connection refused")
+    assert is_setup_retryable(err)
+    assert database_retry_error(err).translation_key == DATABASE_UNREACHABLE
+
+
+@pytest.mark.parametrize(
+    "err",
+    [
+        pg_errors.ProgramLimitExceeded("column cannot have more than 2000"),
+        pg_errors.UndefinedTable("no table"),
+        # A server data file, not a library: damage a retry cannot fix.
+        pg_errors.UndefinedFile('could not open file "base/16384/2619"'),
+        RuntimeError("bug"),
+    ],
+)
+def test_other_errors_are_not_setup_retryable(err: Exception) -> None:
+    """Only connection failures and a missing server file are retried."""
+    assert not is_setup_retryable(err)
 
 
 @pytest.mark.asyncio

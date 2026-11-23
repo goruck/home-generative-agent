@@ -293,8 +293,8 @@ from .core.database_guard import (
     async_clear_database_issue,
     async_ensure_pgvector,
     async_sync_database_issue,
-    database_unreachable,
-    is_connection_failure,
+    database_retry_error,
+    is_setup_retryable,
 )
 from .core.db_utils import db_client_keepalives, parse_postgres_uri
 from .core.embedding_model_guard import (
@@ -1814,8 +1814,9 @@ async def _async_rebuild_tables(
     A setup that fails is logged and the next one still runs, so a store that
     cannot be rebuilt (a vector size its index cannot hold) does not keep the
     checkpointer's tables from coming back, and the integration still loads:
-    a missing table only ever failed the writes to it. A lost connection is
-    raised, for setup's retry.
+    a missing table only ever failed the writes to it. A lost connection, or
+    a server that cannot open an extension library, is raised for setup's
+    retry.
     """
     names = tuple(name for record in records for name in MIGRATION_RECORDS[record])
     steps: tuple[Callable[[], Awaitable[None]], ...] = (
@@ -1826,7 +1827,7 @@ async def _async_rebuild_tables(
         try:
             await step()
         except psycopg.Error as err:
-            if is_connection_failure(err):
+            if is_setup_retryable(err):
                 raise
             LOGGER.error(  # noqa: TRY400
                 "Could not create memory store tables again, so writes to them "
@@ -3675,9 +3676,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             try:
                 await migrate_person_gallery(pool)
             except Exception as err:
-                # A lost connection is retried below; logging it here would
-                # read as a migration bug.
-                if not is_connection_failure(err):
+                # A lost connection or a missing extension library is retried
+                # below; logging it here would read as a migration bug.
+                if not is_setup_retryable(err):
                     LOGGER.exception("Error migrating person_gallery database schema.")
                 raise
 
@@ -3722,9 +3723,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             if isinstance(err, ConfigEntryError):
                 raise
             # The database went away after the preflight connect (a restart
-            # mid-setup): retry, as for one that was down from the start.
-            if is_connection_failure(err):
-                raise database_unreachable(err) from err
+            # mid-setup), or the server cannot open an extension library
+            # (pgvector's library removed by an upgrade, #1071): retry, as
+            # for a database that was down from the start.
+            if is_setup_retryable(err):
+                raise database_retry_error(err) from err
             LOGGER.exception("Postgresql setup failed; pool closed.")
             return False
     else:
