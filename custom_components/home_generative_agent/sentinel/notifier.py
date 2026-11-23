@@ -1018,6 +1018,7 @@ _KNOWN_TYPE_LABEL_KEYS = {
     "zwave_inclusion_active": "type_zwave_inclusion_active",
     "radio_coordinator_update_pending": "type_radio_coordinator_update_pending",
     "appliance_power_duration": "type_appliance_power_duration",
+    "plug_on_while_away": "type_plug_on_while_away",
     "low_battery_sensors": "type_low_battery_sensors",
     "entity_state_duration": "type_entity_state_duration",
     "motion_detected_at_night_while_alarm_disarmed": (
@@ -1207,6 +1208,27 @@ def _appliance_power_duration_mobile_message(
         note=note or "",
     )
     return _cap_keeping_note(msg, note, cap)
+
+
+def _plug_on_while_away_mobile_message(
+    finding: AnomalyFinding,
+    hass: HomeAssistant | None = None,
+    cap: int | None = MAX_MOBILE_MESSAGE_CHARS,
+) -> str:
+    """Return fixed copy for plug_on_while_away: which plug, how long away."""
+    ev = finding.evidence
+    entity_id = str(
+        ev.get("entity_id")
+        or (finding.triggering_entities[0] if finding.triggering_entities else "")
+    )
+    plug = (ev.get("friendly_name") or "").strip() or _friendly_entity(entity_id)
+    away_min = ev.get("away_min")
+    msg = (
+        notif_msg(hass, "body_plug_on_while_away", plug=plug, minutes=int(away_min))
+        if isinstance(away_min, (int, float))
+        else notif_msg(hass, "body_plug_on_while_away_noval", plug=plug)
+    )
+    return msg if cap is None else msg[:cap]
 
 
 def _cap_keeping_note(msg: str, note: str | None, cap: int | None) -> str:
@@ -1822,6 +1844,7 @@ _TYPE_MOBILE_FORMATTERS: dict[str, Any] = {
     "alarm_disarmed_during_external_threat": _alarm_disarmed_mobile_message,
     "appliance_power_duration": _appliance_power_duration_mobile_message,
     "pet_detected_at_night_no_occupancy": _pet_mobile_message,
+    "plug_on_while_away": _plug_on_while_away_mobile_message,
 }
 
 

@@ -25,6 +25,8 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_AUTH_IP_RETENTION_DAYS,
     CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
     CONF_SENTINEL_AUTONOMY_LEVEL,
+    CONF_SENTINEL_AWAY_PLUG_DELAY_MIN,
+    CONF_SENTINEL_AWAY_PLUGS,
     CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
     CONF_SENTINEL_BASELINE_SUSTAINED_MINUTES,
@@ -54,6 +56,7 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     RECOMMENDED_SENTINEL_AUTH_IP_RETENTION_DAYS,
     RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
+    RECOMMENDED_SENTINEL_AWAY_PLUG_DELAY_MIN,
     RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
     RECOMMENDED_SENTINEL_BASELINE_SUSTAINED_MINUTES,
@@ -171,6 +174,7 @@ from .rules.network_upnp_port_mapping_added import NetworkUpnpPortMappingAddedRu
 from .rules.open_entry_while_away import OpenEntryWhileAwayRule
 from .rules.pet_detected_at_night_no_occupancy import PetDetectedAtNightNoOccupancyRule
 from .rules.phone_battery_low_at_night import PhoneBatteryLowAtNightRule
+from .rules.plug_on_while_away import PlugOnWhileAwayRule
 from .rules.radio_coordinator_update_pending import RadioCoordinatorUpdatePendingRule
 from .rules.radio_new_device_joined import RadioNewDeviceJoinedRule
 from .rules.security_device_unavailable import SecurityDeviceUnavailableRule
@@ -512,6 +516,13 @@ class SentinelEngine:
                     duration_min=_coerce_int(
                         options.get(CONF_SENTINEL_APPLIANCE_DURATION_MIN),
                         default=RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN,
+                    ),
+                ),
+                PlugOnWhileAwayRule(
+                    plugs=_text_items(options.get(CONF_SENTINEL_AWAY_PLUGS)),
+                    delay_min=_coerce_int(
+                        options.get(CONF_SENTINEL_AWAY_PLUG_DELAY_MIN),
+                        default=RECOMMENDED_SENTINEL_AWAY_PLUG_DELAY_MIN,
                     ),
                 ),
                 CameraEntryUnsecuredRule(
@@ -3280,6 +3291,13 @@ _NOT_RUN = object()
 _STOPPED_MID_CALL = (
     "Sentinel stopped while the call ran; the device may still have acted"
 )
+
+
+def _text_items(value: object) -> list[str]:
+    """Return the text items of a stored list; anything else is no list."""
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [item for item in cast("list[object]", value) if isinstance(item, str)]
 
 
 def outcome_may_have_acted(outcome: Mapping[str, Any]) -> bool:

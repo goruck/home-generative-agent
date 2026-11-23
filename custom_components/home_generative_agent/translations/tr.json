@@ -250,7 +250,9 @@
             "sentinel_baseline_min_samples": "Sapma uyarıları tetiklenmeden önce gereken minimum örnek sayısı",
             "sentinel_baseline_sustained_minutes": "Döngüsel yük kapısı: Uyarı vermeden önce eşiğin üzerinde geçen dakika (0 = devre dışı)",
             "sentinel_appliance_power_threshold_w": "Cihaz güç kuralı: güç eşiği (W)",
-            "sentinel_appliance_duration_min": "Cihaz güç kuralı: uyarıdan önceki süre (dakika)"
+            "sentinel_appliance_duration_min": "Cihaz güç kuralı: uyarıdan önceki süre (dakika)",
+            "sentinel_away_plugs": "Herkes dışarıdayken izlenecek prizler",
+            "sentinel_away_plug_delay_min": "Priz kuralı: uyarıdan önce herkesin dışarıda olması gereken süre (dakika)"
           }
         },
         "setup_mode": {

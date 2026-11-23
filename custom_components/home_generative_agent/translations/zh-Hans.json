@@ -282,6 +282,8 @@
             "sentinel_baseline_sustained_minutes": "周期性负载门槛：超过阈值多少分钟后才提醒（0 = 禁用）",
             "sentinel_appliance_power_threshold_w": "电器功率规则：功率阈值（W）",
             "sentinel_appliance_duration_min": "电器功率规则：持续多久后提醒（分钟）",
+            "sentinel_away_plugs": "所有人离家时要留意的插座",
+            "sentinel_away_plug_delay_min": "插座规则：所有人离家多少分钟后提醒",
             "sentinel_network_enabled": "启用网络和 Home Assistant 安全审计",
             "sentinel_network_offline_device_min": "安全设备离线阈值（分钟）",
             "sentinel_network_unknown_device_grace_min": "新网络设备宽限期（分钟）",
@@ -323,7 +325,8 @@
             "sentinel_ha_token_stale_days": "长期访问令牌超过多少天会被报告。Home Assistant 不会记录长期令牌的使用时间，所以只能依据令牌年龄，提醒会建议轮换旧令牌。默认 90。",
             "sentinel_auth_ip_retention_days": "使用过访问令牌的地址在安全审计清单中保留多久。地址以单向哈希存储，绝不以明文保存，每个令牌最多保留 20 个。默认 90 天。",
             "sentinel_autonomy_level": "没有临时覆盖时 Sentinel 运行的等级，重启和基础设置后都会保留。0 为被动：停止异常提醒和每日摘要，但异常仍会被记录。在此期间出现的变化（新设备、新管理员或令牌、公网 IP 或端口映射变化）会在你提高等级后提醒，仍然成立的状况会在冷却结束后再次提醒。基线和一次性的设置提示仍会出现。1 为通知。等级 2 和 3 预留给自动操作，目前尚不可用；现阶段它们的通知行为与等级 1 完全相同。Sentinel 健康传感器的 autonomy_level 属性显示当前生效的等级。用 sentinel_set_autonomy_level 服务设置的等级会在覆盖时长到期、重启或修改此设置后结束。",
-            "sentinel_runtime_override_ttl_minutes": "用 sentinel_set_autonomy_level 服务设置的等级持续多久后，Sentinel 恢复到配置的权限等级。重启也会使其结束。"
+            "sentinel_runtime_override_ttl_minutes": "用 sentinel_set_autonomy_level 服务设置的等级持续多久后，Sentinel 恢复到配置的权限等级。重启也会使其结束。",
+            "sentinel_away_plugs": "可选。不应在无人的家中保持开启的智能插座（switch 实体），例如烘干机或熨斗。所有人离家达到下方时间后，列表中仍开着的插座会触发提醒。列表之外的设备不会被报告。至少需要一个人员实体；状态未知或不可用的人员不算离家。留空则关闭此规则。"
           }
         }
       }

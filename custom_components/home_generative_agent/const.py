@@ -351,6 +351,14 @@ CONF_SENTINEL_APPLIANCE_DURATION_MIN = "sentinel_appliance_duration_min"
 RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W: float = 100.0
 RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN: int = 60
 
+# Plugs the plug_on_while_away rule watches: switch entities the user picked.
+# Nothing off this list is reported, or ever acted on (#789).
+CONF_SENTINEL_AWAY_PLUGS = "sentinel_away_plugs"
+RECOMMENDED_SENTINEL_AWAY_PLUGS: list[str] = []
+# How long everyone must have been away before a listed plug is reported.
+CONF_SENTINEL_AWAY_PLUG_DELAY_MIN = "sentinel_away_plug_delay_min"
+RECOMMENDED_SENTINEL_AWAY_PLUG_DELAY_MIN: int = 10
+
 # ---- Sentinel LLM triage (Issue #262) ----
 CONF_SENTINEL_TRIAGE_ENABLED = "sentinel_triage_enabled"
 CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS = "sentinel_triage_timeout_seconds"

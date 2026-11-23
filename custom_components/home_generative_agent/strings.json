@@ -282,6 +282,8 @@
             "sentinel_baseline_sustained_minutes": "Cyclical load gate: minutes above threshold before alerting (0 = disabled)",
             "sentinel_appliance_power_threshold_w": "Appliance power rule: power threshold (W)",
             "sentinel_appliance_duration_min": "Appliance power rule: duration before alert (minutes)",
+            "sentinel_away_plugs": "Plugs to watch while everyone is away",
+            "sentinel_away_plug_delay_min": "Plug rule: minutes everyone must be away before the alert",
             "sentinel_network_enabled": "Enable network and Home Assistant security audit",
             "sentinel_network_offline_device_min": "Security device offline threshold (minutes)",
             "sentinel_network_unknown_device_grace_min": "New network device grace period (minutes)",
@@ -323,7 +325,8 @@
             "sentinel_ha_token_stale_days": "Age in days past which a long-lived access token is reported. Home Assistant does not record when a long-lived token is used, so age is the only fact available and the alert suggests rotating old tokens. Default 90.",
             "sentinel_auth_ip_retention_days": "How long an address seen using an access token stays in the security audit's inventory. Addresses are stored as one-way hashes, never in the clear, and at most 20 are kept per token. Default 90 days.",
             "sentinel_autonomy_level": "The level Sentinel runs at when no override is set, kept across restarts and Basic setup. 0 is passive: finding alerts and the daily digest stop; findings are still recorded. A change seen meanwhile (a new device, admin or token, public IP or port mapping) alerts when you raise the level, and a condition still true alerts again once its cooldown ends. Baseline and one-time setup notices still appear. 1 notifies. Levels 2 and 3 are reserved for automatic actions, which are not available yet; today they notify exactly like level 1. The Sentinel health sensor's autonomy_level attribute shows the level in force. A level set with the sentinel_set_autonomy_level service ends after the override duration, a restart, or a change to this setting.",
-            "sentinel_runtime_override_ttl_minutes": "How long a level set with the sentinel_set_autonomy_level service lasts before Sentinel returns to the configured autonomy level. A restart also ends it."
+            "sentinel_runtime_override_ttl_minutes": "How long a level set with the sentinel_set_autonomy_level service lasts before Sentinel returns to the configured autonomy level. A restart also ends it.",
+            "sentinel_away_plugs": "Optional. Smart plugs (switch entities) that should not stay on in an empty home, such as a tumble drier or an iron. A listed plug that is still on once everyone has been away for the time below raises an alert. Nothing off this list is reported. Needs at least one person entity; a person whose state is unknown or unavailable is not counted as away. Leave empty to turn the rule off."
           }
         }
       }
