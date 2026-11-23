@@ -49,11 +49,12 @@ SUPPRESSION_REASON_PRESENCE_GRACE = "presence_grace"
 SUPPRESSION_REASON_USER_SNOOZE_24H = "user_snooze_24h"
 SUPPRESSION_REASON_USER_SNOOZE_7D = "user_snooze_7d"
 SUPPRESSION_REASON_USER_SNOOZE_PERMANENT = "user_snooze_permanent"
-# Findings that passed should_suppress() but were suppressed downstream
-# (LLM triage or execution policy). Distinct from SUPPRESSION_REASON_NOT_SUPPRESSED
-# so the audit store's eviction logic can correctly treat them as evictable.
+# Findings that passed should_suppress() but were suppressed downstream by
+# LLM triage. Distinct from SUPPRESSION_REASON_NOT_SUPPRESSED so the audit
+# store's eviction logic can correctly treat them as evictable. Older audit
+# records also carry "policy_blocked", from an execution policy path that no
+# longer exists (#789); the audit store still reads it.
 SUPPRESSION_REASON_TRIAGE_SUPPRESSED = "triage_suppressed"
-SUPPRESSION_REASON_POLICY_BLOCKED = "policy_blocked"
 # Autonomy level 0 (passive): found and audited, never notified (#783).
 SUPPRESSION_REASON_AUTONOMY_PASSIVE = "autonomy_passive"
 # The notifier dropped the push as a repeat of the same anomaly within its own

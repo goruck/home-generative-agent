@@ -379,6 +379,44 @@ def test_an_unusable_window_setting_does_not_break_the_gate(window: object) -> N
     result = svc.evaluate_canary(finding, snapshot, 2, _NOW)
 
     assert result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+    if not isinstance(window, str) and window is not None:
+        assert svc._idempotency_window_seconds() == 60
+
+
+@pytest.mark.parametrize(
+    ("limit", "reason"),
+    [
+        (-1, "rate_limit_exceeded"),
+        (0, "rate_limit_exceeded"),
+        ("x", None),
+        ("3.0", None),
+    ],
+)
+def test_an_hourly_limit_is_read_as_a_whole_number_or_the_default(
+    limit: object, reason: str | None
+) -> None:
+    """Below zero is zero (nothing runs); not a number is the default."""
+    opts = {**_FULL_OPTIONS, CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR: limit}
+    svc = SentinelExecutionService(opts)
+    snapshot = _make_snapshot(last_changed="2025-01-01T00:59:50+00:00")
+    finding = _make_finding(suggested_actions=["light.turn_off"])
+
+    assert svc.evaluate_canary(finding, snapshot, 2, _NOW).block_reason == reason
+
+
+@pytest.mark.parametrize("threshold", ["soon", None, float("inf"), 10**18])
+def test_an_unusable_staleness_setting_does_not_break_the_gate(
+    threshold: object,
+) -> None:
+    """It raised out of the gate, before the finding was sent."""
+    opts = {**_FULL_OPTIONS, CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS: threshold}
+    svc = SentinelExecutionService(opts)
+    snapshot = _make_snapshot(last_changed="2025-01-01T00:59:50+00:00")
+    finding = _make_finding(suggested_actions=["light.turn_off"])
+
+    result = svc.evaluate_canary(finding, snapshot, 2, _NOW)
+
+    assert result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
 
 
 # ---------------------------------------------------------------------------

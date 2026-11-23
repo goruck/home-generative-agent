@@ -1471,33 +1471,46 @@ class SentinelEngine:
         outcome = await _auto_execute_finding(
             self._hass, finding, execution_id, refuses=self._action_refused
         )
-        if outcome["status"] == "stopped":
+        # Only a stop ends the run. A level lowered before the first call
+        # also leaves every action "stopped": that finding is then sent and
+        # audited like any other, with nothing run (#789).
+        if outcome["status"] == "stopped" and self._stopping("auto-execute action"):
             raise asyncio.CancelledError
         return outcome
 
-    def _action_refused(self, effect: str) -> bool:
+    def _stopping(self, effect: str) -> bool:
         """
-        Return True when an auto-execute action must not run (#988).
+        Return True from the moment stop() begins (#988).
 
-        From the moment stop() begins, not only once the latch closes after
-        its wait: a run still acting then is one that caught its cancel, and
-        it would act on the options being replaced. A cancel that has not
-        landed yet counts the same.
+        Not only once the latch closes after its wait: a run still acting
+        then is one that caught its cancel, and it would act on the options
+        being replaced. A cancel that has not landed yet counts the same.
         """
         if self._stopped or cancel_requested():
             LOGGER.debug("Sentinel is stopping; not running a late %s.", effect)
             return True
-        if self._latch.refuses(effect):
+        return self._latch.refuses(effect)
+
+    def _action_refused(self, effect: str) -> bool:
+        """
+        Return True when an auto-execute action must not run.
+
+        While the engine stops (see ``_stopping``), and once Sentinel may no
+        longer act: the level was read once, before the finding's first
+        action, a call can take seconds, and a level lowered meanwhile (or a
+        raised one that ran out) must stop the actions after it (#789).
+        """
+        if self._stopping(effect):
             return True
-        # The level was read once, before the finding's first action. A call
-        # can take seconds, and a level lowered meanwhile (or a raised one
-        # that ran out) must stop the actions after it (#789).
         if self._suppression.is_read_only or (
             self._entry_id is not None
             and self.get_autonomy_level(self._entry_id) < MIN_AUTO_EXECUTE_LEVEL
         ):
             LOGGER.info(
-                "Sentinel's autonomy level was lowered; not running a %s.", effect
+                "Sentinel may no longer act (autonomy level below %d, or its "
+                "state cannot be saved); not running a %s.",
+                MIN_AUTO_EXECUTE_LEVEL,
+                effect,
             )
             return True
         return False
@@ -2279,7 +2292,7 @@ class SentinelEngine:
         all_findings = self._with_hvac_context(all_findings, snapshot)
 
         # Whether this run's auth-change finding reached the user: None when
-        # there was none, False when suppression/triage/policy stopped it.
+        # there was none, False when suppression or triage stopped it.
         auth_change_delivered: bool | None = None
         new_device_alert_settled = False
         settled_client_keys: list[str] = []
@@ -2802,7 +2815,7 @@ class SentinelEngine:
         Route a finding or compound finding through suppression and dispatch.
 
         Returns True when the notifier was handed the finding (delivered), False
-        when suppression, triage, or policy stopped it; callers that must know
+        when suppression or triage stopped it; callers that must know
         whether an alert reached the user (the auth inventory commit) rely on it.
         A push the notifier drops as a repeat still returns True: the same
         anomaly reached the user within its cooldown. Only the audit label
@@ -3021,8 +3034,7 @@ class SentinelEngine:
         ones that line named are registered as pending prompts, and the named
         ones only once the push went out.  A constituent the user never saw
         comes due again after its cooldown instead of waiting out the prompt
-        TTL behind its partner (issue #723); it is shown or named then unless
-        the push is policy-blocked.
+        TTL behind its partner (issue #723); it is shown or named then.
 
         A constituent held back only by its own reminder clock (the pending
         prompt from an earlier push, and any cooldown) may be named too when
@@ -3085,8 +3097,8 @@ class SentinelEngine:
                 RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
             )
         )
-        # Use the side-effect-free evaluator here; live execution state is
-        # committed only after the HA service call actually succeeds.
+        # The evaluator changes no state; live execution is committed only
+        # after the HA service call was made.
         exec_result = self._execution_service.evaluate_canary(
             best, snapshot, effective_autonomy, now
         )

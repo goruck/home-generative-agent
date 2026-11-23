@@ -136,6 +136,7 @@ class DummyAudit:
                 "named_anomaly_ids": kwargs.get("named_anomaly_ids"),
                 "constituent_reasons": kwargs.get("constituent_reasons"),
                 "triage_decision": kwargs.get("triage_decision"),
+                "data_quality": kwargs.get("data_quality"),
                 "triage_reason_code": kwargs.get("triage_reason_code"),
                 "canary_would_execute": kwargs.get("canary_would_execute"),
                 "action_policy_path": kwargs.get("action_policy_path"),
@@ -843,31 +844,100 @@ async def test_suppression_gate_fires_before_triage(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_a_refused_action_still_notifies(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Missing data stops the action, never the alert."""
-    snapshot = _make_snapshot()
-    engine, notifier, audit = _make_engine(monkeypatch, snapshot, cooldown_minutes=0)
-
-    refused = ActionPolicyResult(
-        action_policy_path=ACTION_POLICY_PROMPT_USER,
-        data_quality="unavailable",
-        data_quality_details={},
-        execution_id=None,
-        block_reason="data_quality_unavailable",
+def _missing_sensor_finding() -> AnomalyFinding:
+    """Return a finding with an allowlisted action whose trigger sensor is gone."""
+    return AnomalyFinding(
+        anomaly_id="stub-missing-sensor",
+        type="stub_auto_exec",
+        severity="medium",
+        confidence=0.9,
+        triggering_entities=["sensor.gone"],
+        evidence={},
+        suggested_actions=["lock.lock"],
+        is_sensitive=False,
+        actions=service_actions(["lock.lock"], ["lock.front_door"]),
     )
 
-    with patch.object(
-        cast("Any", engine)._execution_service,
-        "evaluate_canary",
-        return_value=refused,
-    ):
-        await engine._run_once("poll")
 
+@pytest.mark.asyncio
+async def test_a_missing_sensor_stops_the_action_and_the_alert_is_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real gate: no service call, one notification, the audit says why."""
+    engine, hass = _make_ae_engine(monkeypatch)
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    audit = cast("DummyAudit", cast("Any", engine)._audit_store)
+
+    delivered = await engine._dispatch_item(
+        _missing_sensor_finding(),
+        _AE_SNAPSHOT,
+        _AE_FROZEN_NOW,
+        timedelta(0),
+        timedelta(0),
+        explain_enabled=False,
+    )
+
+    assert delivered is True
+    hass.services.async_call.assert_not_called()
     assert len(notifier.calls) == 1
     assert audit.calls[0]["action_policy_path"] == ACTION_POLICY_PROMPT_USER
+    assert audit.calls[0]["data_quality"] == {"quality": "unavailable"}
+
+
+@pytest.mark.asyncio
+async def test_a_missing_sensor_does_not_drop_a_compound_alert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same through the compound path, which dropped every constituent."""
+    engine, hass = _make_ae_engine(monkeypatch)
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    audit = cast("DummyAudit", cast("Any", engine)._audit_store)
+
+    delivered = await engine._dispatch_compound(
+        CompoundFinding.from_findings([_missing_sensor_finding()]),
+        _AE_SNAPSHOT,
+        _AE_FROZEN_NOW,
+        timedelta(0),
+        timedelta(0),
+        False,  # noqa: FBT003
+    )
+
+    assert delivered is True
+    hass.services.async_call.assert_not_called()
+    assert len(notifier.calls) == 1
+    assert audit.calls[0]["action_policy_path"] == ACTION_POLICY_PROMPT_USER
+
+
+@pytest.mark.asyncio
+async def test_a_level_lowered_before_the_first_call_does_not_end_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a stop cancels the run; here the finding is sent, nothing ran."""
+    engine, hass = _make_ae_engine(monkeypatch)
+    notifier = cast("DummyNotifier", cast("Any", engine)._notifier)
+    audit = cast("DummyAudit", cast("Any", engine)._audit_store)
+    lowered = {"now": False}
+    monkeypatch.setattr(
+        engine, "get_autonomy_level", lambda _entry_id: 1 if lowered["now"] else 2
+    )
+    approve = engine._execution_service.evaluate_canary
+
+    def _approve_then_lower(*args: Any) -> ActionPolicyResult:
+        result = approve(*args)
+        lowered["now"] = True  # an override runs out right after the decision
+        return result
+
+    monkeypatch.setattr(
+        engine._execution_service, "evaluate_canary", _approve_then_lower
+    )
+
+    await engine._run_once()
+
+    hass.services.async_call.assert_not_called()
+    assert len(notifier.calls) == 1
+    outcome = cast("dict[str, Any]", audit.calls[0]["action_outcome"])
+    assert outcome["status"] == "stopped"
+    assert engine._execution_service._recent_action_times == []
 
 
 @pytest.mark.asyncio
@@ -956,11 +1026,14 @@ def _acting_result(path: str) -> ActionPolicyResult:
     )
 
 
+@pytest.mark.parametrize("dry_run", [False, True])
 async def test_a_finding_whose_action_runs_is_never_triaged(
     monkeypatch: pytest.MonkeyPatch,
+    dry_run: bool,  # noqa: FBT001
 ) -> None:
     """No model may cancel a rule's action, so none is asked (#789)."""
     engine, _audit, service = _triaged_engine(monkeypatch)
+    cast("Any", engine)._options[CONF_SENTINEL_AUTO_EXEC_CANARY_MODE] = dry_run
     finding = replace(
         _standing_finding("drier", "appliance_power_duration"),
         actions=(FindingAction("switch.turn_off", ("switch.drier",)),),
@@ -978,7 +1051,8 @@ async def test_a_finding_whose_action_runs_is_never_triaged(
         delivered = await _dispatch_triaged(engine, finding, datetime.now(UTC))
 
     assert delivered is True
-    ran.assert_awaited_once()
+    # A dry run is judged as the live run would be, and runs nothing.
+    assert ran.await_count == (0 if dry_run else 1)
     service.triage.assert_not_awaited()
 
 

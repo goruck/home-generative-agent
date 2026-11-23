@@ -944,6 +944,9 @@ def guarded_relay_reach(
     what could not be read, for a caller that must refuse when the answer is
     incomplete: an unreadable switch_as_x entry or template is not logged
     here, and the relay under it is not in the reach.
+
+    As complete as the readers it uses, which is not complete: see the limits
+    listed at ``SentinelExecutionService._critical_reason``.
     """
     problems: list[str] = []
     wrapped = read_switch_wrappers(hass, problems)

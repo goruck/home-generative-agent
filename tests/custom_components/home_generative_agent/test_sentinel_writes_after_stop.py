@@ -83,7 +83,8 @@ class _Parts:
         self.notifier = MagicMock()
         self.engine = SentinelEngine(
             hass,
-            {"sentinel_interval_seconds": 60},
+            # Level 2, so that only the stop refuses an action in these tests.
+            {"sentinel_interval_seconds": 60, "sentinel_autonomy_level": 2},
             self.suppression,
             self.notifier,
             self.audit,

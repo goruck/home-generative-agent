@@ -527,7 +527,97 @@ async def test_an_unreadable_wrapper_stops_every_action(
         hass=hass,
         **no_pin_rules,
     )
-    assert result.block_reason == "critical_action"
+    assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
+    assert result.block_reason == "relay_map_unreadable"
+
+
+async def _template_cover(hass: HomeAssistant, target: Any) -> None:
+    """Set up a template blind whose open action turns a switch on."""
+    assert await async_setup_component(
+        hass,
+        "template",
+        {
+            "template": [
+                {
+                    "cover": {
+                        "name": "Attic blind",
+                        "state": "{{ 'closed' }}",
+                        "open_cover": [
+                            {
+                                "action": "switch.turn_on",
+                                "target": {"entity_id": target},
+                            }
+                        ],
+                        "close_cover": [],
+                    }
+                }
+            ]
+        },
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get("cover.attic_blind") is not None
+
+
+async def test_what_a_template_cover_drives_never_runs(hass: HomeAssistant) -> None:
+    """The switch a template blind's action turns on is the blind's relay."""
+    no_pin_rules: dict[str, Any] = {CONF_CRITICAL_ACTIONS: []}
+    hass.states.async_set("switch.relay_7", "off")
+    hass.states.async_set("switch.drier", "on")
+    await _template_cover(hass, "switch.relay_7")
+
+    held = _evaluate_actions(
+        (FindingAction("switch.turn_on", ("switch.relay_7",)),),
+        ["switch"],
+        hass=hass,
+        **no_pin_rules,
+    )
+    assert held.block_reason == "critical_action"
+    free = _evaluate_actions(
+        (FindingAction("switch.turn_off", ("switch.drier",)),),
+        ["switch"],
+        hass=hass,
+        **no_pin_rules,
+    )
+    assert free.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+
+
+async def test_a_template_that_cannot_be_read_stops_every_action(
+    hass: HomeAssistant,
+) -> None:
+    """A templated target could be any switch, so nothing runs (#789)."""
+    no_pin_rules: dict[str, Any] = {CONF_CRITICAL_ACTIONS: []}
+    hass.states.async_set("switch.drier", "on")
+    await _template_cover(hass, "{{ states('input_text.which') }}")
+
+    result = _evaluate_actions(
+        (FindingAction("switch.turn_off", ("switch.drier",)),),
+        ["switch"],
+        hass=hass,
+        **no_pin_rules,
+    )
+    assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
+    assert result.block_reason == "relay_map_unreadable"
+
+
+async def test_a_member_of_a_wrapped_switch_group_never_runs(
+    hass: HomeAssistant,
+) -> None:
+    """The wrapper wraps a group of switches: each member moves the gate."""
+    no_pin_rules: dict[str, Any] = {CONF_CRITICAL_ACTIONS: []}
+    wrap_switch(hass, "switch.gate_pair", "cover.side_gate", attributes={})
+    hass.states.async_set(
+        "switch.gate_pair", "off", {"entity_id": ["switch.gate_a", "switch.gate_b"]}
+    )
+    hass.states.async_set("switch.gate_a", "off")
+    hass.states.async_set("switch.gate_b", "off")
+
+    held = _evaluate_actions(
+        (FindingAction("switch.turn_on", ("switch.gate_a",)),),
+        ["switch"],
+        hass=hass,
+        **no_pin_rules,
+    )
+    assert held.block_reason == "critical_action"
 
 
 async def test_a_switch_wrapped_as_a_light_is_not_held(hass: HomeAssistant) -> None:

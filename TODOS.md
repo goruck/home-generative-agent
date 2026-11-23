@@ -1256,11 +1256,11 @@ Since step 6 this also covers `radio_new_device_joined`, and since step 7 `netwo
 
 ### Sentinel's action gate passes its Home Assistant checks when built without `hass`
 
-**What:** `SentinelExecutionService(options)` with no `hass` skips the relay floor (`_floor_bars` returns False after the service checks), `_unavailable_targets`, the entity expansion of the PIN rules and `stored_action_calls`. The engine always passes `hass` (`sentinel/engine.py`, the constructor), so only tests build it this way, and many of them assert `auto_execute` from it.
+**What:** `SentinelExecutionService(options)` with no `hass` skips the relay floor (`_relay_reason` returns None), `_unavailable_targets`, the entity expansion of the PIN rules and `stored_action_calls`. The engine always passes `hass` (`sentinel/engine.py`, the constructor), so only tests build it this way, and many of them assert `auto_execute` from it.
 
 **Why:** Security specialist on the #789 gate rework, 2026-11-22. A gate that says yes when it cannot look is the wrong default for a future caller.
 
-**How to apply:** Make `hass` a required argument and refuse in `_is_critical` when it is None; give the tests in `test_execution_service.py` and `test_sentinel_autonomy_settings.py` that expect an approval a `hass` with states for their targets.
+**How to apply:** Make `hass` a required argument and refuse in `_critical_reason` when it is None; give the tests in `test_execution_service.py` and `test_sentinel_autonomy_settings.py` that expect an approval a `hass` with states for their targets.
 
 **Effort:** S-M (about 30 test call sites)
 **Priority:** P3

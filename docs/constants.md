@@ -368,7 +368,7 @@ The model Sentinel's triage, discovery and explanation calls run on when a **Sen
 
 | Constant | File | Value | Purpose |
 |---|---|---|---|
-| `_MIN_AUTO_EXECUTE_LEVEL` | `sentinel/execution.py` | `2` | Minimum autonomy level required for any auto-execution attempt |
+| `MIN_AUTO_EXECUTE_LEVEL` | `sentinel/execution.py` | `2` | Minimum autonomy level required for any auto-execution attempt |
 | `_ACTION_CALL_TIMEOUT_S` | `sentinel/engine.py` | `10.0` | Seconds one automatic service call is waited for before it is recorded as unanswered (it may still have acted) |
 
 ---
@@ -705,4 +705,4 @@ These constants live outside `const.py` in individual modules. They affect runti
 
 | Constant | Value | Purpose |
 |---|---|---|
-| `_MIN_AUTO_EXECUTE_LEVEL` | `2` | Autonomy level floor for any auto-execution attempt |
+| `MIN_AUTO_EXECUTE_LEVEL` | `2` | Autonomy level floor for any auto-execution attempt |

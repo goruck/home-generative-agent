@@ -9,8 +9,8 @@ evaluation path.
 Guardrail evaluation order
 --------------------------
 1. Autonomy level < 2                 → ``prompt_user``
-2. Auto-execution disabled            → ``prompt_user`` (the canary
-                                        evaluator still runs on in canary mode)
+2. Auto-execution disabled            → ``prompt_user`` (a dry run still
+                                        evaluates in canary mode)
 3. The finding carries no action
    (its suggested actions are advice,
    never called)                      → ``prompt_user``
@@ -19,8 +19,9 @@ Guardrail evaluation order
    ``domain.service`` call on entities
    of that domain, a target is missing
    or unavailable, one is not
-   allowlisted, or one is critical
-   (see ``_is_critical``)             → ``prompt_user``
+   allowlisted, one is critical (see
+   ``_critical_reason``), or the relays
+   of guarded devices cannot be read  → ``prompt_user``
 6. Rate limit exceeded                → ``prompt_user``
 7. Idempotency duplicate              → ``prompt_user``
 8. All checks passed                  → ``auto_execute``
@@ -115,6 +116,8 @@ _FLOOR_RULES: tuple[dict[str, str], ...] = (
 # Domains whose relay (the switch under a switch_as_x wrapper, what a template
 # cover or lock drives) the floor bars with them.
 _RELAY_GUARDED_DOMAINS = frozenset({*_NEVER_AUTO_DOMAINS, "lock"})
+# No sensor reading is fresh for longer than this, whatever the setting says.
+_MAX_STALENESS_SECONDS = 7 * 24 * 3600
 
 
 def executable_actions(finding: AnomalyFinding) -> list[FindingAction]:
@@ -201,6 +204,8 @@ class SentinelExecutionService:
         self._recent_action_times: list[datetime] = []
         # Idempotency keys seen within the current time window.
         self._idempotency_seen: set[str] = set()
+        # What could not be read of the guarded relays, as last logged.
+        self._unread_relays_logged: tuple[str, ...] = ()
         # Monotonic timestamp of last idempotency window reset.
         self._idempotency_window_reset_at: float = time.monotonic()
 
@@ -333,13 +338,22 @@ class SentinelExecutionService:
 
         return _result(ACTION_POLICY_AUTO_EXECUTE, None, execution_id)
 
-    def _int_option(self, key: str, default: int, *, minimum: int) -> int:
-        """Return a whole-number option; one unreadable or too small is not used."""
+    def _int_option(
+        self, key: str, default: int, *, minimum: int, maximum: int | None = None
+    ) -> int:
+        """
+        Return a whole-number option kept within its bounds.
+
+        One that is not a number is read as the default: these settings are
+        in no form yet, so a bad one was edited by hand, and raising here
+        would stop the finding from being sent at all.
+        """
         try:
-            value = int(self._options.get(key, default))
-        except (TypeError, ValueError):
+            value = int(float(self._options.get(key, default)))
+        except (TypeError, ValueError, OverflowError):
             value = default
-        return max(minimum, value)
+        value = max(minimum, value)
+        return value if maximum is None else min(maximum, value)
 
     def _idempotency_window_seconds(self) -> int:
         """Return the idempotency window, never less than a minute."""
@@ -365,11 +379,11 @@ class SentinelExecutionService:
         Returns a ``(quality, details)`` tuple where quality is one of
         ``"fresh"``, ``"stale"``, or ``"unavailable"``.
         """
-        threshold_seconds = int(
-            self._options.get(
-                CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS,
-                RECOMMENDED_SENTINEL_STALENESS_THRESHOLD_SECONDS,
-            )
+        threshold_seconds = self._int_option(
+            CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS,
+            RECOMMENDED_SENTINEL_STALENESS_THRESHOLD_SECONDS,
+            minimum=0,
+            maximum=_MAX_STALENESS_SECONDS,
         )
         threshold = timedelta(seconds=threshold_seconds)
 
@@ -423,9 +437,10 @@ class SentinelExecutionService:
         targeted call (``is_callable_action``) stops them all, as does a
         target Home Assistant has no state for or holds unavailable. The
         reasons returned are ``malformed_action``, ``target_unavailable``,
-        ``service_not_allowlisted`` and ``critical_action``. An empty
-        allowlist permits nothing. A critical action never runs without a
-        person, whatever the allowlist says (see ``_is_critical``).
+        ``service_not_allowlisted``, ``critical_action`` and
+        ``relay_map_unreadable``. An empty allowlist permits nothing. A
+        critical action never runs without a person, whatever the allowlist
+        says (see ``_critical_reason``).
         """
         actions = executable_actions(finding)
         if not all(is_callable_action(action) for action in actions):
@@ -450,9 +465,7 @@ class SentinelExecutionService:
                     allowed,
                 )
                 return "service_not_allowlisted"
-        if self._is_critical(actions):
-            return "critical_action"
-        return None
+        return self._critical_reason(actions)
 
     def _unavailable_targets(self, actions: list[FindingAction]) -> str | None:
         """
@@ -473,39 +486,49 @@ class SentinelExecutionService:
                     return entity_id
         return None
 
-    def _is_critical(self, actions: list[FindingAction]) -> bool:
+    def _critical_reason(self, actions: list[FindingAction]) -> str | None:
         """
-        Return True if any action needs a person.
+        Return why *actions* need a person, or None.
 
-        The floor, which no rule or allowlist lifts: any ``homeassistant.*``
-        call (it restarts or stops Home Assistant, or runs whatever service
-        its target has), any alarm panel, cover, valve, siren or button
-        action, any lock action but ``lock.lock``, and a call that reaches
-        the relay moving one of those or a lock: the switch under a
-        switch_as_x wrapper or a template cover or lock, a group holding it,
-        another wrapper of it (``guarded_relay_reach``). Then what the
-        user's Critical Action PIN rules cover, and what the call would
-        start (a script, scene or automation, a template entity's own
-        actions), judged by those rules and the floor. A check that cannot
-        be made, or a relay list that could not be read in full, counts as
-        critical. With no Home Assistant instance only the services and
-        entity ids are judged (the engine always supplies one).
+        ``critical_action`` for the floor, which no rule or allowlist lifts:
+        any ``homeassistant.*`` call (it restarts or stops Home Assistant, or
+        runs whatever service its target has), any alarm panel, cover, valve,
+        siren or button action, and any lock action but ``lock.lock``. Then
+        for a call that reaches the relay moving a cover, valve, siren or
+        lock, as far as that can be read (``guarded_relay_reach``): the
+        switch under a switch_as_x wrapper, what a template cover or lock
+        drives, a group holding either, another wrapper of it. Then for what
+        the user's Critical Action PIN rules cover, and for what the call
+        would start (a script, scene or automation, a template entity's own
+        actions), judged by those rules and the floor. A check that raises
+        counts as critical.
+
+        ``relay_map_unreadable`` when a switch_as_x entry or a template
+        cover's or lock's actions cannot be read in full: a relay could be
+        behind it, so nothing runs until it can be read.
+
+        The relay check is best effort, not a guarantee. It does not see a
+        template whose service name is itself a template, a template entity
+        that is not loaded, a relay a template reaches through a wrapper of
+        another domain, or what a template alarm panel or button drives
+        (#789). With no Home Assistant instance only the services and entity
+        ids are judged (the engine always supplies one).
         """
         try:
-            return self._floor_bars(actions) or self._rules_bar(actions)
+            if self._floor_bars_service(actions):
+                return "critical_action"
+            if (reason := self._relay_reason(actions)) is not None:
+                return reason
+            return "critical_action" if self._rules_bar(actions) else None
         except Exception:
             LOGGER.exception(
                 "Auto-execute blocked: could not check whether %s needs a person.",
                 ", ".join(a.service for a in actions),
             )
-            return True
+            return "critical_action"
 
-    def _floor_bars(self, actions: list[FindingAction]) -> bool:
-        """Return True if Sentinel's own floor bars any of *actions*."""
-        from custom_components.home_generative_agent.agent.rule_entities import (  # noqa: PLC0415
-            guarded_relay_reach,
-        )
-
+    def _floor_bars_service(self, actions: list[FindingAction]) -> bool:
+        """Return True if the floor bars the service of any of *actions*."""
         for action in actions:
             service = action.service
             domain = service.split(".", 1)[0]
@@ -516,23 +539,36 @@ class SentinelExecutionService:
             ):
                 LOGGER.debug("Auto-execute blocked: %s needs a person.", service)
                 return True
+        return False
+
+    def _relay_reason(self, actions: list[FindingAction]) -> str | None:
+        """Return why *actions* cannot run for the relays they may reach."""
+        from custom_components.home_generative_agent.agent.rule_entities import (  # noqa: PLC0415
+            guarded_relay_reach,
+        )
+
         if self._hass is None:
-            return False
+            return None
         reach, unread = guarded_relay_reach(self._hass, _RELAY_GUARDED_DOMAINS)
         if unread:
-            LOGGER.warning(
-                "Auto-execute blocked: could not read %s, so what it moves "
-                "is not known.",
-                "; ".join(unread),
-            )
-            return True
+            # Once per set of problems, not on every run.
+            if (key := tuple(sorted(unread))) != self._unread_relays_logged:
+                self._unread_relays_logged = key
+                LOGGER.warning(
+                    "Sentinel runs no automatic action while it cannot read "
+                    "what these move: %s.",
+                    "; ".join(key),
+                )
+            return "relay_map_unreadable"
+        self._unread_relays_logged = ()
         relays = reach & {e for action in actions for e in action.entity_ids}
         if relays:
             LOGGER.debug(
                 "Auto-execute blocked: %s reaches the relay under a guarded device.",
                 ", ".join(sorted(relays)),
             )
-        return bool(relays)
+            return "critical_action"
+        return None
 
     def _rules_bar(self, actions: list[FindingAction]) -> bool:
         """Return True if a PIN rule covers *actions* or what they start."""
