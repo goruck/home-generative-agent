@@ -1568,8 +1568,14 @@ class SentinelEngine:
 
         if self._is_permit_join_turning_on(entity_id, new_state):
             anomaly_type: str | None = ZigbeePermitJoinOpenRule.rule_id
-        elif new_state.state == "on" and entity_id in self._plug_rule.plugs:
-            # A listed plug turned on: if everyone is away, it is due now.
+        elif (
+            new_state.state == "on"
+            and entity_id in self._plug_rule.plugs
+            and getattr(event.data.get("old_state"), "state", None) != "on"
+        ):
+            # A listed plug turned on: if everyone is away, it is due now. Not
+            # an update of one already on: plugs that push their power as
+            # attributes every few seconds would keep Sentinel running.
             anomaly_type = PlugOnWhileAwayRule.rule_id
         else:
             anomaly_type = _anomaly_type_for_state(entity_id, new_state)
@@ -1609,8 +1615,12 @@ class SentinelEngine:
         cancelled between trips and on stop.
         """
         due = None if self._stopped else self._plug_rule.due_at()
-        if due is not None and due <= dt_util.utcnow():
-            due = None  # already due: this run has reported it
+        seen = self._plug_rule.evaluated_at
+        if due is not None and seen is not None and due <= seen:
+            # Due when the snapshot was taken: this run has reported it. One
+            # that came due while the run built the snapshot is not reported
+            # yet, and a time already past fires at once.
+            due = None
         if due == self._plug_wake_at:
             return
         self._cancel_plug_wake()

@@ -1224,12 +1224,24 @@ def _plug_on_while_away_mobile_message(
     ] or [_friendly_entity(entity_id) for entity_id in finding.triggering_entities]
     away_min = ev.get("away_min")
     minutes = int(away_min) if isinstance(away_min, (int, float)) else 0
-    msg = notif_msg(
-        hass,
-        "body_plugs_on_while_away" if len(names) > 1 else "body_plug_on_while_away",
-        plugs=", ".join(names),
-        minutes=minutes,
-    )
+
+    def _message(shown: list[str]) -> str:
+        listed = ", ".join(shown)
+        if len(shown) < len(names):
+            listed += f" +{len(names) - len(shown)}"
+        return notif_msg(
+            hass,
+            "body_plugs_on_while_away" if len(names) > 1 else "body_plug_on_while_away",
+            plugs=listed,
+            minutes=minutes,
+        )
+
+    # Fewer names rather than the end cut off: the time away must survive.
+    msg = _message(names)
+    for count in range(len(names) - 1, 0, -1):
+        if cap is None or len(msg) <= cap:
+            break
+        msg = _message(names[:count])
     return msg if cap is None else msg[:cap].rstrip()
 
 

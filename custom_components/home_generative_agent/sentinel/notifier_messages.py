@@ -456,12 +456,10 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "{appliance}: {power}, {duration} ({threshold}). Zkontrolujte spotřebič."
         ),
         "body_plug_on_while_away": (
-            "Zásuvka {plugs} je stále zapnutá a všichni jsou pryč "
-            "nejméně {minutes} min."
+            "{plugs}: stále zapnuto, všichni jsou pryč nejméně {minutes} min."
         ),
         "body_plugs_on_while_away": (
-            "Zásuvky {plugs} jsou stále zapnuté a všichni jsou pryč "
-            "nejméně {minutes} min."
+            "{plugs}: stále zapnuto, všichni jsou pryč nejméně {minutes} min."
         ),
         "body_power_watts": "odběr asi {watts} W",
         "body_power_unknown": "vysoký odběr",

@@ -42,9 +42,13 @@ class PlugOnWhileAwayRule:
     those plugs (#789). Sentinel runs it by itself only when automatic actions
     are on and every guardrail passes; otherwise the finding is an alert.
 
-    One finding per run names every listed plug that is on, so several plugs
-    are one alert (and one action) rather than alerts a type cooldown spaces
-    out. Nothing off the list is reported, an empty list (the default) turns
+    One finding per area per run names every listed plug in that area that
+    is on, so the plugs of a room are one alert (and one action), and each
+    area's alert reaches the recipient the per-area notify map names for it.
+    The engine's suppression holds this type by each plug's own cooldown, not
+    the type cooldown, so several areas are not spaced 30 minutes apart.
+
+    Nothing off the list is reported, an empty list (the default) turns
     the rule off, and entries that are not ``switch`` entities are ignored. A
     plug the user excluded for this rule is left out of the finding, not the
     whole finding dropped.
@@ -83,7 +87,10 @@ class PlugOnWhileAwayRule:
         self._is_entity_excluded = is_entity_excluded
         # When the current trip started, or None between trips.
         self._away_since: datetime | None = None
+        # The snapshot time of the last run, for the engine's wake-up.
+        self.evaluated_at: datetime | None = None
         self._warned_no_people = False
+        self._warned_untracked: set[str] = set()
 
     def due_at(self) -> datetime | None:
         """Return when the current trip reaches the delay, or None between trips."""
@@ -98,6 +105,7 @@ class PlugOnWhileAwayRule:
         now = dt_util.as_utc(
             dt_util.parse_datetime(snapshot["derived"]["now"]) or dt_util.utcnow()
         )
+        self.evaluated_at = now
         if not self._known_empty(snapshot, now) or self._away_since is None:
             return []
         away = now - self._away_since
@@ -114,9 +122,10 @@ class PlugOnWhileAwayRule:
             ),
             key=lambda entity: entity["entity_id"],
         )
-        if not on:
-            return []
-        return [self._finding(on, away)]
+        by_area: dict[str | None, list[SnapshotEntity]] = {}
+        for entity in on:
+            by_area.setdefault(entity["area"] or None, []).append(entity)
+        return [self._finding(group, away) for group in by_area.values()]
 
     def _known_empty(self, snapshot: FullStateSnapshot, now: datetime) -> bool:
         """
@@ -133,6 +142,7 @@ class PlugOnWhileAwayRule:
                 "person entities, so it can never tell that everyone is away.",
                 len(self.plugs),
             )
+        self._warn_untracked(people)
         states = {person["state"] for person in people}
         if not people or _HOME in states:
             self._away_since = None
@@ -143,6 +153,27 @@ class PlugOnWhileAwayRule:
             self._away_since = min(now, _last_departure(people) or now)
         return True
 
+    def _warn_untracked(self, people: list[SnapshotEntity]) -> None:
+        """
+        Say once that a person with no tracker keeps the rule from firing.
+
+        Home Assistant holds such a person unknown for good, which pauses
+        every trip: the rule would otherwise do nothing, with nothing logged.
+        """
+        for person in people:
+            entity_id = person["entity_id"]
+            if (
+                person["state"] in _NOT_KNOWN
+                and person["attributes"].get("device_trackers") == []
+                and entity_id not in self._warned_untracked
+            ):
+                self._warned_untracked.add(entity_id)
+                LOGGER.warning(
+                    "Sentinel's plug rule cannot tell that everyone is away while "
+                    "%s has no device tracker: give it one, or remove it.",
+                    entity_id,
+                )
+
     def _excluded(self, entity_id: str) -> bool:
         return bool(
             self._is_entity_excluded
@@ -152,8 +183,12 @@ class PlugOnWhileAwayRule:
     def _finding(self, on: list[SnapshotEntity], away: timedelta) -> AnomalyFinding:
         entity_ids = [entity["entity_id"] for entity in on]
         away_since = self._away_since or dt_util.utcnow()
+        areas = sorted({entity["area"] for entity in on if entity["area"]})
         evidence = {
             "entity_ids": entity_ids,
+            # Not in the anomaly id: a renamed area is the same anomaly.
+            "areas": areas,
+            **({"area": areas[0]} if len(areas) == 1 else {}),
             "friendly_names": [
                 entity["friendly_name"] or entity["entity_id"] for entity in on
             ],

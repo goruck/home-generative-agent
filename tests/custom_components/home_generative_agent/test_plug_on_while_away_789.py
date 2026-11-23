@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock
 
 import pytest
+import voluptuous as vol
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant.common import async_fire_time_changed
 
@@ -45,6 +46,11 @@ from custom_components.home_generative_agent.sentinel.notifier import (
 )
 from custom_components.home_generative_agent.sentinel.rules.plug_on_while_away import (
     PlugOnWhileAwayRule,
+)
+from custom_components.home_generative_agent.sentinel.suppression import (
+    SuppressionState,
+    register_finding,
+    should_suppress,
 )
 from custom_components.home_generative_agent.snapshot.schema import (
     FullStateSnapshot,
@@ -159,6 +165,47 @@ def test_the_trip_starts_when_the_last_person_left_not_when_sentinel_looked() ->
     assert findings[0].evidence["away_since"] == _START.isoformat()
 
 
+def test_the_trip_starts_with_the_last_person_to_leave() -> None:
+    """Not the first: the home was occupied until the last one went."""
+    snapshot = _snapshot(30, people={"person.ann": "not_home"}, left=0)
+    snapshot["entities"].append(
+        cast("Any", _entity("person.bob", "work", _START + timedelta(minutes=25)))
+    )
+    rule = _rule(delay_min=10)
+
+    assert rule.evaluate(snapshot) == []
+    assert rule.due_at() == _START + timedelta(minutes=35)
+
+
+def test_a_last_change_in_the_future_starts_the_trip_now() -> None:
+    """Clock skew must not make the home empty for longer than it was."""
+    rule = _rule(delay_min=0)
+    findings = rule.evaluate(_snapshot(0, left=90))
+    assert findings[0].evidence["away_since"] == _START.isoformat()
+
+
+def test_a_person_with_no_tracker_is_named_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Home Assistant holds them unknown for good, which pauses every trip."""
+    snapshot = _snapshot(0, people={"person.ann": "not_home", "person.kid": "unknown"})
+    for entity in snapshot["entities"]:
+        if entity["entity_id"] == "person.kid":
+            entity["attributes"] = {"device_trackers": []}
+    rule = _rule(delay_min=0)
+    with caplog.at_level("WARNING"):
+        assert rule.evaluate(snapshot) == []
+        assert rule.evaluate(snapshot) == []
+    assert caplog.text.count("person.kid has no device tracker") == 1
+
+
+def test_one_area_is_kept_in_the_evidence() -> None:
+    """For correlation with the room's other findings and the explanation."""
+    finding = _rule(delay_min=0).evaluate(_snapshot(0))[0]
+    assert finding.evidence["area"] == "Utility"
+    assert finding.evidence["areas"] == ["Utility"]
+
+
 def test_several_plugs_are_one_alert_and_one_action() -> None:
     """A type cooldown must not space them out: one finding names them all."""
     rule = _rule(delay_min=0, plugs=(_DRIER, "switch.iron"))
@@ -173,6 +220,43 @@ def test_several_plugs_are_one_alert_and_one_action() -> None:
         FindingAction("switch.turn_off", (_DRIER, "switch.iron")),
     )
     assert finding.standing_condition is True
+
+
+def test_each_area_gets_its_own_alert_for_its_own_recipient() -> None:
+    """Plugs in one room share an alert; another room gets its own."""
+    snapshot = _snapshot(
+        0, plugs={_DRIER: "on", "switch.iron": "on", "switch.kettle": "on"}
+    )
+    for entity in snapshot["entities"]:
+        if entity["entity_id"] == "switch.kettle":
+            entity["area"] = "Kitchen"
+    rule = _rule(delay_min=0, plugs=(_DRIER, "switch.iron", "switch.kettle"))
+
+    findings = rule.evaluate(snapshot)
+
+    assert sorted(
+        (f.evidence.get("area"), f.triggering_entities) for f in findings
+    ) == [("Kitchen", ["switch.kettle"]), ("Utility", [_DRIER, "switch.iron"])]
+    assert len({f.anomaly_id for f in findings}) == 2
+
+
+def test_a_second_areas_alert_is_not_held_by_the_type_cooldown() -> None:
+    """Held by each plug's own cooldown, so areas are not spaced out."""
+    snapshot = _snapshot(0, plugs={_DRIER: "on", "switch.kettle": "on"})
+    for entity in snapshot["entities"]:
+        if entity["entity_id"] == "switch.kettle":
+            entity["area"] = "Kitchen"
+    state = SuppressionState()
+    first, second = _rule(delay_min=0, plugs=(_DRIER, "switch.kettle")).evaluate(
+        snapshot
+    )
+    register_finding(state, first, _START)
+
+    decision = should_suppress(
+        state, second, _START, timedelta(minutes=30), timedelta(minutes=30)
+    )
+
+    assert not decision.suppress
 
 
 def test_nothing_off_the_list_is_ever_reported() -> None:
@@ -361,6 +445,18 @@ def test_the_alert_names_the_plug_and_the_time_away() -> None:
     )
 
 
+def test_a_long_list_of_names_never_cuts_off_the_time_away() -> None:
+    """Fewer names and a count, not the end of the sentence."""
+    plugs = {f"switch.plug_with_a_long_name_{i}": "on" for i in range(8)}
+    finding = _rule(delay_min=0, plugs=tuple(plugs)).evaluate(
+        _snapshot(25, plugs=plugs)
+    )[0]
+    msg = _plug_on_while_away_mobile_message(finding, cap=120)
+    assert len(msg) <= 120
+    assert msg.endswith("everyone has been away at least 25 min.")
+    assert "+" in msg
+
+
 def test_several_plugs_are_named_in_one_alert() -> None:
     """One push for all of them."""
     finding = _rule(delay_min=0, plugs=(_DRIER, "switch.iron")).evaluate(
@@ -376,11 +472,8 @@ def test_several_plugs_are_named_in_one_alert() -> None:
     [
         (
             "cs",
-            "Zásuvka Drier je stále zapnutá a všichni jsou pryč nejméně 25 min.",
-            (
-                "Zásuvky Drier, Iron jsou stále zapnuté a všichni jsou pryč "
-                "nejméně 25 min."
-            ),
+            "Drier: stále zapnuto, všichni jsou pryč nejméně 25 min.",
+            "Drier, Iron: stále zapnuto, všichni jsou pryč nejméně 25 min.",
         ),
         (
             "zh-Hans",
@@ -526,6 +619,11 @@ async def test_an_emptied_list_stays_empty_after_another_fields_error(
         if key.description and "suggested_value" in key.description
     }
     assert suggested.get(CONF_SENTINEL_AWAY_PLUGS, []) == []
+    # No default either: an emptied selector must stay empty.
+    field = cast(
+        "Any", next(key for key in schema.schema if key == CONF_SENTINEL_AWAY_PLUGS)
+    )
+    assert field.default is vol.UNDEFINED
 
 
 @pytest.mark.asyncio
@@ -611,22 +709,42 @@ def test_the_engine_builds_the_rule_from_the_settings(
     assert rule._delay == timedelta(minutes=delay)
 
 
-def _state_event(entity_id: str, state: str) -> Any:
+def _state_event(entity_id: str, state: str, *, old: str = "off") -> Any:
     new_state = MagicMock()
     new_state.state = state
     new_state.attributes = {}
+    old_state = MagicMock()
+    old_state.state = old
     event = MagicMock()
-    event.data = {"entity_id": entity_id, "new_state": new_state}
+    event.data = {
+        "entity_id": entity_id,
+        "new_state": new_state,
+        "old_state": old_state,
+    }
     return event
 
 
+def test_an_excluded_plug_turning_on_does_not_wake_sentinel() -> None:
+    """The #481 contract: an excluded entity wakes nothing."""
+    engine = _engine(
+        object(),
+        {
+            CONF_SENTINEL_AWAY_PLUGS: [_DRIER],
+            CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: {"plug_on_while_away": [_DRIER]},
+        },
+    )
+    engine._on_state_changed(_state_event(_DRIER, "on"))
+    assert engine._trigger_scheduler._queue == []
+
+
 def test_a_listed_plug_turning_on_wakes_sentinel() -> None:
-    """Not one off the list, and not one turning off."""
+    """Not one off the list, not one turning off, not an update of one on."""
     engine = _engine(object(), {CONF_SENTINEL_AWAY_PLUGS: [_DRIER]})
     queue = engine._trigger_scheduler._queue
 
     engine._on_state_changed(_state_event("switch.freezer", "on"))
     engine._on_state_changed(_state_event(_DRIER, "off"))
+    engine._on_state_changed(_state_event(_DRIER, "on", old="on"))
     assert queue == []
 
     engine._on_state_changed(_state_event(_DRIER, "on"))
@@ -709,3 +827,70 @@ async def test_a_run_sets_the_timer(
         assert engine._plug_wake_at == start + timedelta(minutes=10)
     finally:
         await engine.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_run_left_behind_by_a_stop_sets_no_timer(hass: HomeAssistant) -> None:
+    """After stop() begins, a run still going must not arm a new wake."""
+    engine = _engine(hass, {CONF_SENTINEL_AWAY_PLUGS: [_DRIER]})
+    engine._plug_rule.evaluate(_snapshot(0, start=dt_util.utcnow()))
+    engine._stopped = True
+
+    engine._schedule_plug_wake()
+
+    assert engine._plug_wake is None
+
+
+@pytest.mark.asyncio
+async def test_a_wake_that_fires_after_a_stop_does_nothing(hass: HomeAssistant) -> None:
+    """The callback checks the stop itself, in case its cancel came too late."""
+    engine = _engine(hass, {CONF_SENTINEL_AWAY_PLUGS: [_DRIER]})
+    start = dt_util.utcnow()
+    engine._plug_rule.evaluate(_snapshot(0, start=start))
+    engine._schedule_plug_wake()
+    engine._stopped = True
+
+    async_fire_time_changed(hass, start + timedelta(minutes=10, seconds=1))
+    await hass.async_block_till_done()
+
+    assert engine._trigger_scheduler._queue == []
+
+
+@pytest.mark.asyncio
+async def test_a_wait_that_ended_while_the_run_was_busy_still_wakes(
+    hass: HomeAssistant,
+) -> None:
+    """Due after the snapshot was taken but before scheduling: wake at once."""
+    engine = _engine(hass, {CONF_SENTINEL_AWAY_PLUGS: [_DRIER]})
+    start = dt_util.utcnow() - timedelta(minutes=10, seconds=30)
+    # The snapshot was taken 9 min 59 s into the trip; the run ends after 10.
+    engine._plug_rule._away_since = start
+    engine._plug_rule.evaluated_at = start + timedelta(minutes=9, seconds=59)
+
+    engine._schedule_plug_wake()
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=1))
+    await hass.async_block_till_done()
+
+    assert [r.anomaly_type for r in engine._trigger_scheduler._queue] == [
+        "plug_on_while_away"
+    ]
+
+
+def test_a_plug_that_comes_on_later_is_not_held_by_the_first_ones_cooldown() -> None:
+    """One alert names several plugs; it is held only while all of them are."""
+    state = SuppressionState()
+    rule = _rule(delay_min=0, plugs=(_DRIER, "switch.iron"))
+    first = rule.evaluate(_snapshot(0))[0]
+    register_finding(state, first, _START)
+
+    later = rule.evaluate(_snapshot(35, plugs={_DRIER: "on", "switch.iron": "on"}))[0]
+    entity_cooldown = timedelta(minutes=60)
+    held_alone = should_suppress(
+        state, first, _START + timedelta(minutes=35), timedelta(0), entity_cooldown
+    )
+    with_new = should_suppress(
+        state, later, _START + timedelta(minutes=35), timedelta(0), entity_cooldown
+    )
+
+    assert held_alone.reason_code == "entity_cooldown"
+    assert not with_new.suppress
