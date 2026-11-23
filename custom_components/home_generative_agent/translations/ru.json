@@ -237,6 +237,8 @@
             "sentinel_baseline_sustained_minutes": "Cyclical load gate: minutes above threshold before alerting (0 = disabled)",
             "sentinel_appliance_power_threshold_w": "Appliance power rule: power threshold (W)",
             "sentinel_appliance_duration_min": "Appliance power rule: duration before alert (minutes)",
+            "sentinel_away_plugs": "Розетки, за которыми следить, когда никого нет дома",
+            "sentinel_away_plug_delay_min": "Правило розеток: через сколько минут отсутствия оповещать",
             "explain_enabled": "Enable LLM explanations for sentinel findings",
             "sentinel_require_pin_for_level_increase": "Require PIN for autonomy level increases",
             "sentinel_autonomy_level": "Autonomy level",

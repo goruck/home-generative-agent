@@ -1285,6 +1285,35 @@ async def test_async_notify_subtitle_is_friendly_type() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_held_batch_never_takes_another_recipients_push() -> None:
+    """The batch goes to one phone; a push for another one is sent now."""
+    options = {
+        CONF_NOTIFY_SERVICE: "notify.mobile_app_phone",
+        CONF_SENTINEL_AREA_NOTIFY_MAP: {"Kitchen": "notify.mobile_app_tablet"},
+    }
+
+    def _fake_async_call_later(_hass: Any, _delay: float, _cb: Any) -> Any:
+        return lambda: None
+
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    original = _notifier_mod.async_call_later
+    _notifier_mod.async_call_later = _fake_async_call_later  # type: ignore[assignment]
+    try:
+        for i in range(4):
+            f = _finding_with_severity("low", anomaly_id=f"phone{i}")
+            await notifier.async_notify(f, _minimal_snapshot(), f"msg {i}")  # type: ignore[arg-type]
+        kitchen = _finding_with_severity("low", anomaly_id="kitchen")
+        await notifier.async_notify(kitchen, _minimal_snapshot("Kitchen"), "k")  # type: ignore[arg-type]
+    finally:
+        _notifier_mod.async_call_later = original  # type: ignore[assignment]
+
+    # Three sent, the fourth held for the phone; the kitchen push not held.
+    assert [f.anomaly_id for f, _e, _s in notifier._held_batch] == ["phone3"]
+    assert len(hass.services.calls) == 4
+    assert hass.services.calls[-1]["service"] == "mobile_app_tablet"
+
+
+@pytest.mark.asyncio
 async def test_async_notify_batching_holds_after_rate_limit() -> None:
     """Send 4 low-severity notifications; first 3 dispatched; 4th held in _held_batch."""
     options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}

@@ -60,6 +60,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "Outdoor activity while alarm disarmed"
         ),
         "type_appliance_power_duration": "Appliance power duration",
+        "type_plug_on_while_away": "Plug left on while away",
         "type_low_battery_sensors": "Low battery",
         "type_entity_state_duration": "Unchanged too long",
         "type_motion_detected_at_night_while_alarm_disarmed": (
@@ -193,6 +194,12 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "body_appliance_power": (
             "{appliance} drew {power} {duration}, {threshold}. Check it."
         ),
+        "body_plug_on_while_away": (
+            "{plugs} is still on and everyone has been away at least {minutes} min."
+        ),
+        "body_plugs_on_while_away": (
+            "{plugs} are still on and everyone has been away at least {minutes} min."
+        ),
         "body_power_watts": "about {watts} W",
         "body_power_unknown": "high power",
         "body_duration_min": "for {minutes} min",
@@ -296,6 +303,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "Pohyb venku při vypnutém alarmu"
         ),
         "type_appliance_power_duration": "Doba provozu spotřebiče",
+        "type_plug_on_while_away": "Zapnutá zásuvka v nepřítomnosti",
         "type_low_battery_sensors": "Slabá baterie",
         "type_entity_state_duration": "Příliš dlouho beze změny",
         "type_motion_detected_at_night_while_alarm_disarmed": (
@@ -447,6 +455,12 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "body_appliance_power": (
             "{appliance}: {power}, {duration} ({threshold}). Zkontrolujte spotřebič."
         ),
+        "body_plug_on_while_away": (
+            "{plugs}: stále zapnuto, všichni jsou pryč nejméně {minutes} min."
+        ),
+        "body_plugs_on_while_away": (
+            "{plugs}: stále zapnuto, všichni jsou pryč nejméně {minutes} min."
+        ),
         "body_power_watts": "odběr asi {watts} W",
         "body_power_unknown": "vysoký odběr",
         "body_duration_min": "trvá {minutes} min",
@@ -548,6 +562,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "type_camera_entry_unsecured": "未关好的门窗附近有动静",
         "type_alarm_disarmed_during_external_threat": "警报解除时室外有动静",
         "type_appliance_power_duration": "电器功率持续时间",
+        "type_plug_on_while_away": "离家时插座仍开着",
         "type_low_battery_sensors": "电池电量低",
         "type_entity_state_duration": "长时间未变化",
         "type_motion_detected_at_night_while_alarm_disarmed": (
@@ -668,6 +683,8 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "body_appliance_power": (
             "{appliance}{duration}功率{power}，{threshold}。请检查。"
         ),
+        "body_plug_on_while_away": "{plugs}仍开着，所有人已离家至少 {minutes} 分钟。",
+        "body_plugs_on_while_away": "{plugs}仍开着，所有人已离家至少 {minutes} 分钟。",
         "body_power_watts": "约 {watts} W",
         "body_power_unknown": "较高",
         "body_duration_min": "持续 {minutes} 分钟",

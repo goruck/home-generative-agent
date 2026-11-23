@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import voluptuous as vol
 from homeassistant.config_entries import (
@@ -38,6 +38,8 @@ from ..const import (  # noqa: TID252
     CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     CONF_SENTINEL_AUTH_IP_RETENTION_DAYS,
     CONF_SENTINEL_AUTONOMY_LEVEL,
+    CONF_SENTINEL_AWAY_PLUG_DELAY_MIN,
+    CONF_SENTINEL_AWAY_PLUGS,
     CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     CONF_SENTINEL_BASELINE_ENABLED,
     CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
@@ -83,6 +85,8 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     RECOMMENDED_SENTINEL_AUTH_IP_RETENTION_DAYS,
     RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
+    RECOMMENDED_SENTINEL_AWAY_PLUG_DELAY_MIN,
+    RECOMMENDED_SENTINEL_AWAY_PLUGS,
     RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     RECOMMENDED_SENTINEL_BASELINE_ENABLED,
     RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
@@ -131,6 +135,9 @@ from ..sentinel.autonomy import (  # noqa: TID252
     override_minutes,
 )
 from .localization import async_common_translation
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 def _camera_entry_links_json(payload: dict[str, Any]) -> str:
@@ -454,6 +461,13 @@ def _carry_basic_setup_survivors(
     if exclusions:
         data[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] = exclusions
 
+    # The plugs to watch while away are picked by hand too, and are what an
+    # automatic action may touch: a Basic re-run must not empty the list (#789).
+    if plugs := _away_plugs(stored):
+        data[CONF_SENTINEL_AWAY_PLUGS] = plugs
+    if CONF_SENTINEL_AWAY_PLUG_DELAY_MIN in stored:
+        data[CONF_SENTINEL_AWAY_PLUG_DELAY_MIN] = _away_plug_delay(stored)
+
     # The outdoor temperature entity is picked by hand; no default rebuilds it
     # (#922).
     outdoor = stored.get(CONF_SENTINEL_OUTDOOR_TEMPERATURE_ENTITY)
@@ -532,6 +546,28 @@ def _override_minutes(payload: dict[str, Any]) -> int:
     return override_minutes(payload.get(CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES))
 
 
+def _away_plugs(data: Mapping[str, Any]) -> list[str]:
+    """Return the stored plug list: switch entity ids, each once, in order."""
+    plugs = data.get(CONF_SENTINEL_AWAY_PLUGS)
+    if not isinstance(plugs, list):
+        return list(RECOMMENDED_SENTINEL_AWAY_PLUGS)
+    return list(
+        dict.fromkeys(
+            plug
+            for plug in cast("list[object]", plugs)
+            if isinstance(plug, str) and plug.startswith("switch.")
+        )
+    )
+
+
+def _away_plug_delay(data: Mapping[str, Any]) -> int:
+    """Return the stored delay in whole minutes, or the default."""
+    try:
+        return max(1, int(float(data.get(CONF_SENTINEL_AWAY_PLUG_DELAY_MIN) or 0)))
+    except (TypeError, ValueError, OverflowError):
+        return RECOMMENDED_SENTINEL_AWAY_PLUG_DELAY_MIN
+
+
 def _normalize_autonomy(data: dict[str, Any]) -> None:
     """Store the autonomy fields as numbers, as the engine reads them."""
     data[CONF_SENTINEL_AUTONOMY_LEVEL] = autonomy_level(
@@ -579,6 +615,8 @@ def _default_payload() -> dict[str, Any]:
         CONF_SENTINEL_APPLIANCE_DURATION_MIN: (
             RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN
         ),
+        CONF_SENTINEL_AWAY_PLUGS: list(RECOMMENDED_SENTINEL_AWAY_PLUGS),
+        CONF_SENTINEL_AWAY_PLUG_DELAY_MIN: RECOMMENDED_SENTINEL_AWAY_PLUG_DELAY_MIN,
         CONF_SENTINEL_NETWORK_ENABLED: RECOMMENDED_SENTINEL_NETWORK_ENABLED,
         CONF_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN: (
             RECOMMENDED_SENTINEL_NETWORK_OFFLINE_DEVICE_MIN
@@ -813,6 +851,14 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     )
                 ),
             ): NumberSelector(NumberSelectorConfig(min=5, max=1440, step=5)),
+            # Suggested, not a default: an emptied list must come back empty.
+            vol.Optional(CONF_SENTINEL_AWAY_PLUGS): EntitySelector(
+                EntitySelectorConfig(domain="switch", multiple=True)
+            ),
+            vol.Required(
+                CONF_SENTINEL_AWAY_PLUG_DELAY_MIN,
+                default=_away_plug_delay(payload),
+            ): NumberSelector(NumberSelectorConfig(min=1, max=240, step=1)),
             vol.Required(
                 CONF_SENTINEL_NETWORK_ENABLED,
                 default=bool(
@@ -1323,6 +1369,9 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             data[CONF_NOTIFY_SERVICE] = notify_service
         else:
             data.pop(CONF_NOTIFY_SERVICE, None)
+        # An emptied plug list comes back as no key at all: store it empty.
+        data[CONF_SENTINEL_AWAY_PLUGS] = _away_plugs(data)
+        data[CONF_SENTINEL_AWAY_PLUG_DELAY_MIN] = _away_plug_delay(data)
 
         raw_pin = str(data.get(CONF_CRITICAL_ACTION_PIN, "") or "").strip()
         data.pop(CONF_CRITICAL_ACTION_PIN, None)

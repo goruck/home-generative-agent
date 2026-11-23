@@ -23,6 +23,7 @@ from custom_components.home_generative_agent.sentinel.notifier_messages import (
 # without adding it here (and without it existing in the English template).
 _DUMMY_KWARGS: dict[str, Any] = {
     "appliance": "Washer",
+    "plugs": "Drier",
     "note": "Likely from heating, 2 °C outside.",
     "demand": "heating",
     "outdoor": ", 2 °C outside",
@@ -226,6 +227,8 @@ _CALL_SITE_KWARGS: dict[str, set[str]] = {
     "digest_message": {"count", "plural", "sev_summary"},
     "snooze_confirm_message": {"friendly"},
     "body_appliance_power": {"appliance", "power", "duration", "threshold"},
+    "body_plug_on_while_away": {"plugs", "minutes"},
+    "body_plugs_on_while_away": {"plugs", "minutes"},
     "body_appliance_power_explained": {
         "appliance",
         "power",

@@ -241,6 +241,10 @@ class AnomalyFinding:
     detected_at: datetime = field(default_factory=dt_util.utcnow)
     # What Sentinel may call by itself for this finding, gates permitting.
     actions: tuple[FindingAction, ...] = ()
+    # Set by rule code for a condition that holds (a plug still on): how long
+    # ago its entities last changed says how long it has held, not that the
+    # data is old, so the action gate does not read their age (#789).
+    standing_condition: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize the finding for storage/notifications."""

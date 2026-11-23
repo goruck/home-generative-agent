@@ -403,6 +403,9 @@ class SentinelNotifier:
                 and not also_line
                 and not canary_line
                 and finding.type not in CHANGE_ALERT_RULE_TYPES
+                # The batch goes to one recipient: a push for another one is
+                # sent now rather than to the wrong phone (per-area routing).
+                and all(svc == target_service for _f, _e, svc in self._held_batch)
             ):
                 # Rate limit exceeded — buffer this finding.  Hold the redacted
                 # explanation, never the raw one: with the full-text record on
@@ -1018,6 +1021,7 @@ _KNOWN_TYPE_LABEL_KEYS = {
     "zwave_inclusion_active": "type_zwave_inclusion_active",
     "radio_coordinator_update_pending": "type_radio_coordinator_update_pending",
     "appliance_power_duration": "type_appliance_power_duration",
+    "plug_on_while_away": "type_plug_on_while_away",
     "low_battery_sensors": "type_low_battery_sensors",
     "entity_state_duration": "type_entity_state_duration",
     "motion_detected_at_night_while_alarm_disarmed": (
@@ -1207,6 +1211,46 @@ def _appliance_power_duration_mobile_message(
         note=note or "",
     )
     return _cap_keeping_note(msg, note, cap)
+
+
+def _plug_on_while_away_mobile_message(
+    finding: AnomalyFinding,
+    hass: HomeAssistant | None = None,
+    cap: int | None = MAX_MOBILE_MESSAGE_CHARS,
+) -> str:
+    """Return fixed copy for plug_on_while_away: which plugs, how long away."""
+    ev = finding.evidence
+    names = [
+        str(name).strip()
+        for name in ev.get("friendly_names") or []
+        if isinstance(name, str) and name.strip()
+    ] or [_friendly_entity(entity_id) for entity_id in finding.triggering_entities]
+    away_min = ev.get("away_min")
+    minutes = int(away_min) if isinstance(away_min, (int, float)) else 0
+
+    def _message(shown: list[str]) -> str:
+        listed = ", ".join(shown)
+        if len(shown) < len(names):
+            listed += f" +{len(names) - len(shown)}"
+        return notif_msg(
+            hass,
+            "body_plugs_on_while_away" if len(names) > 1 else "body_plug_on_while_away",
+            plugs=listed,
+            minutes=minutes,
+        )
+
+    # Fewer names rather than the end cut off: the time away must survive.
+    msg = _message(names)
+    for count in range(len(names) - 1, 0, -1):
+        if cap is None or len(msg) <= cap:
+            break
+        msg = _message(names[:count])
+    if cap is not None and len(msg) > cap:
+        # One name too long by itself: shorten the name, keep the sentence.
+        over = len(msg) - cap + 1
+        names = [names[0][: max(1, len(names[0]) - over)] + "…", *names[1:]]
+        msg = _message(names[:1])
+    return msg if cap is None else msg[:cap].rstrip()
 
 
 def _cap_keeping_note(msg: str, note: str | None, cap: int | None) -> str:
@@ -1822,6 +1866,14 @@ _TYPE_MOBILE_FORMATTERS: dict[str, Any] = {
     "alarm_disarmed_during_external_threat": _alarm_disarmed_mobile_message,
     "appliance_power_duration": _appliance_power_duration_mobile_message,
     "pet_detected_at_night_no_occupancy": _pet_mobile_message,
+    "plug_on_while_away": _plug_on_while_away_mobile_message,
+}
+
+
+# Fixed copy a persistent record uses in full when there is no explanation.
+_FULL_TEXT_FORMATTERS: dict[str, Any] = {
+    "appliance_power_duration": _appliance_power_duration_mobile_message,
+    "plug_on_while_away": _plug_on_while_away_mobile_message,
 }
 
 
@@ -2654,10 +2706,8 @@ def _persistent_message(
             return escape_markdown(text)
 
     # The record is the full text: no push length cap.
-    if finding.type == "appliance_power_duration":
-        return escape_markdown(
-            _appliance_power_duration_mobile_message(finding, hass, cap=None)
-        )
+    if (full_text := _FULL_TEXT_FORMATTERS.get(finding.type)) is not None:
+        return escape_markdown(full_text(finding, hass, cap=None))
     if hvac_explained_by(finding.evidence) is not None:
         # A power deviation heating or cooling explains: the same body as the
         # push, so the record says why too (#922).

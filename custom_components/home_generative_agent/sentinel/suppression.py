@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, cast
 
@@ -55,6 +55,11 @@ SUPPRESSION_REASON_USER_SNOOZE_PERMANENT = "user_snooze_permanent"
 # records also carry "policy_blocked", from an execution policy path that no
 # longer exists (#789); the audit store still reads it.
 SUPPRESSION_REASON_TRIAGE_SUPPRESSED = "triage_suppressed"
+# Finding types that name several devices in one alert, each of which may be
+# new: the entity cooldown holds one only while it holds all of them, and the
+# type cooldown does not apply, since the rule makes one alert per area and
+# a type cooldown would space the areas out (#789).
+_ANY_NEW_ENTITY_TYPES = frozenset({"plug_on_while_away"})
 # Autonomy level 0 (passive): found and audited, never notified (#783).
 SUPPRESSION_REASON_AUTONOMY_PASSIVE = "autonomy_passive"
 # The notifier dropped the push as a repeat of the same anomaly within its own
@@ -533,7 +538,11 @@ def should_suppress(  # noqa: PLR0911, PLR0913
 
     # 5. Type cooldown
     last_type = _parse_dt(state.last_by_type.get(finding.type))
-    if last_type is not None and now - last_type < cooldown_type:
+    if (
+        last_type is not None
+        and now - last_type < cooldown_type
+        and finding.type not in _ANY_NEW_ENTITY_TYPES
+    ):
         return SuppressionDecision(
             suppress=True,
             reason_code=SUPPRESSION_REASON_TYPE_COOLDOWN,
@@ -562,6 +571,32 @@ def _check_entity_cooldown(
     cooldown_entity: timedelta,
     *,
     learned_only: bool = False,
+) -> SuppressionDecision | None:
+    if finding.type in _ANY_NEW_ENTITY_TYPES:
+        # One alert names several devices: it is held only while every one of
+        # them is, so a plug that comes on later is told (#789).
+        decisions = [
+            _entity_cooldown_any(
+                state,
+                replace(finding, triggering_entities=[entity_id]),
+                now,
+                cooldown_entity,
+                learned_only,
+            )
+            for entity_id in finding.triggering_entities
+        ]
+        if decisions and all(decisions):
+            return decisions[0]
+        return None
+    return _entity_cooldown_any(state, finding, now, cooldown_entity, learned_only)
+
+
+def _entity_cooldown_any(
+    state: SuppressionState,
+    finding: AnomalyFinding,
+    now: datetime,
+    cooldown_entity: timedelta,
+    learned_only: bool,  # noqa: FBT001
 ) -> SuppressionDecision | None:
     for entity_id in finding.triggering_entities:
         multiplier = min(

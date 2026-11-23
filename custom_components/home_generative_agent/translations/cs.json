@@ -282,6 +282,8 @@
             "sentinel_baseline_sustained_minutes": "Filtr cyklické zátěže: minuty nad prahem před upozorněním (0 = vypnuto)",
             "sentinel_appliance_power_threshold_w": "Pravidlo výkonu spotřebiče: práh výkonu (W)",
             "sentinel_appliance_duration_min": "Pravidlo výkonu spotřebiče: doba trvání před upozorněním (minuty)",
+            "sentinel_away_plugs": "Zásuvky hlídané, když jsou všichni pryč",
+            "sentinel_away_plug_delay_min": "Pravidlo zásuvek: po kolika minutách nepřítomnosti upozornit",
             "sentinel_network_enabled": "Povolit audit zabezpečení sítě a Home Assistantu",
             "sentinel_network_offline_device_min": "Práh nedostupnosti bezpečnostního zařízení (minuty)",
             "sentinel_network_unknown_device_grace_min": "Ochranná lhůta nového zařízení v síti (minuty)",
@@ -323,7 +325,8 @@
             "sentinel_ha_token_stale_days": "Stáří ve dnech, po jehož překročení je dlouhodobý přístupový token nahlášen. Home Assistant nezaznamenává, kdy je dlouhodobý token použit, takže stáří je jediný dostupný údaj a upozornění doporučuje staré tokeny obměnit. Výchozí 90.",
             "sentinel_auth_ip_retention_days": "Jak dlouho zůstává adresa, ze které byl použit přístupový token, v inventáři bezpečnostního auditu. Adresy se ukládají jako jednosměrné haše, nikdy v čitelné podobě, a na token se jich uchovává nejvýše 20. Výchozí 90 dní.",
             "sentinel_autonomy_level": "Úroveň, na které Sentinel běží, když není nastavena jiná; platí i po restartu a po základním nastavení. 0 je pasivní: upozornění na zjištění i denní souhrn ustanou; zjištění se dál zaznamenávají. Změna zjištěná mezitím (nové zařízení, správce nebo token, veřejná IP adresa nebo mapování portu) se ohlásí, až úroveň zvýšíte, a stav, který stále trvá, se ohlásí znovu po uplynutí své prodlevy. Oznámení o výchozích hodnotách a jednorázová oznámení po nastavení se zobrazují dál. 1 upozorňuje. Úrovně 2 a 3 jsou vyhrazeny pro automatické akce, které zatím nejsou k dispozici; dnes upozorňují stejně jako úroveň 1. Úroveň v platnosti ukazuje atribut autonomy_level senzoru stavu Sentinelu. Úroveň nastavená službou sentinel_set_autonomy_level skončí po uplynutí doby platnosti, restartem nebo změnou tohoto nastavení.",
-            "sentinel_runtime_override_ttl_minutes": "Jak dlouho platí úroveň nastavená službou sentinel_set_autonomy_level, než se Sentinel vrátí k nastavené úrovni autonomie. Skončí i restartem."
+            "sentinel_runtime_override_ttl_minutes": "Jak dlouho platí úroveň nastavená službou sentinel_set_autonomy_level, než se Sentinel vrátí k nastavené úrovni autonomie. Skončí i restartem.",
+            "sentinel_away_plugs": "Nepovinné. Chytré zásuvky (entity switch), které nemají zůstat zapnuté v prázdném domě, například sušička nebo žehlička. Zásuvka ze seznamu, která je stále zapnutá poté, co jsou všichni níže uvedenou dobu pryč, vyvolá upozornění. Nic mimo tento seznam se nehlásí. Je potřeba alespoň jedna entita osoby; osoba s neznámým nebo nedostupným stavem se nepočítá jako nepřítomná. Prázdný seznam pravidlo vypne."
           }
         }
       }

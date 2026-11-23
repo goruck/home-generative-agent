@@ -196,6 +196,7 @@ _KNOWN_TYPE_LABELS = {
     "zwave_inclusion_active": "Z-Wave inclusion is active",
     "radio_coordinator_update_pending": "Radio coordinator update available",
     "appliance_power_duration": "Appliance power duration",
+    "plug_on_while_away": "Plug left on while away",
     "low_battery_sensors": "Low battery",
     "entity_state_duration": "Unchanged too long",
     "motion_detected_at_night_while_alarm_disarmed": "Motion at night, alarm disarmed",

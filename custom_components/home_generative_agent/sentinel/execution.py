@@ -47,7 +47,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
-from homeassistant.const import STATE_UNAVAILABLE
+from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import valid_entity_id
 from homeassistant.util import dt as dt_util
 
@@ -117,6 +117,8 @@ _FLOOR_RULES: tuple[dict[str, str], ...] = (
 # Domains whose relay (the switch under a switch_as_x wrapper, what a template
 # cover or lock drives) the floor bars with them.
 _RELAY_GUARDED_DOMAINS = frozenset({*_NEVER_AUTO_DOMAINS, "lock"})
+# States that say Home Assistant is not hearing from an entity.
+_NOT_REPORTING = frozenset({STATE_UNAVAILABLE, STATE_UNKNOWN})
 # No sensor reading is fresh for longer than this, whatever the setting says.
 _MAX_STALENESS_SECONDS = 7 * 24 * 3600
 
@@ -389,6 +391,12 @@ class SentinelExecutionService:
 
         Returns a ``(quality, details)`` tuple where quality is one of
         ``"fresh"``, ``"stale"``, or ``"unavailable"``.
+
+        An entity missing from the snapshot, or one Home Assistant holds
+        unavailable or unknown, is unavailable. One that last changed longer
+        ago than the staleness threshold is stale, except for a finding its
+        rule marked a standing condition: a plug on for two hours is the
+        condition itself, not old data (#789).
         """
         threshold_seconds = self._int_option(
             CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS,
@@ -406,8 +414,13 @@ class SentinelExecutionService:
 
         for entity_id in finding.triggering_entities:
             entity = entity_map.get(entity_id)
-            if entity is None:
+            if entity is None or (
+                finding.standing_condition and entity["state"] in _NOT_REPORTING
+            ):
                 unavailable_entities.append(entity_id)
+                continue
+            if finding.standing_condition:
+                fresh_entities.append(entity_id)
                 continue
             # When it last reported: an always-on power sensor's last_changed
             # is when its current run started (#982).
