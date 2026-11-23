@@ -359,7 +359,6 @@ The model Sentinel's triage, discovery and explanation calls run on when a **Sen
 | Constant | Config key | Default | Purpose |
 |---|---|---|---|
 | `RECOMMENDED_SENTINEL_AUTO_EXECUTION_ENABLED` | `sentinel_auto_execution_enabled` | `False` | Allow Sentinel to run a finding's own actions (the service calls and targets its rule names) autonomously (requires autonomy level ≥ 2). Not settable from the options yet. |
-| `RECOMMENDED_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE` | `sentinel_auto_execute_default_min_confidence` | `0.70` | Minimum finding confidence score required for auto-execution |
 | `RECOMMENDED_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR` | `sentinel_auto_execute_max_actions_per_hour` | `5` | Rate cap on autonomous actions to prevent runaway execution |
 | `RECOMMENDED_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES` | `sentinel_execution_idempotency_window_minutes` | `15` | Duplicate-execution suppression window; the same action on the same finding will not fire twice within this period |
 | `RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE` | `sentinel_auto_exec_canary_mode` | `False` | Report what auto-execution *would* do, as a line in the finding's notification, without executing (works whether or not live execution is on). Not settable from the options yet. |

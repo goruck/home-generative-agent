@@ -12,10 +12,8 @@ from homeassistant.util import dt as dt_util
 from custom_components.home_generative_agent.const import (
     ACTION_POLICY_AUTO_EXECUTE,
     ACTION_POLICY_BLOCKED,
-    ACTION_POLICY_HANDOFF,
     ACTION_POLICY_PROMPT_USER,
     CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
-    CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE,
     CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
     CONF_SENTINEL_AUTO_EXECUTION_ENABLED,
     CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS,
@@ -105,7 +103,6 @@ _NOW: datetime = cast("datetime", dt_util.parse_datetime("2025-01-01T01:00:00+00
 
 _FULL_OPTIONS: dict[str, Any] = {
     CONF_SENTINEL_AUTO_EXECUTION_ENABLED: True,
-    CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE: 0.70,
     CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR: 5,
     CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: ["light.turn_off"],
     CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS: 3600,
@@ -143,7 +140,7 @@ def test_stale_entity_returns_prompt_user_with_stale_quality() -> None:
     svc = SentinelExecutionService(opts)
     # Snapshot entity last_changed is 00:00:00, _NOW is 01:00:00 → 3600 s old
     snapshot = _make_snapshot(last_changed="2025-01-01T00:00:00+00:00")
-    finding = _make_finding()
+    finding = _make_finding(suggested_actions=["light.turn_off"])
 
     result = svc.evaluate(finding, snapshot, 2, _NOW)
 
@@ -164,6 +161,7 @@ def test_unavailable_entity_low_severity_returns_blocked() -> None:
     finding = _make_finding(
         triggering_entities=["lock.missing_lock"],  # not in snapshot
         severity="medium",
+        suggested_actions=["light.turn_off"],
     )
 
     result = svc.evaluate(finding, snapshot, 2, _NOW)
@@ -179,6 +177,7 @@ def test_unavailable_entity_high_severity_returns_prompt_user() -> None:
     finding = _make_finding(
         triggering_entities=["lock.missing_lock"],
         severity="high",
+        suggested_actions=["light.turn_off"],
     )
 
     result = svc.evaluate(finding, snapshot, 2, _NOW)
@@ -188,22 +187,45 @@ def test_unavailable_entity_high_severity_returns_prompt_user() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. Sensitivity gate
+# 3. What no longer gates an action (#789)
 # ---------------------------------------------------------------------------
 
 
-def test_sensitive_finding_returns_handoff() -> None:
-    """Sensitive findings are handed off to the conversation agent."""
-    # Fresh entity — entity last_changed at _NOW - 10s, threshold 3600
-    recent = "2025-01-01T00:59:50+00:00"
-    snapshot = _make_snapshot(last_changed=recent)
+def test_a_sensitive_finding_with_an_action_still_runs() -> None:
+    """`is_sensitive` governs what text is shared, not whether a rule may act."""
+    snapshot = _make_snapshot(last_changed="2025-01-01T00:59:50+00:00")
     svc = SentinelExecutionService(_FULL_OPTIONS)
-    finding = _make_finding(is_sensitive=True)
+    finding = _make_finding(is_sensitive=True, suggested_actions=["light.turn_off"])
 
     result = svc.evaluate(finding, snapshot, 2, _NOW)
 
-    assert result.action_policy_path == ACTION_POLICY_HANDOFF
-    assert result.block_reason == "finding_sensitive"
+    assert result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+
+
+def test_confidence_does_not_gate_an_action() -> None:
+    """A model picks a discovered rule's confidence; it decides nothing here."""
+    snapshot = _make_snapshot(last_changed="2025-01-01T00:59:50+00:00")
+    svc = SentinelExecutionService(_FULL_OPTIONS)
+    finding = _make_finding(confidence=0.0, suggested_actions=["light.turn_off"])
+
+    result = svc.evaluate(finding, snapshot, 2, _NOW)
+
+    assert result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+
+
+@pytest.mark.parametrize("evaluator", ["evaluate", "evaluate_canary"])
+def test_a_finding_that_cannot_act_is_never_dropped_for_its_data(
+    evaluator: str,
+) -> None:
+    """An alert about a sensor that is gone must still reach the user."""
+    snapshot = _make_snapshot(entity_id="binary_sensor.other")
+    svc = SentinelExecutionService(_FULL_OPTIONS)
+    finding = _make_finding(severity="low")
+
+    result = getattr(svc, evaluator)(finding, snapshot, 2, _NOW)
+
+    assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
+    assert result.block_reason == "no_executable_action"
 
 
 # ---------------------------------------------------------------------------
@@ -222,24 +244,6 @@ def test_auto_execution_disabled_returns_prompt_user() -> None:
 
     assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
     assert result.block_reason == "auto_execution_disabled"
-
-
-# ---------------------------------------------------------------------------
-# 5. Confidence gate
-# ---------------------------------------------------------------------------
-
-
-def test_confidence_below_threshold_returns_prompt_user() -> None:
-    opts = {**_FULL_OPTIONS, CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE: 0.80}
-    svc = SentinelExecutionService(opts)
-    recent = "2025-01-01T00:59:50+00:00"
-    snapshot = _make_snapshot(last_changed=recent)
-    finding = _make_finding(confidence=0.75)  # below 0.80
-
-    result = svc.evaluate(finding, snapshot, 2, _NOW)
-
-    assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
-    assert result.block_reason == "confidence_below_threshold"
 
 
 # ---------------------------------------------------------------------------
@@ -459,15 +463,15 @@ def test_data_quality_reads_when_a_power_sensor_last_reported(
 
 def test_policy_version_is_deterministic() -> None:
     svc = SentinelExecutionService(_FULL_OPTIONS)
-    v1 = svc._compute_policy_version(2, 0.70)
-    v2 = svc._compute_policy_version(2, 0.70)
+    v1 = svc._compute_policy_version(2)
+    v2 = svc._compute_policy_version(2)
     assert v1 == v2
 
 
 def test_policy_version_changes_on_config_change() -> None:
     svc = SentinelExecutionService(_FULL_OPTIONS)
-    v1 = svc._compute_policy_version(2, 0.70)
-    v2 = svc._compute_policy_version(3, 0.70)  # autonomy level changed
+    v1 = svc._compute_policy_version(2)
+    v2 = svc._compute_policy_version(3)  # autonomy level changed
     assert v1 != v2
 
 

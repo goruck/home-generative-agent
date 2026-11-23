@@ -2874,8 +2874,16 @@ class SentinelEngine:
 
         # LLM triage pass (Level 1+): may suppress the finding.
         triage_result: TriageDecision | None = None
-        # Not a replay: what was owed is not the model's to drop.
-        if effective_autonomy >= 1 and self._triage_service is not None and not replay:
+        # Not a replay: what was owed is not the model's to drop. Nor a
+        # finding that carries an action: a model must not be able to cancel
+        # it, and with no model call there is no wait between reading the
+        # autonomy level and acting on it (#789).
+        if (
+            effective_autonomy >= 1
+            and self._triage_service is not None
+            and not replay
+            and not finding.actions
+        ):
             triage_result = await self._triage_finding(
                 self._triage_service,
                 finding,

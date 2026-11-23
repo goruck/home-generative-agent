@@ -1240,20 +1240,6 @@ Since step 6 this also covers `radio_new_device_joined`, and since step 7 `netwo
 
 ---
 
-### Autonomy level is captured before the triage await and reused after it
-
-**What:** `_dispatch_item` computes `effective_autonomy` at `sentinel/engine.py:1672`, then awaits `self._triage_service.triage(...)`, then passes that captured value into `self._execution_service.evaluate_canary(finding, snapshot, effective_autonomy, now)`. `now` is stale across the same await. Lowering the autonomy level -- or a temporary elevated level expiring -- while the model call is in flight still authorizes execution at the old level. The configurable triage timeout makes the window up to 120 seconds wide.
-
-**Why:** Codex adversarial pass, 2026-09-22; mechanically confirmed. Codex rated it P1; downgraded here because auto-execution additionally requires autonomy >= 2 (`_MIN_AUTO_EXECUTE_LEVEL`) *and* a non-empty `sentinel_auto_execute_allowed_services`, which defaults to `[]` meaning no service may be invoked at all. Note the window is *created* by triage: without it there is no await between the capture and the use.
-
-**How to apply:** Re-read the autonomy level (and `now`) immediately before the execution-policy evaluation rather than reusing the pre-triage capture. Keep the captured value for the audit record, which should reflect the level the triage decision was made under.
-
-**Effort:** S
-**Priority:** P3
-**Depends on:** None
-
----
-
 ### A timed-out Sentinel model call leaves its worker thread running
 
 **What:** `run_sentinel_model_call` (`core/utils.py:501`) prefers the model's sync `invoke` and runs it through `asyncio.to_thread`. `asyncio.wait_for` cancels the awaiting task, but nothing can interrupt the thread already inside the provider client, and the `finally` discards it from `_sentinel_llm_tasks` -- so the call stops being tracked while it is still consuming an executor slot and provider capacity. Concrete for the OpenAI clients, whose transport timeout is 120 s against a triage timeout that now defaults to 10 s: up to twelve abandoned calls can stack per timed-out one.

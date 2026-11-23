@@ -24,7 +24,6 @@ from custom_components.home_generative_agent.const import (
     CONF_NOTIFY_SERVICE,
     CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
     CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
-    CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE,
     CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
     CONF_SENTINEL_AUTO_EXECUTION_ENABLED,
     CONF_SENTINEL_AUTONOMY_LEVEL,
@@ -49,6 +48,7 @@ from custom_components.home_generative_agent.sentinel.execution import (
 from custom_components.home_generative_agent.sentinel.models import FindingAction
 from custom_components.home_generative_agent.sentinel.notifier import canary_line
 
+from .test_audit_exposed_relays_898 import _wrap as wrap_switch
 from .test_execution_service import _make_finding, _make_snapshot
 from .test_sentinel_autonomy_level import _make_engine
 from .test_sentinel_notifier import (
@@ -67,7 +67,6 @@ _RECENT = "2025-01-01T00:59:50+00:00"
 # Every guardrail set so that only the action gate decides.
 _ACTING: dict[str, Any] = {
     CONF_SENTINEL_AUTO_EXECUTION_ENABLED: True,
-    CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE: 0.5,
     CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR: 10,
 }
 
@@ -126,7 +125,13 @@ def test_an_allowlisted_safe_action_runs() -> None:
         ),
         # A cover can be a garage whose id names no door; never on its own.
         (["cover.close_cover"], ["cover"], ["cover.ratgdo_main"]),
-        # Through the generic domain, the floor reads the targets' domains.
+        # A button, valve or siren can be an opener, a water line, a sounder.
+        (["button.press"], ["button"], ["button.gate"]),
+        (["input_button.press"], ["input_button"], ["input_button.gate"]),
+        (["valve.close_valve"], ["valve"], ["valve.water_main"]),
+        (["siren.turn_off"], ["siren"], ["siren.hall"]),
+        # The generic domain never runs: it reaches any domain's service.
+        (["homeassistant.turn_off"], ["homeassistant"], ["switch.drier"]),
         (["homeassistant.toggle"], ["homeassistant"], ["cover.ratgdo_main"]),
         (["homeassistant.turn_off"], ["homeassistant"], ["lock.front_door"]),
         # Starts configuration whose steps are not read here.
@@ -402,6 +407,65 @@ async def test_what_the_target_starts_is_read_too(hass: HomeAssistant) -> None:
         (FindingAction("switch.turn_on", ("switch.porch",)),), ["switch"], hass=hass
     )
     assert free.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+
+
+@pytest.mark.parametrize("wrapper", ["cover.side_gate", "lock.shed", "valve.water"])
+async def test_the_relay_under_a_wrapped_switch_never_runs(
+    hass: HomeAssistant, wrapper: str
+) -> None:
+    """A switch wrapped as a cover, lock or valve is that device's relay."""
+    no_pin_rules: dict[str, Any] = {CONF_CRITICAL_ACTIONS: []}
+    hass.states.async_set("switch.drier", "on")
+    wrap_switch(hass, "switch.relay_4", wrapper, attributes={})
+
+    held = _evaluate_actions(
+        (FindingAction("switch.turn_off", ("switch.drier", "switch.relay_4")),),
+        ["switch"],
+        hass=hass,
+        **no_pin_rules,
+    )
+    assert held.block_reason == "critical_action"
+    free = _evaluate_actions(
+        (FindingAction("switch.turn_off", ("switch.drier",)),),
+        ["switch"],
+        hass=hass,
+        **no_pin_rules,
+    )
+    assert free.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+
+
+async def test_a_switch_wrapped_as_a_light_is_not_held(hass: HomeAssistant) -> None:
+    """Only a wrapper of a guarded domain makes its switch a relay."""
+    no_pin_rules: dict[str, Any] = {CONF_CRITICAL_ACTIONS: []}
+    wrap_switch(hass, "switch.lamp_plug", "light.lamp", attributes={})
+    result = _evaluate_actions(
+        (FindingAction("switch.turn_off", ("switch.lamp_plug",)),),
+        ["switch"],
+        hass=hass,
+        **no_pin_rules,
+    )
+    assert result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+
+
+def test_a_check_that_cannot_be_made_stops_the_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure while reading the rules is a refusal, not an error or a pass."""
+
+    def _boom(*_args: Any, **_kwargs: Any) -> Any:
+        msg = "registry unreadable"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.agent.rule_entities."
+        "expand_critical_rules",
+        _boom,
+    )
+    result = _evaluate_actions(
+        (FindingAction("switch.turn_off", ("switch.drier",)),), ["switch"]
+    )
+    assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
+    assert result.block_reason == "critical_action"
 
 
 @pytest.mark.parametrize("state", [None, "unavailable"])

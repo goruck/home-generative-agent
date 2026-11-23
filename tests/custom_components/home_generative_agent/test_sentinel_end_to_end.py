@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -16,7 +17,6 @@ from custom_components.home_generative_agent.const import (
     ACTION_POLICY_BLOCKED,
     CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
     CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
-    CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE,
     CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
     CONF_SENTINEL_AUTO_EXECUTION_ENABLED,
     CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
@@ -35,6 +35,7 @@ from custom_components.home_generative_agent.sentinel.execution import (
 from custom_components.home_generative_agent.sentinel.models import (
     AnomalyFinding,
     CompoundFinding,
+    FindingAction,
 )
 from custom_components.home_generative_agent.sentinel.notifier import (
     MAX_ALSO_LINE_CHARS,
@@ -341,7 +342,6 @@ async def test_sentinel_canary_mode_records_would_execute(
             "explain_enabled": False,
             CONF_SENTINEL_AUTO_EXEC_CANARY_MODE: True,
             CONF_SENTINEL_AUTO_EXECUTION_ENABLED: True,
-            CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE: 0.0,
             CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR: 10,
             CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: [],
             CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS: 3600,
@@ -549,7 +549,6 @@ def _make_ae_engine(
             "explain_enabled": False,
             CONF_SENTINEL_AUTO_EXEC_CANARY_MODE: False,
             CONF_SENTINEL_AUTO_EXECUTION_ENABLED: True,
-            CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE: 0.0,
             CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR: max_actions_per_hour,
             CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: ["lock.lock"],
             CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS: 3600,
@@ -975,6 +974,22 @@ async def _dispatch_triaged(
         timedelta(0),
         explain_enabled=False,
     )
+
+
+async def test_a_finding_that_carries_an_action_is_never_triaged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No model may cancel a rule's action, so none is asked (#789)."""
+    engine, _audit, service = _triaged_engine(monkeypatch)
+    finding = replace(
+        _standing_finding("drier", "appliance_power_duration"),
+        actions=(FindingAction("switch.turn_off", ("switch.drier",)),),
+    )
+
+    delivered = await _dispatch_triaged(engine, finding, datetime.now(UTC))
+
+    assert delivered is True
+    service.triage.assert_not_awaited()
 
 
 async def test_an_unchanged_suppressed_finding_is_triaged_once(
