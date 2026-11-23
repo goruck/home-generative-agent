@@ -465,6 +465,7 @@ def _carry_basic_setup_survivors(
     # automatic action may touch: a Basic re-run must not empty the list (#789).
     if plugs := _away_plugs(stored):
         data[CONF_SENTINEL_AWAY_PLUGS] = plugs
+    if CONF_SENTINEL_AWAY_PLUG_DELAY_MIN in stored:
         data[CONF_SENTINEL_AWAY_PLUG_DELAY_MIN] = _away_plug_delay(stored)
 
     # The outdoor temperature entity is picked by hand; no default rebuilds it

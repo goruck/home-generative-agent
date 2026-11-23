@@ -15,6 +15,7 @@ from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.event import async_track_point_in_utc_time
 from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.const import (
@@ -398,7 +399,7 @@ def _is_cyclical(entity_id: str, friendly_name: str) -> bool:
 class SentinelEngine:
     """Periodic sentinel evaluation loop."""
 
-    def __init__(  # noqa: PLR0913
+    def __init__(  # noqa: PLR0913, PLR0915
         self,
         hass: HomeAssistant,
         options: dict[str, object],
@@ -503,6 +504,18 @@ class SentinelEngine:
                 "event-driven triggering (evaluation falls back to polling).",
                 len(self._rule_entity_exclusions),
             )
+        # Kept by name: its plug list wakes the engine, and its trip schedules
+        # one run for when the wait ends (#789).
+        self._plug_rule = PlugOnWhileAwayRule(
+            plugs=_text_items(options.get(CONF_SENTINEL_AWAY_PLUGS)),
+            delay_min=_coerce_int(
+                options.get(CONF_SENTINEL_AWAY_PLUG_DELAY_MIN),
+                default=RECOMMENDED_SENTINEL_AWAY_PLUG_DELAY_MIN,
+            ),
+            is_entity_excluded=self._entity_excluded_for_type,
+        )
+        self._plug_wake: Callable[[], None] | None = None
+        self._plug_wake_at: datetime | None = None
         self._rules: list[StaticRule] = []
         self._rules.extend(
             [
@@ -518,13 +531,7 @@ class SentinelEngine:
                         default=RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN,
                     ),
                 ),
-                PlugOnWhileAwayRule(
-                    plugs=_text_items(options.get(CONF_SENTINEL_AWAY_PLUGS)),
-                    delay_min=_coerce_int(
-                        options.get(CONF_SENTINEL_AWAY_PLUG_DELAY_MIN),
-                        default=RECOMMENDED_SENTINEL_AWAY_PLUG_DELAY_MIN,
-                    ),
-                ),
+                self._plug_rule,
                 CameraEntryUnsecuredRule(
                     camera_entry_links=cast(
                         "dict[str, list[str]]",
@@ -1427,6 +1434,7 @@ class SentinelEngine:
             for unsub in self._event_unsubscribers:
                 unsub()
             self._event_unsubscribers.clear()
+            self._cancel_plug_wake()
             # Once the wait is over, whether the run ended or was left behind:
             # a run that ended within it finished its writes; one left behind
             # must write and act no more (#988). Every save is refused, so
@@ -1560,6 +1568,9 @@ class SentinelEngine:
 
         if self._is_permit_join_turning_on(entity_id, new_state):
             anomaly_type: str | None = ZigbeePermitJoinOpenRule.rule_id
+        elif new_state.state == "on" and entity_id in self._plug_rule.plugs:
+            # A listed plug turned on: if everyone is away, it is due now.
+            anomaly_type = PlugOnWhileAwayRule.rule_id
         else:
             anomaly_type = _anomaly_type_for_state(entity_id, new_state)
         if anomaly_type is None:
@@ -1587,6 +1598,42 @@ class SentinelEngine:
             return
 
         self._trigger_scheduler.enqueue(TriggerRecord(anomaly_type=anomaly_type))
+
+    def _schedule_plug_wake(self) -> None:
+        """
+        Run once more when the plug rule's wait ends (#789).
+
+        A person leaving wakes the engine, but the wait running out does not,
+        so without this an alert (and later an action) comes up to one poll
+        interval late. One timer at a time, replaced when the trip changes and
+        cancelled between trips and on stop.
+        """
+        due = None if self._stopped else self._plug_rule.due_at()
+        if due is not None and due <= dt_util.utcnow():
+            due = None  # already due: this run has reported it
+        if due == self._plug_wake_at:
+            return
+        self._cancel_plug_wake()
+        if due is None:
+            return
+
+        @callback
+        def _wake(_now: datetime) -> None:
+            self._plug_wake = None
+            self._plug_wake_at = None
+            if not self._stopped:
+                self._trigger_scheduler.enqueue(
+                    TriggerRecord(anomaly_type=PlugOnWhileAwayRule.rule_id)
+                )
+
+        self._plug_wake = async_track_point_in_utc_time(self._hass, _wake, due)
+        self._plug_wake_at = due
+
+    def _cancel_plug_wake(self) -> None:
+        if self._plug_wake is not None:
+            self._plug_wake()
+        self._plug_wake = None
+        self._plug_wake_at = None
 
     def _is_permit_join_turning_on(self, entity_id: str, new_state: State) -> bool:
         """
@@ -2238,6 +2285,7 @@ class SentinelEngine:
 
         await self._attach_counter_baselines(snapshot, record=True)
         evaluation = self._evaluate_gated_rules(snapshot, self._rules)
+        self._schedule_plug_wake()
         all_findings: list[AnomalyFinding] = evaluation.findings
         capabilities = evaluation.capabilities
         inactive_rules = evaluation.inactive_rules

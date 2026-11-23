@@ -195,9 +195,11 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "{appliance} drew {power} {duration}, {threshold}. Check it."
         ),
         "body_plug_on_while_away": (
-            "{plug} is still on and everyone has been away {minutes} min."
+            "{plugs} is still on and everyone has been away at least {minutes} min."
         ),
-        "body_plug_on_while_away_noval": ("{plug} is still on and everyone is away."),
+        "body_plugs_on_while_away": (
+            "{plugs} are still on and everyone has been away at least {minutes} min."
+        ),
         "body_power_watts": "about {watts} W",
         "body_power_unknown": "high power",
         "body_duration_min": "for {minutes} min",
@@ -454,10 +456,12 @@ _MESSAGES: dict[str, dict[str, str]] = {
             "{appliance}: {power}, {duration} ({threshold}). Zkontrolujte spotřebič."
         ),
         "body_plug_on_while_away": (
-            "{plug} je stále zapnutá a všichni jsou už {minutes} min pryč."
+            "Zásuvka {plugs} je stále zapnutá a všichni jsou pryč "
+            "nejméně {minutes} min."
         ),
-        "body_plug_on_while_away_noval": (
-            "{plug} je stále zapnutá a všichni jsou pryč."
+        "body_plugs_on_while_away": (
+            "Zásuvky {plugs} jsou stále zapnuté a všichni jsou pryč "
+            "nejméně {minutes} min."
         ),
         "body_power_watts": "odběr asi {watts} W",
         "body_power_unknown": "vysoký odběr",
@@ -681,8 +685,8 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "body_appliance_power": (
             "{appliance}{duration}功率{power}，{threshold}。请检查。"
         ),
-        "body_plug_on_while_away": ("{plug}仍开着，所有人已离家 {minutes} 分钟。"),
-        "body_plug_on_while_away_noval": "{plug}仍开着，所有人都不在家。",
+        "body_plug_on_while_away": "{plugs}仍开着，所有人已离家至少 {minutes} 分钟。",
+        "body_plugs_on_while_away": "{plugs}仍开着，所有人已离家至少 {minutes} 分钟。",
         "body_power_watts": "约 {watts} W",
         "body_power_unknown": "较高",
         "body_duration_min": "持续 {minutes} 分钟",

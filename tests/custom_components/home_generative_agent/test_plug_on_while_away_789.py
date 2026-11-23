@@ -11,8 +11,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import MagicMock
 
 import pytest
+from homeassistant.util import dt as dt_util
+from pytest_homeassistant.common import async_fire_time_changed
 
 from custom_components.home_generative_agent.const import (
     ACTION_POLICY_AUTO_EXECUTE,
@@ -24,16 +27,20 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_DAILY_DIGEST_ENABLED,
     CONF_SENTINEL_DAILY_DIGEST_TIME,
     CONF_SENTINEL_ENABLED,
+    CONF_SENTINEL_QUIET_HOURS_START,
+    CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
     SUBENTRY_TYPE_SENTINEL,
 )
 from custom_components.home_generative_agent.core.subentry_resolver import (
     resolve_runtime_options,
 )
+from custom_components.home_generative_agent.sentinel.engine import SentinelEngine
 from custom_components.home_generative_agent.sentinel.execution import (
     SentinelExecutionService,
 )
 from custom_components.home_generative_agent.sentinel.models import FindingAction
 from custom_components.home_generative_agent.sentinel.notifier import (
+    _persistent_message,
     _plug_on_while_away_mobile_message,
 )
 from custom_components.home_generative_agent.sentinel.rules.plug_on_while_away import (
@@ -44,6 +51,7 @@ from custom_components.home_generative_agent.snapshot.schema import (
     validate_snapshot,
 )
 
+from .test_sentinel_autonomy_level import DummyAudit, DummyNotifier, DummySuppression
 from .test_sentinel_autonomy_settings import _settings
 from .test_subentries import DummyEntry, DummySubentry, _make_sentinel_flow_for_mode
 
@@ -72,21 +80,31 @@ def _snapshot(
     *,
     people: dict[str, str] | None = None,
     plugs: dict[str, str] | None = None,
+    left: int = 0,
+    start: datetime = _START,
 ) -> FullStateSnapshot:
-    """Return the home *minutes* after 12:00; people and plugs changed at 09:00."""
-    now = _START + timedelta(minutes=minutes)
-    long_ago = _START - timedelta(hours=3)
+    """
+    Return the home *minutes* after *start*.
+
+    The people last changed *left* minutes after *start* (when they left, for
+    people away); the plugs three hours before it.
+    """
+    now = start + timedelta(minutes=minutes)
     people = {"person.ann": "not_home"} if people is None else people
     plugs = {_DRIER: "on"} if plugs is None else plugs
     home = sorted(p for p, state in people.items() if state == "home")
+    entities = [
+        _entity(person, state, start + timedelta(minutes=left))
+        for person, state in people.items()
+    ] + [
+        _entity(plug, state, start - timedelta(hours=3))
+        for plug, state in plugs.items()
+    ]
     return validate_snapshot(
         {
             "schema_version": 1,
             "generated_at": now.isoformat(),
-            "entities": [
-                _entity(entity_id, state, long_ago)
-                for entity_id, state in {**people, **plugs}.items()
-            ],
+            "entities": entities,
             "camera_activity": [],
             "derived": {
                 "now": now.isoformat(),
@@ -101,8 +119,10 @@ def _snapshot(
     )
 
 
-def _rule(delay_min: int = 10, plugs: Any = (_DRIER,)) -> PlugOnWhileAwayRule:
-    return PlugOnWhileAwayRule(plugs=plugs, delay_min=delay_min)
+def _rule(
+    delay_min: int = 10, plugs: Any = (_DRIER,), **kwargs: Any
+) -> PlugOnWhileAwayRule:
+    return PlugOnWhileAwayRule(plugs=plugs, delay_min=delay_min, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +133,7 @@ def _rule(delay_min: int = 10, plugs: Any = (_DRIER,)) -> PlugOnWhileAwayRule:
 def test_a_listed_plug_still_on_is_reported_once_the_home_was_empty_long_enough() -> (
     None
 ):
-    """Not before the delay; the time away is counted from the first empty run."""
+    """Not before the delay, counted from when the last person left."""
     rule = _rule(delay_min=10)
 
     assert rule.evaluate(_snapshot(0)) == []
@@ -128,19 +148,31 @@ def test_a_listed_plug_still_on_is_reported_once_the_home_was_empty_long_enough(
     assert finding.is_sensitive is False
 
 
-def test_the_finding_names_its_own_action_and_only_its_own_plug() -> None:
-    """The one call Sentinel may make: turn that plug off."""
+def test_the_trip_starts_when_the_last_person_left_not_when_sentinel_looked() -> None:
+    """After a reload the rule knows the home has been empty for hours."""
+    rule = _rule(delay_min=10)
+    people = {"person.ann": "not_home", "person.bob": "work"}
+
+    findings = rule.evaluate(_snapshot(180, people=people, left=0))
+
+    assert findings[0].evidence["away_min"] == 180
+    assert findings[0].evidence["away_since"] == _START.isoformat()
+
+
+def test_several_plugs_are_one_alert_and_one_action() -> None:
+    """A type cooldown must not space them out: one finding names them all."""
     rule = _rule(delay_min=0, plugs=(_DRIER, "switch.iron"))
     plugs = {_DRIER: "on", "switch.iron": "on", "switch.freezer": "on"}
 
     findings = rule.evaluate(_snapshot(0, plugs=plugs))
 
-    assert {f.triggering_entities[0] for f in findings} == {_DRIER, "switch.iron"}
-    for finding in findings:
-        assert finding.actions == (
-            FindingAction("switch.turn_off", (finding.triggering_entities[0],)),
-        )
-        assert finding.standing_condition is True
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.triggering_entities == [_DRIER, "switch.iron"]
+    assert finding.actions == (
+        FindingAction("switch.turn_off", (_DRIER, "switch.iron")),
+    )
+    assert finding.standing_condition is True
 
 
 def test_nothing_off_the_list_is_ever_reported() -> None:
@@ -148,8 +180,24 @@ def test_nothing_off_the_list_is_ever_reported() -> None:
     plugs = {_DRIER: "on", "switch.freezer": "on"}
 
     assert _rule(delay_min=0, plugs=()).evaluate(_snapshot(0, plugs=plugs)) == []
+    assert _rule(delay_min=0, plugs=()).due_at() is None
     listed = _rule(delay_min=0).evaluate(_snapshot(0, plugs=plugs))
     assert [f.triggering_entities for f in listed] == [[_DRIER]]
+
+
+def test_an_excluded_plug_is_left_out_not_the_whole_alert() -> None:
+    """The engine drops a finding when any of its devices is excluded."""
+    excluded = {"switch.iron"}
+    rule = _rule(
+        delay_min=0,
+        plugs=(_DRIER, "switch.iron"),
+        is_entity_excluded=lambda entity_id, _type: entity_id in excluded,
+    )
+    plugs = {_DRIER: "on", "switch.iron": "on"}
+
+    findings = rule.evaluate(_snapshot(0, plugs=plugs))
+
+    assert [f.triggering_entities for f in findings] == [[_DRIER]]
 
 
 @pytest.mark.parametrize("state", ["off", "unavailable", "unknown"])
@@ -161,7 +209,6 @@ def test_a_plug_that_is_not_on_is_not_reported(state: str) -> None:
 @pytest.mark.parametrize(
     "people",
     [
-        {},  # a home with no person entities is not known to be empty
         {"person.ann": "home"},
         {"person.ann": "not_home", "person.bob": "home"},
         {"person.ann": "not_home", "person.bob": "unknown"},
@@ -173,44 +220,67 @@ def test_the_home_must_be_known_to_be_empty(people: dict[str, str]) -> None:
     assert _rule(delay_min=0).evaluate(_snapshot(0, people=people)) == []
 
 
+def test_a_home_with_no_people_is_never_empty_and_says_so_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Otherwise the rule would do nothing with nothing in the log."""
+    rule = _rule(delay_min=0)
+    with caplog.at_level("WARNING"):
+        assert rule.evaluate(_snapshot(0, people={})) == []
+        assert rule.evaluate(_snapshot(5, people={})) == []
+    assert caplog.text.count("no person entities") == 1
+
+
 def test_a_named_zone_counts_as_away() -> None:
     """A person at "work" is away; only `home` is home."""
     people = {"person.ann": "work", "person.bob": "not_home"}
     assert len(_rule(delay_min=0).evaluate(_snapshot(0, people=people))) == 1
 
 
-def test_someone_coming_home_ends_the_episode() -> None:
-    """The next time everyone leaves, the delay starts again."""
+def test_someone_coming_home_ends_the_trip() -> None:
+    """The next time everyone leaves, the delay starts again from then."""
     rule = _rule(delay_min=10)
     rule.evaluate(_snapshot(0))
     assert rule.evaluate(_snapshot(10))
 
-    assert rule.evaluate(_snapshot(11, people={"person.ann": "home"})) == []
-    assert rule.evaluate(_snapshot(12)) == []
-    assert rule.evaluate(_snapshot(21)) == []
-    assert rule.evaluate(_snapshot(22))
+    assert rule.evaluate(_snapshot(11, people={"person.ann": "home"}, left=11)) == []
+    assert rule.due_at() is None
+    assert rule.evaluate(_snapshot(12, left=12)) == []
+    assert rule.evaluate(_snapshot(21, left=12)) == []
+    assert rule.evaluate(_snapshot(22, left=12))
 
 
-def test_an_unknown_tracker_ends_the_episode_too() -> None:
-    """Minutes with an unknown tracker do not count as minutes away."""
+def test_an_unknown_tracker_pauses_the_trip() -> None:
+    """A blip reports nothing meanwhile and does not start a new trip."""
     rule = _rule(delay_min=10)
-    rule.evaluate(_snapshot(0))
+    first = rule.evaluate(_snapshot(0)) or rule.evaluate(_snapshot(10))
 
-    assert rule.evaluate(_snapshot(5, people={"person.ann": "unknown"})) == []
-    assert rule.evaluate(_snapshot(10)) == []
+    assert rule.evaluate(_snapshot(15, people={"person.ann": "unknown"}, left=15)) == []
+    again = rule.evaluate(_snapshot(16, left=16))
+
+    assert again[0].anomaly_id == first[0].anomaly_id
+    assert again[0].evidence["away_min"] == 16
 
 
-def test_the_same_episode_is_the_same_anomaly() -> None:
-    """One alert per plug per time everyone leaves, not one per run."""
+def test_the_same_trip_is_the_same_anomaly() -> None:
+    """One alert per set of plugs per trip, not one per run."""
     rule = _rule(delay_min=0)
     first = rule.evaluate(_snapshot(0))[0]
     later = rule.evaluate(_snapshot(30))[0]
     assert later.anomaly_id == first.anomaly_id
     assert later.evidence["away_min"] == 30
 
-    rule.evaluate(_snapshot(31, people={"person.ann": "home"}))
-    again = rule.evaluate(_snapshot(60))[0]
+    rule.evaluate(_snapshot(31, people={"person.ann": "home"}, left=31))
+    again = rule.evaluate(_snapshot(60, left=32))[0]
     assert again.anomaly_id != first.anomaly_id
+
+
+def test_the_rule_says_when_its_wait_ends() -> None:
+    """For the engine's one-shot wake-up."""
+    rule = _rule(delay_min=10)
+    assert rule.due_at() is None
+    rule.evaluate(_snapshot(3))
+    assert rule.due_at() == _START + timedelta(minutes=10)
 
 
 @pytest.mark.parametrize(
@@ -287,7 +357,57 @@ def test_the_alert_names_the_plug_and_the_time_away() -> None:
     finding = rule.evaluate(_snapshot(25))[0]
 
     assert _plug_on_while_away_mobile_message(finding) == (
-        "Drier is still on and everyone has been away 25 min."
+        "Drier is still on and everyone has been away at least 25 min."
+    )
+
+
+def test_several_plugs_are_named_in_one_alert() -> None:
+    """One push for all of them."""
+    finding = _rule(delay_min=0, plugs=(_DRIER, "switch.iron")).evaluate(
+        _snapshot(25, plugs={_DRIER: "on", "switch.iron": "on"})
+    )[0]
+    assert _plug_on_while_away_mobile_message(finding) == (
+        "Drier, Iron are still on and everyone has been away at least 25 min."
+    )
+
+
+@pytest.mark.parametrize(
+    ("language", "one", "two"),
+    [
+        (
+            "cs",
+            "Zásuvka Drier je stále zapnutá a všichni jsou pryč nejméně 25 min.",
+            (
+                "Zásuvky Drier, Iron jsou stále zapnuté a všichni jsou pryč "
+                "nejméně 25 min."
+            ),
+        ),
+        (
+            "zh-Hans",
+            "Drier仍开着，所有人已离家至少 25 分钟。",
+            "Drier, Iron仍开着，所有人已离家至少 25 分钟。",
+        ),
+    ],
+)
+def test_the_alert_follows_the_home_assistant_language(
+    language: str, one: str, two: str
+) -> None:
+    """The words around the names and figures are translated."""
+    hass = MagicMock()
+    hass.config.language = language
+    single = _rule(delay_min=0).evaluate(_snapshot(25))[0]
+    double = _rule(delay_min=0, plugs=(_DRIER, "switch.iron")).evaluate(
+        _snapshot(25, plugs={_DRIER: "on", "switch.iron": "on"})
+    )[0]
+    assert _plug_on_while_away_mobile_message(single, hass) == one
+    assert _plug_on_while_away_mobile_message(double, hass) == two
+
+
+def test_the_persistent_record_keeps_the_figures_without_an_explanation() -> None:
+    """With the explainer off, the record must not fall back to generic text."""
+    finding = _rule(delay_min=0).evaluate(_snapshot(25))[0]
+    assert _persistent_message(None, finding) == (
+        "Drier is still on and everyone has been away at least 25 min."
     )
 
 
@@ -377,3 +497,215 @@ async def test_basic_setup_keeps_the_plug_list(hass: HomeAssistant) -> None:
     )
     assert updates[0]["data"][CONF_SENTINEL_AWAY_PLUGS] == [_DRIER]
     assert updates[0]["data"][CONF_SENTINEL_AWAY_PLUG_DELAY_MIN] == 25
+
+
+@pytest.mark.asyncio
+async def test_an_emptied_list_stays_empty_after_another_fields_error(
+    hass: HomeAssistant,
+) -> None:
+    """The redisplay must not bring the stored plugs back."""
+    existing = DummySubentry(
+        "sent1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {CONF_SENTINEL_ENABLED: True, CONF_SENTINEL_AWAY_PLUGS: [_DRIER]},
+    )
+    entry = DummyEntry()
+    entry.subentries[existing.subentry_id] = existing
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+    submitted = _settings(**{CONF_SENTINEL_QUIET_HOURS_START: "22"})
+    submitted.pop(CONF_SENTINEL_AWAY_PLUGS, None)
+
+    form = await flow.async_step_settings(submitted)
+
+    assert cast("Any", form).get("errors") == {"base": "quiet_hours_incomplete"}
+    schema = cast("Any", form).get("data_schema")
+    suggested = {
+        key.schema: key.description["suggested_value"]
+        for key in schema.schema
+        if key.description and "suggested_value" in key.description
+    }
+    assert suggested.get(CONF_SENTINEL_AWAY_PLUGS, []) == []
+
+
+@pytest.mark.asyncio
+async def test_basic_setup_keeps_the_delay_with_no_plugs_picked(
+    hass: HomeAssistant,
+) -> None:
+    """Emptying the list for a while must not reset the chosen wait."""
+    existing = DummySubentry(
+        "sent1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_AWAY_PLUGS: [],
+            CONF_SENTINEL_AWAY_PLUG_DELAY_MIN: 60,
+        },
+    )
+    entry = DummyEntry()
+    entry.subentries[existing.subentry_id] = existing
+    flow = _make_sentinel_flow_for_mode(hass, entry)
+    updates: list[Any] = []
+    flow.async_update_and_abort = lambda *_a, **kw: (  # type: ignore[assignment]
+        updates.append(kw) or {"type": "abort", "reason": "reconfigure_successful"}
+    )
+    await flow.async_step_setup_mode({"setup_mode": "basic"})
+    await flow.async_step_basic_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_DAILY_DIGEST_ENABLED: False,
+            CONF_SENTINEL_DAILY_DIGEST_TIME: "08:00:00",
+        }
+    )
+    assert updates[0]["data"][CONF_SENTINEL_AWAY_PLUG_DELAY_MIN] == 60
+
+
+# ---------------------------------------------------------------------------
+# The engine
+# ---------------------------------------------------------------------------
+
+
+def _engine(hass: Any, options: dict[str, object]) -> SentinelEngine:
+    return SentinelEngine(
+        hass=hass,
+        options=options,
+        suppression=DummySuppression(),
+        notifier=cast("Any", DummyNotifier()),
+        audit_store=cast("Any", DummyAudit()),
+        explainer=None,
+        entry_id="plug-entry",
+    )
+
+
+@pytest.mark.parametrize(
+    ("options", "plugs", "delay"),
+    [
+        (
+            {
+                CONF_SENTINEL_AWAY_PLUGS: [_DRIER, "light.lamp"],
+                CONF_SENTINEL_AWAY_PLUG_DELAY_MIN: 25,
+            },
+            {_DRIER},
+            25,
+        ),
+        ({}, set(), 10),
+        (
+            {
+                CONF_SENTINEL_AWAY_PLUGS: "switch.drier",
+                CONF_SENTINEL_AWAY_PLUG_DELAY_MIN: "x",
+            },
+            set(),
+            10,
+        ),
+    ],
+)
+def test_the_engine_builds_the_rule_from_the_settings(
+    options: dict[str, object], plugs: set[str], delay: int
+) -> None:
+    """A wrong key here would make the rule silently do nothing."""
+    engine = _engine(object(), options)
+    rule = engine._plug_rule
+    assert rule in engine._rules
+    assert rule.plugs == plugs
+    assert rule._delay == timedelta(minutes=delay)
+
+
+def _state_event(entity_id: str, state: str) -> Any:
+    new_state = MagicMock()
+    new_state.state = state
+    new_state.attributes = {}
+    event = MagicMock()
+    event.data = {"entity_id": entity_id, "new_state": new_state}
+    return event
+
+
+def test_a_listed_plug_turning_on_wakes_sentinel() -> None:
+    """Not one off the list, and not one turning off."""
+    engine = _engine(object(), {CONF_SENTINEL_AWAY_PLUGS: [_DRIER]})
+    queue = engine._trigger_scheduler._queue
+
+    engine._on_state_changed(_state_event("switch.freezer", "on"))
+    engine._on_state_changed(_state_event(_DRIER, "off"))
+    assert queue == []
+
+    engine._on_state_changed(_state_event(_DRIER, "on"))
+    assert [record.anomaly_type for record in queue] == ["plug_on_while_away"]
+
+
+@pytest.mark.asyncio
+async def test_sentinel_wakes_when_the_wait_ends(hass: HomeAssistant) -> None:
+    """One timer per trip, at the end of the wait, gone when someone is home."""
+    engine = _engine(hass, {CONF_SENTINEL_AWAY_PLUGS: [_DRIER]})
+    queue = engine._trigger_scheduler._queue
+    start = dt_util.utcnow()
+
+    engine._plug_rule.evaluate(_snapshot(0, start=start))
+    engine._schedule_plug_wake()
+    assert engine._plug_wake_at == start + timedelta(minutes=10)
+
+    engine._plug_rule.evaluate(_snapshot(1, people={"person.ann": "home"}, start=start))
+    engine._schedule_plug_wake()
+    assert engine._plug_wake is None
+
+    engine._plug_rule.evaluate(_snapshot(2, left=2, start=start))
+    engine._schedule_plug_wake()
+    due = start + timedelta(minutes=12)
+    assert engine._plug_wake_at == due
+
+    async_fire_time_changed(hass, due + timedelta(seconds=1))
+    await hass.async_block_till_done()
+    assert [record.anomaly_type for record in queue] == ["plug_on_while_away"]
+    assert engine._plug_wake is None
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_engine_leaves_no_timer(hass: HomeAssistant) -> None:
+    """The timer must not outlive a reload."""
+    engine = _engine(hass, {CONF_SENTINEL_AWAY_PLUGS: [_DRIER]})
+    engine._plug_rule.evaluate(_snapshot(0, start=dt_util.utcnow()))
+    engine._schedule_plug_wake()
+    assert engine._plug_wake is not None
+
+    await engine.stop()
+
+    assert engine._plug_wake is None
+
+
+def test_the_engine_passes_the_users_exclusions_to_the_rule() -> None:
+    """An excluded plug is left out of the alert, as the rule tests show."""
+    engine = _engine(
+        object(),
+        {
+            CONF_SENTINEL_AWAY_PLUGS: [_DRIER, "switch.iron"],
+            CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: {
+                "plug_on_while_away": ["switch.iron"]
+            },
+        },
+    )
+    assert engine._plug_rule._excluded("switch.iron")
+    assert not engine._plug_rule._excluded(_DRIER)
+
+
+@pytest.mark.asyncio
+async def test_a_run_sets_the_timer(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wake-up comes from the run that saw everyone leave."""
+    engine = _engine(hass, {CONF_SENTINEL_AWAY_PLUGS: [_DRIER]})
+    cast("Any", engine)._suppression._read_only = False
+    start = dt_util.utcnow()
+
+    async def _fake_build(_hass: Any, **_kwargs: Any) -> FullStateSnapshot:
+        return _snapshot(0, start=start)
+
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.sentinel.engine."
+        "async_build_full_state_snapshot",
+        _fake_build,
+    )
+    try:
+        await engine._run_once()
+        assert engine._plug_wake_at == start + timedelta(minutes=10)
+    finally:
+        await engine.stop()

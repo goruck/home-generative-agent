@@ -1215,20 +1215,22 @@ def _plug_on_while_away_mobile_message(
     hass: HomeAssistant | None = None,
     cap: int | None = MAX_MOBILE_MESSAGE_CHARS,
 ) -> str:
-    """Return fixed copy for plug_on_while_away: which plug, how long away."""
+    """Return fixed copy for plug_on_while_away: which plugs, how long away."""
     ev = finding.evidence
-    entity_id = str(
-        ev.get("entity_id")
-        or (finding.triggering_entities[0] if finding.triggering_entities else "")
-    )
-    plug = (ev.get("friendly_name") or "").strip() or _friendly_entity(entity_id)
+    names = [
+        str(name).strip()
+        for name in ev.get("friendly_names") or []
+        if isinstance(name, str) and name.strip()
+    ] or [_friendly_entity(entity_id) for entity_id in finding.triggering_entities]
     away_min = ev.get("away_min")
-    msg = (
-        notif_msg(hass, "body_plug_on_while_away", plug=plug, minutes=int(away_min))
-        if isinstance(away_min, (int, float))
-        else notif_msg(hass, "body_plug_on_while_away_noval", plug=plug)
+    minutes = int(away_min) if isinstance(away_min, (int, float)) else 0
+    msg = notif_msg(
+        hass,
+        "body_plugs_on_while_away" if len(names) > 1 else "body_plug_on_while_away",
+        plugs=", ".join(names),
+        minutes=minutes,
     )
-    return msg if cap is None else msg[:cap]
+    return msg if cap is None else msg[:cap].rstrip()
 
 
 def _cap_keeping_note(msg: str, note: str | None, cap: int | None) -> str:
@@ -1844,6 +1846,13 @@ _TYPE_MOBILE_FORMATTERS: dict[str, Any] = {
     "alarm_disarmed_during_external_threat": _alarm_disarmed_mobile_message,
     "appliance_power_duration": _appliance_power_duration_mobile_message,
     "pet_detected_at_night_no_occupancy": _pet_mobile_message,
+    "plug_on_while_away": _plug_on_while_away_mobile_message,
+}
+
+
+# Fixed copy a persistent record uses in full when there is no explanation.
+_FULL_TEXT_FORMATTERS: dict[str, Any] = {
+    "appliance_power_duration": _appliance_power_duration_mobile_message,
     "plug_on_while_away": _plug_on_while_away_mobile_message,
 }
 
@@ -2677,10 +2686,8 @@ def _persistent_message(
             return escape_markdown(text)
 
     # The record is the full text: no push length cap.
-    if finding.type == "appliance_power_duration":
-        return escape_markdown(
-            _appliance_power_duration_mobile_message(finding, hass, cap=None)
-        )
+    if (full_text := _FULL_TEXT_FORMATTERS.get(finding.type)) is not None:
+        return escape_markdown(full_text(finding, hass, cap=None))
     if hvac_explained_by(finding.evidence) is not None:
         # A power deviation heating or cooling explains: the same body as the
         # push, so the record says why too (#922).
