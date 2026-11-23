@@ -411,6 +411,22 @@ async def test_a_lost_connection_during_a_rebuild_is_raised(
 
 
 @pytest.mark.asyncio
+async def test_a_missing_pgvector_library_during_a_rebuild_is_raised(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Setup's retry handles a server that lost pgvector's library (#1071)."""
+    _with_tables(monkeypatch, _ALL_TABLES - {"store_vectors"})
+    store = _FailingStore(
+        psycopg.errors.UndefinedFile('could not access file "$libdir/vector"')
+    )
+
+    with pytest.raises(psycopg.errors.UndefinedFile):
+        await bootstrap_vectors_once(
+            hass, _entry(hass, **{CONF_VECTORS_BOOTSTRAPPED: True}), store, _POOL
+        )
+
+
+@pytest.mark.asyncio
 async def test_a_store_that_cannot_be_rebuilt_leaves_the_checkpointer_set_up(
     hass: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

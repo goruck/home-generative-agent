@@ -48,6 +48,17 @@ server-side failures such as an index over pgvector's dimension limit, and
 retrying those would hide a permanent error behind a "cannot reach" message.
 Settings libpq rejects before it connects (an unknown connection option) fail
 setup with their own message, since no retry can fix them.
+
+One server-side error is retried as well (#1071): a server that cannot open
+an extension library (``UndefinedFile``, SQLSTATE 58P01, for a file under
+``$libdir``). In practice that is a
+PostgreSQL package upgrade that removed pgvector's library while the
+extension stays enabled, so every query that touches a ``vector`` column
+fails with 'could not access file "$libdir/vector"'. Nothing in the
+integration's settings can fix it, but the server's owner can, and the entry
+should then start on its own instead of staying down until someone reloads
+it. It gets its own message, since "cannot reach" would point at the wrong
+fix.
 """
 
 from __future__ import annotations
@@ -75,6 +86,7 @@ PGVECTOR_NOT_PERMITTED = "pgvector_not_permitted"
 PGVECTOR_NOT_AVAILABLE = "pgvector_not_available"
 DATABASE_UNREACHABLE = "database_unreachable"
 DATABASE_INVALID_SETTINGS = "database_invalid_settings"
+DATABASE_FILE_MISSING = "database_file_missing"
 
 # SQLSTATEs a server sends when it drops or refuses a connection: class 08
 # (connection exception) is matched by prefix; these are the server shutting
@@ -105,6 +117,38 @@ def is_connection_failure(err: BaseException) -> bool:
         or sqlstate.startswith("08")
         or sqlstate in _CONNECTION_SQLSTATES
     )
+
+
+def is_setup_retryable(err: BaseException) -> bool:
+    """
+    Whether setup should retry after ``err`` instead of failing for good.
+
+    A connection failure, or a server that cannot open an extension library
+    (pgvector's library removed by a server upgrade, #1071).
+    """
+    return is_connection_failure(err) or _is_missing_library(err)
+
+
+def _is_missing_library(err: BaseException) -> bool:
+    """
+    Whether the server could not open an extension library (#1071).
+
+    Only a file under ``$libdir``: libpq reports the path untranslated, and a
+    58P01 about one of the server's own data files is damage a retry cannot
+    fix, so it still fails setup with its traceback.
+    """
+    return isinstance(err, pg_errors.UndefinedFile) and "$libdir/" in str(err)
+
+
+def database_retry_error(err: BaseException) -> ConfigEntryNotReady:
+    """Return the retryable setup error for ``err``, with the message for it."""
+    if _is_missing_library(err):
+        return ConfigEntryNotReady(
+            translation_domain=DOMAIN,
+            translation_key=DATABASE_FILE_MISSING,
+            translation_placeholders={"error": _first_line(err)},
+        )
+    return database_unreachable(err)
 
 
 def _first_line(err: BaseException) -> str:

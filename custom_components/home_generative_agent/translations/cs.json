@@ -474,6 +474,9 @@
     "database_unreachable": {
       "message": "Databáze PostgreSQL zatím není dostupná: {error}. Home Assistant to bude zkoušet znovu; zkontrolujte, že databáze běží a že nastavení databáze (hostitel, port, uživatel, heslo, název databáze) je správné."
     },
+    "database_file_missing": {
+      "message": "Server PostgreSQL nemůže načíst knihovnu rozšíření: {error}. Obvykle to znamená, že aktualizace PostgreSQL na databázovém serveru odstranila knihovnu pgvector, i když rozšíření zůstalo zapnuté. Znovu nainstalujte pgvector pro verzi PostgreSQL na serveru. Home Assistant to bude zkoušet znovu a integrace se spustí sama, jakmile server knihovnu načte."
+    },
     "database_invalid_settings": {
       "message": "Nastavení databáze bylo odmítnuto ještě před připojením: {error}. Opravte dodatečné parametry připojení (nebo jiná nastavení) v podpoložce Databáze; integrace se po uložení znovu načte."
     }

@@ -8,12 +8,14 @@ from typing import Any, cast
 import pytest
 from homeassistant.exceptions import ConfigEntryNotReady
 from psycopg import OperationalError
+from psycopg import errors as pg_errors
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 from pytest_homeassistant.common import MockConfigEntry
 
 import custom_components.home_generative_agent as hga_component
 from custom_components.home_generative_agent.const import DOMAIN
 from custom_components.home_generative_agent.core.database_guard import (
+    DATABASE_FILE_MISSING,
     DATABASE_UNREACHABLE,
     database_unreachable,
 )
@@ -128,6 +130,38 @@ async def test_database_lost_mid_setup_retries_and_closes_the_pool(
     assert pool_holder["pool"].close_called is True
     # A lost connection is a retry, not a migration bug.
     assert "Error migrating" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_missing_server_file_retries_setup_with_its_own_message(
+    hass: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """
+    A server that lost pgvector's library retries setup (#1071).
+
+    A PostgreSQL upgrade removed vector.so while the extension stayed
+    enabled; setup used to fail for good and stay down until a manual reload.
+    """
+    entry = MockConfigEntry(domain=DOMAIN, data={})
+    entry.add_to_hass(hass)
+    pool_holder: dict[str, DummyPool] = {}
+
+    async def _fail_migrate(*_args: Any, **_kwargs: Any) -> None:
+        msg = 'could not access file "$libdir/vector": No such file or directory'
+        raise pg_errors.UndefinedFile(msg)
+
+    _patch_setup(monkeypatch, pool_holder, _fail_migrate)
+
+    with pytest.raises(ConfigEntryNotReady) as exc_info:
+        await cast("Any", hga_component).async_setup_entry(hass, entry)
+
+    assert exc_info.value.translation_key == DATABASE_FILE_MISSING
+    assert exc_info.value.translation_placeholders == {
+        "error": 'could not access file "$libdir/vector": No such file or directory'
+    }
+    assert pool_holder["pool"].close_called is True
+    assert "Error migrating" not in caplog.text
+    assert "Postgresql setup failed" not in caplog.text
 
 
 @pytest.mark.asyncio
