@@ -403,6 +403,9 @@ class SentinelNotifier:
                 and not also_line
                 and not canary_line
                 and finding.type not in CHANGE_ALERT_RULE_TYPES
+                # The batch goes to one recipient: a push for another one is
+                # sent now rather than to the wrong phone (per-area routing).
+                and all(svc == target_service for _f, _e, svc in self._held_batch)
             ):
                 # Rate limit exceeded — buffer this finding.  Hold the redacted
                 # explanation, never the raw one: with the full-text record on
@@ -1242,6 +1245,11 @@ def _plug_on_while_away_mobile_message(
         if cap is None or len(msg) <= cap:
             break
         msg = _message(names[:count])
+    if cap is not None and len(msg) > cap:
+        # One name too long by itself: shorten the name, keep the sentence.
+        over = len(msg) - cap + 1
+        names = [names[0][: max(1, len(names[0]) - over)] + "…", *names[1:]]
+        msg = _message(names[:1])
     return msg if cap is None else msg[:cap].rstrip()
 
 

@@ -457,6 +457,17 @@ def test_a_long_list_of_names_never_cuts_off_the_time_away() -> None:
     assert "+" in msg
 
 
+def test_one_very_long_name_never_cuts_off_the_time_away() -> None:
+    """The name is shortened, not the sentence."""
+    plug = "switch." + "very_long_plug_name_" * 10
+    finding = _rule(delay_min=0, plugs=(plug,)).evaluate(
+        _snapshot(25, plugs={plug: "on"})
+    )[0]
+    msg = _plug_on_while_away_mobile_message(finding, cap=120)
+    assert len(msg) <= 120
+    assert msg.endswith("everyone has been away at least 25 min.")
+
+
 def test_several_plugs_are_named_in_one_alert() -> None:
     """One push for all of them."""
     finding = _rule(delay_min=0, plugs=(_DRIER, "switch.iron")).evaluate(
