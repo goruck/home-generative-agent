@@ -19,7 +19,6 @@ from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.const import (
     ACTION_POLICY_AUTO_EXECUTE,
-    ACTION_POLICY_BLOCKED,
     CONF_EXPLAIN_ENABLED,
     CONF_SENTINEL_APPLIANCE_DURATION_MIN,
     CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
@@ -108,6 +107,7 @@ from .baseline import CYCLICAL_LOAD_HINTS
 from .correlator import SentinelCorrelator
 from .dynamic_rules import evaluate_dynamic_rules
 from .execution import (
+    MIN_AUTO_EXECUTE_LEVEL,
     SentinelExecutionService,
     executable_actions,
     is_callable_action,
@@ -187,7 +187,6 @@ from .suppression import (
     SUPPRESSION_REASON_NOT_SUPPRESSED,
     SUPPRESSION_REASON_NOTIFIER_DUPLICATE,
     SUPPRESSION_REASON_PENDING_PROMPT,
-    SUPPRESSION_REASON_POLICY_BLOCKED,
     SUPPRESSION_REASON_TRIAGE_SUPPRESSED,
     SUPPRESSION_REASON_TYPE_COOLDOWN,
     SUPPRESSION_REASON_USER_SNOOZE_7D,
@@ -265,7 +264,6 @@ _FINAL_SUPPRESSION_REASONS: frozenset[str] = frozenset(
         SUPPRESSION_REASON_USER_SNOOZE_7D,
         SUPPRESSION_REASON_USER_SNOOZE_PERMANENT,
         SUPPRESSION_REASON_TRIAGE_SUPPRESSED,
-        SUPPRESSION_REASON_POLICY_BLOCKED,
     }
 )
 
@@ -1489,7 +1487,20 @@ class SentinelEngine:
         if self._stopped or cancel_requested():
             LOGGER.debug("Sentinel is stopping; not running a late %s.", effect)
             return True
-        return self._latch.refuses(effect)
+        if self._latch.refuses(effect):
+            return True
+        # The level was read once, before the finding's first action. A call
+        # can take seconds, and a level lowered meanwhile (or a raised one
+        # that ran out) must stop the actions after it (#789).
+        if self._suppression.is_read_only or (
+            self._entry_id is not None
+            and self.get_autonomy_level(self._entry_id) < MIN_AUTO_EXECUTE_LEVEL
+        ):
+            LOGGER.info(
+                "Sentinel's autonomy level was lowered; not running a %s.", effect
+            )
+            return True
+        return False
 
     def _forget_run_now(self, task: asyncio.Task[None]) -> None:
         """Drop the finished on-demand run, once it has really ended."""
@@ -2872,17 +2883,32 @@ class SentinelEngine:
             )
         )
 
+        # Execution policy, decided before any model is asked. The evaluator
+        # changes no state; live execution is committed only after the HA
+        # service call was made.
+        canary_mode = bool(
+            self._options.get(
+                CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
+                RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
+            )
+        )
+        exec_result = self._execution_service.evaluate_canary(
+            finding, snapshot, effective_autonomy, now
+        )
+        will_act = exec_result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
+
         # LLM triage pass (Level 1+): may suppress the finding.
         triage_result: TriageDecision | None = None
         # Not a replay: what was owed is not the model's to drop. Nor a
-        # finding that carries an action: a model must not be able to cancel
-        # it, and with no model call there is no wait between reading the
-        # autonomy level and acting on it (#789).
+        # finding whose action runs (or, in a dry run, would): a model must
+        # not be able to cancel it, and with no model call there is no wait
+        # between reading the autonomy level and acting on it (#789). One
+        # whose action is refused is an alert like any other.
         if (
             effective_autonomy >= 1
             and self._triage_service is not None
             and not replay
-            and not finding.actions
+            and not will_act
         ):
             triage_result = await self._triage_finding(
                 self._triage_service,
@@ -2904,32 +2930,12 @@ class SentinelEngine:
             triage_result.triage_confidence if triage_result else None
         )
 
-        # Execution policy evaluation.
-        canary_mode = bool(
-            self._options.get(
-                CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
-                RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
-            )
-        )
-        # Use the side-effect-free evaluator here; live execution state is
-        # committed only after the HA service call actually succeeds.
-        exec_result = self._execution_service.evaluate_canary(
-            finding, snapshot, effective_autonomy, now
-        )
-
         # Canary: record would_auto_execute without acting.
-        canary_would_execute: bool | None = None
-        if canary_mode:
-            canary_would_execute = (
-                exec_result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
-            )
+        canary_would_execute: bool | None = will_act if canary_mode else None
 
         # Live auto-execute: call HA services when policy approves and canary is off.
         action_outcome: dict[str, Any] | None = None
-        if (
-            exec_result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
-            and not canary_mode
-        ):
+        if will_act and not canary_mode:
             action_outcome = await self._auto_execute(finding, exec_result.execution_id)
             if exec_result.execution_id is not None and outcome_may_have_acted(
                 action_outcome
@@ -2943,26 +2949,6 @@ class SentinelEngine:
         # the alert is sent.
         stamps = cooldown_stamps(self._suppression.state, finding)
         register_finding(self._suppression.state, finding, now)
-
-        # BLOCKED findings: audit and skip notification — no pending user action.
-        if exec_result.action_policy_path == ACTION_POLICY_BLOCKED:
-            await self._suppression.async_save()
-            await _append_finding_audit(
-                self._audit_store,
-                snapshot,
-                finding,
-                None,
-                SUPPRESSION_REASON_POLICY_BLOCKED,
-                triage_decision=triage_decision_value,
-                triage_reason_code=triage_reason_code_value,
-                triage_confidence=triage_confidence_value,
-                data_quality=exec_result.data_quality,
-                action_policy_path=exec_result.action_policy_path,
-                autonomy_level_at_decision=effective_autonomy,
-                trigger_source=trigger_source,
-            )
-            self._last_dispatch_reason = SUPPRESSION_REASON_POLICY_BLOCKED
-            return False
 
         register_prompt(self._suppression.state, finding, now)
         await self._suppression.async_save()
@@ -3114,23 +3100,6 @@ class SentinelEngine:
         for constituent, _reason in passing:
             register_finding(self._suppression.state, constituent, now)
 
-        # BLOCKED findings: audit and skip notification — no pending user action.
-        if exec_result.action_policy_path == ACTION_POLICY_BLOCKED:
-            await self._suppression.async_save()
-            await _append_finding_audit(
-                self._audit_store,
-                snapshot,
-                compound,
-                None,
-                SUPPRESSION_REASON_POLICY_BLOCKED,
-                data_quality=exec_result.data_quality,
-                action_policy_path=exec_result.action_policy_path,
-                autonomy_level_at_decision=effective_autonomy,
-                trigger_source=trigger_source,
-                constituent_reasons=reasons,
-            )
-            return False
-
         # Before the cooldown and prompt are saved, as for a single finding:
         # a stop that refused every action ends the run here, so the reloaded
         # engine runs them (#988).
@@ -3160,16 +3129,15 @@ class SentinelEngine:
         if (explainer := self._explainer_for(explain_enabled, best)) is not None:
             explanation = await self._async_explanation(explainer, best, None)
 
-        # A partner the policy would auto-execute or block is never named:
-        # holding it would delay its action by the prompt TTL, or announce a
-        # finding the policy keeps from the user.  It is shown on its own.
+        # A partner the policy would auto-execute is never named: holding it
+        # would delay its action by the prompt TTL.  It is shown on its own.
         def _nameable(constituent: AnomalyFinding) -> bool:
-            return self._execution_service.evaluate_canary(
-                constituent, snapshot, effective_autonomy, now
-            ).action_policy_path not in {
-                ACTION_POLICY_AUTO_EXECUTE,
-                ACTION_POLICY_BLOCKED,
-            }
+            return (
+                self._execution_service.evaluate_canary(
+                    constituent, snapshot, effective_autonomy, now
+                ).action_policy_path
+                != ACTION_POLICY_AUTO_EXECUTE
+            )
 
         # A partner not due yet may be named by its condition when only its
         # own reminder clock holds it (#736). Worked out after the awaits

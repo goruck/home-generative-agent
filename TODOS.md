@@ -1240,6 +1240,34 @@ Since step 6 this also covers `radio_new_device_joined`, and since step 7 `netwo
 
 ---
 
+### An automatic action is judged on the run's snapshot, which can be minutes old
+
+**What:** A Sentinel run dispatches its findings one after another with one `snapshot` and one `now` (`sentinel/engine.py`, the dispatch loop in `_run_once`). Earlier findings in the run can each wait on triage, an explanation and the notifier. A later finding that carries an action is then approved by `evaluate_canary` on a condition, and a data-quality age, read when the run began. Only the action's targets are re-read live (`_unavailable_targets`, `_not_callable_now`). The autonomy level is no longer part of this: it is read with no wait before the gate and again before each call.
+
+**Why:** Claude adversarial pass on the #789 gate rework, 2026-11-22. Latent: automatic actions are forced off and no rule builds an action. It replaces the entry "Autonomy level is captured before the triage await", whose level half that PR closed.
+
+**How to apply:** Dispatch findings that carry actions before the others, or have the rule that builds an action re-check its condition against live state right before `_auto_execute` (the plug rule can re-read presence and the plug). Do this before live execution is offered (#789 step 4).
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** None
+
+---
+
+### Sentinel's action gate passes its Home Assistant checks when built without `hass`
+
+**What:** `SentinelExecutionService(options)` with no `hass` skips the relay floor (`_floor_bars` returns False after the service checks), `_unavailable_targets`, the entity expansion of the PIN rules and `stored_action_calls`. The engine always passes `hass` (`sentinel/engine.py`, the constructor), so only tests build it this way, and many of them assert `auto_execute` from it.
+
+**Why:** Security specialist on the #789 gate rework, 2026-11-22. A gate that says yes when it cannot look is the wrong default for a future caller.
+
+**How to apply:** Make `hass` a required argument and refuse in `_is_critical` when it is None; give the tests in `test_execution_service.py` and `test_sentinel_autonomy_settings.py` that expect an approval a `hass` with states for their targets.
+
+**Effort:** S-M (about 30 test call sites)
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ### A timed-out Sentinel model call leaves its worker thread running
 
 **What:** `run_sentinel_model_call` (`core/utils.py:501`) prefers the model's sync `invoke` and runs it through `asyncio.to_thread`. `asyncio.wait_for` cancels the awaiting task, but nothing can interrupt the thread already inside the provider client, and the `finally` discards it from `_sentinel_llm_tasks` -- so the call stops being tracked while it is still consuming an executor slot and provider capacity. Concrete for the OpenAI clients, whose transport timeout is 120 s against a triage timeout that now defaults to 10 s: up to twelve abandoned calls can stack per timed-out one.

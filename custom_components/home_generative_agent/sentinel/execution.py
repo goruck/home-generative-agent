@@ -14,8 +14,7 @@ Guardrail evaluation order
 3. The finding carries no action
    (its suggested actions are advice,
    never called)                      → ``prompt_user``
-4. Data quality != "fresh"            → ``prompt_user`` (stale) /
-                                        ``blocked`` (unavailable)
+4. Data quality != "fresh"            → ``prompt_user``
 5. Actions: one is not a targeted
    ``domain.service`` call on entities
    of that domain, a target is missing
@@ -26,11 +25,13 @@ Guardrail evaluation order
 7. Idempotency duplicate              → ``prompt_user``
 8. All checks passed                  → ``auto_execute``
 
-Only rule code decides whether a finding may act, by giving it actions.
-Neither ``is_sensitive`` (which governs what reaches a model or a
-notification) nor ``confidence`` (which a model chooses for a discovered
-rule) is read here, and the engine asks no model about a finding that
-carries an action (#789).
+No path here ends in silence: a finding whose action is refused is still
+sent to the user. No model takes part: neither ``is_sensitive`` (which
+governs what reaches a model or a notification) nor ``confidence`` (which a
+model chooses for a discovered rule) is read, and the engine asks no model
+about a finding whose action this gate approves (#789). The gate is reached
+only by a finding the engine would notify about: one a cooldown, snooze,
+quiet hours or a pending prompt holds back does not act either.
 """
 
 from __future__ import annotations
@@ -50,7 +51,6 @@ from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.const import (
     ACTION_POLICY_AUTO_EXECUTE,
-    ACTION_POLICY_BLOCKED,
     ACTION_POLICY_PROMPT_USER,
     CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
     CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
@@ -91,7 +91,7 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 # Minimum autonomy level required for auto-execution.
-_MIN_AUTO_EXECUTE_LEVEL: int = 2
+MIN_AUTO_EXECUTE_LEVEL: int = 2
 # The form of a service Sentinel can call.
 _SERVICE_ACTION = re.compile(r"[a-z0-9_]+\.[a-z0-9_]+")
 # Domains Sentinel never acts on by itself, whatever the rules or allowlist:
@@ -112,6 +112,9 @@ _FLOOR_RULES: tuple[dict[str, str], ...] = (
     {"domain": "lock", "service": "unlock"},
     {"domain": "lock", "service": "open"},
 )
+# Domains whose relay (the switch under a switch_as_x wrapper, what a template
+# cover or lock drives) the floor bars with them.
+_RELAY_GUARDED_DOMAINS = frozenset({*_NEVER_AUTO_DOMAINS, "lock"})
 
 
 def executable_actions(finding: AnomalyFinding) -> list[FindingAction]:
@@ -134,7 +137,7 @@ def is_callable_action(action: FindingAction) -> bool:
     slip past a floor that reads domains and still move the cover. An entity
     service acts only on its own domain, so a target of another domain is a
     call that does nothing and reads as done; only ``homeassistant.*`` takes
-    any domain, and the floor judges its targets.
+    any domain, and the floor bars it outright.
     """
     service = action.service
     targets = action.entity_ids
@@ -207,10 +210,10 @@ class SentinelExecutionService:
 
     def commit_auto_execute(self, execution_id: str, now: datetime) -> None:
         """
-        Record a successful live auto-execution after the service call completes.
+        Record a live auto-execution after its service calls were made.
 
-        This is used by the engine's live path so rate-limit and idempotency
-        state reflect actual completed actions rather than optimistic approval.
+        Called by the engine, never by the gate, so that the hourly limit and
+        the idempotency window count actions that ran, not approvals.
         """
         window_start = now - timedelta(hours=1)
         self._recent_action_times = [
@@ -221,7 +224,7 @@ class SentinelExecutionService:
         self._idempotency_seen.add(execution_id)
         LOGGER.info("Recorded auto-execute completion (execution_id=%s).", execution_id)
 
-    def evaluate(
+    def evaluate_canary(  # noqa: PLR0911
         self,
         finding: AnomalyFinding,
         snapshot: FullStateSnapshot,
@@ -229,53 +232,19 @@ class SentinelExecutionService:
         now: datetime,
     ) -> ActionPolicyResult:
         """
-        Evaluate execution policy for *finding* and return an ``ActionPolicyResult``.
+        Return the policy decision for *finding*, changing no state.
 
         The returned ``action_policy_path`` is one of:
 
-        - ``"prompt_user"`` — notify and ask the user to decide
-        - ``"auto_execute"`` — all guardrails passed; execute automatically
-        - ``"blocked"``    — finding is suppressed at the execution layer
+        - ``"prompt_user"`` — notify and let the user decide
+        - ``"auto_execute"`` — every guardrail passed; the actions would run
 
-        An approval is counted toward the hourly limit and remembered for the
-        idempotency window. This method is **not** a coroutine; it performs
-        no I/O.
+        Canary (dry-run) mode gets the same answer live execution would, so a
+        dry-run review needs no switch that could act; the engine runs
+        nothing in that mode. Nothing is counted or remembered here: the
+        engine calls ``commit_auto_execute`` once a live action has run. Not
+        a coroutine; it performs no I/O.
         """
-        result = self._decide(finding, snapshot, autonomy_level, now, dry_run=False)
-        if (
-            result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
-            and result.execution_id is not None
-        ):
-            self.commit_auto_execute(result.execution_id, now)
-        return result
-
-    def evaluate_canary(
-        self,
-        finding: AnomalyFinding,
-        snapshot: FullStateSnapshot,
-        autonomy_level: int,
-        now: datetime,
-    ) -> ActionPolicyResult:
-        """
-        Evaluate execution policy **without mutating any instance state**.
-
-        The same decision as ``evaluate()``, except that canary mode reports
-        what would run whether or not live execution is on, so a dry-run
-        review needs no switch that could act. Nothing is counted or
-        remembered: the caller commits a live action once it has run.
-        """
-        return self._decide(finding, snapshot, autonomy_level, now, dry_run=True)
-
-    def _decide(  # noqa: PLR0911
-        self,
-        finding: AnomalyFinding,
-        snapshot: FullStateSnapshot,
-        autonomy_level: int,
-        now: datetime,
-        *,
-        dry_run: bool,
-    ) -> ActionPolicyResult:
-        """Return the policy decision for *finding*, changing no state."""
 
         def _left_to_user(reason: str) -> ActionPolicyResult:
             return ActionPolicyResult(
@@ -287,37 +256,30 @@ class SentinelExecutionService:
             )
 
         # 1. Autonomy level gate — auto-execute requires level 2+.
-        if autonomy_level < _MIN_AUTO_EXECUTE_LEVEL:
+        if autonomy_level < MIN_AUTO_EXECUTE_LEVEL:
             return _left_to_user("autonomy_level_below_2")
 
         # 2. Auto-execution gate. Off: nothing to decide, the user is notified
-        # as at level 1. Checked before data quality so that levels 2 and 3
-        # drop no finding while no action can run (#783).
-        enabled = bool(
+        # as at level 1.
+        if not (
             self._options.get(
                 CONF_SENTINEL_AUTO_EXECUTION_ENABLED,
                 RECOMMENDED_SENTINEL_AUTO_EXECUTION_ENABLED,
             )
-        ) or (
-            dry_run
-            and bool(
-                self._options.get(
-                    CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
-                    RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
-                )
+            or self._options.get(
+                CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
+                RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
             )
-        )
-        if not enabled:
+        ):
             return _left_to_user("auto_execution_disabled")
 
-        # 3. Nothing to run. Checked before data quality for the same reason:
-        # a finding that could never act is an alert like any other, and a
-        # stale or missing sensor is often what it is about. This also covers
-        # an owed alert sent later, which is restored without its actions.
+        # 3. Nothing to run: an alert like any other. This also covers an
+        # owed alert sent later, which is restored without its actions.
         if not executable_actions(finding):
             return _left_to_user("no_executable_action")
 
-        # 4. Data quality gate.
+        # 4. Data quality gate. The action does not run on data that is
+        # missing or old; the user is still told, at every severity.
         dq, dq_details = self._compute_data_quality(finding, snapshot, now)
 
         def _result(
@@ -331,12 +293,8 @@ class SentinelExecutionService:
                 block_reason=reason,
             )
 
-        if dq == DATA_QUALITY_UNAVAILABLE:
-            high_sev = finding.severity == "high"
-            path = ACTION_POLICY_PROMPT_USER if high_sev else ACTION_POLICY_BLOCKED
-            return _result(path, "data_quality_unavailable")
-        if dq == DATA_QUALITY_STALE:
-            return _result(ACTION_POLICY_PROMPT_USER, "data_quality_stale")
+        if dq != DATA_QUALITY_FRESH:
+            return _result(ACTION_POLICY_PROMPT_USER, f"data_quality_{dq}")
 
         # 5. Action gate: well-formed, on the allowlist, never critical.
         if (block_reason := self._actions_block_reason(finding)) is not None:
@@ -345,11 +303,10 @@ class SentinelExecutionService:
         # 6. Rate limit gate.
         window_start = now - timedelta(hours=1)
         recent = [t for t in self._recent_action_times if t > window_start]
-        max_per_hour = int(
-            self._options.get(
-                CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
-                RECOMMENDED_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
-            )
+        max_per_hour = self._int_option(
+            CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
+            RECOMMENDED_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
+            minimum=0,
         )
         if len(recent) >= max_per_hour:
             return _result(ACTION_POLICY_PROMPT_USER, "rate_limit_exceeded")
@@ -360,17 +317,11 @@ class SentinelExecutionService:
             ACTION_POLICY_AUTO_EXECUTE,
             self._compute_policy_version(autonomy_level),
         )
-        window_seconds = (
-            int(
-                self._options.get(
-                    CONF_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES,
-                    RECOMMENDED_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES,
-                )
-            )
-            * 60
-        )
         elapsed = time.monotonic() - self._idempotency_window_reset_at
-        if elapsed < window_seconds and execution_id in self._idempotency_seen:
+        if (
+            elapsed < self._idempotency_window_seconds()
+            and execution_id in self._idempotency_seen
+        ):
             LOGGER.debug(
                 "Auto-execute blocked for %s: idempotency duplicate (execution_id=%s).",
                 finding.anomaly_id,
@@ -381,6 +332,22 @@ class SentinelExecutionService:
             )
 
         return _result(ACTION_POLICY_AUTO_EXECUTE, None, execution_id)
+
+    def _int_option(self, key: str, default: int, *, minimum: int) -> int:
+        """Return a whole-number option; one unreadable or too small is not used."""
+        try:
+            value = int(self._options.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return max(minimum, value)
+
+    def _idempotency_window_seconds(self) -> int:
+        """Return the idempotency window, never less than a minute."""
+        return 60 * self._int_option(
+            CONF_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES,
+            RECOMMENDED_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES,
+            minimum=1,
+        )
 
     # ---------------------------------------------------------------------- #
     # Data quality / staleness
@@ -451,19 +418,16 @@ class SentinelExecutionService:
         Return why *finding*'s actions cannot run on their own, or None.
 
         Only the finding's ``actions`` are ever called (its suggested actions
-        are advice), so only those must be on the allowlist; with none, there
-        is nothing to run and the user decides. An action that is not a
+        are advice), so only those must be on the allowlist; the caller has
+        already left a finding with none to the user. An action that is not a
         targeted call (``is_callable_action``) stops them all, as does a
         target Home Assistant has no state for or holds unavailable. The
-        reasons returned are ``no_executable_action``, ``malformed_action``,
-        ``target_unavailable``, ``service_not_allowlisted`` and
-        ``critical_action``. An empty allowlist permits nothing. A critical
-        action never runs without a person, whatever the allowlist says
-        (see ``_is_critical``).
+        reasons returned are ``malformed_action``, ``target_unavailable``,
+        ``service_not_allowlisted`` and ``critical_action``. An empty
+        allowlist permits nothing. A critical action never runs without a
+        person, whatever the allowlist says (see ``_is_critical``).
         """
         actions = executable_actions(finding)
-        if not actions:
-            return "no_executable_action"
         if not all(is_callable_action(action) for action in actions):
             LOGGER.debug("Auto-execute blocked: malformed action in %s.", actions)
             return "malformed_action"
@@ -516,12 +480,16 @@ class SentinelExecutionService:
         The floor, which no rule or allowlist lifts: any ``homeassistant.*``
         call (it restarts or stops Home Assistant, or runs whatever service
         its target has), any alarm panel, cover, valve, siren or button
-        action, any lock action but ``lock.lock``, and a call on the switch
-        under a switch_as_x wrapper of one of those domains or of a lock,
-        which is the relay that moves it. Then what the user's Critical
-        Action PIN rules cover, and what the call would start (a script,
-        scene or automation, a template entity's own actions). A check that
-        cannot be made counts as critical.
+        action, any lock action but ``lock.lock``, and a call that reaches
+        the relay moving one of those or a lock: the switch under a
+        switch_as_x wrapper or a template cover or lock, a group holding it,
+        another wrapper of it (``guarded_relay_reach``). Then what the
+        user's Critical Action PIN rules cover, and what the call would
+        start (a script, scene or automation, a template entity's own
+        actions), judged by those rules and the floor. A check that cannot
+        be made, or a relay list that could not be read in full, counts as
+        critical. With no Home Assistant instance only the services and
+        entity ids are judged (the engine always supplies one).
         """
         try:
             return self._floor_bars(actions) or self._rules_bar(actions)
@@ -535,10 +503,9 @@ class SentinelExecutionService:
     def _floor_bars(self, actions: list[FindingAction]) -> bool:
         """Return True if Sentinel's own floor bars any of *actions*."""
         from custom_components.home_generative_agent.agent.rule_entities import (  # noqa: PLC0415
-            read_switch_wrappers,
+            guarded_relay_reach,
         )
 
-        guarded = {*_NEVER_AUTO_DOMAINS, "lock"}
         for action in actions:
             service = action.service
             domain = service.split(".", 1)[0]
@@ -549,18 +516,23 @@ class SentinelExecutionService:
             ):
                 LOGGER.debug("Auto-execute blocked: %s needs a person.", service)
                 return True
-        targets = {e for action in actions for e in action.entity_ids}
-        if self._hass is None or not any(e.startswith("switch.") for e in targets):
+        if self._hass is None:
             return False
-        for wrapper, (switch_id, _inverted) in read_switch_wrappers(self._hass).items():
-            if switch_id in targets and wrapper.split(".", 1)[0] in guarded:
-                LOGGER.debug(
-                    "Auto-execute blocked: %s is the relay under %s.",
-                    switch_id,
-                    wrapper,
-                )
-                return True
-        return False
+        reach, unread = guarded_relay_reach(self._hass, _RELAY_GUARDED_DOMAINS)
+        if unread:
+            LOGGER.warning(
+                "Auto-execute blocked: could not read %s, so what it moves "
+                "is not known.",
+                "; ".join(unread),
+            )
+            return True
+        relays = reach & {e for action in actions for e in action.entity_ids}
+        if relays:
+            LOGGER.debug(
+                "Auto-execute blocked: %s reaches the relay under a guarded device.",
+                ", ".join(sorted(relays)),
+            )
+        return bool(relays)
 
     def _rules_bar(self, actions: list[FindingAction]) -> bool:
         """Return True if a PIN rule covers *actions* or what they start."""
@@ -578,9 +550,15 @@ class SentinelExecutionService:
         )
 
         # Extended as the PIN gate extends them (#773): a rule's word also
-        # reaches entities by device class, name and group.
+        # reaches entities by device class, name and group. The floor's rules
+        # go with them, so that a relay a template switch drives is held like
+        # the cover it moves.
         rules = expand_critical_rules(
-            self._hass, resolve_critical_action_policy(self._options).critical_actions
+            self._hass,
+            [
+                *resolve_critical_action_policy(self._options).critical_actions,
+                *_FLOOR_RULES,
+            ],
         )
         steps = [
             {"action": a.service, "target": {"entity_id": list(a.entity_ids)}}
@@ -591,7 +569,7 @@ class SentinelExecutionService:
         # The PIN gate follows them, and so does Sentinel (#831).
         found = find_critical_automation_calls(
             {"actions": steps}, rules
-        ) or stored_action_calls(self._hass, steps, [*rules, *_FLOOR_RULES])
+        ) or stored_action_calls(self._hass, steps, rules)
         if found:
             LOGGER.debug(
                 "Auto-execute blocked: critical action %s.",
@@ -605,16 +583,9 @@ class SentinelExecutionService:
 
     def _refresh_idempotency_window(self) -> None:
         """Reset the seen-set when the current time bucket rolls over."""
-        window_minutes = int(
-            self._options.get(
-                CONF_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES,
-                RECOMMENDED_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES,
-            )
-        )
-        window_seconds = window_minutes * 60
         now_monotonic = time.monotonic()
         elapsed = now_monotonic - self._idempotency_window_reset_at
-        if elapsed >= window_seconds:
+        if elapsed >= self._idempotency_window_seconds():
             self._idempotency_seen.clear()
             self._idempotency_window_reset_at = now_monotonic
 
@@ -630,13 +601,7 @@ class SentinelExecutionService:
         ``sha256(anomaly_id + ":" + action_policy_path + ":" + policy_version
                  + ":" + window_bucket)``
         """
-        window_minutes = int(
-            self._options.get(
-                CONF_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES,
-                RECOMMENDED_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES,
-            )
-        )
-        window_bucket = int(time.time() / (window_minutes * 60))
+        window_bucket = int(time.time() / self._idempotency_window_seconds())
         raw = f"{anomaly_id}:{action_policy_path}:{policy_version}:{window_bucket}"
         return hashlib.sha256(raw.encode()).hexdigest()
 
@@ -656,11 +621,10 @@ class SentinelExecutionService:
         policy: dict[str, Any] = {
             "allowed_services": allowed,
             "autonomy_level": autonomy_level,
-            "max_actions_per_hour": int(
-                self._options.get(
-                    CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
-                    RECOMMENDED_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
-                )
+            "max_actions_per_hour": self._int_option(
+                CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
+                RECOMMENDED_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
+                minimum=0,
             ),
             "require_pin_for_increase": level_increase_pin_required(self._options),
         }

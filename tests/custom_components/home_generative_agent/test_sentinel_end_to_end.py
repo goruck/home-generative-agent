@@ -14,7 +14,7 @@ import pytest
 
 from custom_components.home_generative_agent.const import (
     ACTION_POLICY_AUTO_EXECUTE,
-    ACTION_POLICY_BLOCKED,
+    ACTION_POLICY_PROMPT_USER,
     CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
     CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
     CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
@@ -41,7 +41,6 @@ from custom_components.home_generative_agent.sentinel.notifier import (
     MAX_ALSO_LINE_CHARS,
 )
 from custom_components.home_generative_agent.sentinel.suppression import (
-    SUPPRESSION_REASON_POLICY_BLOCKED,
     SUPPRESSION_REASON_TRIAGE_SUPPRESSED,
     SuppressionManager,
     SuppressionState,
@@ -840,20 +839,20 @@ async def test_suppression_gate_fires_before_triage(
 
 
 # ---------------------------------------------------------------------------
-# Gap 2: BLOCKED findings do not notify but do produce an audit record
+# Gap 2: a finding whose action is refused is still sent (#789)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_blocked_finding_no_notification(
+async def test_a_refused_action_still_notifies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A BLOCKED finding must not trigger async_notify."""
+    """Missing data stops the action, never the alert."""
     snapshot = _make_snapshot()
-    engine, notifier, _audit = _make_engine(monkeypatch, snapshot, cooldown_minutes=0)
+    engine, notifier, audit = _make_engine(monkeypatch, snapshot, cooldown_minutes=0)
 
-    blocked_result = ActionPolicyResult(
-        action_policy_path=ACTION_POLICY_BLOCKED,
+    refused = ActionPolicyResult(
+        action_policy_path=ACTION_POLICY_PROMPT_USER,
         data_quality="unavailable",
         data_quality_details={},
         execution_id=None,
@@ -863,41 +862,12 @@ async def test_blocked_finding_no_notification(
     with patch.object(
         cast("Any", engine)._execution_service,
         "evaluate_canary",
-        return_value=blocked_result,
+        return_value=refused,
     ):
         await engine._run_once("poll")
 
-    assert len(notifier.calls) == 0
-
-
-@pytest.mark.asyncio
-async def test_blocked_finding_creates_audit_record(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A BLOCKED finding must produce an audit record with action_policy_path='blocked'."""
-    snapshot = _make_snapshot()
-    engine, _notifier, audit = _make_engine(monkeypatch, snapshot, cooldown_minutes=0)
-
-    blocked_result = ActionPolicyResult(
-        action_policy_path=ACTION_POLICY_BLOCKED,
-        data_quality="unavailable",
-        data_quality_details={},
-        execution_id=None,
-        block_reason="data_quality_unavailable",
-    )
-
-    with patch.object(
-        cast("Any", engine)._execution_service,
-        "evaluate_canary",
-        return_value=blocked_result,
-    ):
-        await engine._run_once("poll")
-
-    assert len(audit.calls) == 1
-    assert audit.calls[0]["action_policy_path"] == ACTION_POLICY_BLOCKED
-    assert (
-        audit.calls[0]["suppression_reason_code"] == SUPPRESSION_REASON_POLICY_BLOCKED
-    )
+    assert len(notifier.calls) == 1
+    assert audit.calls[0]["action_policy_path"] == ACTION_POLICY_PROMPT_USER
 
 
 @pytest.mark.asyncio
@@ -976,7 +946,17 @@ async def _dispatch_triaged(
     )
 
 
-async def test_a_finding_that_carries_an_action_is_never_triaged(
+def _acting_result(path: str) -> ActionPolicyResult:
+    return ActionPolicyResult(
+        action_policy_path=path,
+        data_quality="fresh",
+        data_quality_details={},
+        execution_id="exec-1",
+        block_reason=None if path == ACTION_POLICY_AUTO_EXECUTE else "critical_action",
+    )
+
+
+async def test_a_finding_whose_action_runs_is_never_triaged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No model may cancel a rule's action, so none is asked (#789)."""
@@ -985,11 +965,48 @@ async def test_a_finding_that_carries_an_action_is_never_triaged(
         _standing_finding("drier", "appliance_power_duration"),
         actions=(FindingAction("switch.turn_off", ("switch.drier",)),),
     )
+    ran = AsyncMock(return_value={"status": "success", "actions": []})
 
-    delivered = await _dispatch_triaged(engine, finding, datetime.now(UTC))
+    with (
+        patch.object(
+            engine._execution_service,
+            "evaluate_canary",
+            return_value=_acting_result(ACTION_POLICY_AUTO_EXECUTE),
+        ),
+        patch.object(engine, "_auto_execute", ran),
+    ):
+        delivered = await _dispatch_triaged(engine, finding, datetime.now(UTC))
 
     assert delivered is True
+    ran.assert_awaited_once()
     service.triage.assert_not_awaited()
+
+
+async def test_a_finding_whose_action_is_refused_is_triaged_like_any_other(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With nothing to protect, the alert keeps triage's noise filter."""
+    engine, _audit, service = _triaged_engine(monkeypatch)
+    finding = replace(
+        _standing_finding("drier", "appliance_power_duration"),
+        actions=(FindingAction("switch.turn_off", ("switch.drier",)),),
+    )
+    ran = AsyncMock()
+
+    with (
+        patch.object(
+            engine._execution_service,
+            "evaluate_canary",
+            return_value=_acting_result(ACTION_POLICY_PROMPT_USER),
+        ),
+        patch.object(engine, "_auto_execute", ran),
+    ):
+        delivered = await _dispatch_triaged(engine, finding, datetime.now(UTC))
+
+    # Triage suppresses in this fixture: the alert is stopped, nothing ran.
+    assert delivered is False
+    service.triage.assert_awaited_once()
+    ran.assert_not_awaited()
 
 
 async def test_an_unchanged_suppressed_finding_is_triaged_once(
@@ -1255,10 +1272,10 @@ async def test_a_finding_with_no_device_ignores_the_entity_cooldown(
 
 
 @pytest.mark.asyncio
-async def test_compound_blocked_finding_audit_reason(
+async def test_a_compound_whose_action_is_refused_still_notifies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A BLOCKED compound finding must audit as policy_blocked, not notify."""
+    """Missing data stops a compound's action, never its alert."""
     snapshot = _make_snapshot()
     engine, notifier, audit = _make_engine(monkeypatch, snapshot, cooldown_minutes=0)
 
@@ -1274,8 +1291,8 @@ async def test_compound_blocked_finding_audit_reason(
     )
     compound = CompoundFinding.from_findings([finding])
 
-    blocked_result = ActionPolicyResult(
-        action_policy_path=ACTION_POLICY_BLOCKED,
+    refused = ActionPolicyResult(
+        action_policy_path=ACTION_POLICY_PROMPT_USER,
         data_quality="unavailable",
         data_quality_details={},
         execution_id=None,
@@ -1285,7 +1302,7 @@ async def test_compound_blocked_finding_audit_reason(
     with patch.object(
         cast("Any", engine)._execution_service,
         "evaluate_canary",
-        return_value=blocked_result,
+        return_value=refused,
     ):
         await engine._dispatch_compound(
             compound,
@@ -1296,12 +1313,9 @@ async def test_compound_blocked_finding_audit_reason(
             False,  # noqa: FBT003
         )
 
-    assert len(notifier.calls) == 0
+    assert len(notifier.calls) == 1
     assert len(audit.calls) == 1
-    assert (
-        audit.calls[0]["suppression_reason_code"] == SUPPRESSION_REASON_POLICY_BLOCKED
-    )
-    assert audit.calls[0]["action_policy_path"] == ACTION_POLICY_BLOCKED
+    assert audit.calls[0]["action_policy_path"] == ACTION_POLICY_PROMPT_USER
     assert audit.calls[0]["constituent_reasons"] == {
         "test-compound-1": "not_suppressed"
     }
@@ -2080,38 +2094,6 @@ async def test_grouped_push_leaves_out_what_does_not_fit_and_keeps_it_due(
     # After its cooldown the first one left out is shown itself.
     assert await _dispatch_group(engine, *windows, at=t0 + timedelta(minutes=31))
     assert notifier.calls[1]["finding"] is left_out[0]
-
-
-@pytest.mark.asyncio
-async def test_blocked_finding_registers_cooldown_not_prompt(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A BLOCKED finding must register a type cooldown but not a pending prompt."""
-    snapshot = _make_snapshot()
-    engine, _notifier, _audit = _make_engine(monkeypatch, snapshot, cooldown_minutes=0)
-
-    suppression = cast("DummySuppression", cast("Any", engine)._suppression)
-
-    blocked_result = ActionPolicyResult(
-        action_policy_path=ACTION_POLICY_BLOCKED,
-        data_quality="unavailable",
-        data_quality_details={},
-        execution_id=None,
-        block_reason="data_quality_unavailable",
-    )
-
-    with patch.object(
-        cast("Any", engine)._execution_service,
-        "evaluate_canary",
-        return_value=blocked_result,
-    ):
-        await engine._run_once("poll")
-
-    # Cooldown (last_by_type) must be registered.
-    assert suppression.state.last_by_type  # non-empty
-
-    # No pending prompt must be registered (BLOCKED never sends user a prompt).
-    assert not suppression.state.pending_prompts
 
 
 # ---------------------------------------------------------------------------

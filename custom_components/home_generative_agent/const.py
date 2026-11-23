@@ -1641,7 +1641,6 @@ SNOOZE_PERMANENT = "permanent"
 # Action policy values written to audit records and consumed by the execution service.
 ACTION_POLICY_PROMPT_USER = "prompt_user"
 ACTION_POLICY_AUTO_EXECUTE = "auto_execute"
-ACTION_POLICY_BLOCKED = "blocked"
 
 # Data quality tags written to action audit payloads.
 DATA_QUALITY_FRESH = "fresh"
