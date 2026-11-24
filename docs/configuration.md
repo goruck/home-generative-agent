@@ -565,6 +565,15 @@ The **Options** flow (gear icon on the integration page) exposes:
 - Tool retrieval limit and relevance threshold
 - **Excluded tools** (`tool_exclusions`) — per-tool allow/deny picker across every selected LLM API, including MCP servers (see [Excluded tools](#excluded-tools))
 - **Always-included tools** (`tool_inclusions`) — tools appended after vector retrieval, on top of the retrieval limit (see [Always-included tools](#always-included-tools))
+- **Video analyzer mode** — disable / notify_on_anomaly / always_notify
+- **Enable perceptual-hash frame filter (dHash)** — skip visually identical frames before VLM analysis (off by default; always active for ring-mqtt `event_select` capture loops regardless of this setting; see caveat in [Camera Entities](camera-entities.md#advanced-options))
+- **Camera notification cooldown (seconds)** — `0` (off) to `600`; after a camera notification sounds, later ones from that camera within the window replace the same card quietly instead of sounding again (needs a single `notify.mobile_app_*` target; see [Notification cooldown](camera-entities.md#notification-cooldown))
+- **House notification cooldown (seconds)** — `0` (off) to `60`; after a camera notification sounds, a notification from any camera within the window posts its card quietly (start around 15 s; needs a single `notify.mobile_app_*` target; see [House notification cooldown](camera-entities.md#house-notification-cooldown))
+- **Motion sensor → camera overrides** — one `binary_sensor.X: camera.Y` pair per line; use when automatic resolution picks the wrong camera (see [Motion → camera resolution](camera-entities.md#motion--camera-resolution))
+
+Two options have no form field: `model_provider_uncontended` (default `false`; bypass all local GPU gates when the server has dedicated capacity, see [Sentinel admission control](sentinel.md)) and `video_model_semaphore` (default `1`; most camera model calls at once). To set one, stop Home Assistant, add the key to this integration's `options` object in `config/.storage/core.config_entries`, and start it again. Saving the options form later keeps the value.
+
+See [Architecture](architecture.md#llm-context-management) for detail on context management parameters.
 
 ### Prompt caching
 
@@ -587,13 +596,6 @@ Two things still prevent a hit between turns, by design of the providers' caches
 - **Time-dependent expressions in your own system prompt.** The prompt is a Home Assistant template; a `{{ now() }}` or a state lookup in it re-renders differently each turn and lands in the stable part. Keep such values out of the prompt, or accept that the prefix will be rewritten on every turn.
 
 If you use a fallback chain, each member is shaped for its own provider: an OpenAI fallback behind an Anthropic primary receives the plain string, never the Anthropic cache key.
-- `model_provider_uncontended` — bypass all local GPU gates when the server has dedicated capacity
-- **Video analyzer mode** — disable / notify_on_anomaly / always_notify
-- **Enable perceptual-hash frame filter (dHash)** — skip visually identical frames before VLM analysis (off by default; always active for ring-mqtt `event_select` capture loops regardless of this setting; see caveat in [Camera Entities](camera-entities.md#advanced-options))
-- **Camera notification cooldown (seconds)** — `0` (off) to `600`; after a camera notification sounds, later ones from that camera within the window replace the same card quietly instead of sounding again (needs a single `notify.mobile_app_*` target; see [Notification cooldown](camera-entities.md#notification-cooldown))
-- **Motion sensor → camera overrides** — one `binary_sensor.X: camera.Y` pair per line; use when automatic resolution picks the wrong camera (see [Motion → camera resolution](camera-entities.md#motion--camera-resolution))
-
-See [Architecture](architecture.md#llm-context-management) for detail on context management parameters.
 
 ---
 

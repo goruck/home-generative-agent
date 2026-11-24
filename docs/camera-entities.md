@@ -352,12 +352,12 @@ The video pipeline enforces a per-entry semaphore that limits concurrent VLM and
 | `video_analyzer_house_notification_cooldown_s` | `0` | Seconds (0 to 60) after a sounding camera notification during which a notification from any camera posts its card quietly; that camera then stays quiet for its camera cooldown (or the house cooldown, if longer). The first Unknown Person still sounds. `0` = off. Start around 15 s: per-camera analysis can put one event's decisions 10 to 30 s apart. See [House notification cooldown](#house-notification-cooldown). |
 | `video_analyzer_motion_camera_map` | *(empty)* | Explicit `binary_sensor: camera` overrides, one per line. Use when automatic resolution picks the wrong camera. |
 
-**In the Camera Image Analysis feature subentry:**
+**With no form field** (see [Options with no form field](configuration.md#global-options) for how to set them):
 
 | Option | Default | Description |
 |---|---|---|
 | `video_model_semaphore` | `1` | Concurrent video model call limit. Increase only if your server has dedicated GPU headroom. |
-| `model_provider_uncontended` | `false` | (Global Options) Bypass all local gates when the model server has dedicated capacity. |
+| `model_provider_uncontended` | `false` | Bypass all local gates when the model server has dedicated capacity. |
 
 ![Video analysis notification example](../assets/video-analysis-screenshot.jpeg)
 
