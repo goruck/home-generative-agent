@@ -2737,6 +2737,30 @@ def intent_service_calls(
     ]
 
 
+# A timer's slot holding a command the timer runs when it finishes.
+START_TIMER_INTENT = "HassStartTimer"
+TIMER_COMMAND_SLOT = "conversation_command"
+# Home Assistant 2026.12's tool that runs a command after a delay.
+SCHEDULE_COMMAND_TOOL = "schedule_command"
+
+
+def runs_a_command_later(tool_name: str, tool_args: dict[str, Any]) -> bool:
+    """
+    Return True if the call leaves a command for Home Assistant to run later.
+
+    Home Assistant runs it as a new conversation when the delay ends, on the
+    agent the request named. This integration names none, so the command runs
+    on Home Assistant's own agent, which this gate never sees. Its words cannot
+    be read for what they will do.
+    """
+    base = base_tool_name(tool_name)
+    if base == SCHEDULE_COMMAND_TOOL:
+        return True
+    return base == START_TIMER_INTENT and bool(
+        str(tool_args.get(TIMER_COMMAND_SLOT) or "").strip()
+    )
+
+
 # Intents that only read, list or time things: the gate leaves them alone.
 # Every other intent that is not an on/off or cover intent is a device
 # intent: a template entity behind one runs action scripts of its own, which

@@ -54,6 +54,7 @@ from .helpers import (
     QUOTE_MARKS,
     SET_POSITION_INTENT,
     STOP_MOVING_INTENT,
+    TIMER_COMMAND_SLOT,
     TOOL_NAMESPACE_SEP,
     PinReply,
     base_tool_name,
@@ -64,6 +65,7 @@ from .helpers import (
     is_on_off_intent,
     minimal_payload_for_domain,
     normalize_intent_for_lock,
+    runs_a_command_later,
     sanitize_tool_text,
 )
 from .indirect_pin import (
@@ -221,6 +223,8 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "target_and_others": "{targets} and other devices",
         "target_unnamed_devices": "devices it does not name",
         "action_remote": 'run {tool} on "{api}"',
+        # A command Home Assistant runs when a timer or delay ends.
+        "action_run_later": 'run "{command}" later',
         "action_remote_args": 'run {tool} ({args}) on "{api}"',
         # What the agent passed to a script's device fields (#787).
         "action_script_targets": "{action} ({targets})",
@@ -379,6 +383,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "target_and_others": "{targets} a další zařízení",
         "target_unnamed_devices": "zařízení, která nejmenuje",
         "action_remote": "spustit {tool} na „{api}“",
+        "action_run_later": "později spustit „{command}“",
         "action_remote_args": "spustit {tool} ({args}) na „{api}“",
         "action_script_targets": "{action} ({targets})",
         "action_unnamed_target": "nepojmenované zařízení",
@@ -490,6 +495,7 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "action_stop": "停止{target}",
         "action_service": "{service} {target}",
         "action_remote": "在“{api}”上运行 {tool}",
+        "action_run_later": "稍后运行“{command}”",
         "action_remote_args": "在“{api}”上运行 {tool}（{args}）",
         "action_automation": "添加自动化{target}",
         "action_unnamed_automation": "添加一个未命名的自动化",
@@ -571,6 +577,8 @@ def refused_pin_request(hass: HomeAssistant | None, pin_reply: PinReply | None) 
     return pin_msg(hass, key)
 
 
+# Longest delayed command the action line repeats; the model wrote it.
+_COMMAND_MAX_LEN = 160
 # Longest target name the action line repeats. The name comes from the model.
 _ACTION_TARGET_MAX_LEN = 80
 _SCENE_DOMAIN = "scene"
@@ -1090,7 +1098,7 @@ def _relay_effects(hass: HomeAssistant, action: Mapping[str, Any]) -> list[str]:
     return effects
 
 
-def _describe_line(  # noqa: PLR0911
+def _describe_line(  # noqa: PLR0911, PLR0912
     hass: HomeAssistant | None, action: Mapping[str, Any]
 ) -> str:
     """
@@ -1136,6 +1144,20 @@ def _describe_line(  # noqa: PLR0911
 
     raw_args = action.get("tool_args")
     tool_args: dict[str, Any] = dict(raw_args) if isinstance(raw_args, Mapping) else {}
+    if runs_a_command_later(tool_name, tool_args):
+        # The command is what the PIN approves: it runs later on Home
+        # Assistant's own agent, past this gate. Its quote marks are shown as
+        # apostrophes, so it cannot close the quote and read as more.
+        command = tool_args.get(TIMER_COMMAND_SLOT) or tool_args.get("command")
+        return pin_msg(
+            hass,
+            "action_run_later",
+            command=_one_line(
+                str(command or "").translate(_QUOTE_MARKS),
+                _COMMAND_MAX_LEN,
+                mark_cut=True,
+            ),
+        )
     if (line := _intent_script_line(hass, tool_name, tool_args)) is not None:
         return line
     if (script_id := script_tool_entity_id(tool_name)) is not None:

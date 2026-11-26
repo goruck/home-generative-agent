@@ -144,6 +144,7 @@ from .helpers import (
     remote_tool_label,
     remote_tool_name,
     resolve_critical_action_policy,
+    runs_a_command_later,
     sanitize_tool_args,
     sanitize_tool_text,
     thread_has_pending_action,
@@ -779,9 +780,6 @@ _REMOTE_READ_ONLY_INTENTS = frozenset(
         "HassRespond",
     }
 )
-# A timer's slot holding a command the timer runs when it finishes.
-_START_TIMER_INTENT = "HassStartTimer"
-_TIMER_COMMAND_SLOT = "conversation_command"
 
 # ----- Alarm helpers -----
 
@@ -4473,6 +4471,11 @@ def _is_critical_action(  # noqa: PLR0911, PLR0912
             origin.tool_name or tool_name, tool_args, read_only_hint=origin.read_only
         )
 
+    # A timer given a command, or a scheduled command: what it runs later
+    # goes past this gate, so the PIN is asked for now.
+    if runs_a_command_later(tool_name, tool_args):
+        return True
+
     # Home Assistant's admin-only API (#918). A tool it marks read-only only
     # reads. Its call-action tool runs the service its arguments name, so it
     # is read by them alone: by its name it would read as a
@@ -4579,16 +4582,11 @@ def _remote_call_is_read_only(
     agent. Otherwise one of Home Assistant's read-only intents, or a tool the
     remote server marks read-only, only reads.
     """
-    if is_script_like_tool(tool_name):
-        return False
-    base = base_tool_name(tool_name)
-    if (
-        base == _START_TIMER_INTENT
-        and str(tool_args.get(_TIMER_COMMAND_SLOT) or "").strip()
-    ):
+    if is_script_like_tool(tool_name) or runs_a_command_later(tool_name, tool_args):
         return False
     return read_only_hint or (
-        is_intent_tool(tool_name) and base in _REMOTE_READ_ONLY_INTENTS
+        is_intent_tool(tool_name)
+        and base_tool_name(tool_name) in _REMOTE_READ_ONLY_INTENTS
     )
 
 

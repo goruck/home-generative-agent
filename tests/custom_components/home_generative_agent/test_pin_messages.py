@@ -20,6 +20,7 @@ from custom_components.home_generative_agent.agent.tools import (
 # in test_templates_format_cleanly means a language introduced a placeholder
 # without adding it here (and without it existing in the English template).
 _DUMMY_KWARGS: dict[str, Any] = {
+    "command": "command",
     "reason": "reason",
     "automations": "automations",
     "calls": "calls",
