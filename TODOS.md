@@ -146,6 +146,34 @@
 
 ---
 
+### A failed PIN-confirmed MCP call hands the model the whole MCP wrapper
+
+**What:** When a tool reached over MCP fails after a PIN (the MCP error flag, or its own failure report, #1067), `_execute_pending_action` (`agent/tools.py`) puts `parse_tool_response`'s content into the `action_execute_failed` line. That content is the whole MCP result re-encoded: `{"content": [{"type": "text", "text": "{\"success\": false…"}], "isError": false}`. The model reads doubly escaped JSON with a literal `"isError": false` beside "failed", and the remote server's text sits unbounded inside a fixed instruction line.
+
+**Why:** PR for #1067, gstack review (2026-11-26), Claude adversarial pass. Not new with that PR: the `isError: true` branch has done the same since #1007.
+
+**How to apply:** Pass the text of the item that reported the failure, bounded and run through `sanitize_tool_text`, as `err`. Keep the full result out of the fixed line.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
+### MCP failure reports in other shapes still read as done
+
+**What:** `_mcp_reports_failure` (`agent/helpers.py`, #1067) reads a JSON object in a text item. A tool's failure still reads as done when it comes as `structuredContent` with non-JSON text, as doubly encoded JSON, inside a Markdown code fence, as a top-level list, nested under another key, as `"success": "false"`, or as `"errors": [...]`. So does text that starts with a byte order mark, a JSON object followed by prose, a failure inside a `resource` item, and a `status` of `"Error"` in another case. An action intent whose `response_type` is written with a JSON escape is not read as an intent either (#1007). In the other direction, a result whose items disagree (one says `success: true`, another reports an error) reads as wholly failed, though part of it acted. `loads_or_none` does not catch `MemoryError`, and `_run_ha_tool` calls `parse_tool_response` outside its `try`. A self-reported failure after a PIN also gets the same "can ask again" line as any failed call, though another server's `success: false` does not prove nothing acted.
+
+**Why:** PR for #1067, gstack review (2026-11-26), Claude adversarial pass and Codex, second and third cycles. None is a regression; each needs a server other than Home Assistant, whose own tools send a boolean `success`.
+
+**How to apply:** Read `structuredContent` first when it is an object (newer MCP servers send it). Leave the rest until a user reports a tool that uses one. For the PIN line, consider a reply without "ask again" for a self-reported failure.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
 ### Sentinel's "Ask agent" handoff text is treated as a user-written PIN source
 
 **What:** `_outcome_for_handoff` (`notify/actions.py`) passes a generated Sentinel prompt (finding evidence, device names, readings, timestamps) to `conversation.process`. `conversation.py` wraps every turn's text in `PinReply`, so the generated text is checked by `pin_in_text` as if a person wrote it. The handoff conversation is fresh, so the model has no PIN from history, but a model that tries the numbers in the prompt as PIN guesses succeeds when the PIN equals one of them standing alone (a year such as 2026, a reading such as 1234 W); each wrong guess counts one of the five attempts.

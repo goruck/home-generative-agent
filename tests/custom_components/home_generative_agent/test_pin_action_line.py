@@ -1118,6 +1118,156 @@ def test_a_remote_error_flag_in_the_result_is_a_failure(text: str) -> None:
     assert parse_tool_response(response, {"domain": ["lock"]})[1] == "error"
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"success": False, "error": "No exposed entities"},
+        {"success": False},
+        {"error": "Script failed"},
+        {"error": {"code": 5}},
+        {"status": "error", "message": "lock jammed"},
+        # A long error is still a failure report.
+        {"success": False, "error": "x" * 100_000},
+    ],
+)
+def test_an_mcp_tool_that_reports_its_own_failure_is_a_failure(
+    payload: dict[str, Any],
+) -> None:
+    """The MCP error flag is unset; the failure is in the text (#1067)."""
+    response = _over_mcp(payload)
+
+    content, status = parse_tool_response(response, {})
+
+    assert status == "error"
+    # The model still reads the tool's own words.
+    assert json.loads(content) == response
+    # The same result handed on as a JSON string.
+    assert parse_tool_response(json.dumps(response), {})[1] == "error"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"success": True, "result": "ok"},
+        {"success": True, "error": None, "warning": ""},
+        # A call that says it worked is not failed for a note beside that.
+        {"success": True, "warning": "Deprecated argument; action completed"},
+        {"success": True, "error": "none"},
+        {"success": True, "status": "error"},
+        # Another server's warning need not mean the call did not act.
+        {"result": 1, "warning": "low battery"},
+        # Only a boolean decides.
+        {"success": 0},
+        {"success": None},
+        {"success": "false"},
+        {"status": {"error": 1}},
+        {"status": "failed"},
+        {"status": "Error"},
+        # An empty error is no report.
+        {"result": 1, "error": None},
+        {"error": ""},
+        {"error": []},
+        # Words in plain text, or JSON that is not an object, are not a report.
+        'The "error" light is off and "success": false was logged',
+        [{"success": False}],
+        {"data": {"success": False, "error": "nested deeper"}},
+    ],
+)
+def test_an_mcp_result_that_reports_no_failure_stays_a_success(
+    payload: Any,
+) -> None:
+    """Read as failed, a call that acted would be asked for again (#1067 review)."""
+    assert parse_tool_response(_over_mcp(payload), {})[1] is None
+
+
+def test_a_failure_among_several_mcp_text_items_is_a_failure() -> None:
+    """A tool can add a second item to its failure report (#1067 review)."""
+    response = {
+        "content": [
+            {"type": "image", "data": "aGk=", "mimeType": "image/png"},
+            {"type": "text", "text": "Diagnostics follow"},
+            {"type": "text", "text": json.dumps({"success": False})},
+        ],
+        "isError": False,
+    }
+
+    assert parse_tool_response(response, {})[1] == "error"
+
+
+def test_malformed_mcp_content_items_are_skipped() -> None:
+    """A remote tool's odd result must not fail a call that ran (#1067 review)."""
+    response: dict[str, Any] = {
+        "content": [
+            "plain",
+            None,
+            5,
+            {"type": "text"},
+            {"type": "text", "text": None},
+            {"type": "text", "text": 5},
+        ],
+        "isError": False,
+    }
+
+    assert parse_tool_response(response, {})[1] is None
+
+    response["content"].append({"type": "text", "text": json.dumps({"success": False})})
+    assert parse_tool_response(response, {})[1] == "error"
+
+
+def test_a_tools_own_result_carrying_text_is_not_read_as_an_mcp_result() -> None:
+    """It has a success of its own; the text is its data (#1067 review)."""
+    log = json.dumps({"error": "historical log entry"})
+    response = {"success": True, "content": [{"type": "text", "text": log}]}
+
+    assert parse_tool_response(response, {})[1] is None
+
+
+@pytest.mark.parametrize("intent_first", [True, False])
+def test_an_action_intent_among_several_items_is_not_a_failure_report(
+    *, intent_first: bool
+) -> None:
+    """It may have acted: a note beside it is no failure to try again (#1067)."""
+    items = [
+        {"type": "text", "text": json.dumps(_half_done(BACK))},
+        {"type": "text", "text": json.dumps({"error": "one lock jammed"})},
+    ]
+    response = {"content": items if intent_first else items[::-1], "isError": False}
+
+    assert parse_tool_response(response, {})[1] is None
+
+
+def test_an_action_intent_carrying_text_items_stays_partial() -> None:
+    """The intent is the result itself; its text is no failure report (#1067)."""
+    note = json.dumps({"error": "back lock jammed"})
+    response = {**_half_done(BACK), "content": [{"type": "text", "text": note}]}
+
+    content, status = parse_tool_response(response, {"domain": ["lock"]})
+
+    assert status == "partial"
+    assert json.loads(content)["failed_count"] == 1
+
+
+def test_a_failure_report_with_an_escaped_key_is_a_failure() -> None:
+    """The decoded keys are read, not their spelling in the text (#1067 review)."""
+    text = '{"\\u0073uccess": false}'
+    assert json.loads(text) == {"success": False}
+
+    assert parse_tool_response(_over_mcp(text), {})[1] == "error"
+
+
+@pytest.mark.parametrize("extra", [{"error": "one lock jammed"}, {"success": False}])
+def test_a_remote_half_done_action_with_an_error_field_stays_partial(
+    extra: dict[str, Any],
+) -> None:
+    """It acted on a device: never a failure to try again (#1067 review)."""
+    content, status = parse_tool_response(
+        _over_mcp({**_half_done(BACK), **extra}), {"domain": ["lock"]}
+    )
+
+    assert status == "partial"
+    assert json.loads(content)["failed_count"] == 1
+
+
 def test_failed_names_are_bounded_and_told_apart() -> None:
     twin_a = {"type": "entity", "name": "Front Door", "id": "lock.front_a"}
     twin_b = {"type": "entity", "name": "Front Door", "id": "lock.front_b"}

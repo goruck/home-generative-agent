@@ -630,6 +630,22 @@ async def test_a_remote_half_done_action_says_how_many_failed(
     assert "Front" not in json.dumps(result)
 
 
+async def test_a_remote_tool_reporting_its_own_failure_is_not_accepted(
+    home: HomeAssistant,
+) -> None:
+    """The error flag is unset and the failure is in the text (#1067)."""
+    api = _api(["intent__HassTurnOff"])
+    ctx = _ctx(home, api)
+    _prepare_tool_args("intent__HassTurnOff", {"name": "Doors"}, ctx, {"id": "c1"})
+    api.apis[REMOTE].result = _over_mcp({"success": False, "error": "lock jammed"})
+    reply = PinReply("1234", turn_id="turn2")
+
+    result = await _answer_pin(home, ctx, api, reply)
+
+    assert "completed" not in result
+    assert reply.outcome == PIN_OUTCOME_FAILED
+
+
 async def test_a_remote_error_before_tool_results_is_not_accepted(
     home: HomeAssistant,
 ) -> None:

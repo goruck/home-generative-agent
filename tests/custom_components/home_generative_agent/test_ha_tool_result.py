@@ -110,6 +110,23 @@ async def test_ha_tool_result_reaches_the_model_as_its_data(
     assert message.status == "success"
 
 
+async def test_an_mcp_tool_reporting_its_own_failure_is_an_error_message(
+    tool_result_cls: type,
+) -> None:
+    """The MCP error flag is unset; the failure is in the text (#1067)."""
+    text = json.dumps({"success": False, "error": "No exposed entities"})
+    data = {"content": [{"type": "text", "text": text}], "isError": False}
+    api = _FakeAPI(tool_result_cls(data=data))
+
+    message = await graph._run_ha_tool("GetLiveContext", {}, _ctx(api), {"id": "call1"})
+
+    assert message.status == "error"
+    # The model still reads the tool's own words.
+    assert json.loads(cast("str", message.content)) == data
+    # So a model that then says nothing does not get "Done.".
+    assert not graph._result_succeeded(message)
+
+
 async def test_ha_tool_error_result_is_an_error_message(
     tool_result_cls: type,
 ) -> None:
