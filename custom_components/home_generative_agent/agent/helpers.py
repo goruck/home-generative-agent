@@ -2025,8 +2025,8 @@ def _mcp_text_json(response: Any) -> Any | None:
     if not isinstance(item, dict) or item.get("type") != "text":
         return None
     text = item.get("text")
-    # Only an intent response is read, so a large result (a remote
-    # GetLiveContext) is not decoded on every call.
+    # Only an intent response is read here, so other text is not decoded a
+    # second time: `_mcp_reports_failure` reads every item (#1067).
     if not isinstance(text, str) or '"action_done"' not in text:
         return None
     decoded = loads_or_none(text)
@@ -2036,6 +2036,59 @@ def _mcp_text_json(response: Any) -> Any | None:
     except (ValueError, RecursionError):
         return None
     return decoded
+
+
+def _reports_failure(result: dict[str, Any]) -> bool:
+    """
+    Return True when a tool's own JSON object says the call failed.
+
+    ``success`` decides when it is a boolean, so a call that says it worked
+    is never read as failed for a note it carries beside that (#1067 review).
+    Without it, a non-empty ``error`` or a ``status`` of "error" counts. A
+    ``warning`` does not: on another server's tool it need not mean the call
+    did not act, and a call wrongly read as failed invites a repeat.
+    """
+    success = result.get("success")
+    if isinstance(success, bool):
+        return not success
+    return bool(result.get("error")) or result.get("status") == "error"
+
+
+def _mcp_reports_failure(response: dict[str, Any]) -> bool:
+    """
+    Return True when an MCP tool's text says the call failed (#1067).
+
+    A tool reached over MCP (a remote Home Assistant's GetLiveContext or
+    script, any MCP server's tool) can answer ``{"success": false, "error":
+    "..."}`` as text with the MCP error flag unset. Every text item is read,
+    whatever its length: a failure can come with a second item, or with a
+    long error. Only a JSON object counts: plain text that mentions an error
+    does not.
+
+    Home Assistant hands on no mark of where a result came from, so an MCP
+    result is told by its shape: a ``content`` list and no ``success`` of its
+    own, which an MCP result never has. A result with one is the tool's own
+    answer, and text it carries is its data (#1067 review). Nor is an intent
+    response read here, as the result itself or as any of its items: an
+    action intent's devices are read by `intent_results`, and one that acted
+    on some of them must stay a partial run, never a failure to try again.
+    """
+    content = response.get("content")
+    if not isinstance(content, list) or "success" in response:
+        return False
+    if "response_type" in response:
+        return False
+    reports = []
+    for item in content:
+        if not isinstance(item, dict) or item.get("type") != "text":
+            continue
+        text = item.get("text")
+        inner = loads_or_none(text) if isinstance(text, str) else None
+        if isinstance(inner, dict):
+            if "response_type" in inner:
+                return False
+            reports.append(inner)
+    return any(_reports_failure(report) for report in reports)
 
 
 def _action_intent_response(response: Any) -> tuple[dict[str, Any], bool] | None:
@@ -2167,7 +2220,8 @@ def parse_tool_response(
 
     Shared by the normal tool path and the PIN confirmation, so a tool that
     reports failure in its payload (`success: false`, a `warning`, an alarm
-    that did not change state) reads as a failure on both. An action intent
+    that did not change state) reads as a failure on both. So does a tool
+    reached over MCP that reports it inside its text (#1067). An action intent
     that acted on some devices only (``data.failed``) reads as
     TOOL_STATUS_PARTIAL, and one where no device acted as a failure, each with
     a note listing what failed (#948).
@@ -2187,6 +2241,11 @@ def parse_tool_response(
     # Before 2026.10 Home Assistant hands on a remote MCP result as a dict with
     # its error flag in it, not as ToolResult.error (#1007 review).
     if parsed.get("isError") is True and isinstance(parsed.get("content"), list):
+        return content_str, "error"
+    # A tool reached over MCP that reports its own failure in its text, with
+    # the error flag unset (#1067). The text stays as it came: the model
+    # reads the tool's own words, and only the status is ours.
+    if _mcp_reports_failure(parsed):
         return content_str, "error"
 
     warning = parsed.get("warning")
