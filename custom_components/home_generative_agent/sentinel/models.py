@@ -160,8 +160,12 @@ def _jsonify(value: Any) -> Any:
 
 # Display-only evidence fields excluded from the anomaly-id hash so IDs (and
 # therefore snooze/suppression state) stay stable when presentation metadata
-# is added or temporarily unavailable.  Single authority for every evaluator
-# that hashes evidence — do not fork this set per call site.
+# is added or temporarily unavailable.  Single authority for what every
+# evaluator leaves out — do not fork this set per call site.  A rule whose
+# own evidence carries live readings leaves those out as well, by name, where
+# it builds the finding (dynamic_rules ``_build_finding(unhashed=...)``, used
+# by the low-battery rule): the same key is identity for another rule
+# (``sensor_states`` for unavailable_sensors), so it cannot go in this set.
 DISPLAY_ONLY_EVIDENCE_KEYS: frozenset[str] = frozenset(
     # "summary" is the pre-rendered sentence the network / HA-security rules
     # attach for the notifier; its figures (days idle, minutes offline)
