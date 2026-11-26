@@ -2,6 +2,18 @@
 
 ## Agent
 
+### A timer that carries a PIN-approved command can be changed without the PIN
+
+**What:** After the PIN approves a timer's `conversation_command` (#1087), `HassDecreaseTimer`, `HassUnpauseTimer`, `HassCancelTimer` and `HassCancelAllTimers` still pass the gate: they are in `READ_ONLY_INTENTS` (`agent/helpers.py`). A later turn can bring the approved command forward to a time the user did not approve (decrease, unpause), or drop a protective one ("lock the front door in 10 minutes") without asking.
+
+**Why:** Claude adversarial pass, pass 3 of the #1087 review (2026-11-26). Lindo chose to show the delay in the PIN line in #1087 and leave this as a follow-up. Related coupling from the same review: the hold assumes the command runs past this gate because `LLMContext` (`conversation.py`, `_async_handle_message`) sets no `agent_id`. Setting one makes HA 2026.12 offer `intent__schedule_command` and run the command on this agent, in a new conversation with nobody to answer a second PIN prompt, so the approved command would be parked and never run.
+
+**How to apply:** In `_is_critical_action`, for those four intents, find the targeted timers through HA's `TimerManager` (`hass.data[TIMER_DATA]`, matched by device id and name as `_find_timer` does) and hold when any carries a `conversation_command`. Before anyone sets `agent_id`, decide how a delayed command that comes back to this agent is handled (carry the approval with it, or refuse it).
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** None
+
 ### An always-included short name is not checked against exclusions after the lookup
 
 **What:** `_append_included_tools` (`agent/graph.py`) runs `is_tool_excluded` on the stored name only. A stored `HassTurnOff` with `intent__HassTurnOff` excluded skips that tool only because the live tool list and the fallback set were stripped of exclusions earlier; the fetched tool's own name is never checked. The other force-injection site checks the fetched name.
