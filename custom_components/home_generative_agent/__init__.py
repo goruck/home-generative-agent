@@ -926,8 +926,9 @@ def _is_battery_like_state(entity_id: str, state: Any) -> bool:
     state (red-team review): a battery device_class or a percent unit
     (excluding percent sensors of another declared class, e.g. humidity),
     or a legacy English "battery" ID token. The state must also be numeric
-    or transiently unavailable — a text state would permanently deadlock
-    the all-of low_battery_sensors evaluator.
+    or transiently unavailable — the low_battery_sensors evaluator skips
+    a state it cannot read as a number, so a sensor with a text state
+    would be listed in the rule and never checked.
     """
     attributes = getattr(state, "attributes", {}) or {}
     device_class = attributes.get("device_class")
@@ -968,8 +969,8 @@ async def _validate_low_battery_params(
     Battery sensor IDs can come from the locale fallback, which promotes an
     unnamed sensor.* evidence ID on text signals alone — evidence paths are
     LLM output, so a hallucinated or paraphrased ID would register a
-    low_battery_sensors rule whose all-of numeric evaluator silently never
-    fires while its semantic key suppresses re-proposals (same
+    low_battery_sensors rule that never fires (the evaluator needs a state
+    for every listed sensor) while its semantic key suppresses re-proposals (same
     permanent-monitoring-gap class as the #518 motion validation). Resolves
     against live states, drops unknown IDs, and returns an error response
     (second element) when no usable battery sensor remains.
@@ -1013,7 +1014,7 @@ async def _validate_low_battery_params(
             # the locale fallback cannot recognize e.g. a Czech
             # voltage/temperature sensor, and registering one would
             # false-fire the percent-threshold evaluator every cycle
-            # (3.1 V <= 40) or deadlock it on a non-numeric state.
+            # (3.1 V <= 40), or sit in it unread with a non-numeric state.
             # This live-state gate is the authoritative filter.
             implausible_battery_ids.append(entity_id)
     if not resolved_battery_ids:

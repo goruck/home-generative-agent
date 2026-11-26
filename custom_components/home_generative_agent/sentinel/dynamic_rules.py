@@ -85,7 +85,9 @@ def evaluate_dynamic_rules(  # noqa: PLR0913
         "alarm_disarmed_open_entry": lambda rule: _eval_alarm_disarmed_open_entry(
             snapshot, rule, entity_map
         ),
-        "low_battery_sensors": lambda rule: _eval_low_battery_sensors(rule, entity_map),
+        "low_battery_sensors": lambda rule: _eval_low_battery_sensors(
+            rule, entity_map, run_unresolved
+        ),
         "motion_detected_at_night_while_alarm_disarmed": (
             lambda rule: _eval_motion_detected_at_night_while_alarm_disarmed(
                 snapshot, rule, entity_map
@@ -696,29 +698,35 @@ def _eval_unavailable_sensors(
 def _eval_low_battery_sensors(
     rule: dict[str, Any],
     entity_map: Mapping[str, SnapshotEntity],
+    unresolved: dict[str, set[str]],
 ) -> list[AnomalyFinding]:
+    """
+    Fire when a listed battery sensor reads at or below the threshold.
+
+    A sensor whose state is not a number ("unavailable", "unknown") is left
+    out and the rest are still checked: a dead battery is a common reason for
+    a sensor to drop off the network, which is when the others most need
+    watching (#1064). A sensor with no state at all keeps the whole rule from
+    firing, as it does for the unavailable-sensors rules, and is reported.
+    """
     params = _rule_params(rule)
     sensor_ids = params.get("sensor_entity_ids")
     if not isinstance(sensor_ids, list) or not sensor_ids:
         return []
 
+    resolved = _resolve_listed_sensors(rule, sensor_ids, entity_map, unresolved)
+    if resolved is None:
+        return []
+    resolved_ids, entities = resolved
+
     threshold = _coerce_float(params.get("threshold"), default=40.0)
-    resolved_ids: list[str] = []
     readings: dict[str, float] = {}
     states: dict[str, Any] = {}
-    for sensor_id in sensor_ids:
-        resolved_sensor_id = _resolve_sensor_entity_id(sensor_id, entity_map)
-        if resolved_sensor_id is None:
-            return []
-        entity = entity_map.get(resolved_sensor_id)
-        if entity is None:
-            return []
+    for sensor_id, entity in zip(resolved_ids, entities, strict=True):
+        states[sensor_id] = entity.get("state")
         value = _coerce_optional_float(entity.get("state"))
-        if value is None:
-            return []
-        resolved_ids.append(resolved_sensor_id)
-        readings[resolved_sensor_id] = value
-        states[resolved_sensor_id] = entity.get("state")
+        if value is not None:
+            readings[sensor_id] = value
 
     triggering_ids = [
         sensor_id for sensor_id, value in readings.items() if value <= threshold
@@ -759,7 +767,7 @@ def _resolve_listed_sensors(
     unresolved: dict[str, set[str]],
 ) -> tuple[list[str], list[SnapshotEntity]] | None:
     """
-    Resolve every sensor an unavailable-sensors rule lists, or none of them.
+    Resolve every sensor a rule lists, or none of them.
 
     One listed sensor with no state (renamed, re-paired under a new ID,
     disabled, removed) keeps the whole rule from firing; that is deliberate.

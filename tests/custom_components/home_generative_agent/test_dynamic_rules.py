@@ -1331,6 +1331,106 @@ def test_dynamic_rule_low_battery_sensors_issue_236_missing_required_entity() ->
     assert findings == []
 
 
+def _low_battery_rule(*sensor_ids: str) -> dict[str, Any]:
+    return {
+        "rule_id": "low_battery_room_sensors_v1",
+        "template_id": "low_battery_sensors",
+        "params": {"sensor_entity_ids": list(sensor_ids), "threshold": 40},
+        "severity": "low",
+        "confidence": 0.62,
+        "is_sensitive": False,
+        "suggested_actions": ["check_sensor"],
+    }
+
+
+def _low_battery_snapshot(**states: str) -> FullStateSnapshot:
+    return _snapshot(
+        [
+            _base_entity(f"sensor.{name}", "sensor", state)
+            for name, state in states.items()
+        ],
+        [],
+        _DEAD_RULE_DERIVED,
+    )
+
+
+@pytest.mark.parametrize("dropped_state", ["unavailable", "unknown"])
+def test_dynamic_rule_low_battery_skips_a_sensor_it_cannot_read(
+    dropped_state: str,
+) -> None:
+    """
+    One sensor off the network does not silence the rule (#1064).
+
+    The sensor with no reading is left out and the others are still checked.
+    The evidence keeps its state, so the finding shows it was not read.
+    """
+    rule = _low_battery_rule("sensor.elias", "sensor.girls", "sensor.hall")
+    snapshot = _low_battery_snapshot(elias="37", girls=dropped_state, hall="80")
+
+    (finding,) = evaluate_dynamic_rules(snapshot, [rule])
+
+    assert finding.triggering_entities == ["sensor.elias"]
+    assert finding.evidence["sensor_states"]["sensor.girls"] == dropped_state
+    assert finding.evidence["sensor_levels"] == {
+        "sensor.elias": 37.0,
+        "sensor.hall": 80.0,
+    }
+
+
+def test_dynamic_rule_low_battery_unreadable_sensors_alone_do_not_fire() -> None:
+    """A sensor that cannot be read is not a low one, and the rest are fine."""
+    rule = _low_battery_rule("sensor.elias", "sensor.girls")
+
+    for states in (
+        {"elias": "unavailable", "girls": "53"},
+        {"elias": "unavailable", "girls": "unknown"},
+    ):
+        assert evaluate_dynamic_rules(_low_battery_snapshot(**states), [rule]) == []
+
+
+def test_dynamic_rule_low_battery_logs_a_dead_rule_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    A low-battery rule that lists a sensor with no state says so (#1064).
+
+    It does not fire even though the sensor that is left reads low, as for
+    the unavailable-sensors rules (#960), and it fires again once the missing
+    sensor has a state.
+    """
+    rule = _low_battery_rule("sensor.elias", _DEAD_RULE_GONE)
+    broken = _low_battery_snapshot(elias="12")
+    whole = _low_battery_snapshot(**{"elias": "12", "0x00158d0001a2b3c4": "90"})
+    log: dict[str, tuple[str, ...]] = {}
+
+    with caplog.at_level("WARNING"):
+        assert evaluate_dynamic_rules(broken, [rule], unresolved_log=log) == []
+        assert evaluate_dynamic_rules(broken, [rule], unresolved_log=log) == []
+        (warning,) = _dead_rule_warnings(caplog)
+        assert rule["rule_id"] in warning
+        assert f"'{_DEAD_RULE_GONE}'" in warning
+        assert "sensor.elias" not in warning
+
+        assert evaluate_dynamic_rules(whole, [rule], unresolved_log=log) != []
+        assert log == {}
+        assert len(_dead_rule_warnings(caplog)) == 1
+
+
+def test_dynamic_rule_low_battery_unreadable_sensor_is_not_reported_as_dead(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An unavailable sensor still has a state: the rule is alive, no warning."""
+    rule = _low_battery_rule("sensor.elias", "sensor.girls")
+    snapshot = _low_battery_snapshot(elias="unavailable", girls="53")
+    log: dict[str, tuple[str, ...]] = {}
+
+    with caplog.at_level("WARNING"):
+        evaluate_dynamic_rules(snapshot, [rule], unresolved_log=log)
+
+    assert log == {}
+    assert _dead_rule_warnings(caplog) == []
+
+
 def test_dynamic_rule_motion_alarm_disarmed_home_issue_225_triggers() -> None:
     snapshot = _snapshot(
         [

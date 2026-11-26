@@ -263,8 +263,8 @@ _NON_ENTRY_ID_TOKENS = (
 # Entity-ID tokens that disqualify a sensor.* from the text-driven battery
 # fallback — sensor kinds that commonly appear alongside battery candidates
 # but are never battery-level readings themselves. Promoting one would
-# poison the all-of low_battery_sensors evaluator: a non-numeric state
-# deadlocks the rule, a numeric non-percentage reading (temperature,
+# poison the low_battery_sensors evaluator: a non-numeric state is never
+# checked, a numeric non-percentage reading (temperature,
 # wattage) false-fires it against the percent threshold (issue #522).
 _NON_BATTERY_ID_TOKENS = (
     "power",
