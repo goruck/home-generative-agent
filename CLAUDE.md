@@ -164,6 +164,10 @@ Pick the review by the size and risk of the diff, not by which skill matches fir
 
 If the user names a skill, use the one they named.
 
+Models for a gstack review: dispatch the checklist specialists (testing, maintainability,
+security, performance, simplification and the other scope-gated ones) on Sonnet. The adversarial
+pass and the Red Team stay on the session's model. If the user names a model, use that one.
+
 ### PRs and releases
 
 Do **not** invoke the gstack `ship` skill in this repo. It bumps a `VERSION` file and writes a
