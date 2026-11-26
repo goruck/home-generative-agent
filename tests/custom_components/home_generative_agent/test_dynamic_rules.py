@@ -11,6 +11,7 @@ from custom_components.home_generative_agent.sentinel.dynamic_rules import (
     evaluate_dynamic_rule,
     evaluate_dynamic_rules,
 )
+from custom_components.home_generative_agent.sentinel.models import build_anomaly_id
 from custom_components.home_generative_agent.sentinel.rule_registry import RuleRegistry
 from custom_components.home_generative_agent.snapshot.schema import (
     CameraActivity,
@@ -1429,6 +1430,77 @@ def test_dynamic_rule_low_battery_unreadable_sensor_is_not_reported_as_dead(
 
     assert log == {}
     assert _dead_rule_warnings(caplog) == []
+
+
+def _low_battery_id(rule: dict[str, Any], **states: str) -> str:
+    (finding,) = evaluate_dynamic_rules(_low_battery_snapshot(**states), [rule])
+    return finding.anomaly_id
+
+
+def test_dynamic_rule_low_battery_id_ignores_readings_that_do_not_change_who_is_low() -> (
+    None
+):
+    """
+    One low battery is one alert, whatever the readings do meanwhile.
+
+    The anomaly id is what the pending prompt and the per-finding cooldown
+    match on. It used to hash every listed sensor's reading, so the low
+    sensor losing 1%, or another sensor moving or dropping off the network,
+    made the same low battery a new alert.
+    """
+    rule = _low_battery_rule("sensor.elias", "sensor.girls")
+    first = _low_battery_id(rule, elias="12", girls="80")
+
+    assert _low_battery_id(rule, elias="11", girls="80") == first
+    assert _low_battery_id(rule, elias="12", girls="79") == first
+    assert _low_battery_id(rule, elias="12", girls="unavailable") == first
+    assert _low_battery_id(rule, elias="12", girls="unknown") == first
+
+
+def test_dynamic_rule_low_battery_id_changes_with_the_low_sensors_and_the_rule() -> (
+    None
+):
+    """A second battery going low, another rule or threshold: a new alert."""
+    rule = _low_battery_rule("sensor.elias", "sensor.girls")
+    first = _low_battery_id(rule, elias="12", girls="80")
+
+    assert _low_battery_id(rule, elias="12", girls="30") != first
+    assert _low_battery_id(rule, elias="80", girls="12") != first
+    assert _low_battery_id({**rule, "rule_id": "other"}, elias="12", girls="80") != (
+        first
+    )
+    stricter = {**rule, "params": {**rule["params"], "threshold": 20}}
+    assert _low_battery_id(stricter, elias="12", girls="80") != first
+
+
+def test_dynamic_rule_low_battery_keeps_the_readings_in_the_evidence() -> None:
+    """Leaving the readings out of the id does not take them off the alert."""
+    rule = _low_battery_rule("sensor.elias", "sensor.girls")
+
+    (finding,) = evaluate_dynamic_rules(
+        _low_battery_snapshot(elias="12", girls="80"), [rule]
+    )
+
+    assert finding.evidence["sensor_levels"] == {
+        "sensor.elias": 12.0,
+        "sensor.girls": 80.0,
+    }
+    assert finding.evidence["sensor_states"] == {
+        "sensor.elias": "12",
+        "sensor.girls": "80",
+    }
+
+
+def test_dynamic_rule_unavailable_sensors_id_still_hashes_its_states() -> None:
+    """Only the low-battery rule leaves sensor_states out of its id."""
+    rule = _dead_rule("unavailable_sensors")
+    snapshot = _dead_rule_snapshot(_DEAD_RULE_PRESENT, _DEAD_RULE_GONE)
+
+    (finding,) = evaluate_dynamic_rules(snapshot, [rule])
+
+    assert finding.anomaly_id == build_anomaly_id(
+        rule["rule_id"], finding.triggering_entities, finding.evidence
+    )
 
 
 def test_dynamic_rule_motion_alarm_disarmed_home_issue_225_triggers() -> None:

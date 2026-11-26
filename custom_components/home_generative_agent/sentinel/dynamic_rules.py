@@ -41,6 +41,12 @@ LOGGER = logging.getLogger(__name__)
 _UNRESOLVED_ID_MAX_CHARS = 100
 _UNRESOLVED_IDS_SHOWN = 10
 
+# Evidence a low-battery finding shows but does not hash into its anomaly id.
+# The id marks which sensors are low. Hashing the readings gave one low battery
+# a new id at every 1% it lost, and whenever another listed sensor changed its
+# reading or dropped off the network, so the pending prompt never held.
+_LOW_BATTERY_UNHASHED_EVIDENCE = frozenset({"sensor_states", "sensor_levels"})
+
 _SEVERITIES = {"low", "medium", "high"}
 # HA covers report "open"/"closed" rather than binary_sensor's "on"/"off";
 # both count as an open entry (issue #504 adversarial review).
@@ -742,7 +748,11 @@ def _eval_low_battery_sensors(
         "sensor_levels": readings,
         "threshold": threshold,
     }
-    return [_build_finding(rule, triggering_ids, evidence)]
+    return [
+        _build_finding(
+            rule, triggering_ids, evidence, unhashed=_LOW_BATTERY_UNHASHED_EVIDENCE
+        )
+    ]
 
 
 def _resolve_sensor_entity_id(
@@ -1254,7 +1264,15 @@ def _build_finding(
     rule: dict[str, Any],
     triggering_entities: list[str],
     evidence: dict[str, Any],
+    *,
+    unhashed: frozenset[str] = frozenset(),
 ) -> AnomalyFinding:
+    """
+    Build the finding for *rule*.
+
+    *unhashed* names evidence keys this rule keeps out of the anomaly id, on
+    top of the display-only keys every rule leaves out.
+    """
     rule_id = str(rule.get("rule_id") or "dynamic_rule")
     severity_value = str(rule.get("severity") or "low")
     severity: Severity
@@ -1268,7 +1286,9 @@ def _build_finding(
         suggested_actions = []
     is_sensitive = bool(rule.get("is_sensitive", False))
     anomaly_id = build_anomaly_id(
-        rule_id, triggering_entities, hashable_evidence(evidence)
+        rule_id,
+        triggering_entities,
+        {k: v for k, v in hashable_evidence(evidence).items() if k not in unhashed},
     )
     return AnomalyFinding(
         anomaly_id=anomaly_id,
