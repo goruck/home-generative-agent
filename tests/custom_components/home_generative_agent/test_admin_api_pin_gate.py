@@ -459,15 +459,17 @@ async def test_a_read_only_tool_is_never_held(
     assert not _held(hass, admin_api, tool_name, args)
 
 
-async def test_the_tools_that_can_write_are_the_two_looked_at(
-    admin_api: SimpleNamespace,
+async def test_every_writing_tool_but_call_action_is_held(
+    hass: HomeAssistant, admin_api: SimpleNamespace
 ) -> None:
     """
-    A writing tool added to the integrations set up here has to be looked at.
+    A tool that can change something and names no service needs the PIN.
 
-    Not every integration that adds tools to the API is set up (`history`
-    needs the recorder, `hassio` a supervisor), and a custom one may add its
-    own; a tool not read here is read as any other tool is.
+    Home Assistant adds writing tools to the API between releases (2026.12
+    added label, floor, entity, device and flow tools), so each one found is
+    checked, not a fixed list. Only the call-action tool is read by its
+    arguments. Not every integration that adds tools is set up here
+    (`history` needs the recorder, `hassio` a supervisor).
     """
     writing = {
         tool.name
@@ -475,7 +477,13 @@ async def test_the_tools_that_can_write_are_the_two_looked_at(
         if not tool_origin(admin_api, tool.name).read_only
     }
 
-    assert writing == {CALL_ACTION_TOOL, "config__reload_config_entry"}
+    assert {CALL_ACTION_TOOL, "config__reload_config_entry"} <= writing
+    not_held = sorted(
+        name
+        for name in writing - {CALL_ACTION_TOOL}
+        if not _held(hass, admin_api, name, {})
+    )
+    assert not_held == []
 
 
 async def test_reloading_an_integration_needs_the_pin(

@@ -28,5 +28,11 @@ PyTurboJPEG==1.8.3
 pymicro-vad==1.0.1
 pyspeex-noise==1.0.2
 
+# From HA 2026.12, intent.llm (whose LLM_INTENTS the audit tests read) imports
+# the conversation component at module import; pin to core's conversation manifest.
+hassil==3.12.1
+home-assistant-intents==2026.10.27
+gazetteer-matcher==1.1.0
+
 # Supervisor snapshot tests import the hassio component.
 aiohasupervisor==0.8.1

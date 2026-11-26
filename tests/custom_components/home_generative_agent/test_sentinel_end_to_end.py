@@ -2239,7 +2239,8 @@ async def test_a_level_zero_override_silences_a_notifying_setup(
 ) -> None:
     """An override of 0 over a configured level 1, end to end, sends nothing."""
     engine, hass = _make_ae_engine(monkeypatch, autonomy_level=1)
-    del cast("Any", engine).get_autonomy_level  # the real level lookup
+    # The real level lookup. Through monkeypatch, so its undo stays consistent.
+    monkeypatch.delattr(engine, "get_autonomy_level")
     engine._options["sentinel_autonomy_level"] = 1
     engine_module._AUTONOMY_OVERRIDES["test_entry"] = (
         0,
