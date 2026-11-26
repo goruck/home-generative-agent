@@ -1083,15 +1083,15 @@ def _assistant_content(text: str, tool_calls: Any = None) -> Any:
     is loaded when this module runs.
     """
     try:
-        item: Any = ha_conversation.AssistantContent(
-            agent_id="conversation.test", content=text
+        return ha_conversation.AssistantContent(
+            agent_id="conversation.test", content=text, tool_calls=tool_calls
         )
     except TypeError:
         stub_cls: Any = ha_conversation.AssistantContent
         item = stub_cls()
         item.content = text
-    item.tool_calls = tool_calls
-    return item
+        item.tool_calls = tool_calls
+        return item
 
 
 def _user_content() -> Any:
@@ -1727,7 +1727,9 @@ def _mk_content(cls: Any, **kwargs: Any) -> Any:
     try:
         return cls(**kwargs)
     except TypeError:
-        obj = cls()
+        # A stub's constructor takes nothing; a real class's may want fields a
+        # test leaves out. Build it bare either way.
+        obj = object.__new__(cls)
         for key, value in kwargs.items():
             object.__setattr__(obj, key, value)
         return obj
@@ -1762,7 +1764,7 @@ def _own_tool_turn(question: str, answer: str) -> list:
             agent_id=HGA_AGENT_ID,
             tool_call_id="call_1",
             tool_name="plex_library",
-            tool_result={"movies": 1389},
+            result={"movies": 1389},
         ),
         _mk_content(
             ha_conversation.AssistantContent,
@@ -1811,7 +1813,7 @@ def test_message_history_drops_spoken_text_of_a_tool_using_turn() -> None:
             agent_id=FOREIGN_AGENT_ID,
             tool_call_id="01M16N286Y2A5T0BVZ163SMKT7",
             tool_name="HassTurnOn",
-            tool_result={"speech": {"plain": {"speech": "Turned on the light"}}},
+            result={"speech": {"plain": {"speech": "Turned on the light"}}},
         ),
         _mk_content(
             ha_conversation.AssistantContent,
@@ -1873,7 +1875,7 @@ def test_message_history_tool_flag_resets_on_the_next_user_turn() -> None:
             agent_id=FOREIGN_AGENT_ID,
             tool_call_id="call_1",
             tool_name="HassTurnOn",
-            tool_result={},
+            result={},
         ),
         _mk_content(
             ha_conversation.AssistantContent,
@@ -2043,7 +2045,7 @@ def test_message_history_locally_handled_intent_is_a_foreign_turn() -> None:
             agent_id=HGA_AGENT_ID,
             tool_call_id="01M16N286Y2A5T0BVZ163SMKT7",
             tool_name="HassTurnOn",
-            tool_result={"speech": {"plain": {"speech": "Turned on the light"}}},
+            result={"speech": {"plain": {"speech": "Turned on the light"}}},
         ),
         _mk_content(
             ha_conversation.AssistantContent,
@@ -2079,7 +2081,7 @@ def _local_intent_turn(question: str, answer: str | None, tool: str) -> list:
             agent_id=FOREIGN_AGENT_ID,
             tool_call_id="call_1",
             tool_name=tool,
-            tool_result={"speech": {"plain": {"speech": answer or ""}}},
+            result={"speech": {"plain": {"speech": answer or ""}}},
         ),
     ]
     if answer is not None:
@@ -3193,7 +3195,7 @@ def _refusal_turn_chat_log() -> Any:
                 agent_id=HGA_AGENT_ID,
                 tool_call_id="c1",
                 tool_name="confirm_sensitive_action",
-                tool_result={"status": "awaiting_user_pin"},
+                result={"status": "awaiting_user_pin"},
             ),
         ]
     )
