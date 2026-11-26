@@ -1613,13 +1613,13 @@ That satisfies all three cases at once: different devices with identical prose s
 
 ---
 
-### Bucket volatile readings out of the low_battery_sensors anomaly-id hash
+### Reject non-finite and out-of-range low_battery_sensors readings
 
-**What:** `_eval_low_battery_sensors` (dynamic_rules.py) puts float `sensor_levels` into finding evidence, and `build_anomaly_id` hashes evidence — so every reading change mints a new anomaly_id, and the notifier's per-finding cooldown (keyed by anomaly_id) never suppresses repeats as a draining battery drifts through the threshold (39, 38, 37 → three distinct anomaly ids). The suppression layer's per-type cooldown limits real-world impact for slow percent drift, but a jittering promoted sensor would notify every cycle. Since #1064 a listed sensor that is not the low one changes the id too when it goes `unavailable` or `unknown` and when it comes back (the evaluator now skips it instead of going silent), so one low battery can alert up to three times inside a pending-prompt window (Codex and adversarial review of the #1064 PR, 2026-11-26; left out there by decision).
+**What:** `_eval_low_battery_sensors` (dynamic_rules.py) and the approval gate `_is_battery_like_state` (`__init__.py`) both take anything `float()` accepts as a battery reading. `-inf` fires the rule with level `-inf`; `nan` never fires but stays in `sensor_levels` (invalid JSON under `json.dumps`, `null` under orjson); `inf` and `1e3` read as above the threshold; negative readings fire. The rule's `threshold` has the same gap in `_coerce_float`: `nan` means the rule never fires, `inf` means every sensor always fires.
 
-**Why:** Red-team finding during the issue #522 ship (2026-08-01). NOT fixed in that PR deliberately: changing evidence hashing changes anomaly IDs for all existing low_battery rules, breaking snooze continuity and audit linkage on existing installs (the evidence-key-order-is-anomaly-id pitfall) — needs its own migration-aware PR. The #522 approval-time battery plausibility gate (`_is_battery_like_state`) removes the pathological wrongly-promoted-sensor case.
+**Why:** Adversarial review of the #1064 PR (#1081, 2026-11-26). Older than that change and not fixed there. No sensor is known to report these; the approval gate's battery plausibility check (#522) makes a wrongly promoted sensor unlikely.
 
-**How to apply:** Floor `sensor_levels` to 5% buckets (or exclude levels/states from the hashed evidence and carry them in a non-hashed field, mirroring the friendly_name exclusion in `_build_finding`), with a migration note that pre-existing anomaly ids for low-battery findings change once.
+**How to apply:** In the evaluator and the approval gate, treat a reading as readable only when `math.isfinite` holds and it lies in 0-100, and skip it otherwise, as for a non-numeric state. Clamp or reject a non-finite threshold when the rule is registered.
 
 **Effort:** S
 **Priority:** P3
