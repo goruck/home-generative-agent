@@ -263,8 +263,8 @@ _NON_ENTRY_ID_TOKENS = (
 # Entity-ID tokens that disqualify a sensor.* from the text-driven battery
 # fallback — sensor kinds that commonly appear alongside battery candidates
 # but are never battery-level readings themselves. Promoting one would
-# poison the all-of low_battery_sensors evaluator: a non-numeric state
-# deadlocks the rule, a numeric non-percentage reading (temperature,
+# poison the low_battery_sensors evaluator: a non-numeric state is never
+# checked, a numeric non-percentage reading (temperature,
 # wattage) false-fires it against the percent threshold (issue #522).
 _NON_BATTERY_ID_TOKENS = (
     "power",
@@ -1496,14 +1496,14 @@ def _find_text_battery_sensor_entity_ids(evidence_paths: list[str]) -> list[str]
     caller invokes this only when the candidate carries an explicit
     low-battery signal and no battery-named ID resolved; promote ``sensor.*``
     evidence IDs that are not some other recognizable sensor kind. The
-    domain restriction matters: the low_battery_sensors evaluator requires
-    a numeric state from every listed sensor, so binary_sensor/lock/etc.
-    entities would deadlock the rule (issue #514 invariant). And because the
-    kind-token filter is English-only, two or more surviving locale-named
-    IDs are ambiguous — which one is the battery? — so only a single
-    unambiguous target is promoted; multi-ID candidates stay honestly
-    unsupported rather than register an all-of rule that deadlocks or
-    false-fires on the contextual sensor's reading.
+    domain restriction matters: the low_battery_sensors evaluator skips a
+    sensor whose state is not a number, so binary_sensor/lock/etc. entities
+    would sit in the rule and never be checked (issue #514 invariant). And
+    because the kind-token filter is English-only, two or more surviving
+    locale-named IDs are ambiguous — which one is the battery? — so only a
+    single unambiguous target is promoted; multi-ID candidates stay
+    honestly unsupported rather than register a rule that never checks its
+    battery sensor or false-fires on the contextual sensor's reading.
 
     The single-ID heuristic is advisory only — an English token filter
     cannot classify locale IDs, so a lone locale-named contextual sensor
