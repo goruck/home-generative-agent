@@ -57,6 +57,10 @@ class UnlockedLockAtNightRule:
                 continue
             if not _is_exterior_hint(entity):
                 continue
+            # A car's door lock while the car is away is not a way into the
+            # house (#1088). Parked at home, it still alerts.
+            if entity.get("device_away_from_home"):
+                continue
 
             evidence = {
                 "entity_id": entity["entity_id"],

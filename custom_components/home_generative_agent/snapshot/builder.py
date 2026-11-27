@@ -60,6 +60,40 @@ def _build_entity_snapshot(
     }
 
 
+_TRACKER_DOMAIN = "device_tracker"
+_SOURCE_TYPE_GPS = "gps"
+_TRACKER_HOME = "home"
+_TRACKER_NO_READING = frozenset({"unknown", "unavailable"})
+
+
+def _devices_away_from_home(
+    states: Iterable[State], entity_device: dict[str, str]
+) -> set[str]:
+    """
+    Return the ids of devices a GPS device_tracker reports away from home.
+
+    A device counts as away when one of its GPS trackers has a reading and none
+    of them reads ``home``. A tracker with no reading (``unknown``,
+    ``unavailable``) says nothing about where the device is, so a device whose
+    only trackers have none is not away: its lock still alerts (#1088).
+    """
+    readings: dict[str, list[str]] = {}
+    for state in states:
+        if state.domain != _TRACKER_DOMAIN:
+            continue
+        if state.attributes.get("source_type") != _SOURCE_TYPE_GPS:
+            continue
+        device_id = entity_device.get(state.entity_id)
+        if device_id is None or state.state in _TRACKER_NO_READING:
+            continue
+        readings.setdefault(device_id, []).append(state.state)
+    return {
+        device_id
+        for device_id, values in readings.items()
+        if _TRACKER_HOME not in values
+    }
+
+
 @dataclass
 class RegistryLookups:
     """Per-entity registry facts resolved once per snapshot build."""
@@ -131,6 +165,11 @@ async def async_build_full_state_snapshot(
         for state in states
     ]
     entities.sort(key=lambda item: item["entity_id"])
+    away_devices = _devices_away_from_home(states, lookups.entity_device)
+    if away_devices:
+        for entity in entities:
+            if lookups.entity_device.get(entity["entity_id"]) in away_devices:
+                entity["device_away_from_home"] = True
 
     camera_activity = []
     for state in states:
