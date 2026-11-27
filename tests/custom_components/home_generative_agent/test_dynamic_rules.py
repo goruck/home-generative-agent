@@ -1446,9 +1446,7 @@ def _since(snapshot: FullStateSnapshot, entity_id: str, last_changed: str) -> No
             entity["last_changed"] = last_changed
 
 
-@pytest.mark.parametrize(
-    "state", ["locked", "low", "ok", "", "nan", "inf", "-inf", "1e999"]
-)
+@pytest.mark.parametrize("state", ["locked", "low", "ok", ""])
 def test_dynamic_rule_low_battery_warns_once_for_a_state_that_is_no_level(
     state: str, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1480,7 +1478,9 @@ def test_dynamic_rule_low_battery_warns_once_for_a_state_that_is_no_level(
         assert len(_unreadable_warnings(caplog)) == 2
 
 
-@pytest.mark.parametrize("dropped_state", ["unavailable", "unknown"])
+@pytest.mark.parametrize(
+    "dropped_state", ["unavailable", "unknown", "nan", "inf", "-inf", "1e999"]
+)
 def test_dynamic_rule_low_battery_warns_once_after_a_day_unreadable(
     dropped_state: str, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1559,6 +1559,58 @@ def test_dynamic_rule_low_battery_flapping_sensor_does_not_repeat_others(
     assert len(warnings) == 3
     assert "'sensor.hall'" not in warnings[0]
     assert all("'sensor.hall'" in warning for warning in warnings[1:])
+    assert all("'sensor.front_lock'" not in warning for warning in warnings[1:])
+
+
+def test_dynamic_rule_low_battery_sensor_off_the_network_is_not_named_again(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A lock that drops off for a while and comes back stays reported (#1082)."""
+    rule = _low_battery_rule("sensor.front_lock", "sensor.hall")
+    locked = _low_battery_snapshot(front_lock="locked", hall="80")
+    dropped = _low_battery_snapshot(front_lock="unavailable", hall="80")
+    log: dict[tuple[str, str], tuple[str, ...]] = {}
+
+    with caplog.at_level("WARNING"):
+        for snapshot in (locked, dropped, locked):
+            evaluate_dynamic_rules(snapshot, [rule], unreadable_log=log)
+
+    assert len(_unreadable_warnings(caplog)) == 1
+
+
+def test_dynamic_rule_low_battery_record_survives_a_sensor_with_no_state(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Another sensor missing for a run (#960) does not reset the record."""
+    rule = _low_battery_rule("sensor.front_lock", "sensor.hall")
+    whole = _low_battery_snapshot(front_lock="locked", hall="80")
+    hall_gone = _low_battery_snapshot(front_lock="locked")
+    log: dict[tuple[str, str], tuple[str, ...]] = {}
+
+    with caplog.at_level("WARNING"):
+        for snapshot in (whole, hall_gone, whole):
+            evaluate_dynamic_rules(snapshot, [rule], unreadable_log=log)
+
+    assert len(_unreadable_warnings(caplog)) == 1
+
+
+def test_dynamic_rule_low_battery_warning_names_the_sensor_that_joined(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """With many reported already, the newcomer is the one shown (#1082)."""
+    names = [f"lock_{index:02d}" for index in range(10)]
+    rule = _low_battery_rule(*(f"sensor.{name}" for name in names), "sensor.z_lock")
+    before = _low_battery_snapshot(**dict.fromkeys(names, "locked"), z_lock="50")
+    after = _low_battery_snapshot(**dict.fromkeys(names, "locked"), z_lock="ok")
+    log: dict[tuple[str, str], tuple[str, ...]] = {}
+
+    with caplog.at_level("WARNING"):
+        evaluate_dynamic_rules(before, [rule], unreadable_log=log)
+        evaluate_dynamic_rules(after, [rule], unreadable_log=log)
+
+    second = _unreadable_warnings(caplog)[1]
+    assert "'sensor.z_lock'" in second
+    assert "sensor.lock_00" not in second
 
 
 @pytest.mark.parametrize(
