@@ -51,6 +51,30 @@ _SEVERITIES = {"low", "medium", "high"}
 # HA covers report "open"/"closed" rather than binary_sensor's "on"/"off";
 # both count as an open entry (issue #504 adversarial review).
 _OPEN_ENTRY_STATES = frozenset({"on", "open"})
+# What a duration rule treats as a lock or entry of the house: these device
+# classes ("lock" is a binary_sensor that is on when unlocked), or a
+# binary_sensor/cover whose id names a door, window or entry, which is how
+# proposal_templates picks the entity for "entry open too long".
+_ENTRY_DEVICE_CLASSES = frozenset({"door", "window", "opening", "garage_door", "lock"})
+_ENTRY_ID_TOKENS = ("door", "window", "entry")
+_ENTRY_STATES_KEY = frozenset({"entry_states"})
+
+
+def _away_vehicle(entity: SnapshotEntity) -> bool:
+    """
+    Return True for an entity on a device whose GPS tracker is away from home.
+
+    A car's door, window, lid or lock while the car is out is not a way into
+    the house, so the entry and lock templates skip it (#1088, #1089), even
+    for a rule approved for that one entity. Parked at home, it still alerts.
+    """
+    if not entity.get("device_away_from_home"):
+        return False
+    LOGGER.debug(
+        "Skipping %s: its device's GPS tracker is away from home.",
+        entity.get("entity_id"),
+    )
+    return True
 
 
 def evaluate_dynamic_rules(  # noqa: PLR0913
@@ -280,6 +304,8 @@ def _eval_alarm_disarmed_open_entry(
         entry = entity_map.get(entry_id)
         if not entry or entry.get("state") not in _OPEN_ENTRY_STATES:
             continue
+        if _away_vehicle(entry):
+            continue
         evidence = {
             "rule_id": rule.get("rule_id"),
             "template_id": rule.get("template_id"),
@@ -503,7 +529,7 @@ def _eval_unlocked_lock_when_home(
     if not lock_id:
         return []
     lock = entity_map.get(lock_id)
-    if not lock or lock.get("state") != "unlocked":
+    if not lock or lock.get("state") != "unlocked" or _away_vehicle(lock):
         return []
     evidence = {
         "rule_id": rule.get("rule_id"),
@@ -878,6 +904,8 @@ def _eval_open_entry_with_context(  # noqa: PLR0913
         entry = entity_map.get(entry_id)
         if not entry or entry.get("state") not in _OPEN_ENTRY_STATES:
             continue
+        if _away_vehicle(entry):
+            continue
         evidence = {
             "rule_id": rule.get("rule_id"),
             "template_id": rule.get("template_id"),
@@ -931,7 +959,8 @@ def _find_open_window_entity_ids(
         if domain not in {"binary_sensor", "sensor"}:
             continue
         device_class = str(entity.get("attributes", {}).get("device_class", ""))
-        if device_class == "window" or "window" in entity_id:
+        is_window = device_class == "window" or "window" in entity_id
+        if is_window and not _away_vehicle(entity):
             window_ids.append(entity_id)
     return sorted(set(window_ids))
 
@@ -948,7 +977,7 @@ def _eval_unlocked_lock_while_away(
     if not lock_id:
         return []
     lock = entity_map.get(lock_id)
-    if not lock or lock.get("state") != "unlocked":
+    if not lock or lock.get("state") != "unlocked" or _away_vehicle(lock):
         return []
     evidence = {
         "rule_id": rule.get("rule_id"),
@@ -995,6 +1024,20 @@ def _eval_alarm_state_mismatch(
     return [_build_finding(rule, [alarm_id], evidence)]
 
 
+def _is_lock_or_entry(entity: SnapshotEntity) -> bool:
+    """Return True for a lock or a door, window or lid sensor."""
+    domain = entity.get("domain")
+    if domain == "lock":
+        return True
+    device_class = entity.get("attributes", {}).get("device_class")
+    if isinstance(device_class, str) and device_class in _ENTRY_DEVICE_CLASSES:
+        return True
+    entity_id = str(entity.get("entity_id", ""))
+    return domain in {"binary_sensor", "cover"} and any(
+        token in entity_id for token in _ENTRY_ID_TOKENS
+    )
+
+
 def _eval_entity_state_duration(
     snapshot: FullStateSnapshot,
     rule: dict[str, Any],
@@ -1007,7 +1050,14 @@ def _eval_entity_state_duration(
     if not entity_id or not target_state:
         return []
     entity = entity_map.get(entity_id)
-    if not entity:
+    # "Lock unlocked too long" and "entry open too long" are house-entry rules
+    # (proposal_templates routes both here): an away car's lock or doors are
+    # skipped as in the other entry templates (#1089).
+    if not entity or (
+        entity.get("device_away_from_home")
+        and _is_lock_or_entry(entity)
+        and _away_vehicle(entity)
+    ):
         return []
     state = entity.get("state")
     # Target "on" also matches covers, which report "open" for the same
@@ -1140,7 +1190,9 @@ def _eval_multiple_entries_open_count(
     states: dict[str, Any] = {}
     for entry_id in entry_ids:
         entity = entity_map.get(entry_id)
-        if not entity:
+        # An away car's openings neither count nor enter the hashed evidence,
+        # so its doors opening and closing on a drive do not churn the id.
+        if not entity or _away_vehicle(entity):
             continue
         states[entry_id] = entity.get("state")
         if entity.get("state") in _OPEN_ENTRY_STATES:
@@ -1157,7 +1209,9 @@ def _eval_multiple_entries_open_count(
         "entry_states": states,
         "anyone_home": anyone_home,
     }
-    return [_build_finding(rule, triggering, evidence)]
+    # The open entries already pin the id (triggering_entities); the states of
+    # the closed ones, and an away car dropping out of them, must not churn it.
+    return [_build_finding(rule, triggering, evidence, unhashed=_ENTRY_STATES_KEY)]
 
 
 def _network_context_matches(

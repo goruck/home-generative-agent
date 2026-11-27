@@ -87,6 +87,10 @@ class CameraEntryUnsecuredRule:
             "excluded_evidence_entry": 0,
             "excluded_activity_source": 0,
             "excluded_linked_entry": 0,
+            # A car's door, window or lock while the car is away (#1089).
+            "away_vehicle_entry": 0,
+            "away_vehicle_linked_entry": 0,
+            "away_vehicle_activity_source": 0,
         }
 
         unsecured_by_area: dict[str, list[str]] = {}
@@ -97,14 +101,10 @@ class CameraEntryUnsecuredRule:
             if self._excluded(entity["entity_id"]):
                 skip_counts["excluded_evidence_entry"] += 1
                 continue
-            if entity["domain"] == "lock" and entity["state"] == "unlocked":
-                unsecured_by_area.setdefault(area, []).append(entity["entity_id"])
+            if not _is_unsecured_entry(entity):
                 continue
-            if entity["domain"] != "binary_sensor":
-                continue
-            if entity["attributes"].get("device_class") not in ENTRY_CLASSES:
-                continue
-            if entity["state"] != "on":
+            if entity.get("device_away_from_home"):
+                skip_counts["away_vehicle_entry"] += 1
                 continue
             unsecured_by_area.setdefault(area, []).append(entity["entity_id"])
 
@@ -164,6 +164,11 @@ class CameraEntryUnsecuredRule:
                         if self._excluded(e["entity_id"]):
                             excluded_sources += 1
                             continue
+                        # A car away from home is not at this camera: its
+                        # cloud updates say nothing about activity here (#1089).
+                        if e.get("device_away_from_home"):
+                            skip_counts["away_vehicle_activity_source"] += 1
+                            continue
                         candidates.append(e["last_changed"])
                     fallback_sensor_candidates += len(candidates)
                 skip_counts["excluded_activity_source"] += excluded_sources
@@ -194,14 +199,12 @@ class CameraEntryUnsecuredRule:
                 if entity is None:
                     skip_counts["missing_linked_entry"] += 1
                     continue
-                domain = entity["domain"]
-                state = entity["state"]
-                if (domain == "lock" and state == "unlocked") or (
-                    domain == "binary_sensor"
-                    and entity["attributes"].get("device_class") in ENTRY_CLASSES
-                    and state == "on"
-                ):
-                    unsecured_linked.append(linked_eid)
+                if not _is_unsecured_entry(entity):
+                    continue
+                if entity.get("device_away_from_home"):
+                    skip_counts["away_vehicle_linked_entry"] += 1
+                    continue
+                unsecured_linked.append(linked_eid)
 
             # Merge: same-area first, then linked (preserving order, deduplicating).
             same_area_set = set(unsecured_same_area)
@@ -261,3 +264,16 @@ class CameraEntryUnsecuredRule:
                 fallback_sensor_candidates,
             )
         return findings
+
+
+def _is_unsecured_entry(entity: SnapshotEntity) -> bool:
+    """Return True for an unlocked lock or an open door/window sensor."""
+    domain = entity["domain"]
+    state = entity["state"]
+    if domain == "lock":
+        return state == "unlocked"
+    return (
+        domain == "binary_sensor"
+        and entity["attributes"].get("device_class") in ENTRY_CLASSES
+        and state == "on"
+    )

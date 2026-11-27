@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from custom_components.home_generative_agent.sentinel.models import (
     AnomalyFinding,
     build_anomaly_id,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from custom_components.home_generative_agent.snapshot.schema import (
@@ -37,6 +40,14 @@ class OpenEntryWhileAwayRule:
             if device_class not in _ENTRY_CLASSES:
                 continue
             if entity["state"] != "on":
+                continue
+            # A car's door, window or lid while the car is away is not an
+            # entry of the house (#1089). Parked at home, it still alerts.
+            if entity.get("device_away_from_home"):
+                LOGGER.debug(
+                    "Skipping %s: its device's GPS tracker is away from home.",
+                    entity["entity_id"],
+                )
                 continue
 
             evidence = {
