@@ -37,6 +37,10 @@ class SnapshotEntity(TypedDict):
     # start of the current run: when Home Assistant last heard from the sensor,
     # even with an unchanged value. Read it through entity_last_heard (#982).
     last_reported: NotRequired[str]
+    # True when the entity's device also has a GPS device_tracker that places
+    # it away from home (a car, a bike). Set only when true. Lock rules read it
+    # so a car's door lock is not taken for a door of the house (#1088).
+    device_away_from_home: NotRequired[bool]
 
 
 class CameraActivity(TypedDict):
@@ -289,6 +293,7 @@ SNAPSHOT_SCHEMA = vol.Schema(
                 vol.Optional("platform"): vol.Any(str, None),
                 vol.Optional("last_changed_is_lower_bound"): bool,
                 vol.Optional("last_reported"): str,
+                vol.Optional("device_away_from_home"): bool,
             }
         ],
         vol.Required("camera_activity"): [

@@ -79,7 +79,7 @@ These rules run on every detection cycle without any configuration or approval.
 
 | Rule | Description |
 |---|---|
-| `unlocked_lock_at_night` | Exterior lock unlocked while it is night |
+| `unlocked_lock_at_night` | Exterior lock unlocked while it is night. A lock on a device whose GPS tracker places it away from home (a car's door lock while the car is out) is skipped. It still alerts when the car is parked at home, including in a zone inside the home zone such as a driveway, and when the tracker has no usable location. The location is taken as the vehicle integration reports it: a car whose cloud location still says away after it came home is skipped until the location catches up |
 | `open_entry_while_away` | Door or window open while everyone is away |
 | `camera_entry_unsecured` | Camera activity detected near an unsecured entry point. Same-area entries detected automatically; cameras that overlook entries in a different area can be linked via `sentinel_camera_entry_links` |
 | `unknown_person_camera_no_home` | Face recognition reports an "Unknown Person" on any camera while no one is home. Fires only on a fresh sighting (within 10 minutes of the snapshot) and is suppressed when an enrolled person is recognized alongside the stranger (treated as an accompanied guest) |
