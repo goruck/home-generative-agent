@@ -89,6 +89,8 @@ class CameraEntryUnsecuredRule:
             "excluded_linked_entry": 0,
             # A car's door, window or lock while the car is away (#1089).
             "away_vehicle_entry": 0,
+            "away_vehicle_linked_entry": 0,
+            "away_vehicle_activity_source": 0,
         }
 
         unsecured_by_area: dict[str, list[str]] = {}
@@ -162,6 +164,11 @@ class CameraEntryUnsecuredRule:
                         if self._excluded(e["entity_id"]):
                             excluded_sources += 1
                             continue
+                        # A car away from home is not at this camera: its
+                        # cloud updates say nothing about activity here (#1089).
+                        if e.get("device_away_from_home"):
+                            skip_counts["away_vehicle_activity_source"] += 1
+                            continue
                         candidates.append(e["last_changed"])
                     fallback_sensor_candidates += len(candidates)
                 skip_counts["excluded_activity_source"] += excluded_sources
@@ -195,7 +202,7 @@ class CameraEntryUnsecuredRule:
                 if not _is_unsecured_entry(entity):
                     continue
                 if entity.get("device_away_from_home"):
-                    skip_counts["away_vehicle_entry"] += 1
+                    skip_counts["away_vehicle_linked_entry"] += 1
                     continue
                 unsecured_linked.append(linked_eid)
 

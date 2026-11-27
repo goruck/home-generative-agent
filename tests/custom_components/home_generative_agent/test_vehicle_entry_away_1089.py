@@ -291,3 +291,157 @@ async def test_the_snapshot_marks_a_cars_door_sensor_away(hass: HomeAssistant) -
     assert doors.get("device_away_from_home") is True
     snapshot["derived"]["anyone_home"] = False
     assert _open_entry(snapshot) == []
+
+
+@pytest.mark.parametrize(
+    ("entity_id", "target_state"),
+    [(CAR_LOCK, "unlocked"), (CAR_DOORS, "on"), (CAR_WINDOW, "on")],
+)
+def test_lock_and_entry_duration_rules_skip_an_away_car(
+    entity_id: str, target_state: str
+) -> None:
+    """'Lock unlocked too long' / 'entry open too long' are house-entry rules."""
+    rules = [
+        _rule(
+            "entity_state_duration",
+            entity_id=entity_id,
+            target_state=target_state,
+            threshold_hours=1,
+        )
+    ]
+    snapshot_away = _snapshot(away=True)
+    snapshot_home = _snapshot(away=False)
+    for snapshot in (snapshot_away, snapshot_home):
+        snapshot["derived"]["now"] = "2026-02-01T03:00:00+00:00"
+    assert _triggered(snapshot_away, rules) == []
+    assert _triggered(snapshot_home, rules) == [entity_id]
+
+
+def test_a_duration_rule_on_another_car_sensor_still_fires_while_away() -> None:
+    """Only locks and door/window sensors are entries; a car's other sensors are not."""
+    snapshot = _snapshot(away=True)
+    snapshot["derived"]["now"] = "2026-02-01T03:00:00+00:00"
+    snapshot["entities"].append(
+        _entity("binary_sensor.911_carrera_charging", "on", away=True)
+    )
+    rules = [
+        _rule(
+            "entity_state_duration",
+            entity_id="binary_sensor.911_carrera_charging",
+            target_state="on",
+            threshold_hours=1,
+        )
+    ]
+    assert _triggered(snapshot, rules) == ["binary_sensor.911_carrera_charging"]
+
+
+def test_an_away_car_does_not_stand_in_as_camera_activity() -> None:
+    """A camera with no activity of its own must not borrow an away car's updates."""
+    snapshot = _snapshot(away=True, camera=True)
+    snapshot["camera_activity"][0]["last_activity"] = None
+    snapshot["entities"].append(_entity(HOUSE_LOCK, "unlocked"))
+    for entity in snapshot["entities"]:
+        if entity["entity_id"] == HOUSE_LOCK:
+            entity["last_changed"] = "2026-01-31T00:00:00+00:00"
+    assert _camera_unsecured(snapshot) == []
+    for entity in snapshot["entities"]:
+        entity.pop("device_away_from_home", None)
+    assert _camera_unsecured(snapshot) == [
+        [CAR_DOORS, CAR_WINDOW, CAR_LOCK, HOUSE_LOCK]
+    ]
+
+
+def test_an_away_car_door_does_not_change_the_open_count_alert_id() -> None:
+    """A car door opening and closing on a drive must not re-mint the house alert."""
+    second_house_door = "binary_sensor.back_door"
+    rules = [
+        _rule(
+            "multiple_entries_open_count",
+            entry_entity_ids=[*_ENTRIES, second_house_door],
+            min_count=2,
+        )
+    ]
+    ids = []
+    for car_state in ("on", "off"):
+        snapshot = _snapshot(away=True, house=True)
+        snapshot["entities"].append(
+            _entity(second_house_door, "on", device_class="door")
+        )
+        for entity in snapshot["entities"]:
+            if entity["entity_id"] in {CAR_DOORS, CAR_WINDOW}:
+                entity["state"] = car_state
+        findings = evaluate_dynamic_rules(snapshot, rules)
+        assert len(findings) == 1
+        ids.append(findings[0].anomaly_id)
+    assert ids[0] == ids[1]
+
+
+@pytest.mark.parametrize(
+    ("entity_id", "device_class"),
+    [
+        ("binary_sensor.911_carrera_door_lock_state", "lock"),
+        ("binary_sensor.911_carrera_rear_door", None),
+    ],
+)
+def test_a_duration_rule_on_a_car_lock_sensor_or_unclassed_door_skips(
+    entity_id: str, device_class: str | None
+) -> None:
+    """'Entry open too long' picks entries by id, not class: both shapes skip."""
+    rules = [
+        _rule(
+            "entity_state_duration",
+            entity_id=entity_id,
+            target_state="on",
+            threshold_hours=1,
+        )
+    ]
+    results = []
+    for away in (True, False):
+        snapshot = _snapshot(away=away)
+        snapshot["derived"]["now"] = "2026-02-01T03:00:00+00:00"
+        snapshot["entities"].append(
+            _entity(entity_id, "on", device_class=device_class, away=away)
+        )
+        results.append(_triggered(snapshot, rules))
+    assert results == [[], [entity_id]]
+
+
+def test_the_car_leaving_does_not_change_a_house_only_open_count_alert_id() -> None:
+    """Two house windows open all afternoon: the car leaving is not a new alert."""
+    back_door = "binary_sensor.back_door"
+    rules = [
+        _rule(
+            "multiple_entries_open_count",
+            entry_entity_ids=[*_ENTRIES, back_door],
+            min_count=2,
+        )
+    ]
+    ids = []
+    for away in (False, True):
+        snapshot = _snapshot(away=away, house=True)
+        snapshot["entities"].append(_entity(back_door, "on", device_class="door"))
+        for entity in snapshot["entities"]:
+            if entity["entity_id"] in {CAR_DOORS, CAR_WINDOW}:
+                entity["state"] = "off"
+        findings = evaluate_dynamic_rules(snapshot, rules)
+        assert len(findings) == 1
+        ids.append(findings[0].anomaly_id)
+    assert ids[0] == ids[1]
+
+
+def test_an_unhashable_device_class_does_not_break_duration_rules() -> None:
+    """A customized list-valued device_class must not raise in the entry check."""
+    snapshot = _snapshot(away=True)
+    snapshot["derived"]["now"] = "2026-02-01T03:00:00+00:00"
+    odd = _entity("binary_sensor.911_carrera_odd", "on", away=True)
+    odd["attributes"]["device_class"] = ["door"]
+    snapshot["entities"].append(odd)
+    rules = [
+        _rule(
+            "entity_state_duration",
+            entity_id="binary_sensor.911_carrera_odd",
+            target_state="on",
+            threshold_hours=1,
+        )
+    ]
+    assert _triggered(snapshot, rules) == ["binary_sensor.911_carrera_odd"]

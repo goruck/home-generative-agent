@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from custom_components.home_generative_agent.sentinel.models import (
     AnomalyFinding,
     build_anomaly_id,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from custom_components.home_generative_agent.snapshot.schema import (
@@ -60,6 +63,10 @@ class UnlockedLockAtNightRule:
             # A car's door lock while the car is away is not a way into the
             # house (#1088). Parked at home, it still alerts.
             if entity.get("device_away_from_home"):
+                LOGGER.debug(
+                    "Skipping %s: its device's GPS tracker is away from home.",
+                    entity["entity_id"],
+                )
                 continue
 
             evidence = {
