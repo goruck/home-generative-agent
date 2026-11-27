@@ -134,6 +134,7 @@ from .helpers import (
     drop_empty_args,
     intent_results,
     keep_pin_prompt,
+    loads_or_none,
     minimal_payload_for_domain,
     narrow_intent_args,
     normalize_intent_for_alarm,
@@ -168,6 +169,9 @@ if TYPE_CHECKING:
     from langchain_core.runnables.base import RunnableSerializable
 
 LOGGER = logging.getLogger(__name__)
+
+# How much of a failed tool's own text the PIN failure reply carries (#1078).
+PIN_FAILURE_TEXT_MAX_LEN = 300
 
 # Limit on a PIN confirmation, counted from the start of the tool call. Below
 # the graph's per-tool timeout (graph.py, 30 s), so an action that is slow
@@ -1604,6 +1608,45 @@ def _completed_reply(
     )
 
 
+def _tool_failure_reason(data: Any) -> str | None:
+    """
+    Return a failed tool's own error string, or None when it gives none.
+
+    Shown instead of the tool's whole answer, which is cut to fit and could
+    end before an error put last (#1078). Read from the shapes the failure
+    check reads: the result, a JSON string of it, and the JSON objects in an
+    MCP result's text items. A result that says ``success`` itself keeps its
+    own readable text, so None for it.
+    """
+    result = loads_or_none(data) if isinstance(data, str) else data
+    if not isinstance(result, dict) or isinstance(result.get("success"), bool):
+        return None
+    candidates = [result]
+    content = result.get("content")
+    for item in content if isinstance(content, list) else []:
+        text = item.get("text") if isinstance(item, dict) else None
+        inner = loads_or_none(text) if isinstance(text, str) else None
+        if isinstance(inner, dict):
+            candidates.append(inner)
+    for candidate in candidates:
+        reason = candidate.get("error")
+        if isinstance(reason, str) and reason:
+            return reason
+    return None
+
+
+def _quoted_tool_text(text: str) -> str:
+    """
+    Return a tool's text as one bounded, quoted line for fixed safety copy.
+
+    Cut to PIN_FAILURE_TEXT_MAX_LEN, then quoted, so the words read as the
+    tool's data, never as part of the copy they sit in (#1078).
+    """
+    return json.dumps(
+        sanitize_tool_text(text, limit=PIN_FAILURE_TEXT_MAX_LEN), ensure_ascii=False
+    )
+
+
 async def _execute_pending_action(  # noqa: PLR0911, PLR0912
     resolved_action_id: str,
     action: dict[str, Any],
@@ -1696,8 +1739,9 @@ async def _execute_pending_action(  # noqa: PLR0911, PLR0912
         tool_input = llm.ToolInput(tool_name=own_name, tool_args=tool_args)
         async with asyncio.timeout_at(deadline):
             response = tool_call_data(await target_api.async_call_tool(tool_input))
-        # A tool that reports failure in its payload (success: false, a
-        # warning) did not act, the same as the normal path reads it. Inside
+        # A tool that reports failure in its payload (success: false, an
+        # error or status "error" with no success, a warning) did not act,
+        # the same as the normal path reads it. Inside
         # the try: after the claim, even reading the reply must not raise.
         # What was done, so the reply cannot say the opposite (#797).
         data = with_action_performed(tool_name, response.data)
@@ -1715,11 +1759,11 @@ async def _execute_pending_action(  # noqa: PLR0911, PLR0912
         if not response.error and status != "error":
             return _completed_reply(cfg, action, resolved_action_id, data, status), None
         # HA 2026.10's error flag gets the same reply as a raised error.
-        failure = (
+        failure = _tool_failure_reason(data) or (
             content if status == "error" else json.dumps(response.data, default=str)
         )
     _record_confirmed(cfg, action, outcome)
-    reply = pin_msg(cfg.get("hass"), reply_key, err=failure)
+    reply = pin_msg(cfg.get("hass"), reply_key, err=_quoted_tool_text(failure))
     # "May have run" is no failure to retry (#1023 review): only a call that
     # did not act is a ToolFailure.
     return None, reply if outcome == PIN_OUTCOME_UNKNOWN else ToolFailure(reply)
