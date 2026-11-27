@@ -665,8 +665,54 @@ async def test_engine_reports_a_dead_dynamic_rule_once_and_forgets_it(
 
         registry.rules = []
         await engine._run_once()
-        assert engine._unresolved_rule_sensors == {}
+        assert engine._rule_sensor_logs.unresolved == {}
 
         registry.rules = [dead_rule]
+        await engine._run_once()
+        assert warnings() == 2
+
+
+@pytest.mark.asyncio
+async def test_engine_reports_an_unreadable_battery_sensor_once_and_forgets_it(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """
+    The engine owns the record of unreadable battery sensors it logged (#1082).
+
+    A low-battery rule listing an entity whose state is not a level ("on") is
+    logged once across runs, and again after the rule leaves and comes back.
+    """
+    _patch_snapshot(monkeypatch, _open_door_snapshot())
+    engine = _make_engine({})
+    registry = _ListRegistry()
+    engine._rule_registry = cast("Any", registry)
+    rule = {
+        "rule_id": "battery_rule_engine",
+        "template_id": "low_battery_sensors",
+        "params": {"sensor_entity_ids": ["binary_sensor.front_door"]},
+        "severity": "low",
+        "confidence": 0.8,
+        "is_sensitive": False,
+        "suggested_actions": ["check_sensor"],
+    }
+
+    def warnings() -> int:
+        return sum(
+            "battery_rule_engine" in record.getMessage()
+            and "#1082" in record.getMessage()
+            for record in caplog.records
+        )
+
+    with caplog.at_level("WARNING"):
+        registry.rules = [rule]
+        await engine._run_once()
+        await engine._run_once()
+        assert warnings() == 1
+
+        registry.rules = []
+        await engine._run_once()
+        assert engine._rule_sensor_logs.unreadable == {}
+
+        registry.rules = [rule]
         await engine._run_once()
         assert warnings() == 2
