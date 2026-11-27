@@ -862,6 +862,16 @@ async def test_a_failed_action_reply_carries_the_tool_text_safely() -> None:
     assert "x" * 400 not in reply
 
 
+async def test_a_failed_action_reply_names_the_error_given_last() -> None:
+    """A long answer before the error does not cut the reason off (#1078)."""
+    result = {"result": "Front door unlock command sent " * 20, "error": "Lock jammed"}
+    answer, reply = await _request_and_confirm(_FakeAPI(result))
+
+    assert answer.outcome == PIN_OUTCOME_FAILED
+    assert '"Lock jammed"' in reply
+    assert "unlock command sent" not in reply
+
+
 FRONT = {"type": "entity", "name": "Front Lock", "id": "lock.f"}
 BACK = {"type": "entity", "name": "Back Lock", "id": "lock.b"}
 KITCHEN = {"type": "area", "name": "Kitchen", "id": "kitchen"}
