@@ -2250,7 +2250,6 @@ def parse_tool_response(
         return content_str, "error"
 
     warning = parsed.get("warning")
-    error_text = parsed.get("error")
     result_text = (
         parsed.get("result_text") or parsed.get("response") or parsed.get("result")
     )
@@ -2269,11 +2268,10 @@ def parse_tool_response(
         # only {"error": "..."} is a failure too, not "PIN accepted" (#1078).
         # Home Assistant's own tools that set error set its error flag too.
         status = "error"
-        content_str = str(
-            result_text
-            or (error_text if isinstance(error_text, str) and error_text else None)
-            or "Action failed."
-        )
+        if parsed.get("success") is False:
+            content_str = str(result_text or "Action failed.")
+        # Otherwise the tool's own JSON stays as it came, as for MCP text: a
+        # "result" or "message" beside the error must not hide the failure.
     elif is_alarm:
         if "arm" in service and inferred_state not in {
             "armed",

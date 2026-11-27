@@ -169,6 +169,9 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+# How much of a failed tool's own text the PIN failure reply carries (#1078).
+PIN_FAILURE_TEXT_MAX_LEN = 300
+
 # Limit on a PIN confirmation, counted from the start of the tool call. Below
 # the graph's per-tool timeout (graph.py, 30 s), so an action that is slow
 # after its claim is answered as "may have run" here.
@@ -1719,7 +1722,12 @@ async def _execute_pending_action(  # noqa: PLR0911, PLR0912
             content if status == "error" else json.dumps(response.data, default=str)
         )
     _record_confirmed(cfg, action, outcome)
-    reply = pin_msg(cfg.get("hass"), reply_key, err=failure)
+    # The tool's own words sit inside fixed safety copy: one line, bounded.
+    reply = pin_msg(
+        cfg.get("hass"),
+        reply_key,
+        err=sanitize_tool_text(failure, limit=PIN_FAILURE_TEXT_MAX_LEN),
+    )
     # "May have run" is no failure to retry (#1023 review): only a call that
     # did not act is a ToolFailure.
     return None, reply if outcome == PIN_OUTCOME_UNKNOWN else ToolFailure(reply)
