@@ -1625,13 +1625,13 @@ That satisfies all three cases at once: different devices with identical prose s
 
 ---
 
-### Reject non-finite and out-of-range low_battery_sensors readings
+### Reject out-of-range low_battery_sensors readings, and non-finite ones at approval
 
-**What:** `_eval_low_battery_sensors` (dynamic_rules.py) and the approval gate `_is_battery_like_state` (`__init__.py`) both take anything `float()` accepts as a battery reading. `-inf` fires the rule with level `-inf`; `nan` never fires but stays in `sensor_levels` (invalid JSON under `json.dumps`, `null` under orjson); `inf` and `1e3` read as above the threshold; negative readings fire. The rule's `threshold` has the same gap in `_coerce_float`: `nan` means the rule never fires, `inf` means every sensor always fires.
+**What:** The approval gate `_is_battery_like_state` (`__init__.py`) takes anything `float()` accepts as a battery reading, `nan` and `inf` included. The evaluator skips a non-finite reading and names it in the #1082 warning, but still takes an out-of-range one: `1e3` reads as above the threshold, and negative readings fire. The rule's `threshold` has the same gap in `_coerce_float`: `nan` means the rule never fires, `inf` means every sensor always fires.
 
 **Why:** Adversarial review of the #1064 PR (#1081, 2026-11-26). Older than that change and not fixed there. No sensor is known to report these; the approval gate's battery plausibility check (#522) makes a wrongly promoted sensor unlikely.
 
-**How to apply:** In the evaluator and the approval gate, treat a reading as readable only when `math.isfinite` holds and it lies in 0-100, and skip it otherwise, as for a non-numeric state. Clamp or reject a non-finite threshold when the rule is registered.
+**How to apply:** In the approval gate, require `math.isfinite`; in both, treat a reading outside 0-100 as unreadable, as for a non-numeric state. Clamp or reject a non-finite threshold when the rule is registered. (Non-finite readings in the evaluator: done in the #1082 PR.)
 
 **Effort:** S
 **Priority:** P3

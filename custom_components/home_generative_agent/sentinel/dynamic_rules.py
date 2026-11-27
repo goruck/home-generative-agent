@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import math
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, cast
 
@@ -67,6 +69,25 @@ _OPEN_ENTRY_STATES = frozenset({"on", "open"})
 _ENTRY_DEVICE_CLASSES = frozenset({"door", "window", "opening", "garage_door", "lock"})
 _ENTRY_ID_TOKENS = ("door", "window", "entry")
 _ENTRY_STATES_KEY = frozenset({"entry_states"})
+
+
+@dataclass
+class RuleSensorLogs:
+    """
+    The engine's record of rules it has logged as unable to check a sensor.
+
+    *unresolved* holds rules that list a sensor with no state (#960),
+    *unreadable* low-battery rules with a sensor they cannot read (#1082).
+    Pass them to evaluate_dynamic_rules as unresolved_log and unreadable_log.
+    """
+
+    unresolved: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    unreadable: dict[tuple[str, str], tuple[str, ...]] = field(default_factory=dict)
+
+    def clear(self) -> None:
+        """Forget every rule, as when no dynamic rule is left."""
+        self.unresolved.clear()
+        self.unreadable.clear()
 
 
 def _away_vehicle(entity: SnapshotEntity) -> bool:
@@ -764,8 +785,8 @@ def _eval_low_battery_sensors(
 
     A sensor that is left out is noted in *unreadable* for the caller to
     report (#1082) when it will not read again by waiting: its state is some
-    other text ("locked", "low"), or it has been unavailable or unknown for
-    a day.
+    other text ("locked", "low") or a number that is not finite ("nan",
+    "inf"), or it has been unavailable or unknown for a day.
     """
     params = _rule_params(rule)
     sensor_ids = params.get("sensor_entity_ids")
@@ -783,7 +804,7 @@ def _eval_low_battery_sensors(
     for sensor_id, entity in zip(resolved_ids, entities, strict=True):
         states[sensor_id] = entity.get("state")
         value = _coerce_optional_float(entity.get("state"))
-        if value is not None:
+        if value is not None and math.isfinite(value):
             readings[sensor_id] = value
             continue
         kind = _unreadable_battery_kind(entity, now)
@@ -819,13 +840,19 @@ def _unreadable_battery_kind(entity: SnapshotEntity, now: datetime) -> str | Non
 
     None for a sensor that is unavailable or unknown for less than a day, or
     since a time that cannot be read: it is skipped quietly, as it may read
-    again. Home Assistant restarts the clock when it restarts.
+    again. The clock restarts when Home Assistant restarts and when the state
+    moves between unavailable and unknown.
     """
     state = entity.get("state")
     if state not in _LOW_BATTERY_TRANSIENT_STATES:
         return _UNREADABLE_NOT_A_NUMBER
-    since = dt_util.parse_datetime(str(entity.get("last_changed") or ""))
-    if since is None or now - since < _LOW_BATTERY_UNREADABLE_WARN_AFTER:
+    try:
+        since = dt_util.parse_datetime(str(entity.get("last_changed") or ""))
+        if since is None or now - since < _LOW_BATTERY_UNREADABLE_WARN_AFTER:
+            return None
+    except (TypeError, ValueError):
+        # An impossible date, or one with no time zone, must not stop the
+        # run and silence every other rule with it.
         return None
     return _UNREADABLE_FOR_LONG
 
@@ -839,13 +866,14 @@ def _report_unreadable_battery_sensors(
 
     Kept as _report_unresolved_sensors keeps its record (#960): a rule whose
     sensor reads again, or that leaves the run, is reported again if the
-    sensor stops reading again.
+    sensor stops reading again. A warning is logged only when a sensor joins
+    the set, so one sensor that keeps flapping does not repeat the others.
     """
     current = {
         key: tuple(sorted(sensor_ids)) for key, sensor_ids in run_unreadable.items()
     }
     for (rule_id, kind), sensor_ids in sorted(current.items()):
-        if logged.get((rule_id, kind)) == sensor_ids:
+        if set(sensor_ids) <= set(logged.get((rule_id, kind), ())):
             continue
         shown = ", ".join(
             repr(sensor_id[:_UNRESOLVED_ID_MAX_CHARS])
@@ -868,9 +896,9 @@ def _report_unreadable_battery_sensors(
                 "Sentinel low-battery rule %r has not checked %s for a day or "
                 "more: the sensor is unavailable or unknown, which can mean its "
                 "battery is dead. The rule still checks its other sensors and "
-                "checks this one again once it reads. To be alerted when a "
-                "sensor goes offline, approve an unavailable-sensors rule for "
-                "it (#1082).",
+                "checks this one again once it reads. An unavailable-sensors "
+                "rule for it alerts while it is unavailable; nothing alerts on "
+                "unknown (#1082).",
                 rule_id[:_UNRESOLVED_ID_MAX_CHARS],
                 shown,
             )

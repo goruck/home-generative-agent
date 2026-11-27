@@ -105,7 +105,7 @@ from .alarm_enrichment import async_enrich_alarm_last_changed
 from .autonomy import autonomy_level, override_minutes
 from .baseline import CYCLICAL_LOAD_HINTS
 from .correlator import SentinelCorrelator
-from .dynamic_rules import evaluate_dynamic_rules
+from .dynamic_rules import RuleSensorLogs, evaluate_dynamic_rules
 from .execution import (
     MIN_AUTO_EXECUTE_LEVEL,
     SentinelExecutionService,
@@ -394,7 +394,7 @@ def _is_cyclical(entity_id: str, friendly_name: str) -> bool:
 class SentinelEngine:
     """Periodic sentinel evaluation loop."""
 
-    def __init__(  # noqa: PLR0913, PLR0915
+    def __init__(  # noqa: PLR0913
         self,
         hass: HomeAssistant,
         options: dict[str, object],
@@ -468,10 +468,8 @@ class SentinelEngine:
         self._audit_store = audit_store
         self._explainer = explainer
         self._rule_registry = rule_registry
-        # Dynamic rules last logged as listing a sensor with no state (#960).
-        self._unresolved_rule_sensors: dict[str, tuple[str, ...]] = {}
-        # Low-battery rules last logged as unable to check a sensor (#1082).
-        self._unreadable_battery_sensors: dict[tuple[str, str], tuple[str, ...]] = {}
+        # Dynamic rules last logged as unable to check a sensor (#960, #1082).
+        self._rule_sensor_logs = RuleSensorLogs()
         self._entry_id = entry_id
         self._triage_service = triage_service
         # Explanations share the per-run model-call limit (#866): calls made
@@ -2237,8 +2235,7 @@ class SentinelEngine:
             dynamic_rules = self._rule_registry.list_rules()
             if not dynamic_rules:
                 # No rule is left to be reported as dead; see the call below.
-                self._unresolved_rule_sensors.clear()
-                self._unreadable_battery_sensors.clear()
+                self._rule_sensor_logs.clear()
             else:
                 baselines: dict[str, dict[str, float]] = {}
                 dow_data: dict[str, dict[str, tuple[float, int]]] | None = None
@@ -2274,8 +2271,8 @@ class SentinelEngine:
                     dow_data=dow_data,
                     dow_min_samples=dow_min_samples,
                     global_drift_pct=global_drift_pct,
-                    unresolved_log=self._unresolved_rule_sensors,
-                    unreadable_log=self._unreadable_battery_sensors,
+                    unresolved_log=self._rule_sensor_logs.unresolved,
+                    unreadable_log=self._rule_sensor_logs.unreadable,
                 )
                 sustained_minutes = _coerce_int(
                     self._options.get(CONF_SENTINEL_BASELINE_SUSTAINED_MINUTES),

@@ -665,7 +665,7 @@ async def test_engine_reports_a_dead_dynamic_rule_once_and_forgets_it(
 
         registry.rules = []
         await engine._run_once()
-        assert engine._unresolved_rule_sensors == {}
+        assert engine._rule_sensor_logs.unresolved == {}
 
         registry.rules = [dead_rule]
         await engine._run_once()
@@ -711,7 +711,7 @@ async def test_engine_reports_an_unreadable_battery_sensor_once_and_forgets_it(
 
         registry.rules = []
         await engine._run_once()
-        assert engine._unreadable_battery_sensors == {}
+        assert engine._rule_sensor_logs.unreadable == {}
 
         registry.rules = [rule]
         await engine._run_once()
