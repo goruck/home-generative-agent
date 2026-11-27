@@ -2219,8 +2219,9 @@ def parse_tool_response(
     Return (content, status) from a tool response.
 
     Shared by the normal tool path and the PIN confirmation, so a tool that
-    reports failure in its payload (`success: false`, a `warning`, an alarm
-    that did not change state) reads as a failure on both. So does a tool
+    reports failure in its payload (`success: false`, a non-empty `error` or
+    `status: "error"` with no `success`, a `warning`, an alarm that did not
+    change state) reads as a failure on both. So does a tool
     reached over MCP that reports it inside its text (#1067). An action intent
     that acted on some devices only (``data.failed``) reads as
     TOOL_STATUS_PARTIAL, and one where no device acted as a failure, each with
@@ -2249,7 +2250,7 @@ def parse_tool_response(
         return content_str, "error"
 
     warning = parsed.get("warning")
-    success_val = parsed.get("success", True)
+    error_text = parsed.get("error")
     result_text = (
         parsed.get("result_text") or parsed.get("response") or parsed.get("result")
     )
@@ -2263,9 +2264,16 @@ def parse_tool_response(
     if warning:
         status = "error"
         content_str = str(result_text or warning)
-    elif success_val is False:
+    elif _reports_failure(parsed):
+        # The rule the MCP text follows (#1067), so a local tool answering
+        # only {"error": "..."} is a failure too, not "PIN accepted" (#1078).
+        # Home Assistant's own tools that set error set its error flag too.
         status = "error"
-        content_str = str(result_text or "Action failed.")
+        content_str = str(
+            result_text
+            or (error_text if isinstance(error_text, str) and error_text else None)
+            or "Action failed."
+        )
     elif is_alarm:
         if "arm" in service and inferred_state not in {
             "armed",

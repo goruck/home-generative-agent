@@ -836,6 +836,10 @@ async def test_a_wrong_pin_records_nothing() -> None:
         # A tool that reports failure in its payload, as the normal path reads it.
         {"success": False, "result_text": "Device unavailable"},
         {"warning": "no entity matched"},
+        # A local tool that reports failure only through error or status, with
+        # no success field and no HA error flag (#1078).
+        {"error": "boom"},
+        {"status": "error", "message": "boom"},
     ],
 )
 async def test_a_failed_action_is_recorded_as_failed(result: Any) -> None:
@@ -964,6 +968,14 @@ def test_the_normal_path_lists_the_failed_devices() -> None:
     # A failure that was reported as such stays an error.
     with_warning = {**_half_done(BACK), "warning": "no entity matched"}
     assert parse_tool_response(with_warning, {"domain": ["lock"]})[1] == "error"
+
+
+def test_an_error_only_result_carries_its_own_words() -> None:
+    """The failure text is the tool's error, not a generic line (#1078)."""
+    content, status = parse_tool_response({"error": "lock jammed"}, {})
+
+    assert status == "error"
+    assert content == "lock jammed"
 
 
 def test_a_call_where_no_device_acted_is_an_error() -> None:
@@ -1392,6 +1404,14 @@ async def test_an_unreadable_reply_after_the_claim_is_an_unknown_outcome(
     [
         ({"success": False}, {}, "error"),
         ({"warning": "x"}, {}, "error"),
+        # No success field: a non-empty error or status "error" fails (#1078).
+        ({"error": "boom"}, {}, "error"),
+        ('{"error": "boom"}', {}, "error"),
+        ({"status": "error"}, {}, "error"),
+        # A boolean success decides; an empty error is no failure.
+        ({"success": True, "error": "a note beside it"}, {}, None),
+        ({"error": ""}, {}, None),
+        ({"error": None, "result": "ok"}, {}, None),
         ('{"success": false}', {}, "error"),
         ("[]", {}, None),
         ("not json", {}, None),
