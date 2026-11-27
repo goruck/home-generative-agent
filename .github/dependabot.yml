@@ -28,4 +28,7 @@ updates:
       - dependency-name: "pymicro-vad"
       - dependency-name: "pyspeex-noise"
       - dependency-name: "aiohasupervisor"
+      - dependency-name: "hassil"
+      - dependency-name: "home-assistant-intents"
+      - dependency-name: "gazetteer-matcher"
 
