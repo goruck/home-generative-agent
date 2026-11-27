@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.const import STATE_HOME, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
@@ -15,6 +16,7 @@ from homeassistant.util import dt as dt_util
 from .camera_activity import extract_camera_activity
 from .derived import derive_context
 from .network import NetworkBuildContext, async_build_network_snapshot
+from .router import TRACKER_DOMAIN
 from .schema import (
     SNAPSHOT_SCHEMA_VERSION,
     FullStateSnapshot,
@@ -60,38 +62,55 @@ def _build_entity_snapshot(
     }
 
 
-_TRACKER_DOMAIN = "device_tracker"
 _SOURCE_TYPE_GPS = "gps"
-_TRACKER_HOME = "home"
-_TRACKER_NO_READING = frozenset({"unknown", "unavailable"})
+_TRACKER_NO_READING = frozenset({STATE_UNKNOWN, STATE_UNAVAILABLE, ""})
+_HOME_ZONE = "zone.home"
+
+
+def _tracker_is_home(state: State) -> bool:
+    """
+    Return True when a tracker places its device in the home zone.
+
+    A tracker's state names the closest zone it is in, so a car parked in a
+    "Driveway" zone inside the home radius reads "Driveway", not ``home``.
+    ``in_zones`` lists every zone that holds it, the home zone included (#1088).
+    """
+    if state.state == STATE_HOME:
+        return True
+    in_zones = state.attributes.get("in_zones")
+    return isinstance(in_zones, list) and _HOME_ZONE in in_zones
 
 
 def _devices_away_from_home(
     states: Iterable[State], entity_device: dict[str, str]
-) -> set[str]:
+) -> dict[str, datetime]:
     """
-    Return the ids of devices a GPS device_tracker reports away from home.
+    Map each device a GPS device_tracker reports away from home to when it said so.
 
     A device counts as away when one of its GPS trackers has a reading and none
-    of them reads ``home``. A tracker with no reading (``unknown``,
-    ``unavailable``) says nothing about where the device is, so a device whose
-    only trackers have none is not away: its lock still alerts (#1088).
+    of them places it at home. A tracker with no reading (``unknown``,
+    ``unavailable``, blank) says nothing about where the device is, so a device
+    whose only trackers have none is not away: its lock still alerts (#1088).
+    The time is the newest ``last_updated`` of the trackers that read away; a
+    rule compares it with the lock's own change to tell a stale "away" apart.
     """
-    readings: dict[str, list[str]] = {}
+    away: dict[str, datetime] = {}
+    home: set[str] = set()
     for state in states:
-        if state.domain != _TRACKER_DOMAIN:
+        if state.domain != TRACKER_DOMAIN:
             continue
         if state.attributes.get("source_type") != _SOURCE_TYPE_GPS:
             continue
         device_id = entity_device.get(state.entity_id)
-        if device_id is None or state.state in _TRACKER_NO_READING:
+        if device_id is None or state.state.strip() in _TRACKER_NO_READING:
             continue
-        readings.setdefault(device_id, []).append(state.state)
-    return {
-        device_id
-        for device_id, values in readings.items()
-        if _TRACKER_HOME not in values
-    }
+        if _tracker_is_home(state):
+            home.add(device_id)
+            continue
+        seen = away.get(device_id)
+        if seen is None or state.last_updated > seen:
+            away[device_id] = state.last_updated
+    return {device_id: at for device_id, at in away.items() if device_id not in home}
 
 
 @dataclass
@@ -168,8 +187,9 @@ async def async_build_full_state_snapshot(
     away_devices = _devices_away_from_home(states, lookups.entity_device)
     if away_devices:
         for entity in entities:
-            if lookups.entity_device.get(entity["entity_id"]) in away_devices:
-                entity["device_away_from_home"] = True
+            device_id = lookups.entity_device.get(entity["entity_id"])
+            if device_id in away_devices:
+                entity["device_away_since"] = _as_iso(away_devices[device_id])
 
     camera_activity = []
     for state in states:

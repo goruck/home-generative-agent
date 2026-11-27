@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from homeassistant.util import dt as dt_util
+
 from custom_components.home_generative_agent.sentinel.models import (
     AnomalyFinding,
     build_anomaly_id,
@@ -57,9 +59,7 @@ class UnlockedLockAtNightRule:
                 continue
             if not _is_exterior_hint(entity):
                 continue
-            # A car's door lock while the car is away is not a way into the
-            # house (#1088). Parked at home, it still alerts.
-            if entity.get("device_away_from_home"):
+            if _on_device_away_from_home(entity):
                 continue
 
             evidence = {
@@ -91,3 +91,22 @@ def _is_exterior_hint(entity: SnapshotEntity) -> bool:
     area = (entity["area"] or "").lower()
     name = (entity["friendly_name"] or "").lower()
     return any(hint in area or hint in name for hint in EXTERIOR_HINTS)
+
+
+def _on_device_away_from_home(entity: SnapshotEntity) -> bool:
+    """
+    Return True for a lock on a device its GPS tracker places away from home.
+
+    A car's door lock while the car is away is not a way into the house
+    (#1088). The skip holds only while the tracker's report is at least as new
+    as the lock's last change: a car whose cloud location still reads away
+    after it came home, and was unlocked there since, alerts. A lock with no
+    usable change time alerts too.
+    """
+    away_since = dt_util.parse_datetime(entity.get("device_away_since") or "")
+    if away_since is None:
+        return False
+    changed = dt_util.parse_datetime(entity.get("last_changed") or "")
+    if changed is None:
+        return False
+    return away_since >= changed
