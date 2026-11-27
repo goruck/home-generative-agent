@@ -53,6 +53,17 @@ _SEVERITIES = {"low", "medium", "high"}
 _OPEN_ENTRY_STATES = frozenset({"on", "open"})
 
 
+def _away_vehicle(entity: SnapshotEntity) -> bool:
+    """
+    Return True for an entity on a device whose GPS tracker is away from home.
+
+    A car's door, window, lid or lock while the car is out is not a way into
+    the house, so the entry and lock templates skip it (#1088, #1089), even
+    for a rule approved for that one entity. Parked at home, it still alerts.
+    """
+    return bool(entity.get("device_away_from_home"))
+
+
 def evaluate_dynamic_rules(  # noqa: PLR0913
     snapshot: FullStateSnapshot,
     rules: Iterable[dict[str, Any]],
@@ -280,6 +291,8 @@ def _eval_alarm_disarmed_open_entry(
         entry = entity_map.get(entry_id)
         if not entry or entry.get("state") not in _OPEN_ENTRY_STATES:
             continue
+        if _away_vehicle(entry):
+            continue
         evidence = {
             "rule_id": rule.get("rule_id"),
             "template_id": rule.get("template_id"),
@@ -503,7 +516,7 @@ def _eval_unlocked_lock_when_home(
     if not lock_id:
         return []
     lock = entity_map.get(lock_id)
-    if not lock or lock.get("state") != "unlocked":
+    if not lock or lock.get("state") != "unlocked" or _away_vehicle(lock):
         return []
     evidence = {
         "rule_id": rule.get("rule_id"),
@@ -878,6 +891,8 @@ def _eval_open_entry_with_context(  # noqa: PLR0913
         entry = entity_map.get(entry_id)
         if not entry or entry.get("state") not in _OPEN_ENTRY_STATES:
             continue
+        if _away_vehicle(entry):
+            continue
         evidence = {
             "rule_id": rule.get("rule_id"),
             "template_id": rule.get("template_id"),
@@ -925,7 +940,7 @@ def _find_open_window_entity_ids(
 ) -> list[str]:
     window_ids: list[str] = []
     for entity_id, entity in entity_map.items():
-        if entity.get("state") != "on":
+        if entity.get("state") != "on" or _away_vehicle(entity):
             continue
         domain = entity.get("domain")
         if domain not in {"binary_sensor", "sensor"}:
@@ -948,7 +963,7 @@ def _eval_unlocked_lock_while_away(
     if not lock_id:
         return []
     lock = entity_map.get(lock_id)
-    if not lock or lock.get("state") != "unlocked":
+    if not lock or lock.get("state") != "unlocked" or _away_vehicle(lock):
         return []
     evidence = {
         "rule_id": rule.get("rule_id"),
@@ -1143,7 +1158,7 @@ def _eval_multiple_entries_open_count(
         if not entity:
             continue
         states[entry_id] = entity.get("state")
-        if entity.get("state") in _OPEN_ENTRY_STATES:
+        if entity.get("state") in _OPEN_ENTRY_STATES and not _away_vehicle(entity):
             triggering.append(entry_id)
     if len(triggering) < min_count:
         return []

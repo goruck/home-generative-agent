@@ -38,6 +38,10 @@ class OpenEntryWhileAwayRule:
                 continue
             if entity["state"] != "on":
                 continue
+            # A car's door, window or lid while the car is away is not an
+            # entry of the house (#1089). Parked at home, it still alerts.
+            if entity.get("device_away_from_home"):
+                continue
 
             evidence = {
                 "entity_id": entity["entity_id"],
