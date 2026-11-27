@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import math
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -73,70 +74,127 @@ def _build_entity_snapshot(
 
 _SOURCE_TYPE_GPS = "gps"
 _TRACKER_NO_READING = frozenset({STATE_UNKNOWN, STATE_UNAVAILABLE, ""})
+_ZONE_DOMAIN = "zone"
 _HOME_ZONE = "zone.home"
-
-
-def _within_zone(state: State, zone: State | None) -> bool | None:
-    """
-    Return whether a tracker's coordinates lie in ``zone``, or None if unknown.
-
-    The same test Home Assistant's zone helper uses: the distance to the
-    zone's centre, less the reported GPS accuracy, is inside the radius.
-    """
-    if zone is None:
-        return None
-    lat = _number(state.attributes.get(ATTR_LATITUDE))
-    lon = _number(state.attributes.get(ATTR_LONGITUDE))
-    zone_lat = _number(zone.attributes.get(ATTR_LATITUDE))
-    zone_lon = _number(zone.attributes.get(ATTR_LONGITUDE))
-    radius = _number(zone.attributes.get("radius"))
-    if lat is None or lon is None or zone_lat is None or zone_lon is None:
-        return None
-    if radius is None:
-        return None
-    gap = distance(lat, lon, zone_lat, zone_lon)
-    if gap is None:
-        return None
-    accuracy = _number(state.attributes.get(ATTR_GPS_ACCURACY)) or 0.0
-    return gap - accuracy < radius
+_ATTR_IN_ZONES = "in_zones"
+_ATTR_RADIUS = "radius"
+_ATTR_SOURCE_TYPE = "source_type"
+_MAX_LATITUDE = 90.0
+_MAX_LONGITUDE = 180.0
 
 
 def _number(value: Any) -> float | None:
-    """Return a real number attribute as a float, else None (bools excluded)."""
+    """Return a finite real-number attribute as a float, else None."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
 
 
-def _tracker_at_home(state: State, home_zone: State | None) -> bool | None:
+def _point(attributes: Mapping[str, Any]) -> tuple[float, float] | None:
+    """Return a valid (latitude, longitude) from state attributes, else None."""
+    lat = _number(attributes.get(ATTR_LATITUDE))
+    lon = _number(attributes.get(ATTR_LONGITUDE))
+    if lat is None or lon is None:
+        return None
+    if abs(lat) > _MAX_LATITUDE or abs(lon) > _MAX_LONGITUDE:
+        return None
+    return lat, lon
+
+
+def _inside(
+    point: tuple[float, float], zone: State | None, accuracy: float = 0.0
+) -> bool | None:
+    """
+    Return whether ``point`` lies in ``zone``, or None when that is unknown.
+
+    The test Home Assistant's zone helper uses: the distance to the zone's
+    centre, less the GPS accuracy, is inside the radius. An unavailable zone
+    or one without a usable centre and radius settles nothing.
+    """
+    if zone is None or zone.state == STATE_UNAVAILABLE:
+        return None
+    centre = _point(zone.attributes)
+    radius = _number(zone.attributes.get(_ATTR_RADIUS))
+    if centre is None or radius is None:
+        return None
+    gap = distance(point[0], point[1], centre[0], centre[1])
+    if gap is None or not math.isfinite(gap):
+        return None
+    return gap - accuracy < radius
+
+
+def _listed_zones_at_home(
+    in_zones: list[Any], zones: Mapping[str, State]
+) -> bool | None:
+    """
+    Read a tracker's ``in_zones`` list: home, away, or None when unsure.
+
+    Home Assistant adds the enclosing zones only when it places a fix itself;
+    a list the integration supplies may name a "Driveway" zone and not the home
+    zone around it, so a listed zone whose centre is inside home counts as home.
+    """
+    home_zone = zones.get(_HOME_ZONE)
+    unsure = False
+    for zone_id in in_zones:
+        if zone_id == _HOME_ZONE:
+            return True
+        zone = zones.get(zone_id) if isinstance(zone_id, str) else None
+        centre = _point(zone.attributes) if zone is not None else None
+        inside = _inside(centre, home_zone) if centre is not None else None
+        if inside:
+            return True
+        if inside is None:
+            unsure = True
+    return None if unsure else False
+
+
+def _tracker_at_home(state: State, zones: Mapping[str, State]) -> bool | None:
     """
     Return True (home), False (away) or None (no usable reading) for a tracker.
 
-    A tracker's state names the closest zone it is in, so a car parked in a
-    "Driveway" zone inside the home radius reads "Driveway", not ``home``.
-    ``in_zones`` lists every zone that holds it; without it (older Home
-    Assistant), the coordinates are checked against the home zone. A zone
-    name that neither settles says nothing about home, so it is no reading
-    and the lock keeps alerting (#1088).
+    Evidence in the order it can be trusted: Home Assistant's own ``home``;
+    the fix's coordinates against the home zone; the zones the tracker lists
+    (a tracker's state names only the closest zone, so a car parked in a
+    "Driveway" zone inside the home radius reads "Driveway"); last, a location
+    name the integration reports. An empty ``in_zones`` is what Home Assistant
+    writes when it placed nothing, so it settles nothing. A reading nothing
+    settles is no reading, and the lock keeps alerting (#1088).
     """
     reading = state.state.strip()
     if reading in _TRACKER_NO_READING:
         return None
-    if reading.casefold() == STATE_HOME:
+    if reading == STATE_HOME:
         return True
-    in_zones = state.attributes.get("in_zones")
-    if isinstance(in_zones, list):
-        return _HOME_ZONE in in_zones
-    inside = _within_zone(state, home_zone)
-    if inside is not None:
-        return inside
-    if reading == STATE_NOT_HOME:
+    point = _point(state.attributes)
+    if point is not None:
+        accuracy = max(_number(state.attributes.get(ATTR_GPS_ACCURACY)) or 0.0, 0.0)
+        inside = _inside(point, zones.get(_HOME_ZONE), accuracy)
+        if inside is not None:
+            return inside
+    in_zones = state.attributes.get(_ATTR_IN_ZONES)
+    if isinstance(in_zones, list) and in_zones:
+        listed = _listed_zones_at_home(in_zones, zones)
+        if listed is not None:
+            return listed
+    return _named_location_at_home(reading)
+
+
+def _named_location_at_home(reading: str) -> bool | None:
+    """Read a location name an integration reports: home, not_home, else None."""
+    folded = reading.casefold()
+    if folded == STATE_HOME:
+        return True
+    if folded == STATE_NOT_HOME:
         return False
     return None
 
 
 def _devices_away_from_home(
-    states: Iterable[State], entity_device: dict[str, str], home_zone: State | None
+    states: Iterable[State], entity_device: dict[str, str]
 ) -> set[str]:
     """
     Return the ids of devices a GPS device_tracker places away from home.
@@ -147,17 +205,19 @@ def _devices_away_from_home(
     The location is taken as the integration reports it; Home Assistant keeps
     no time of the last real fix, so a stale cloud location is not detected.
     """
+    states = list(states)
+    zones = {s.entity_id: s for s in states if s.domain == _ZONE_DOMAIN}
     away: set[str] = set()
     home: set[str] = set()
     for state in states:
         if state.domain != TRACKER_DOMAIN:
             continue
-        if state.attributes.get("source_type") != _SOURCE_TYPE_GPS:
+        if state.attributes.get(_ATTR_SOURCE_TYPE) != _SOURCE_TYPE_GPS:
             continue
         device_id = entity_device.get(state.entity_id)
         if device_id is None:
             continue
-        at_home = _tracker_at_home(state, home_zone)
+        at_home = _tracker_at_home(state, zones)
         if at_home is True:
             home.add(device_id)
         elif at_home is False:
@@ -236,9 +296,7 @@ async def async_build_full_state_snapshot(
         for state in states
     ]
     entities.sort(key=lambda item: item["entity_id"])
-    away_devices = _devices_away_from_home(
-        states, lookups.entity_device, hass.states.get(_HOME_ZONE)
-    )
+    away_devices = _devices_away_from_home(states, lookups.entity_device)
     for entity in entities:
         if lookups.entity_device.get(entity["entity_id"]) in away_devices:
             entity["device_away_from_home"] = True

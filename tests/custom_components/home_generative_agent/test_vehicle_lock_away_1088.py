@@ -112,6 +112,18 @@ def _alerts(snapshot: FullStateSnapshot) -> list[list[str]]:
     ]
 
 
+def _zone(hass: HomeAssistant, entity_id: str, lat: float, lon: float) -> None:
+    hass.states.async_set(
+        entity_id, "0", {"latitude": lat, "longitude": lon, "radius": 100}
+    )
+
+
+def _home_zone(hass: HomeAssistant, state: str = "0") -> None:
+    hass.states.async_set(
+        "zone.home", state, {"latitude": 37.2282, "longitude": -121.9832, "radius": 100}
+    )
+
+
 async def test_a_car_away_from_home_raises_no_unlocked_lock_alert(
     hass: HomeAssistant, freezer: FrozenDateTimeFactory
 ) -> None:
@@ -126,6 +138,8 @@ async def test_a_car_in_a_zone_outside_home_counts_as_away(
     hass: HomeAssistant, freezer: FrozenDateTimeFactory
 ) -> None:
     """A zone other than home ("Work") is still away from the house."""
+    _home_zone(hass)
+    _zone(hass, "zone.work", 37.3861, -122.0839)
     _car(hass, freezer, tracker_state="Work", in_zones=["zone.work"])
     snapshot = await async_build_full_state_snapshot(hass)
     assert _alerts(snapshot) == []
@@ -157,12 +171,6 @@ async def test_a_car_at_home_or_with_no_location_still_alerts(
     snapshot = await async_build_full_state_snapshot(hass)
     assert "device_away_from_home" not in _lock(snapshot)
     assert _alerts(snapshot) == [[LOCK]]
-
-
-def _home_zone(hass: HomeAssistant) -> None:
-    hass.states.async_set(
-        "zone.home", "0", {"latitude": 37.2282, "longitude": -121.9832, "radius": 100}
-    )
 
 
 async def test_without_in_zones_coordinates_inside_home_still_alert(
@@ -281,3 +289,90 @@ async def test_without_in_zones_a_zone_name_far_from_home_counts_as_away(
     snapshot = await async_build_full_state_snapshot(hass)
     assert _lock(snapshot).get("device_away_from_home") is True
     assert _alerts(snapshot) == []
+
+
+async def test_an_empty_zone_list_with_only_a_location_name_still_alerts(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    """HA writes in_zones [] when it placed nothing: "Garage" says nothing."""
+    _car(hass, freezer, tracker_state="Garage", in_zones=[])
+    snapshot = await async_build_full_state_snapshot(hass)
+    assert "device_away_from_home" not in _lock(snapshot)
+    assert _alerts(snapshot) == [[LOCK]]
+
+
+async def test_a_listed_zone_inside_home_counts_as_home(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    """An integration-supplied ["zone.driveway"] omits the home zone around it."""
+    _home_zone(hass)
+    _zone(hass, "zone.driveway", 37.2283, -121.9833)
+    _car(hass, freezer, tracker_state="Driveway", in_zones=["zone.driveway"])
+    snapshot = await async_build_full_state_snapshot(hass)
+    assert "device_away_from_home" not in _lock(snapshot)
+    assert _alerts(snapshot) == [[LOCK]]
+
+
+async def test_coordinates_at_home_override_an_away_zone_list(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    """The fix itself is better evidence than a zone list."""
+    _home_zone(hass)
+    _car(
+        hass,
+        freezer,
+        tracker_state="Driveway",
+        in_zones=[],
+        latitude=37.2282,
+        longitude=-121.9832,
+    )
+    snapshot = await async_build_full_state_snapshot(hass)
+    assert "device_away_from_home" not in _lock(snapshot)
+
+
+@pytest.mark.parametrize(
+    "fix",
+    [
+        {"latitude": 10**400, "longitude": -121.9832},
+        {"latitude": float("nan"), "longitude": -121.9832},
+        {"latitude": 95.0, "longitude": -121.9832},
+        {"latitude": True, "longitude": -121.9832},
+    ],
+)
+async def test_a_malformed_fix_is_no_reading_and_does_not_break_the_build(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory, fix: dict[str, Any]
+) -> None:
+    """An unusable coordinate settles nothing, and the snapshot still builds."""
+    _home_zone(hass)
+    _car(hass, freezer, tracker_state="Driveway", **fix)
+    snapshot = await async_build_full_state_snapshot(hass)
+    assert "device_away_from_home" not in _lock(snapshot)
+    assert _alerts(snapshot) == [[LOCK]]
+
+
+@pytest.mark.parametrize("accuracy", [float("nan"), -100, float("inf")])
+async def test_an_unusable_accuracy_does_not_push_a_home_fix_away(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory, accuracy: float
+) -> None:
+    """A fix at the home zone's centre stays home whatever the accuracy says."""
+    _home_zone(hass)
+    _car(
+        hass,
+        freezer,
+        tracker_state="not_home",
+        latitude=37.2282,
+        longitude=-121.9832,
+        gps_accuracy=accuracy,
+    )
+    snapshot = await async_build_full_state_snapshot(hass)
+    assert "device_away_from_home" not in _lock(snapshot)
+
+
+async def test_an_unavailable_home_zone_settles_nothing(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    """With zone.home unavailable, a "Driveway" fix cannot be placed: alert."""
+    _home_zone(hass, state="unavailable")
+    _car(hass, freezer, tracker_state="Driveway", latitude=37.2756, longitude=-121.9837)
+    snapshot = await async_build_full_state_snapshot(hass)
+    assert "device_away_from_home" not in _lock(snapshot)
