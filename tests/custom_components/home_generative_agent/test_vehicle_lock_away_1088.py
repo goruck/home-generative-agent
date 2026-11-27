@@ -64,10 +64,12 @@ def _set_tracker(
     entity_id: str = TRACKER,
     source_type: str = "gps",
     in_zones: list[str] | None = None,
+    **extra: Any,
 ) -> None:
     attributes: dict[str, Any] = {"source_type": source_type, "friendly_name": "911"}
     if in_zones is not None:
         attributes["in_zones"] = in_zones
+    attributes.update(extra)
     hass.states.async_set(entity_id, state, attributes)
 
 
@@ -82,12 +84,15 @@ def _car(
     tracker_state: str,
     source_type: str = "gps",
     in_zones: list[str] | None = None,
+    **extra: Any,
 ) -> None:
     """Unlock the car, then have its tracker report in (the box's order)."""
     _register_car(hass)
     _unlock(hass)
     freezer.tick(timedelta(minutes=2))
-    _set_tracker(hass, tracker_state, source_type=source_type, in_zones=in_zones)
+    _set_tracker(
+        hass, tracker_state, source_type=source_type, in_zones=in_zones, **extra
+    )
 
 
 def _lock(snapshot: FullStateSnapshot) -> SnapshotEntity:
@@ -113,7 +118,7 @@ async def test_a_car_away_from_home_raises_no_unlocked_lock_alert(
     """The box's case: the car is driven away, its cloud data says unlocked."""
     _car(hass, freezer, tracker_state="not_home", in_zones=[])
     snapshot = await async_build_full_state_snapshot(hass)
-    assert "device_away_since" in _lock(snapshot)
+    assert _lock(snapshot).get("device_away_from_home") is True
     assert _alerts(snapshot) == []
 
 
@@ -137,19 +142,85 @@ async def test_a_car_in_a_zone_inside_home_still_alerts(
         in_zones=["zone.driveway", "zone.home"],
     )
     snapshot = await async_build_full_state_snapshot(hass)
-    assert "device_away_since" not in _lock(snapshot)
+    assert "device_away_from_home" not in _lock(snapshot)
     assert _alerts(snapshot) == [[LOCK]]
 
 
-@pytest.mark.parametrize("tracker_state", ["home", "unknown", "unavailable", "", "  "])
+@pytest.mark.parametrize(
+    "tracker_state", ["home", "Home", "unknown", "unavailable", "", "  "]
+)
 async def test_a_car_at_home_or_with_no_location_still_alerts(
     hass: HomeAssistant, freezer: FrozenDateTimeFactory, tracker_state: str
 ) -> None:
     """Parked at home, or with no location reading, the lock still alerts."""
     _car(hass, freezer, tracker_state=tracker_state)
     snapshot = await async_build_full_state_snapshot(hass)
-    assert "device_away_since" not in _lock(snapshot)
+    assert "device_away_from_home" not in _lock(snapshot)
     assert _alerts(snapshot) == [[LOCK]]
+
+
+def _home_zone(hass: HomeAssistant) -> None:
+    hass.states.async_set(
+        "zone.home", "0", {"latitude": 37.2282, "longitude": -121.9832, "radius": 100}
+    )
+
+
+async def test_without_in_zones_coordinates_inside_home_still_alert(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    """Older Home Assistant has no in_zones: a Driveway fix near home is home."""
+    _home_zone(hass)
+    _car(hass, freezer, tracker_state="Driveway", latitude=37.2283, longitude=-121.9833)
+    snapshot = await async_build_full_state_snapshot(hass)
+    assert "device_away_from_home" not in _lock(snapshot)
+    assert _alerts(snapshot) == [[LOCK]]
+
+
+async def test_without_in_zones_coordinates_far_from_home_count_as_away(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    """The box's car, 5 km from home, on an install with no in_zones."""
+    _home_zone(hass)
+    _car(hass, freezer, tracker_state="not_home", latitude=37.2756, longitude=-121.9837)
+    snapshot = await async_build_full_state_snapshot(hass)
+    assert _lock(snapshot).get("device_away_from_home") is True
+    assert _alerts(snapshot) == []
+
+
+async def test_gps_accuracy_can_place_a_fix_at_home(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    """A fix just outside the radius, within its own accuracy, is home (HA's rule)."""
+    _home_zone(hass)
+    _car(
+        hass,
+        freezer,
+        tracker_state="not_home",
+        latitude=37.2294,
+        longitude=-121.9832,
+        gps_accuracy=50,
+    )
+    snapshot = await async_build_full_state_snapshot(hass)
+    assert "device_away_from_home" not in _lock(snapshot)
+
+
+async def test_a_zone_name_with_nothing_to_place_it_still_alerts(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    """No in_zones and no coordinates: "Work" says nothing about home."""
+    _car(hass, freezer, tracker_state="Work")
+    snapshot = await async_build_full_state_snapshot(hass)
+    assert "device_away_from_home" not in _lock(snapshot)
+    assert _alerts(snapshot) == [[LOCK]]
+
+
+async def test_not_home_with_nothing_else_counts_as_away(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    """not_home is Home Assistant saying the fix is in no zone at all."""
+    _car(hass, freezer, tracker_state="not_home")
+    snapshot = await async_build_full_state_snapshot(hass)
+    assert _lock(snapshot).get("device_away_from_home") is True
 
 
 async def test_one_tracker_at_home_keeps_the_device_home(
@@ -163,30 +234,7 @@ async def test_one_tracker_at_home_keeps_the_device_home(
     _set_tracker(hass, "not_home")
     _set_tracker(hass, "home", entity_id=second)
     snapshot = await async_build_full_state_snapshot(hass)
-    assert "device_away_since" not in _lock(snapshot)
-    assert _alerts(snapshot) == [[LOCK]]
-
-
-async def test_a_lock_changed_after_the_last_away_report_still_alerts(
-    hass: HomeAssistant, freezer: FrozenDateTimeFactory
-) -> None:
-    """Stale cloud location: the car came home and was unlocked since."""
-    _register_car(hass)
-    _set_tracker(hass, "not_home", in_zones=[])
-    freezer.tick(timedelta(hours=4))
-    _unlock(hass)
-    snapshot = await async_build_full_state_snapshot(hass)
-    assert "device_away_since" in _lock(snapshot)
-    assert _alerts(snapshot) == [[LOCK]]
-
-
-async def test_a_lock_with_no_change_time_still_alerts(
-    hass: HomeAssistant, freezer: FrozenDateTimeFactory
-) -> None:
-    """Lock enrichment can clear last_changed; then the skip has nothing to go on."""
-    _car(hass, freezer, tracker_state="not_home", in_zones=[])
-    snapshot = await async_build_full_state_snapshot(hass)
-    _lock(snapshot)["last_changed"] = ""
+    assert "device_away_from_home" not in _lock(snapshot)
     assert _alerts(snapshot) == [[LOCK]]
 
 
@@ -196,7 +244,7 @@ async def test_a_router_tracker_on_the_device_says_nothing_about_location(
     """Only a GPS tracker places the device; a router's not_home is Wi-Fi."""
     _car(hass, freezer, tracker_state="not_home", source_type="router")
     snapshot = await async_build_full_state_snapshot(hass)
-    assert "device_away_since" not in _lock(snapshot)
+    assert "device_away_from_home" not in _lock(snapshot)
     assert _alerts(snapshot) == [[LOCK]]
 
 
@@ -210,5 +258,26 @@ async def test_a_lock_on_another_device_is_not_marked_away(
     )
     snapshot = await async_build_full_state_snapshot(hass)
     front = next(e for e in snapshot["entities"] if e["entity_id"] == "lock.front_door")
-    assert "device_away_since" not in front
+    assert "device_away_from_home" not in front
     assert _alerts(snapshot) == [["lock.front_door"]]
+
+
+async def test_a_location_name_home_with_empty_in_zones_is_home(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    """An integration that reports only a location name "Home" gets in_zones []."""
+    _car(hass, freezer, tracker_state="Home", in_zones=[])
+    snapshot = await async_build_full_state_snapshot(hass)
+    assert "device_away_from_home" not in _lock(snapshot)
+    assert _alerts(snapshot) == [[LOCK]]
+
+
+async def test_without_in_zones_a_zone_name_far_from_home_counts_as_away(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+) -> None:
+    """Older Home Assistant: the coordinates settle a "Work" reading as away."""
+    _home_zone(hass)
+    _car(hass, freezer, tracker_state="Work", latitude=37.2756, longitude=-121.9837)
+    snapshot = await async_build_full_state_snapshot(hass)
+    assert _lock(snapshot).get("device_away_from_home") is True
+    assert _alerts(snapshot) == []

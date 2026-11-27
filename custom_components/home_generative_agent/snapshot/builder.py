@@ -7,11 +7,20 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from homeassistant.const import STATE_HOME, STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.const import (
+    ATTR_GPS_ACCURACY,
+    ATTR_LATITUDE,
+    ATTR_LONGITUDE,
+    STATE_HOME,
+    STATE_NOT_HOME,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+)
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
+from homeassistant.util.location import distance
 
 from .camera_activity import extract_camera_activity
 from .derived import derive_context
@@ -67,34 +76,78 @@ _TRACKER_NO_READING = frozenset({STATE_UNKNOWN, STATE_UNAVAILABLE, ""})
 _HOME_ZONE = "zone.home"
 
 
-def _tracker_is_home(state: State) -> bool:
+def _within_zone(state: State, zone: State | None) -> bool | None:
     """
-    Return True when a tracker places its device in the home zone.
+    Return whether a tracker's coordinates lie in ``zone``, or None if unknown.
+
+    The same test Home Assistant's zone helper uses: the distance to the
+    zone's centre, less the reported GPS accuracy, is inside the radius.
+    """
+    if zone is None:
+        return None
+    lat = _number(state.attributes.get(ATTR_LATITUDE))
+    lon = _number(state.attributes.get(ATTR_LONGITUDE))
+    zone_lat = _number(zone.attributes.get(ATTR_LATITUDE))
+    zone_lon = _number(zone.attributes.get(ATTR_LONGITUDE))
+    radius = _number(zone.attributes.get("radius"))
+    if lat is None or lon is None or zone_lat is None or zone_lon is None:
+        return None
+    if radius is None:
+        return None
+    gap = distance(lat, lon, zone_lat, zone_lon)
+    if gap is None:
+        return None
+    accuracy = _number(state.attributes.get(ATTR_GPS_ACCURACY)) or 0.0
+    return gap - accuracy < radius
+
+
+def _number(value: Any) -> float | None:
+    """Return a real number attribute as a float, else None (bools excluded)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _tracker_at_home(state: State, home_zone: State | None) -> bool | None:
+    """
+    Return True (home), False (away) or None (no usable reading) for a tracker.
 
     A tracker's state names the closest zone it is in, so a car parked in a
     "Driveway" zone inside the home radius reads "Driveway", not ``home``.
-    ``in_zones`` lists every zone that holds it, the home zone included (#1088).
+    ``in_zones`` lists every zone that holds it; without it (older Home
+    Assistant), the coordinates are checked against the home zone. A zone
+    name that neither settles says nothing about home, so it is no reading
+    and the lock keeps alerting (#1088).
     """
-    if state.state == STATE_HOME:
+    reading = state.state.strip()
+    if reading in _TRACKER_NO_READING:
+        return None
+    if reading.casefold() == STATE_HOME:
         return True
     in_zones = state.attributes.get("in_zones")
-    return isinstance(in_zones, list) and _HOME_ZONE in in_zones
+    if isinstance(in_zones, list):
+        return _HOME_ZONE in in_zones
+    inside = _within_zone(state, home_zone)
+    if inside is not None:
+        return inside
+    if reading == STATE_NOT_HOME:
+        return False
+    return None
 
 
 def _devices_away_from_home(
-    states: Iterable[State], entity_device: dict[str, str]
-) -> dict[str, datetime]:
+    states: Iterable[State], entity_device: dict[str, str], home_zone: State | None
+) -> set[str]:
     """
-    Map each device a GPS device_tracker reports away from home to when it said so.
+    Return the ids of devices a GPS device_tracker places away from home.
 
-    A device counts as away when one of its GPS trackers has a reading and none
-    of them places it at home. A tracker with no reading (``unknown``,
-    ``unavailable``, blank) says nothing about where the device is, so a device
-    whose only trackers have none is not away: its lock still alerts (#1088).
-    The time is the newest ``last_updated`` of the trackers that read away; a
-    rule compares it with the lock's own change to tell a stale "away" apart.
+    A device counts as away when one of its GPS trackers places it away and
+    none places it at home. A tracker with no usable reading says nothing, so
+    a device whose only trackers have none is not away: its lock still alerts.
+    The location is taken as the integration reports it; Home Assistant keeps
+    no time of the last real fix, so a stale cloud location is not detected.
     """
-    away: dict[str, datetime] = {}
+    away: set[str] = set()
     home: set[str] = set()
     for state in states:
         if state.domain != TRACKER_DOMAIN:
@@ -102,15 +155,14 @@ def _devices_away_from_home(
         if state.attributes.get("source_type") != _SOURCE_TYPE_GPS:
             continue
         device_id = entity_device.get(state.entity_id)
-        if device_id is None or state.state.strip() in _TRACKER_NO_READING:
+        if device_id is None:
             continue
-        if _tracker_is_home(state):
+        at_home = _tracker_at_home(state, home_zone)
+        if at_home is True:
             home.add(device_id)
-            continue
-        seen = away.get(device_id)
-        if seen is None or state.last_updated > seen:
-            away[device_id] = state.last_updated
-    return {device_id: at for device_id, at in away.items() if device_id not in home}
+        elif at_home is False:
+            away.add(device_id)
+    return away - home
 
 
 @dataclass
@@ -184,12 +236,12 @@ async def async_build_full_state_snapshot(
         for state in states
     ]
     entities.sort(key=lambda item: item["entity_id"])
-    away_devices = _devices_away_from_home(states, lookups.entity_device)
-    if away_devices:
-        for entity in entities:
-            device_id = lookups.entity_device.get(entity["entity_id"])
-            if device_id in away_devices:
-                entity["device_away_since"] = _as_iso(away_devices[device_id])
+    away_devices = _devices_away_from_home(
+        states, lookups.entity_device, hass.states.get(_HOME_ZONE)
+    )
+    for entity in entities:
+        if lookups.entity_device.get(entity["entity_id"]) in away_devices:
+            entity["device_away_from_home"] = True
 
     camera_activity = []
     for state in states:
