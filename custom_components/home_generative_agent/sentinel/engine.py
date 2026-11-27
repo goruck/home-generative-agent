@@ -394,7 +394,7 @@ def _is_cyclical(entity_id: str, friendly_name: str) -> bool:
 class SentinelEngine:
     """Periodic sentinel evaluation loop."""
 
-    def __init__(  # noqa: PLR0913
+    def __init__(  # noqa: PLR0913, PLR0915
         self,
         hass: HomeAssistant,
         options: dict[str, object],
@@ -470,6 +470,8 @@ class SentinelEngine:
         self._rule_registry = rule_registry
         # Dynamic rules last logged as listing a sensor with no state (#960).
         self._unresolved_rule_sensors: dict[str, tuple[str, ...]] = {}
+        # Low-battery rules last logged as unable to check a sensor (#1082).
+        self._unreadable_battery_sensors: dict[tuple[str, str], tuple[str, ...]] = {}
         self._entry_id = entry_id
         self._triage_service = triage_service
         # Explanations share the per-run model-call limit (#866): calls made
@@ -2236,6 +2238,7 @@ class SentinelEngine:
             if not dynamic_rules:
                 # No rule is left to be reported as dead; see the call below.
                 self._unresolved_rule_sensors.clear()
+                self._unreadable_battery_sensors.clear()
             else:
                 baselines: dict[str, dict[str, float]] = {}
                 dow_data: dict[str, dict[str, tuple[float, int]]] | None = None
@@ -2272,6 +2275,7 @@ class SentinelEngine:
                     dow_min_samples=dow_min_samples,
                     global_drift_pct=global_drift_pct,
                     unresolved_log=self._unresolved_rule_sensors,
+                    unreadable_log=self._unreadable_battery_sensors,
                 )
                 sustained_minutes = _coerce_int(
                     self._options.get(CONF_SENTINEL_BASELINE_SUSTAINED_MINUTES),

@@ -1432,6 +1432,154 @@ def test_dynamic_rule_low_battery_unreadable_sensor_is_not_reported_as_dead(
     assert _dead_rule_warnings(caplog) == []
 
 
+def _unreadable_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "WARNING" and "#1082" in record.getMessage()
+    ]
+
+
+def _since(snapshot: FullStateSnapshot, entity_id: str, last_changed: str) -> None:
+    for entity in snapshot["entities"]:
+        if entity["entity_id"] == entity_id:
+            entity["last_changed"] = last_changed
+
+
+@pytest.mark.parametrize("state", ["locked", "low", "ok", ""])
+def test_dynamic_rule_low_battery_warns_once_for_a_state_that_is_no_level(
+    state: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """
+    A listed sensor whose state is never a number is named once (#1082).
+
+    The rule still checks the others and fires for a low one. The warning
+    is not repeated while nothing changes, and comes back if the sensor
+    reads and then stops reading again.
+    """
+    rule = _low_battery_rule("sensor.front_lock", "sensor.hall")
+    broken = _low_battery_snapshot(front_lock=state, hall="12")
+    fixed = _low_battery_snapshot(front_lock="90", hall="12")
+    log: dict[tuple[str, str], tuple[str, ...]] = {}
+
+    with caplog.at_level("WARNING"):
+        (finding,) = evaluate_dynamic_rules(broken, [rule], unreadable_log=log)
+        assert finding.triggering_entities == ["sensor.hall"]
+        evaluate_dynamic_rules(broken, [rule], unreadable_log=log)
+        (warning,) = _unreadable_warnings(caplog)
+        assert rule["rule_id"] in warning
+        assert "'sensor.front_lock'" in warning
+        assert "not a battery level" in warning
+        assert "sensor.hall" not in warning
+
+        evaluate_dynamic_rules(fixed, [rule], unreadable_log=log)
+        assert log == {}
+        evaluate_dynamic_rules(broken, [rule], unreadable_log=log)
+        assert len(_unreadable_warnings(caplog)) == 2
+
+
+@pytest.mark.parametrize("dropped_state", ["unavailable", "unknown"])
+def test_dynamic_rule_low_battery_warns_once_after_a_day_unreadable(
+    dropped_state: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """
+    A sensor unavailable for a day is named once, a shorter gap is not (#1082).
+
+    The snapshot's clock is 2026-02-01T00:00 UTC.
+    """
+    rule = _low_battery_rule("sensor.girls", "sensor.hall")
+    log: dict[tuple[str, str], tuple[str, ...]] = {}
+
+    with caplog.at_level("WARNING"):
+        recent = _low_battery_snapshot(girls=dropped_state, hall="80")
+        _since(recent, "sensor.girls", "2026-01-31T00:00:01+00:00")
+        assert evaluate_dynamic_rules(recent, [rule], unreadable_log=log) == []
+        assert _unreadable_warnings(caplog) == []
+        assert log == {}
+
+        long_gone = _low_battery_snapshot(girls=dropped_state, hall="80")
+        _since(long_gone, "sensor.girls", "2026-01-31T00:00:00+00:00")
+        assert evaluate_dynamic_rules(long_gone, [rule], unreadable_log=log) == []
+        assert evaluate_dynamic_rules(long_gone, [rule], unreadable_log=log) == []
+        (warning,) = _unreadable_warnings(caplog)
+        assert rule["rule_id"] in warning
+        assert "'sensor.girls'" in warning
+        assert "a day or more" in warning
+
+
+def test_dynamic_rule_low_battery_unreadable_since_unknown_time_is_quiet(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No readable last_changed: no claim about how long it has been."""
+    rule = _low_battery_rule("sensor.girls", "sensor.hall")
+    snapshot = _low_battery_snapshot(girls="unavailable", hall="80")
+    _since(snapshot, "sensor.girls", "not a time")
+    log: dict[tuple[str, str], tuple[str, ...]] = {}
+
+    with caplog.at_level("WARNING"):
+        evaluate_dynamic_rules(snapshot, [rule], unreadable_log=log)
+
+    assert log == {}
+    assert _unreadable_warnings(caplog) == []
+
+
+def test_dynamic_rule_low_battery_unreadable_kinds_are_reported_apart(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One rule, both kinds: two warnings, and one going away keeps the other."""
+    rule = _low_battery_rule("sensor.front_lock", "sensor.girls")
+    both = _low_battery_snapshot(front_lock="locked", girls="unavailable")
+    _since(both, "sensor.girls", "2026-01-30T00:00:00+00:00")
+    lock_only = _low_battery_snapshot(front_lock="locked", girls="55")
+    log: dict[tuple[str, str], tuple[str, ...]] = {}
+
+    with caplog.at_level("WARNING"):
+        evaluate_dynamic_rules(both, [rule], unreadable_log=log)
+        assert len(_unreadable_warnings(caplog)) == 2
+        evaluate_dynamic_rules(lock_only, [rule], unreadable_log=log)
+        assert len(_unreadable_warnings(caplog)) == 2
+        assert list(log) == [(rule["rule_id"], "not_a_number")]
+
+
+def test_dynamic_rule_low_battery_preview_does_not_use_up_the_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """As for a dead rule (#960), a preview logs nothing (#1082)."""
+    rule = _low_battery_rule("sensor.front_lock", "sensor.hall")
+    snapshot = _low_battery_snapshot(front_lock="locked", hall="80")
+    log: dict[tuple[str, str], tuple[str, ...]] = {}
+
+    with caplog.at_level("WARNING"):
+        evaluate_dynamic_rule(snapshot, rule)
+        assert _unreadable_warnings(caplog) == []
+        evaluate_dynamic_rules(snapshot, [rule], unreadable_log=log)
+        assert len(_unreadable_warnings(caplog)) == 1
+
+
+def test_dynamic_rule_low_battery_unreadable_warning_quotes_ids(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Stored IDs are rule text a model proposed: quoted and cut (#1082)."""
+    forged = "sensor.a\nforged line"
+    long_id = "sensor." + "x" * 300
+    rule = _low_battery_rule(forged, long_id)
+    snapshot = _snapshot(
+        [
+            _base_entity(forged, "sensor", "locked"),
+            _base_entity(long_id, "sensor", "locked"),
+        ],
+        [],
+        _DEAD_RULE_DERIVED,
+    )
+    log: dict[tuple[str, str], tuple[str, ...]] = {}
+
+    with caplog.at_level("WARNING"):
+        evaluate_dynamic_rules(snapshot, [rule], unreadable_log=log)
+    (warning,) = _unreadable_warnings(caplog)
+    assert "\n" not in warning
+    assert "x" * 101 not in warning
+
+
 def _low_battery_id(rule: dict[str, Any], **states: str) -> str:
     (finding,) = evaluate_dynamic_rules(_low_battery_snapshot(**states), [rule])
     return finding.anomaly_id
