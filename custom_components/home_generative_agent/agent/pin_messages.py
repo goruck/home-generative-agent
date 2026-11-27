@@ -57,6 +57,8 @@ from .helpers import (
     TOOL_NAMESPACE_SEP,
     PinReply,
     base_tool_name,
+    delayed_command_delay,
+    delayed_command_text,
     intent_service_calls,
     is_actuating_intent,
     is_device_intent,
@@ -64,6 +66,7 @@ from .helpers import (
     is_on_off_intent,
     minimal_payload_for_domain,
     normalize_intent_for_lock,
+    runs_a_command_later,
     sanitize_tool_text,
 )
 from .indirect_pin import (
@@ -221,6 +224,11 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "target_and_others": "{targets} and other devices",
         "target_unnamed_devices": "devices it does not name",
         "action_remote": 'run {tool} on "{api}"',
+        # A command Home Assistant runs when a timer or delay ends.
+        "action_run_later": 'run "{command}" later',
+        "action_run_in": 'run "{command}" in {delay}',
+        "action_run_later_remote": 'run "{command}" later on "{api}"',
+        "action_run_in_remote": 'run "{command}" in {delay} on "{api}"',
         "action_remote_args": 'run {tool} ({args}) on "{api}"',
         # What the agent passed to a script's device fields (#787).
         "action_script_targets": "{action} ({targets})",
@@ -379,6 +387,10 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "target_and_others": "{targets} a další zařízení",
         "target_unnamed_devices": "zařízení, která nejmenuje",
         "action_remote": "spustit {tool} na „{api}“",
+        "action_run_later": "později spustit „{command}“",
+        "action_run_in": "spustit „{command}“ za {delay}",
+        "action_run_later_remote": "později spustit „{command}“ na „{api}“",
+        "action_run_in_remote": "spustit „{command}“ za {delay} na „{api}“",
         "action_remote_args": "spustit {tool} ({args}) na „{api}“",
         "action_script_targets": "{action} ({targets})",
         "action_unnamed_target": "nepojmenované zařízení",
@@ -490,6 +502,10 @@ _MESSAGES: dict[str, dict[str, str]] = {
         "action_stop": "停止{target}",
         "action_service": "{service} {target}",
         "action_remote": "在“{api}”上运行 {tool}",
+        "action_run_later": "稍后运行“{command}”",
+        "action_run_in": "{delay}后运行“{command}”",
+        "action_run_later_remote": "在“{api}”上稍后运行“{command}”",
+        "action_run_in_remote": "在“{api}”上{delay}后运行“{command}”",
         "action_remote_args": "在“{api}”上运行 {tool}（{args}）",
         "action_automation": "添加自动化{target}",
         "action_unnamed_automation": "添加一个未命名的自动化",
@@ -1090,7 +1106,37 @@ def _relay_effects(hass: HomeAssistant, action: Mapping[str, Any]) -> list[str]:
     return effects
 
 
-def _describe_line(  # noqa: PLR0911
+def _run_later_line(
+    hass: HomeAssistant | None,
+    tool_name: str,
+    tool_args: dict[str, Any],
+    api: str | None = None,
+) -> str | None:
+    """
+    Name a command Home Assistant runs later, whole, and when; else None.
+
+    The command is what the PIN approves: it runs later on Home Assistant's
+    own agent, past this gate. All of it is shown, since all of it runs, and
+    its quote marks are shown as apostrophes, so it cannot close the quote
+    and read as more. A remote server's command names the server too.
+    """
+    if not runs_a_command_later(tool_name, tool_args):
+        return None
+    command = delayed_command_text(tool_name, tool_args)
+    if not command:
+        return None
+    delay = delayed_command_delay(tool_args)
+    key = "action_run_in" if delay else "action_run_later"
+    return pin_msg(
+        hass,
+        f"{key}_remote" if api is not None else key,
+        command=_one_line(command.translate(_QUOTE_MARKS), len(command)),
+        delay=delay,
+        api=api,
+    )
+
+
+def _describe_line(  # noqa: PLR0911, PLR0912
     hass: HomeAssistant | None, action: Mapping[str, Any]
 ) -> str:
     """
@@ -1118,6 +1164,16 @@ def _describe_line(  # noqa: PLR0911
         # admin-only API that names no action, such as its reload of a config
         # entry, reads the same way (#918 review).
         raw = action.get("tool_args")
+        api = _one_line(
+            action.get("api_name") or action.get("api_id") or "",
+            _ACTION_TARGET_MAX_LEN,
+        )
+        if (
+            line := _run_later_line(
+                hass, own_name, dict(raw) if isinstance(raw, Mapping) else {}, api
+            )
+        ) is not None:
+            return line
         args = _remote_args_text(raw if isinstance(raw, Mapping) else {})
         return pin_msg(
             hass,
@@ -1140,6 +1196,9 @@ def _describe_line(  # noqa: PLR0911
         return line
     if (script_id := script_tool_entity_id(tool_name)) is not None:
         return _script_line(hass, script_id, tool_args)
+    if (line := _run_later_line(hass, tool_name, tool_args)) is not None:
+        # A script or intent script is named above, by what it runs.
+        return line
     # A tool named like a script (HA before 2026.9 named script tools so) is
     # held for the script or for the call its arguments make, so the line
     # names the script, and the call too when it makes one.

@@ -2737,6 +2737,86 @@ def intent_service_calls(
     ]
 
 
+# A timer's slot holding a command the timer runs when it finishes.
+START_TIMER_INTENT = "HassStartTimer"
+TIMER_COMMAND_SLOT = "conversation_command"
+# Home Assistant 2026.12's tool that runs a command after a delay, and the
+# namespace Home Assistant gives it.
+SCHEDULE_COMMAND_TOOL = "schedule_command"
+SCHEDULE_COMMAND_ARG = "command"
+_INTENT_NAMESPACE = "intent"
+
+
+def runs_a_command_later(tool_name: str, tool_args: dict[str, Any]) -> bool:
+    """
+    Return True if the call leaves a command for Home Assistant to run later.
+
+    Home Assistant runs it as a new conversation when the delay ends, on the
+    agent the request named. This integration names none, so the command runs
+    on Home Assistant's own agent, which this gate never sees. Its words cannot
+    be read for what they will do.
+
+    Only Home Assistant's own scheduled-command tool counts (`intent__...`,
+    with a remote server's prefix or not): a user's script or another server's
+    tool sharing the last part of its name is read as itself. A timer's
+    command counts whatever its value: Home Assistant runs 0 or False as the
+    text "0" or "False".
+    """
+    parts = tool_name.split(TOOL_NAMESPACE_SEP)
+    if parts[-1] == SCHEDULE_COMMAND_TOOL:
+        return len(parts) > 1 and parts[-2] == _INTENT_NAMESPACE
+    # A timer's tool is named bare (before 2026.9) or in the intent namespace;
+    # an intent script of that name is read by what it runs.
+    return (
+        parts[-1] == START_TIMER_INTENT
+        and (len(parts) == 1 or parts[-2] == _INTENT_NAMESPACE)
+        and bool(delayed_command_text(tool_name, tool_args))
+    )
+
+
+def delayed_command_text(tool_name: str, tool_args: dict[str, Any]) -> str:
+    """Return the command a timer or scheduled command would run, or ""."""
+    key = (
+        SCHEDULE_COMMAND_ARG
+        if base_tool_name(tool_name) == SCHEDULE_COMMAND_TOOL
+        else TIMER_COMMAND_SLOT
+    )
+    value = tool_args.get(key)
+    return "" if value is None else str(value).strip()
+
+
+_DELAY_UNITS = (("hours", 3600), ("minutes", 60), ("seconds", 1))
+
+
+def delayed_command_delay(tool_args: dict[str, Any]) -> str:
+    """
+    Return when a delayed command runs, as H:MM:SS, or "" if it cannot be read.
+
+    The model picks the delay, so the line the PIN approves names it. Any
+    value that is not a whole number of zero or more leaves it unread.
+    """
+    total = 0
+    given = False
+    for key, seconds in _DELAY_UNITS:
+        value = tool_args.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int | str):
+            return ""
+        try:
+            amount = int(value)
+        except ValueError:
+            return ""
+        if amount < 0:
+            return ""
+        total += amount * seconds
+        given = True
+    if not given:
+        return ""
+    hours, rest = divmod(total, 3600)
+    return f"{hours}:{rest // 60:02d}:{rest % 60:02d}"
+
+
 # Intents that only read, list or time things: the gate leaves them alone.
 # Every other intent that is not an on/off or cover intent is a device
 # intent: a template entity behind one runs action scripts of its own, which
