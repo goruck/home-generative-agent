@@ -1633,6 +1633,56 @@ def test_dynamic_rule_low_battery_bad_last_changed_does_not_stop_the_run(
     assert _unreadable_warnings(caplog) == []
 
 
+def test_dynamic_rule_low_battery_change_of_kind_is_not_named_again(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Text, then unavailable for a day, with no reading between: once."""
+    rule = _low_battery_rule("sensor.girls", "sensor.hall")
+    text = _low_battery_snapshot(girls="low", hall="80")
+    gone = _low_battery_snapshot(girls="unavailable", hall="80")
+    _since(gone, "sensor.girls", "2026-01-30T00:00:00+00:00")
+    log: dict[tuple[str, str], tuple[str, ...]] = {}
+
+    with caplog.at_level("WARNING"):
+        for snapshot in (text, gone, text):
+            evaluate_dynamic_rules(snapshot, [rule], unreadable_log=log)
+
+    assert len(_unreadable_warnings(caplog)) == 1
+    assert log == {(rule["rule_id"], "not_a_number"): ("sensor.girls",)}
+
+
+def test_dynamic_rule_low_battery_recovery_while_another_has_no_state(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A reading during a run stopped by a missing sensor still counts."""
+    rule = _low_battery_rule("sensor.front_lock", "sensor.hall")
+    broken = _low_battery_snapshot(front_lock="locked", hall="80")
+    recovered_hall_gone = _low_battery_snapshot(front_lock="90")
+    log: dict[tuple[str, str], tuple[str, ...]] = {}
+
+    with caplog.at_level("WARNING"):
+        for snapshot in (broken, recovered_hall_gone, broken):
+            evaluate_dynamic_rules(snapshot, [rule], unreadable_log=log)
+
+    assert len(_unreadable_warnings(caplog)) == 2
+
+
+def test_dynamic_rule_low_battery_sensor_taken_out_of_the_rule_is_forgotten(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A patch that drops a sensor and adds it back names it again."""
+    both = _low_battery_rule("sensor.front_lock", "sensor.hall")
+    hall_only = _low_battery_rule("sensor.hall")
+    snapshot = _low_battery_snapshot(front_lock="locked", hall="80")
+    log: dict[tuple[str, str], tuple[str, ...]] = {}
+
+    with caplog.at_level("WARNING"):
+        for rule in (both, hall_only, both):
+            evaluate_dynamic_rules(snapshot, [rule], unreadable_log=log)
+
+    assert len(_unreadable_warnings(caplog)) == 2
+
+
 def test_dynamic_rule_low_battery_preview_does_not_use_up_the_warning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

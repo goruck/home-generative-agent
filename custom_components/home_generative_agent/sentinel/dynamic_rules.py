@@ -99,6 +99,9 @@ class _UnreadableRun:
     rules: set[str] = field(default_factory=set)
     # Sensors with a reading, by rule: these leave the record.
     readable: dict[str, set[str]] = field(default_factory=dict)
+    # Sensors each rule lists now, for rules that resolved: a sensor taken
+    # out of a rule leaves its record.
+    listed: dict[str, set[str]] = field(default_factory=dict)
     # Sensors that cannot be checked, by (rule, kind).
     unreadable: dict[tuple[str, str], set[str]] = field(default_factory=dict)
 
@@ -795,8 +798,8 @@ def _eval_low_battery_sensors(
     """
     Fire when a listed battery sensor reads at or below the threshold.
 
-    A sensor whose state is not a number ("unavailable", "unknown") is left
-    out and the rest are still checked: a dead battery is a common reason for
+    A sensor with no usable reading ("unavailable", "unknown", text, "nan")
+    is left out and the rest are still checked: a dead battery is a common reason for
     a sensor to drop off the network, which is when the others most need
     watching (#1064). A sensor with no state at all keeps the whole rule from
     firing, as it does for the unavailable-sensors rules, and is reported.
@@ -815,19 +818,30 @@ def _eval_low_battery_sensors(
     unreadable.rules.add(rule_id)
     resolved = _resolve_listed_sensors(rule, sensor_ids, entity_map, unresolved)
     if resolved is None:
+        # Still note who reads a number, so a sensor that recovers while
+        # another one has no state leaves the record.
+        unreadable.readable[rule_id] = {
+            resolved_id
+            for sensor_id in sensor_ids
+            if (resolved_id := _resolve_sensor_entity_id(sensor_id, entity_map))
+            and _battery_reading(entity_map[resolved_id].get("state")) is not None
+        }
         return []
     resolved_ids, entities = resolved
+    unreadable.listed[rule_id] = set(resolved_ids)
 
     threshold = _coerce_float(params.get("threshold"), default=40.0)
     readings: dict[str, float] = {}
     states: dict[str, Any] = {}
     for sensor_id, entity in zip(resolved_ids, entities, strict=True):
         states[sensor_id] = entity.get("state")
-        value = _coerce_optional_float(entity.get("state"))
-        if value is not None and math.isfinite(value):
+        value = _battery_reading(entity.get("state"))
+        if value is not None:
             readings[sensor_id] = value
             continue
-        kind = _unreadable_battery_kind(entity, now, number=value)
+        kind = _unreadable_battery_kind(
+            entity, now, number=_coerce_optional_float(entity.get("state"))
+        )
         if kind is not None:
             unreadable.unreadable.setdefault((rule_id, kind), set()).add(sensor_id)
     unreadable.readable[rule_id] = set(readings)
@@ -851,6 +865,12 @@ def _eval_low_battery_sensors(
             rule, triggering_ids, evidence, unhashed=_LOW_BATTERY_UNHASHED_EVIDENCE
         )
     ]
+
+
+def _battery_reading(state: Any) -> float | None:
+    """Return a battery state as a finite number, or None if it is none."""
+    value = _coerce_optional_float(state)
+    return value if value is not None and math.isfinite(value) else None
 
 
 def _unreadable_battery_kind(
@@ -885,20 +905,29 @@ def _report_unreadable_battery_sensors(
     Log each sensor a low-battery rule cannot check, once while that lasts.
 
     A sensor is named once, when it joins its rule's record, and stays there
-    until it reads a number or its rule leaves the run; then it is reported
-    again if it stops reading again. Dropping off the network for a while, or
-    the rule being stopped by another sensor with no state (#960), does not
-    make it a new one.
+    until it reads a number, is taken out of the rule or its rule leaves the
+    run; then it is reported again if it stops reading again. Dropping off
+    the network for a while, failing in the other way (text, then unavailable
+    for a day), or the rule being stopped by another sensor with no state
+    (#960) does not make it a new one.
     """
     kept: dict[tuple[str, str], set[str]] = {}
     for (rule_id, kind), sensor_ids in logged.items():
         if rule_id not in run.rules:
             continue
         still = set(sensor_ids) - run.readable.get(rule_id, set())
+        if rule_id in run.listed:
+            still &= run.listed[rule_id]
         if still:
             kept[(rule_id, kind)] = still
     for (rule_id, kind), sensor_ids in sorted(run.unreadable.items()):
-        added = sorted(sensor_ids - kept.get((rule_id, kind), set()))
+        named: set[str] = set()
+        for (other_rule, other_kind), other_ids in kept.items():
+            if other_rule == rule_id:
+                named |= other_ids
+                if other_kind != kind:
+                    other_ids.difference_update(sensor_ids)
+        added = sorted(sensor_ids - named)
         kept[(rule_id, kind)] = kept.get((rule_id, kind), set()) | sensor_ids
         if not added:
             continue
@@ -925,12 +954,13 @@ def _report_unreadable_battery_sensors(
                 "finite number, which can mean its battery is dead. The rule "
                 "still checks its other sensors and checks this one again once "
                 "it reads. An unavailable-sensors rule for it alerts while it "
-                "is unavailable; nothing alerts on unknown (#1082).",
+                "is unavailable; for one stuck at unknown, an entity-staleness "
+                "rule can alert (#1082).",
                 rule_id[:_UNRESOLVED_ID_MAX_CHARS],
                 shown,
             )
     logged.clear()
-    logged.update({key: tuple(sorted(ids)) for key, ids in kept.items()})
+    logged.update({key: tuple(sorted(ids)) for key, ids in kept.items() if ids})
 
 
 def _resolve_sensor_entity_id(

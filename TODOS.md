@@ -1627,7 +1627,7 @@ That satisfies all three cases at once: different devices with identical prose s
 
 ### Reject out-of-range low_battery_sensors readings, and non-finite ones at approval
 
-**What:** The approval gate `_is_battery_like_state` (`__init__.py`) takes anything `float()` accepts as a battery reading, `nan` and `inf` included. The evaluator skips a non-finite reading and names it in the #1082 warning, but still takes an out-of-range one: `1e3` reads as above the threshold, and negative readings fire. The rule's `threshold` has the same gap in `_coerce_float`: `nan` means the rule never fires, `inf` means every sensor always fires.
+**What:** The approval gate `_is_battery_like_state` (`__init__.py`) takes anything `float()` accepts as a battery reading, `nan` and `inf` included. The evaluator skips a non-finite reading and names it in the #1082 warning after a day, but still takes an out-of-range one: `1e3` reads as above the threshold, and negative readings fire. The rule's `threshold` has the same gap in `_coerce_float`: `nan` means the rule never fires, `inf` means every sensor always fires.
 
 **Why:** Adversarial review of the #1064 PR (#1081, 2026-11-26). Older than that change and not fixed there. No sensor is known to report these; the approval gate's battery plausibility check (#522) makes a wrongly promoted sensor unlikely.
 
