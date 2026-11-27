@@ -872,6 +872,43 @@ async def test_a_failed_action_reply_names_the_error_given_last() -> None:
     assert "unlock command sent" not in reply
 
 
+@pytest.mark.parametrize(
+    "result",
+    [
+        # A remote tool's own answer in MCP text, its error after a long field.
+        {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {"result": "x" * 400, "error": "Lock jammé"},
+                        ensure_ascii=False,
+                    ),
+                }
+            ]
+        },
+        # The same object handed on as a JSON string.
+        json.dumps({"result": "x" * 400, "error": "Lock jammé"}, ensure_ascii=False),
+    ],
+)
+async def test_a_failed_remote_action_reply_names_its_error(result: Any) -> None:
+    """The reason is found where the failure was, not cut off (#1078)."""
+    answer, reply = await _request_and_confirm(_FakeAPI(result))
+
+    assert answer.outcome == PIN_OUTCOME_FAILED
+    assert '"Lock jammé"' in reply
+
+
+async def test_a_failed_action_that_says_success_keeps_its_own_text() -> None:
+    """With success: false, its readable text is the reason, not a code."""
+    result = {"success": False, "result_text": "Front door is jammed", "error": "E1"}
+    answer, reply = await _request_and_confirm(_FakeAPI(result))
+
+    assert answer.outcome == PIN_OUTCOME_FAILED
+    assert "Front door is jammed" in reply
+    assert '"E1"' not in reply
+
+
 FRONT = {"type": "entity", "name": "Front Lock", "id": "lock.f"}
 BACK = {"type": "entity", "name": "Back Lock", "id": "lock.b"}
 KITCHEN = {"type": "area", "name": "Kitchen", "id": "kitchen"}

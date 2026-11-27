@@ -134,6 +134,7 @@ from .helpers import (
     drop_empty_args,
     intent_results,
     keep_pin_prompt,
+    loads_or_none,
     minimal_payload_for_domain,
     narrow_intent_args,
     normalize_intent_for_alarm,
@@ -1609,21 +1610,37 @@ def _completed_reply(
 
 def _tool_failure_reason(data: Any) -> str | None:
     """
-    Return a failed tool's own error text, if it gives one (#1078 review).
+    Return a failed tool's own error string, or None when it gives none.
 
-    The reason to show: the tool's whole answer, cut to fit, could end before
-    an error it put last.
+    Shown instead of the tool's whole answer, which is cut to fit and could
+    end before an error put last (#1078). Read from the shapes the failure
+    check reads: the result, a JSON string of it, and the JSON objects in an
+    MCP result's text items. A result that says ``success`` itself keeps its
+    own readable text, so None for it.
     """
-    reason = data.get("error") if isinstance(data, dict) else None
-    return reason if isinstance(reason, str) and reason else None
+    result = loads_or_none(data) if isinstance(data, str) else data
+    if not isinstance(result, dict) or isinstance(result.get("success"), bool):
+        return None
+    candidates = [result]
+    content = result.get("content")
+    for item in content if isinstance(content, list) else []:
+        text = item.get("text") if isinstance(item, dict) else None
+        inner = loads_or_none(text) if isinstance(text, str) else None
+        if isinstance(inner, dict):
+            candidates.append(inner)
+    for candidate in candidates:
+        reason = candidate.get("error")
+        if isinstance(reason, str) and reason:
+            return reason
+    return None
 
 
 def _quoted_tool_text(text: str) -> str:
     """
     Return a tool's text as one bounded, quoted line for fixed safety copy.
 
-    Quoted so the words read as the tool's data, never as part of the copy
-    they sit in (#1078 review).
+    Cut to PIN_FAILURE_TEXT_MAX_LEN, then quoted, so the words read as the
+    tool's data, never as part of the copy they sit in (#1078).
     """
     return json.dumps(
         sanitize_tool_text(text, limit=PIN_FAILURE_TEXT_MAX_LEN), ensure_ascii=False
