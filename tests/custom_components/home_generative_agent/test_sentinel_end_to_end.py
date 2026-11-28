@@ -2058,6 +2058,41 @@ async def test_grouped_push_leaves_a_condition_marked_false_alarm_alone(
 
 
 @pytest.mark.asyncio
+async def test_grouped_push_keeps_a_false_alarm_pressed_while_it_was_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A press on a named partner while the push goes out keeps its own hold.
+
+    The partners' prompts are restarted after delivery; restarting one the
+    user just dismissed would put back the push time and drop the mark, so a
+    later grouped push could name it inside the hold (#1084).
+    """
+    engine, notifier, _audit = _make_engine(monkeypatch, _make_snapshot())
+    suppression = cast("DummySuppression", cast("Any", engine)._suppression)
+    t0 = datetime(2025, 1, 1, 20, 0, tzinfo=UTC)
+    disarmed = _disarmed()
+    assert await _dispatch_group(engine, disarmed, at=t0)
+    t1 = t0 + timedelta(hours=1)
+    pressed = t1 + timedelta(seconds=1)
+    send = notifier.async_notify
+
+    async def _pressed_while_sent(*args: Any, **kwargs: Any) -> bool | None:
+        result = await send(*args, **kwargs)
+        renew_prompt(suppression.state, "disarmed-id", pressed)
+        return result
+
+    monkeypatch.setattr(notifier, "async_notify", _pressed_while_sent)
+    assert await _dispatch_group(
+        engine, _open_door("door-id", "binary_sensor.front_door"), disarmed, at=t1
+    )
+
+    assert notifier.calls[1]["also_line"] == "Also: Front Door (alarm disarmed)"
+    assert suppression.state.pending_prompts["disarmed-id"] == pressed.isoformat()
+    assert prompt_is_dismissal(suppression.state, "disarmed-id")
+
+
+@pytest.mark.asyncio
 async def test_grouped_push_names_a_held_finding_only_by_its_condition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -90,15 +90,21 @@ class ActionHandler:
             return
         action, anomaly_id = parts
         LOGGER.info("Handling sentinel action %s for %s.", action, anomaly_id)
-        finding = self._pending_findings.get(anomaly_id)
+        # Claimed before anything is awaited: the first answer to a push is the
+        # one that counts, so a tap on another phone while an Execute runs
+        # cannot put back a hold the Execute cleared.
+        finding = self._pending_findings.pop(anomaly_id, None)
         if action == "dismiss":
             # A False Alarm says "I have seen this": hold the alert at least as
             # long as an unanswered one, not only for the shorter cooldowns, or
             # a standing condition would come back sooner for answering (#1084).
-            # Only for an alert pushed since startup and not answered yet, once
-            # per push: a tap naming any other id (a stale or repeated tap, one
-            # after a restart, or an alert never sent) leaves its hold as it is.
-            if finding is not None:
+            # Only while the hold of a push since startup still runs, once per
+            # push: a tap naming any other id (a repeated or late tap, one after
+            # a restart, or an alert never sent) leaves the hold as it is.
+            if (
+                finding is not None
+                and anomaly_id in self._suppression.state.pending_prompts
+            ):
                 renew_prompt(self._suppression.state, anomaly_id, dt_util.utcnow())
         else:
             # An action was taken: if the condition comes back, it is news.

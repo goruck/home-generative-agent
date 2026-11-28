@@ -349,7 +349,9 @@ def purge_expired_prompts(
     """
     Remove expired pending prompts in-place.
 
-    Returns the number of entries removed (0 when nothing was purged).
+    Also drops False Alarm marks whose prompt is gone or was replaced (see
+    ``prompt_is_dismissal``); a mark left until the next save is inert.
+    Returns the number of pending prompts removed (0 when nothing was purged).
     """
     expired: list[str] = []
     for anomaly_id, last_seen_iso in state.pending_prompts.items():
@@ -698,6 +700,7 @@ def register_prompt(
 def resolve_prompt(state: SuppressionState, anomaly_id: str) -> None:
     """Resolve an active prompt once user responds."""
     state.pending_prompts.pop(anomaly_id, None)
+    state.dismissed_prompts.pop(anomaly_id, None)
 
 
 def renew_prompt(state: SuppressionState, anomaly_id: str, now: datetime) -> None:

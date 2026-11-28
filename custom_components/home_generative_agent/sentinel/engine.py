@@ -3242,7 +3242,12 @@ class SentinelEngine:
         named = [] if sent is False else named
         if named:
             for constituent in named:
-                register_prompt(self._suppression.state, constituent, now)
+                # A False Alarm pressed on it while the push went out keeps
+                # the hold the press started (#1084).
+                if not prompt_is_dismissal(
+                    self._suppression.state, constituent.anomaly_id
+                ):
+                    register_prompt(self._suppression.state, constituent, now)
             await self._suppression.async_save()
         await _append_finding_audit(
             self._audit_store,

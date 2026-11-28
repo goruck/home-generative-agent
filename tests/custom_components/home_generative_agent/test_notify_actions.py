@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -574,6 +575,7 @@ async def test_false_alarm_restarts_the_hold_once_per_push() -> None:
     """A second tap (another phone, a stale notification) does not extend it."""
     suppression = DummySuppressionManager()
     finding = _low_battery()
+    register_prompt(suppression.state, finding, dt_util.utcnow())  # the push
     handler = ActionHandler(
         hass=DummyHass(),  # type: ignore[arg-type]
         suppression=suppression,  # type: ignore[arg-type]
@@ -587,6 +589,69 @@ async def test_false_alarm_restarts_the_hold_once_per_push() -> None:
     await handler.handle_action(action, {})
 
     assert suppression.state.pending_prompts[finding.anomaly_id] == first
+
+
+@pytest.mark.asyncio
+async def test_false_alarm_after_the_push_hold_ended_starts_no_new_hold() -> None:
+    """
+    A late tap on a push whose hold already ended does not start a new one.
+
+    The condition may have cleared and come back since; holding it then would
+    make answering quieter than ignoring.
+    """
+    suppression = DummySuppressionManager()
+    finding = _low_battery()
+    handler = ActionHandler(
+        hass=DummyHass(),  # type: ignore[arg-type]
+        suppression=suppression,  # type: ignore[arg-type]
+        audit_store=DummyAuditStore(),  # type: ignore[arg-type]
+    )
+    handler.register_finding(finding)  # pushed; its prompt since expired and purged
+
+    await handler.handle_action(f"{ACTION_PREFIX}dismiss_{finding.anomaly_id}", {})
+
+    assert suppression.state.pending_prompts == {}
+    assert suppression.state.dismissed_prompts == {}
+
+
+@pytest.mark.asyncio
+async def test_a_false_alarm_during_another_answer_does_not_hold_it() -> None:
+    """
+    The first answer to a push claims it before anything is awaited.
+
+    A False Alarm on a second phone while Execute was still running found the
+    finding too, and put back a 4 h hold the Execute had cleared.
+    """
+    release = asyncio.Event()
+
+    class _SlowSave(DummySuppressionManager):
+        # A real store save, or Execute's agent call, suspends here.
+        async def async_save(self) -> None:
+            await release.wait()
+            await super().async_save()
+
+    suppression = _SlowSave()
+    finding = _finding(anomaly_id="race-1", is_sensitive=False)
+    suppression.state.pending_prompts[finding.anomaly_id] = "2026-01-01T00:00:00+00:00"
+    handler = ActionHandler(
+        hass=DummyHass(),  # type: ignore[arg-type]
+        suppression=suppression,  # type: ignore[arg-type]
+        audit_store=DummyAuditStore(),  # type: ignore[arg-type]
+    )
+    handler.register_finding(finding)
+    execute = asyncio.create_task(
+        handler.handle_action(f"{ACTION_PREFIX}execute_{finding.anomaly_id}", {})
+    )
+    await asyncio.sleep(0)
+    dismiss = asyncio.create_task(
+        handler.handle_action(f"{ACTION_PREFIX}dismiss_{finding.anomaly_id}", {})
+    )
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(execute, dismiss)
+
+    assert finding.anomaly_id not in suppression.state.pending_prompts
+    assert suppression.state.dismissed_prompts == {}
 
 
 @pytest.mark.asyncio
