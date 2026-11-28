@@ -8,7 +8,7 @@
 
 **Why:** Claude adversarial pass, pass 3 of the #1087 review (2026-11-26). Lindo chose to show the delay in the PIN line in #1087 and leave this as a follow-up. Related coupling from the same review: the hold assumes the command runs past this gate because `LLMContext` (`conversation.py`, `_async_handle_message`) sets no `agent_id`. Setting one makes HA 2026.12 offer `intent__schedule_command` and run the command on this agent, in a new conversation with nobody to answer a second PIN prompt, so the approved command would be parked and never run.
 
-**How to apply:** In `_is_critical_action`, for those four intents, find the targeted timers through HA's `TimerManager` (`hass.data[TIMER_DATA]`, matched by device id and name as `_find_timer` does) and hold when any carries a `conversation_command`. Before anyone sets `agent_id`, decide how a delayed command that comes back to this agent is handled (carry the approval with it, or refuse it).
+**How to apply:** In `_is_critical_action`, for those four intents, find the targeted timers through HA's `TimerManager` (`hass.data[TIMER_DATA]`, matched by device id and name as `_find_timer` does) and hold when any carries a `conversation_command`. Before anyone sets `agent_id`, decide how a delayed command that comes back to this agent is handled (carry the approval with it, or refuse it). The same change must update `command_sets_its_own_delay` (`agent/helpers.py`, #1099), which reads the command on Home Assistant's own agent to catch a doubled delay: with `agent_id` set, the command would run on this agent instead.
 
 **Effort:** M
 **Priority:** P2

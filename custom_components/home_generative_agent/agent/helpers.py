@@ -2753,6 +2753,24 @@ SCHEDULE_COMMAND_ARG = "command"
 _INTENT_NAMESPACE = "intent"
 
 
+# The timer's tool as Home Assistant names it since 2026.9.
+START_TIMER_TOOL = f"{_INTENT_NAMESPACE}{TOOL_NAMESPACE_SEP}{START_TIMER_INTENT}"
+
+
+def is_builtin_timer_tool(tool_name: str) -> bool:
+    """
+    Return True for Home Assistant's own start-timer tool.
+
+    Named bare before 2026.9 and in the intent namespace since, with a remote
+    server's prefix or not. An intent script of that name
+    (`intent_script__HassStartTimer`) is another tool.
+    """
+    parts = tool_name.split(TOOL_NAMESPACE_SEP)
+    return parts[-1] == START_TIMER_INTENT and (
+        len(parts) == 1 or parts[-2] == _INTENT_NAMESPACE
+    )
+
+
 def runs_a_command_later(tool_name: str, tool_args: dict[str, Any]) -> bool:
     """
     Return True if the call leaves a command for Home Assistant to run later.
@@ -2771,12 +2789,9 @@ def runs_a_command_later(tool_name: str, tool_args: dict[str, Any]) -> bool:
     parts = tool_name.split(TOOL_NAMESPACE_SEP)
     if parts[-1] == SCHEDULE_COMMAND_TOOL:
         return len(parts) > 1 and parts[-2] == _INTENT_NAMESPACE
-    # A timer's tool is named bare (before 2026.9) or in the intent namespace;
-    # an intent script of that name is read by what it runs.
-    return (
-        parts[-1] == START_TIMER_INTENT
-        and (len(parts) == 1 or parts[-2] == _INTENT_NAMESPACE)
-        and bool(delayed_command_text(tool_name, tool_args))
+    # An intent script named like the timer is read by what it runs.
+    return is_builtin_timer_tool(tool_name) and bool(
+        delayed_command_text(tool_name, tool_args)
     )
 
 
@@ -2799,15 +2814,26 @@ async def command_sets_its_own_delay(
     device_id: str | None,
 ) -> bool:
     """
-    Return True if Home Assistant's own agent reads `command` as a timer.
+    Return True if Home Assistant's own agent reads `command` as a delayed one.
 
     A delayed command runs on that agent when the delay ends. A command that
     still names its delay ("unlock the playroom door in one minute") starts a
-    second timer there, so the action comes twice as late. Field test
-    2026-11-27: the unlock asked for in one minute came after two. The
-    command is read by the agent that will run it, in the request's language.
+    second timer there carrying the rest of the command, so the action comes
+    twice as late. Field test 2026-11-27: the unlock asked for in one minute
+    came after two. A command that starts a plain timer ("start a five-minute
+    timer") rings once and is a request of its own, so only a timer that
+    carries a command counts. The command is read as Home Assistant runs it:
+    by its own agent, in the request's language, sentence triggers first (a
+    user's trigger runs instead of the built-in sentence).
+
+    Home Assistant runs the command on its own agent because this integration
+    names none in its LLM context (see TODOS.md, "A timer that carries a
+    PIN-approved command"); if it ever names itself, this must read the
+    command as that agent will.
+
     It only decides whether the model is asked to drop the delay: anything
-    that fails here answers False, and the call goes on to the PIN gate.
+    that fails here answers False, and the call goes on to the PIN gate. The
+    first failure is logged as a warning, since the doubled delay is back.
     """
     from homeassistant.components.conversation import (  # noqa: PLC0415
         ConversationInput,
@@ -2818,30 +2844,45 @@ async def command_sets_its_own_delay(
     )
     from homeassistant.core import Context  # noqa: PLC0415
 
+    global _DELAY_CHECK_WARNED  # noqa: PLW0603 - warn once per process
+
     if not command:
         return False
     try:
         agent = async_get_agent(hass, None)
         if not isinstance(agent, DefaultAgent):
             return False
-        result = await agent.async_recognize_intent(
-            ConversationInput(
-                text=command,
-                context=Context(),
-                conversation_id=None,
-                device_id=device_id,
-                satellite_id=None,
-                language=language or hass.config.language,
-                agent_id=agent.entity_id,
-            )
+        user_input = ConversationInput(
+            text=command,
+            context=Context(),
+            conversation_id=None,
+            device_id=device_id,
+            satellite_id=None,
+            language=language or hass.config.language,
+            agent_id=agent.entity_id,
         )
+        # Only matches: the trigger's actions run when the command is handled.
+        if await agent.async_recognize_sentence_trigger(user_input) is not None:
+            return False
+        result = await agent.async_recognize_intent(user_input)
     except Exception:  # advisory only: the PIN gate still holds the call
-        LOGGER.debug("Could not read a delayed command's intent", exc_info=True)
+        if not _DELAY_CHECK_WARNED:
+            _DELAY_CHECK_WARNED = True
+            LOGGER.warning(
+                "Could not check whether a delayed command names its own "
+                "delay; such a command may run late",
+                exc_info=True,
+            )
         return False
     return (
         result is not None
         and getattr(result.intent, "name", None) == START_TIMER_INTENT
+        and TIMER_COMMAND_SLOT in (getattr(result, "entities", None) or {})
     )
+
+
+# The first failure of `command_sets_its_own_delay` is warned about, once.
+_DELAY_CHECK_WARNED = False
 
 
 _DELAY_UNITS = (("hours", 3600), ("minutes", 60), ("seconds", 1))
