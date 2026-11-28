@@ -13,6 +13,9 @@ import pytest
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from custom_components.home_generative_agent.core.utils import SentinelLLMDeferredError
+from custom_components.home_generative_agent.sentinel.dynamic_rules import (
+    evaluate_dynamic_rules,
+)
 from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
 from custom_components.home_generative_agent.sentinel.triage import (
     TRIAGE_NOTIFY,
@@ -208,16 +211,18 @@ def _battery_finding(
     levels: dict[str, Any],
     triggering: list[str],
     threshold: Any = 40.0,
-    ftype: str = "low_battery_sensors",
+    template_id: str = "low_battery_sensors",
 ) -> AnomalyFinding:
+    # Shaped as dynamic_rules builds it: typed by rule id, template in evidence.
     return AnomalyFinding(
         anomaly_id="battery-id",
-        type=ftype,
+        type="low_battery_rule",
         severity="medium",
         confidence=0.8,
         triggering_entities=triggering,
         evidence={
             "rule_id": "low_battery_rule",
+            "template_id": template_id,
             "sensor_entity_ids": list(levels),
             "sensor_states": {k: str(v) for k, v in levels.items()},
             "sensor_levels": levels,
@@ -226,6 +231,39 @@ def _battery_finding(
         suggested_actions=[],
         is_sensitive=False,
     )
+
+
+def test_low_battery_prompt_from_a_real_rule_finding() -> None:
+    """A finding built by the rule evaluator carries the level (#1085)."""
+    snapshot = _snapshot()
+    snapshot["entities"] = [
+        {
+            "entity_id": "sensor.front_lock_battery",
+            "domain": "sensor",
+            "state": "3",
+            "friendly_name": "Front lock battery",
+            "area": None,
+            "attributes": {"device_class": "battery", "unit_of_measurement": "%"},
+            "last_changed": "2025-01-01T10:00:00+00:00",
+            "last_updated": "2025-01-01T10:00:00+00:00",
+        }
+    ]
+    rule = {
+        "rule_id": "low_battery_front_lock_v1",
+        "template_id": "low_battery_sensors",
+        "params": {"sensor_entity_ids": ["sensor.front_lock_battery"], "threshold": 40},
+        "severity": "medium",
+        "confidence": 0.7,
+    }
+    findings = evaluate_dynamic_rules(snapshot, [rule])
+    assert len(findings) == 1
+    assert findings[0].type == "low_battery_front_lock_v1"
+
+    prompt = _build_prompt(findings[0], snapshot)
+
+    assert "battery_level_pct: 0" in prompt
+    assert "battery_threshold_pct: 40" in prompt
+    assert "front_lock" not in prompt.split("evidence:")[1]
 
 
 def test_low_battery_prompt_carries_level_and_threshold() -> None:
@@ -291,7 +329,7 @@ def test_low_battery_out_of_range_values_are_bounded() -> None:
 def test_battery_fields_only_for_low_battery_findings() -> None:
     """Another rule's threshold or levels never reach the prompt."""
     finding = _battery_finding(
-        {"sensor.a": 5.0}, ["sensor.a"], ftype="sensor_threshold_condition"
+        {"sensor.a": 5.0}, ["sensor.a"], template_id="sensor_threshold_condition"
     )
     prompt = _build_prompt(finding, _snapshot())
 

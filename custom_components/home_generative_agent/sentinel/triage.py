@@ -402,6 +402,17 @@ _MAGNITUDE_KEYS = ("deviation_pct", "power_w", "duration_min", "threshold_min")
 _MAGNITUDE_MAX = 100_000
 
 
+def _finite_number(value: Any) -> float | None:
+    """Return *value* as a finite float, or None for anything else."""
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    ):
+        return float(value)
+    return None
+
+
 def _power_magnitude(evidence: dict[str, Any]) -> list[str]:
     """Return how big a power finding is, as allowlisted ``key: number`` lines."""
     figures = dict(evidence)
@@ -419,12 +430,8 @@ def _power_magnitude(evidence: dict[str, Any]) -> list[str]:
             figures["power_w"] = current * factor
     lines: list[str] = []
     for key in _MAGNITUDE_KEYS:
-        value = figures.get(key)
-        if (
-            isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and math.isfinite(value)
-        ):
+        value = _finite_number(figures.get(key))
+        if value is not None:
             bounded = max(-_MAGNITUDE_MAX, min(_MAGNITUDE_MAX, value))
             lines.append(f"{key}: {bounded:.0f}")
     return lines
@@ -434,25 +441,16 @@ def _power_magnitude(evidence: dict[str, Any]) -> list[str]:
 # remembered for the exact prompt, so a reading 1% lower must not be a new
 # question, while one a few steps lower must be.
 _BATTERY_LEVEL_STEP = 5
-_LOW_BATTERY_TYPE = "low_battery_sensors"
-
-
-def _finite_number(value: Any) -> float | None:
-    """Return *value* as a finite float, or None for anything else."""
-    if (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-    ):
-        return float(value)
-    return None
+_LOW_BATTERY_TEMPLATE = "low_battery_sensors"
 
 
 def _battery_level(finding: AnomalyFinding) -> list[str]:
     """Return a low-battery finding's level and threshold as allowlisted lines."""
-    if finding.type != _LOW_BATTERY_TYPE:
-        return []
+    # A rule's finding is typed by its own rule id; the template it was
+    # approved from is in its evidence, as the notifier reads it.
     evidence = finding.evidence or {}
+    if evidence.get("template_id") != _LOW_BATTERY_TEMPLATE:
+        return []
     levels = evidence.get("sensor_levels")
     threshold = _finite_number(evidence.get("threshold"))
     lines: list[str] = []
