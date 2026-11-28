@@ -899,6 +899,81 @@ async def run_sentinel_llm_call_in_executor(  # noqa: PLR0913
     return await _await_sentinel_call(task, category, call_timeout_s)
 
 
+# Ollama Sentinel models already warned about reasoning although reasoning is
+# off, keyed by (model, what was seen), so each is logged once per start.
+_REASONING_DESPITE_OFF_WARNED: set[tuple[str, str]] = set()
+
+
+def _ollama_model_with_reasoning_off(model: Any) -> str | None:
+    """
+    Return the Ollama model name when *model* is bound with reasoning off.
+
+    ``reasoning_field`` sets ``reasoning: False`` only for an Ollama model
+    that can think, so the bound config says both the provider and the
+    setting. A fallback chain (``FallbackChatModel``, which wraps even a
+    single provider) is looked through to its members, in order.
+    """
+    chain = getattr(model, "chain", None)
+    members = [member for member, *_ in chain] if isinstance(chain, list) else []
+    for candidate in (model, *members):
+        config = getattr(candidate, "config", None)
+        configurable = config.get("configurable") if isinstance(config, dict) else None
+        if (
+            isinstance(configurable, dict)
+            and configurable.get("reasoning") is False
+            and configurable.get("model")
+        ):
+            return str(configurable["model"])
+    return None
+
+
+def _note_reasoning_despite_off(
+    model: Any, category: str, *, result: Any = None, timed_out: bool = False
+) -> None:
+    """
+    Log once when an Ollama Sentinel model seems to reason with reasoning off.
+
+    Some Ollama builds ignore ``reasoning: False`` and write a <think> block
+    into the reply, which makes Sentinel calls slow enough to time out with
+    nothing saying why (#1065). The fix is the user's: another Sentinel model,
+    or the model's tag pulled again.
+    """
+    name = _ollama_model_with_reasoning_off(model)
+    if name is None:
+        return
+    if timed_out:
+        key = (name, "timeout")
+        if key in _REASONING_DESPITE_OFF_WARNED:
+            return
+        _REASONING_DESPITE_OFF_WARNED.add(key)
+        LOGGER.warning(
+            "Sentinel %s call to Ollama model %s timed out with reasoning "
+            "off. Some Ollama models and builds reason anyway, which makes "
+            "calls slow; if this repeats, choose another Sentinel model or "
+            "pull this model's tag again.",
+            category,
+            name,
+        )
+        return
+    content = getattr(result, "content", None)
+    if not isinstance(content, str) or not (
+        _THINK_BLOCK.search(content) or _ORPHAN_THINK.search(content)
+    ):
+        return
+    key = (name, "think")
+    if key in _REASONING_DESPITE_OFF_WARNED:
+        return
+    _REASONING_DESPITE_OFF_WARNED.add(key)
+    LOGGER.warning(
+        "Ollama model %s reasoned in a Sentinel %s reply although reasoning "
+        "is off. This model or build ignores the setting, which makes "
+        "Sentinel calls slow and can time them out. Choose another Sentinel "
+        "model, or pull this model's tag again.",
+        name,
+        category,
+    )
+
+
 async def run_sentinel_model_call(  # noqa: PLR0913
     model: Any,
     messages: Any,
@@ -911,23 +986,30 @@ async def run_sentinel_model_call(  # noqa: PLR0913
 ) -> Any:
     """Run a Sentinel model call, preferring sync ``invoke`` off the event loop."""
     invoke = getattr(model, "invoke", None)
-    if callable(invoke):
-        return await run_sentinel_llm_call_in_executor(
-            lambda: invoke_dropping_unsupported_params(model, messages),
-            deployment=deployment,
-            category=category,
-            admission_timeout_s=admission_timeout_s,
-            call_timeout_s=call_timeout_s,
-            health_stats=health_stats,
-        )
-    return await run_sentinel_llm_call(
-        lambda: ainvoke_dropping_unsupported_params(model, messages),
-        deployment=deployment,
-        category=category,
-        admission_timeout_s=admission_timeout_s,
-        call_timeout_s=call_timeout_s,
-        health_stats=health_stats,
-    )
+    try:
+        if callable(invoke):
+            result = await run_sentinel_llm_call_in_executor(
+                lambda: invoke_dropping_unsupported_params(model, messages),
+                deployment=deployment,
+                category=category,
+                admission_timeout_s=admission_timeout_s,
+                call_timeout_s=call_timeout_s,
+                health_stats=health_stats,
+            )
+        else:
+            result = await run_sentinel_llm_call(
+                lambda: ainvoke_dropping_unsupported_params(model, messages),
+                deployment=deployment,
+                category=category,
+                admission_timeout_s=admission_timeout_s,
+                call_timeout_s=call_timeout_s,
+                health_stats=health_stats,
+            )
+    except TimeoutError:
+        _note_reasoning_despite_off(model, category, timed_out=True)
+        raise
+    _note_reasoning_despite_off(model, category, result=result)
+    return result
 
 
 async def generate_embeddings(
