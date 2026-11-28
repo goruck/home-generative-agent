@@ -718,6 +718,25 @@ def renew_prompt(state: SuppressionState, anomaly_id: str, now: datetime) -> Non
     state.dismissed_prompts[anomaly_id] = iso
 
 
+def prompt_is_live(
+    state: SuppressionState,
+    anomaly_id: str,
+    now: datetime,
+    *,
+    pending_prompt_ttl: timedelta,
+) -> bool:
+    """
+    Return True while *anomaly_id*'s pending prompt still holds it.
+
+    The engine purges an expired prompt only on its next run, so a prompt
+    still stored may already have ended.
+    """
+    last_seen = _parse_dt(state.pending_prompts.get(anomaly_id))
+    return last_seen is not None and not _is_pending_prompt_expired(
+        last_seen, now, pending_prompt_ttl=pending_prompt_ttl
+    )
+
+
 def prompt_is_dismissal(state: SuppressionState, anomaly_id: str) -> bool:
     """Return True when *anomaly_id*'s pending prompt is a False Alarm hold."""
     at = state.dismissed_prompts.get(anomaly_id)

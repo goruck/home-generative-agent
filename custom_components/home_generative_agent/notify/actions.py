@@ -20,13 +20,17 @@ from custom_components.home_generative_agent.sentinel.models import (
     trust_device_ids,
 )
 from custom_components.home_generative_agent.sentinel.suppression import (
+    PENDING_PROMPT_DEFAULT_TTL,
     SuppressionManager,
+    prompt_is_live,
     record_cooldown_feedback,
     renew_prompt,
     resolve_prompt,
 )
 
 if TYPE_CHECKING:
+    from datetime import timedelta
+
     from homeassistant.core import HomeAssistant
 
     from custom_components.home_generative_agent.audit.store import AuditStore
@@ -45,7 +49,7 @@ EVENT_SENTINEL_ASK_REQUESTED = "hga_sentinel_ask_requested"
 class ActionHandler:
     """Handle notification actions for sentinel findings."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         hass: HomeAssistant,
         suppression: SuppressionManager,
@@ -53,6 +57,7 @@ class ActionHandler:
         *,
         entry_id: str = "",
         notify_service: str | None = None,
+        pending_prompt_ttl: timedelta = PENDING_PROMPT_DEFAULT_TTL,
     ) -> None:
         """Initialize action handling dependencies."""
         self._hass = hass
@@ -60,6 +65,7 @@ class ActionHandler:
         self._audit_store = audit_store
         self._entry_id = entry_id
         self._notify_service = notify_service
+        self._pending_prompt_ttl = pending_prompt_ttl
         self._pending_findings: dict[str, AnomalyFinding] = {}
         # Allows tests to inject a known entity_id without a real entity registry.
         self._conversation_entity_id_override: str | None = None
@@ -94,33 +100,27 @@ class ActionHandler:
         # one that counts, so a tap on another phone while an Execute runs
         # cannot put back a hold the Execute cleared.
         finding = self._pending_findings.pop(anomaly_id, None)
-        if action == "dismiss":
-            # A False Alarm says "I have seen this": hold the alert at least as
-            # long as an unanswered one, not only for the shorter cooldowns, or
-            # a standing condition would come back sooner for answering (#1084).
-            # Only while the hold of a push since startup still runs, once per
-            # push: a tap naming any other id (a repeated or late tap, one after
-            # a restart, or an alert never sent) leaves the hold as it is.
-            if (
-                finding is not None
-                and anomaly_id in self._suppression.state.pending_prompts
-            ):
-                renew_prompt(self._suppression.state, anomaly_id, dt_util.utcnow())
-        else:
-            # An action was taken: if the condition comes back, it is news.
-            resolve_prompt(self._suppression.state, anomaly_id)
+        self._answer_prompt(action, anomaly_id, finding)
 
         response = {
             "action": action,
             "payload": payload,
         }
         outcome: dict[str, Any] | None = None
-        if action == "execute":
-            outcome = await self._outcome_for_execute(finding, payload)
-        elif action == "handoff":
-            # Delegate to the conversation agent for PIN-gated or sensitive actions.
-            outcome = await self._outcome_for_handoff(finding, payload)
-        elif action == "dismiss":
+        try:
+            if action == "execute":
+                outcome = await self._outcome_for_execute(finding, payload)
+            elif action == "handoff":
+                # Delegate to the conversation agent for PIN-gated or sensitive
+                # actions.
+                outcome = await self._outcome_for_handoff(finding, payload)
+        except BaseException:
+            # As before the claim above, a failed Execute or Ask Agent leaves
+            # the push answerable, so a retry tap still finds its finding.
+            if finding is not None:
+                self._pending_findings.setdefault(anomaly_id, finding)
+            raise
+        if action == "dismiss":
             # User explicitly marked this alert as a false positive.
             # Record per-entity feedback so future cooldowns are extended.
             response["false_positive"] = True
@@ -136,12 +136,34 @@ class ActionHandler:
         await self._suppression.async_save()
 
         if anomaly_id:
-            self._pending_findings.pop(anomaly_id, None)
+            # The finding was claimed at the top; popping again here would
+            # drop a newer push of the same alert registered meanwhile.
             await self._audit_store.async_update_response(
                 anomaly_id=anomaly_id,
                 response=response,
                 outcome=outcome,
             )
+
+    def _answer_prompt(
+        self, action: str, anomaly_id: str, finding: AnomalyFinding | None
+    ) -> None:
+        """Update the alert's pending-prompt hold for the button pressed."""
+        state = self._suppression.state
+        if action != "dismiss":
+            # An action was taken: if the condition comes back, it is news.
+            resolve_prompt(state, anomaly_id)
+            return
+        # A False Alarm says "I have seen this": hold the alert at least as
+        # long as an unanswered one, not only for the shorter cooldowns, or a
+        # standing condition would come back sooner for answering (#1084).
+        # Only while the hold of a push since startup still runs, once per
+        # push: a tap naming any other id (a repeated or late tap, one after a
+        # restart, or an alert never sent) leaves the hold as it is.
+        now = dt_util.utcnow()
+        if finding is not None and prompt_is_live(
+            state, anomaly_id, now, pending_prompt_ttl=self._pending_prompt_ttl
+        ):
+            renew_prompt(state, anomaly_id, now)
 
     async def _outcome_for_trust(
         self, finding: AnomalyFinding | None, user_id: str | None

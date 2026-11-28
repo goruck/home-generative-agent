@@ -439,7 +439,7 @@ from .sentinel.discovery_semantic import (
 )
 from .sentinel.discovery_store import DiscoveryStore
 from .sentinel.dynamic_rules import evaluate_dynamic_rule
-from .sentinel.engine import SentinelEngine
+from .sentinel.engine import SentinelEngine, pending_prompt_ttl_from
 from .sentinel.evidence_paths import (
     NETWORK_POSTURE_ALERT_VALUE,
     NETWORK_POSTURE_STATIC_RULES,
@@ -4729,6 +4729,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         audit_store,
         entry_id=entry.entry_id,
         notify_service=options.get(CONF_NOTIFY_SERVICE),
+        pending_prompt_ttl=pending_prompt_ttl_from(options),
     )
     action_handler.network_inventory = network_inventory
     notifier = SentinelNotifier(

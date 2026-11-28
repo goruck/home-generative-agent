@@ -2203,12 +2203,7 @@ class SentinelEngine:
             )
         )
         explain_enabled = bool(self._options.get(CONF_EXPLAIN_ENABLED, False))
-        pending_prompt_ttl = timedelta(
-            minutes=_coerce_int(
-                self._options.get(CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES),
-                default=RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
-            )
-        )
+        pending_prompt_ttl = pending_prompt_ttl_from(self._options)
 
         purged = purge_expired_prompts(
             self._suppression.state,
@@ -3661,6 +3656,16 @@ def _parse_rule_entity_exclusions(value: object | None) -> dict[str, _ExclusionS
     return exclusions
 
 
+def pending_prompt_ttl_from(options: Mapping[str, Any]) -> timedelta:
+    """Return the configured pending-prompt TTL (minutes option)."""
+    return timedelta(
+        minutes=_coerce_int(
+            options.get(CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES),
+            default=RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
+        )
+    )
+
+
 def _coerce_int(value: object | None, default: int) -> int:
     """Coerce option values to int with a deterministic fallback."""
     if isinstance(value, bool):
@@ -3739,12 +3744,7 @@ def _build_suppress_kwargs(
     )
 
     return {
-        "pending_prompt_ttl": timedelta(
-            minutes=_coerce_int(
-                options.get(CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES),
-                default=RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
-            )
-        ),
+        "pending_prompt_ttl": pending_prompt_ttl_from(options),
         "snapshot_timezone": timezone,
         "quiet_hours_start": quiet_start,
         "quiet_hours_end": quiet_end,
