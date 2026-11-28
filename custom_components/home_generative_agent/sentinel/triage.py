@@ -17,6 +17,9 @@ Design constraints (from sentinel_plan.md §6, §7)
     fixed word ``hvac_explained_by``, ``outdoor_temperature_C``/``_F``, and
     the bounded numbers ``deviation_pct``, ``power_w``, ``duration_min`` and
     ``threshold_min``.
+  - Only for a low-battery finding (#1085): ``battery_level_pct``, the
+    lowest triggering reading rounded down to a step of 5, and
+    ``battery_threshold_pct``, the rule's threshold.
   - **Never** included: raw entity state values, attribute strings, area
     names, or free-form evidence text.
 * Output schema: ``decision`` (``notify``|``suppress``), ``reason_code``,
@@ -140,6 +143,9 @@ _ALLOWED_EVIDENCE_KEYS: frozenset[str] = frozenset(
         "power_w",
         "duration_min",
         "threshold_min",
+        # Low-battery findings only (#1085).
+        "battery_level_pct",
+        "battery_threshold_pct",
     }
 )
 
@@ -167,6 +173,9 @@ Rules:
   above normal (deviation_pct), unusually high (power_w), or running many
   times longer than the threshold (duration_min vs threshold_min) can still
   be a fault, and should be notified.
+- battery_level_pct is how low the lowest battery is, against the rule's
+  battery_threshold_pct. A battery far below the threshold, or nearly empty,
+  should be notified: the device may stop working soon.
 - If you are uncertain, default to "notify".
 - Return only the JSON object. Do not explain your reasoning."""
 
@@ -421,6 +430,49 @@ def _power_magnitude(evidence: dict[str, Any]) -> list[str]:
     return lines
 
 
+# A low-battery finding's level goes in steps (#1085): the triage answer is
+# remembered for the exact prompt, so a reading 1% lower must not be a new
+# question, while one a few steps lower must be.
+_BATTERY_LEVEL_STEP = 5
+_LOW_BATTERY_TYPE = "low_battery_sensors"
+
+
+def _finite_number(value: Any) -> float | None:
+    """Return *value* as a finite float, or None for anything else."""
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    ):
+        return float(value)
+    return None
+
+
+def _battery_level(finding: AnomalyFinding) -> list[str]:
+    """Return a low-battery finding's level and threshold as allowlisted lines."""
+    if finding.type != _LOW_BATTERY_TYPE:
+        return []
+    evidence = finding.evidence or {}
+    levels = evidence.get("sensor_levels")
+    threshold = _finite_number(evidence.get("threshold"))
+    lines: list[str] = []
+    if isinstance(levels, dict):
+        triggering = set(finding.triggering_entities)
+        readings = [
+            number
+            for sensor_id, value in levels.items()
+            if sensor_id in triggering and (number := _finite_number(value)) is not None
+        ]
+        if readings:
+            lowest = max(0.0, min(100.0, *readings))
+            stepped = int(lowest // _BATTERY_LEVEL_STEP) * _BATTERY_LEVEL_STEP
+            lines.append(f"battery_level_pct: {stepped}")
+    if threshold is not None:
+        bounded = max(0.0, min(100.0, threshold))
+        lines.append(f"battery_threshold_pct: {bounded:.0f}")
+    return lines
+
+
 def triage_memo_key(
     finding: AnomalyFinding, snapshot: FullStateSnapshot
 ) -> tuple[str, str]:
@@ -485,6 +537,9 @@ def _build_prompt(
             unit = "F" if reading[1] == "°F" else "C"
             evidence_items.append(f"outdoor_temperature_{unit}: {reading[0]}")
         evidence_items.extend(_power_magnitude(raw_evidence))
+
+    # How low a low battery is (#1085): numbers only, never sensor names.
+    evidence_items.extend(_battery_level(finding))
 
     evidence_block = ""
     if evidence_items:

@@ -25,6 +25,7 @@ from custom_components.home_generative_agent.sentinel.triage import (
     SentinelTriageService,
     TriageDecision,
     _build_prompt,
+    triage_memo_key,
 )
 
 if TYPE_CHECKING:
@@ -201,6 +202,101 @@ def test_prompt_allowlist_excludes_unlisted_evidence_keys() -> None:
     assert "some_value" not in prompt
     # The one allowed key is still present.
     assert "last_changed_age_seconds: 60" in prompt
+
+
+def _battery_finding(
+    levels: dict[str, Any],
+    triggering: list[str],
+    threshold: Any = 40.0,
+    ftype: str = "low_battery_sensors",
+) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id="battery-id",
+        type=ftype,
+        severity="medium",
+        confidence=0.8,
+        triggering_entities=triggering,
+        evidence={
+            "rule_id": "low_battery_rule",
+            "sensor_entity_ids": list(levels),
+            "sensor_states": {k: str(v) for k, v in levels.items()},
+            "sensor_levels": levels,
+            "threshold": threshold,
+        },
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+
+
+def test_low_battery_prompt_carries_level_and_threshold() -> None:
+    """The model is told how low the lowest triggering battery is (#1085)."""
+    finding = _battery_finding(
+        {"sensor.lock_battery": 3.0, "sensor.door_battery": 38.0},
+        ["sensor.lock_battery", "sensor.door_battery"],
+    )
+    prompt = _build_prompt(finding, _snapshot())
+
+    assert "battery_level_pct: 0" in prompt
+    assert "battery_threshold_pct: 40" in prompt
+    assert "lock_battery" not in prompt
+    assert "door_battery" not in prompt
+
+
+def test_low_battery_level_ignores_sensors_above_threshold() -> None:
+    """Only triggering sensors count toward the reported level."""
+    finding = _battery_finding(
+        {"sensor.a": 37.0, "sensor.b": 2.0},
+        ["sensor.a"],
+    )
+    prompt = _build_prompt(finding, _snapshot())
+
+    assert "battery_level_pct: 35" in prompt
+
+
+def test_low_battery_small_drop_keeps_the_triage_memo() -> None:
+    """A 1% lower reading is the same question; a much lower one is new."""
+    snapshot = _snapshot()
+    at_39 = _battery_finding({"sensor.a": 39.0}, ["sensor.a"])
+    at_36 = _battery_finding({"sensor.a": 36.0}, ["sensor.a"])
+    at_3 = _battery_finding({"sensor.a": 3.0}, ["sensor.a"])
+
+    assert triage_memo_key(at_39, snapshot) == triage_memo_key(at_36, snapshot)
+    assert triage_memo_key(at_39, snapshot) != triage_memo_key(at_3, snapshot)
+
+
+@pytest.mark.parametrize(
+    ("level", "threshold"),
+    [(float("nan"), float("inf")), (True, "40"), ("12", None)],
+)
+def test_low_battery_non_finite_or_non_numeric_values_are_left_out(
+    level: Any, threshold: Any
+) -> None:
+    """Only finite numbers reach the prompt."""
+    finding = _battery_finding({"sensor.a": level}, ["sensor.a"], threshold)
+    prompt = _build_prompt(finding, _snapshot())
+
+    assert "battery_level_pct" not in prompt
+    assert "battery_threshold_pct" not in prompt
+
+
+def test_low_battery_out_of_range_values_are_bounded() -> None:
+    """A reading or threshold outside 0-100 is clamped."""
+    finding = _battery_finding({"sensor.a": -7.0}, ["sensor.a"], 250.0)
+    prompt = _build_prompt(finding, _snapshot())
+
+    assert "battery_level_pct: 0" in prompt
+    assert "battery_threshold_pct: 100" in prompt
+
+
+def test_battery_fields_only_for_low_battery_findings() -> None:
+    """Another rule's threshold or levels never reach the prompt."""
+    finding = _battery_finding(
+        {"sensor.a": 5.0}, ["sensor.a"], ftype="sensor_threshold_condition"
+    )
+    prompt = _build_prompt(finding, _snapshot())
+
+    assert "battery_level_pct" not in prompt
+    assert "battery_threshold_pct" not in prompt
 
 
 def test_prompt_entity_count_and_actions_count_match_finding() -> None:
