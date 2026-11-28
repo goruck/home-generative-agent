@@ -129,6 +129,11 @@ class SuppressionState:
     # an alert waiting on a rule that stopped is visible (#802). Optional and
     # additive, like the above.
     owed_rule_idle: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Anomaly id -> the pending-prompt time a False Alarm press wrote (#1084).
+    # The hold is a dismissal only while pending_prompts still holds that same
+    # time: a new push, an answer or expiry replaces or removes it. Optional
+    # and additive, like the above.
+    dismissed_prompts: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SuppressionState:
@@ -159,6 +164,10 @@ class SuppressionState:
                 for kind, idle in _mapping(data.get("owed_rule_idle")).items()
                 if isinstance(idle, dict)
             },
+            dismissed_prompts={
+                str(anomaly_id): str(at)
+                for anomaly_id, at in _mapping(data.get("dismissed_prompts")).items()
+            },
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -180,6 +189,7 @@ class SuppressionState:
             "owed_rule_idle": {
                 kind: dict(idle) for kind, idle in self.owed_rule_idle.items()
             },
+            "dismissed_prompts": dict(self.dismissed_prompts),
         }
 
 
@@ -353,6 +363,12 @@ def purge_expired_prompts(
 
     for anomaly_id in expired:
         del state.pending_prompts[anomaly_id]
+    for anomaly_id in [
+        anomaly_id
+        for anomaly_id in state.dismissed_prompts
+        if not prompt_is_dismissal(state, anomaly_id)
+    ]:
+        del state.dismissed_prompts[anomaly_id]
     return len(expired)
 
 
@@ -690,9 +706,19 @@ def renew_prompt(state: SuppressionState, anomaly_id: str, now: datetime) -> Non
 
     For a False Alarm press (#1084): the alert stays quiet for the whole
     pending-prompt TTL after the press, as long as an unanswered alert does,
-    instead of coming back when the shorter cooldowns end.
+    instead of coming back when the shorter cooldowns end. The hold is marked
+    as a dismissal, so a grouped push does not name the alert as a reminder
+    while it runs (see ``prompt_is_dismissal``).
     """
-    state.pending_prompts[anomaly_id] = dt_util.as_utc(now).isoformat()
+    iso = dt_util.as_utc(now).isoformat()
+    state.pending_prompts[anomaly_id] = iso
+    state.dismissed_prompts[anomaly_id] = iso
+
+
+def prompt_is_dismissal(state: SuppressionState, anomaly_id: str) -> bool:
+    """Return True when *anomaly_id*'s pending prompt is a False Alarm hold."""
+    at = state.dismissed_prompts.get(anomaly_id)
+    return at is not None and state.pending_prompts.get(anomaly_id) == at
 
 
 def register_snooze(

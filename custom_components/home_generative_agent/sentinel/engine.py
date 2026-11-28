@@ -195,6 +195,7 @@ from .suppression import (
     SuppressionManager,
     cooldown_stamps,
     false_alarm_cooldown,
+    prompt_is_dismissal,
     purge_expired_prompts,
     register_device_cooldown,
     register_finding,
@@ -3173,6 +3174,9 @@ class SentinelEngine:
                     **suppress_kwargs,
                 ).reason_code
                 != SUPPRESSION_REASON_PENDING_PROMPT
+                # A False Alarm hold is not a reminder clock: the user said
+                # they have seen it, so it waits out the hold (#1084).
+                or prompt_is_dismissal(self._suppression.state, constituent.anomaly_id)
             ):
                 return False
             # The pending prompt is checked first: set it aside to see whether

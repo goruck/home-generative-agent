@@ -554,8 +554,8 @@ async def test_false_alarm_restarts_the_prompt_hold_from_the_press() -> None:
 
 
 @pytest.mark.asyncio
-async def test_false_alarm_holds_even_when_no_prompt_was_left() -> None:
-    """A press after the prompt expired (or for an unknown alert) still holds."""
+async def test_false_alarm_for_an_alert_never_pushed_writes_no_hold() -> None:
+    """A tap naming an id no push carried cannot quiet that alert in advance."""
     suppression = DummySuppressionManager()
     handler = ActionHandler(
         hass=DummyHass(),  # type: ignore[arg-type]
@@ -563,9 +563,54 @@ async def test_false_alarm_holds_even_when_no_prompt_was_left() -> None:
         audit_store=DummyAuditStore(),  # type: ignore[arg-type]
     )
 
-    await handler.handle_action(f"{ACTION_PREFIX}dismiss_gone-1", {})
+    await handler.handle_action(f"{ACTION_PREFIX}dismiss_never-sent", {})
 
-    assert "gone-1" in suppression.state.pending_prompts
+    assert suppression.state.pending_prompts == {}
+    assert suppression.state.dismissed_prompts == {}
+
+
+@pytest.mark.asyncio
+async def test_false_alarm_restarts_the_hold_once_per_push() -> None:
+    """A second tap (another phone, a stale notification) does not extend it."""
+    suppression = DummySuppressionManager()
+    finding = _low_battery()
+    handler = ActionHandler(
+        hass=DummyHass(),  # type: ignore[arg-type]
+        suppression=suppression,  # type: ignore[arg-type]
+        audit_store=DummyAuditStore(),  # type: ignore[arg-type]
+    )
+    handler.register_finding(finding)
+    action = f"{ACTION_PREFIX}dismiss_{finding.anomaly_id}"
+    await handler.handle_action(action, {})
+    first = suppression.state.pending_prompts[finding.anomaly_id]
+
+    await handler.handle_action(action, {})
+
+    assert suppression.state.pending_prompts[finding.anomaly_id] == first
+
+
+@pytest.mark.asyncio
+async def test_false_alarm_after_a_restart_keeps_the_pushed_hold() -> None:
+    """
+    After a restart the tap leaves the hold the push started, as if ignored.
+
+    The pushed findings live in memory only, so the tap cannot be tied to a
+    push; it is neither renewed nor cleared.
+    """
+    suppression = DummySuppressionManager()
+    finding = _low_battery()
+    pushed = "2026-01-01T00:00:00+00:00"
+    suppression.state.pending_prompts[finding.anomaly_id] = pushed
+    handler = ActionHandler(  # a fresh handler: nothing registered since start
+        hass=DummyHass(),  # type: ignore[arg-type]
+        suppression=suppression,  # type: ignore[arg-type]
+        audit_store=DummyAuditStore(),  # type: ignore[arg-type]
+    )
+
+    await handler.handle_action(f"{ACTION_PREFIX}dismiss_{finding.anomaly_id}", {})
+
+    assert suppression.state.pending_prompts[finding.anomaly_id] == pushed
+    assert suppression.state.dismissed_prompts == {}
 
 
 @pytest.mark.asyncio

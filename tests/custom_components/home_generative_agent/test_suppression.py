@@ -29,10 +29,12 @@ from custom_components.home_generative_agent.sentinel.suppression import (
     SuppressionState,
     _is_quiet_hours,
     _migrate_suppression_state,
+    prompt_is_dismissal,
     purge_expired_prompts,
     record_cooldown_feedback,
     register_finding,
     register_prompt,
+    renew_prompt,
     resolve_prompt,
     should_suppress,
 )
@@ -169,6 +171,60 @@ def test_purge_expired_prompts_removes_only_expired() -> None:
     assert "expired" not in state.pending_prompts
     assert "invalid" not in state.pending_prompts
     assert "fresh" in state.pending_prompts
+
+
+def _held_finding(anomaly_id: str) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id=anomaly_id,
+        type="low_battery_front_lock_v1",
+        severity="low",
+        confidence=0.9,
+        triggering_entities=["sensor.front_lock_battery"],
+        evidence={},
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+
+
+def test_a_false_alarm_hold_stops_being_one_when_the_prompt_changes() -> None:
+    """
+    The dismissal mark follows the prompt it was written with (#1084).
+
+    A new push, an answer or expiry replaces or removes the prompt; the hold is
+    then no longer a False Alarm one, and the purge drops the stale mark.
+    """
+    now = dt_util.utcnow()
+    state = SuppressionState()
+    for anomaly_id in ("repushed", "answered", "expired", "live"):
+        renew_prompt(state, anomaly_id, now - timedelta(hours=1))
+        assert prompt_is_dismissal(state, anomaly_id)
+    state.pending_prompts["expired"] = dt_util.as_utc(
+        now - timedelta(hours=5)
+    ).isoformat()
+    register_prompt(state, _held_finding("repushed"), now)
+    resolve_prompt(state, "answered")
+
+    assert not prompt_is_dismissal(state, "repushed")
+    assert not prompt_is_dismissal(state, "answered")
+    assert prompt_is_dismissal(state, "live")
+
+    purge_expired_prompts(state, now, pending_prompt_ttl=PENDING_PROMPT_DEFAULT_TTL)
+
+    assert set(state.dismissed_prompts) == {"live"}
+
+
+def test_a_false_alarm_hold_survives_a_restart() -> None:
+    """The mark is saved with the store; an older store without it loads."""
+    now = dt_util.utcnow()
+    state = SuppressionState()
+    renew_prompt(state, "lb-1", now)
+
+    restored = SuppressionState.from_dict(state.as_dict())
+
+    assert prompt_is_dismissal(restored, "lb-1")
+    old = state.as_dict()
+    del old["dismissed_prompts"]
+    assert SuppressionState.from_dict(old).dismissed_prompts == {}
 
 
 def test_entity_cooldown_suppresses() -> None:

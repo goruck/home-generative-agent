@@ -95,7 +95,11 @@ class ActionHandler:
             # A False Alarm says "I have seen this": hold the alert at least as
             # long as an unanswered one, not only for the shorter cooldowns, or
             # a standing condition would come back sooner for answering (#1084).
-            renew_prompt(self._suppression.state, anomaly_id, dt_util.utcnow())
+            # Only for an alert pushed since startup and not answered yet, once
+            # per push: a tap naming any other id (a stale or repeated tap, one
+            # after a restart, or an alert never sent) leaves its hold as it is.
+            if finding is not None:
+                renew_prompt(self._suppression.state, anomaly_id, dt_util.utcnow())
         else:
             # An action was taken: if the condition comes back, it is news.
             resolve_prompt(self._suppression.state, anomaly_id)
