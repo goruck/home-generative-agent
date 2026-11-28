@@ -2350,6 +2350,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     _utils_mod._uncontended = False  # noqa: SLF001
     _utils_mod._gate_generation += 1  # noqa: SLF001
     _utils_mod._sentinel_last_call_end = 0.0  # noqa: SLF001
+    _utils_mod.reset_reasoning_despite_off_warnings()
     _utils_mod._sentinel_last_defer = 0.0  # noqa: SLF001
     _utils_mod._video_active_count = 0  # noqa: SLF001
     _utils_mod._video_idle.set()  # noqa: SLF001
