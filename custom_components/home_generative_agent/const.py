@@ -1763,6 +1763,19 @@ AUTOMATION_ACTION_KEYWORDS_REGEX = (
     r"disable|toggle|notify|alert|send|announce|broadcast|remind|flash|"
     r"tell|text|warn)\b"
 )
+# A request to do something after a delay ("lock the door in 30 seconds",
+# "turn off the fan after an hour"). Home Assistant runs one through a timer
+# given a command, whose tool's description ("Starts a new timer") ranks far
+# below the device tools for the words of the command itself, so the tool is
+# bound on these phrasings. English only, like the automation markers above;
+# a miss leaves the tool to ranking, a false match costs one unused slot.
+DELAYED_COMMAND_REGEX = (
+    r"(?i)\b(?:in|after)\s+"
+    r"(?:\d+(?:[.,]\d+)?|a|an|one|two|three|four|five|six|seven|eight|nine|"
+    r"ten|fifteen|twenty|thirty|forty|forty-five|fifty|sixty|ninety|"
+    r"a\s+few|a\s+couple(?:\s+of)?|a\s+half|half\s+an?|an?\s+half)\s*"
+    r"(?:secs?|seconds?|mins?|minutes?|hrs?|hours?)\b"
+)
 
 # Referential follow-up signals: a turn that points back at the previous one
 # instead of naming its target ("turn it off", "do that again", "the other

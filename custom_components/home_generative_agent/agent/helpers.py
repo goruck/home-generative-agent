@@ -2791,6 +2791,59 @@ def delayed_command_text(tool_name: str, tool_args: dict[str, Any]) -> str:
     return "" if value is None else str(value).strip()
 
 
+async def command_sets_its_own_delay(
+    hass: HomeAssistant,
+    command: str,
+    *,
+    language: str | None,
+    device_id: str | None,
+) -> bool:
+    """
+    Return True if Home Assistant's own agent reads `command` as a timer.
+
+    A delayed command runs on that agent when the delay ends. A command that
+    still names its delay ("unlock the playroom door in one minute") starts a
+    second timer there, so the action comes twice as late. Field test
+    2026-11-27: the unlock asked for in one minute came after two. The
+    command is read by the agent that will run it, in the request's language.
+    It only decides whether the model is asked to drop the delay: anything
+    that fails here answers False, and the call goes on to the PIN gate.
+    """
+    from homeassistant.components.conversation import (  # noqa: PLC0415
+        ConversationInput,
+        async_get_agent,
+    )
+    from homeassistant.components.conversation.default_agent import (  # noqa: PLC0415
+        DefaultAgent,
+    )
+    from homeassistant.core import Context  # noqa: PLC0415
+
+    if not command:
+        return False
+    try:
+        agent = async_get_agent(hass, None)
+        if not isinstance(agent, DefaultAgent):
+            return False
+        result = await agent.async_recognize_intent(
+            ConversationInput(
+                text=command,
+                context=Context(),
+                conversation_id=None,
+                device_id=device_id,
+                satellite_id=None,
+                language=language or hass.config.language,
+                agent_id=agent.entity_id,
+            )
+        )
+    except Exception:  # advisory only: the PIN gate still holds the call
+        LOGGER.debug("Could not read a delayed command's intent", exc_info=True)
+        return False
+    return (
+        result is not None
+        and getattr(result.intent, "name", None) == START_TIMER_INTENT
+    )
+
+
 _DELAY_UNITS = (("hours", 3600), ("minutes", 60), ("seconds", 1))
 
 
