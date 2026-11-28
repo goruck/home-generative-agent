@@ -899,23 +899,36 @@ async def run_sentinel_llm_call_in_executor(  # noqa: PLR0913
     return await _await_sentinel_call(task, category, call_timeout_s)
 
 
-# Ollama Sentinel models already warned about reasoning although reasoning is
-# off, keyed by (model, what was seen), so each is logged once per start.
+# Ollama models already warned about reasoning although reasoning is off,
+# keyed by (model, what was seen): each is logged once per setup of the entry
+# (async_setup_entry clears both), so a fix can be checked after a reload.
 _REASONING_DESPITE_OFF_WARNED: set[tuple[str, str]] = set()
+# Timeouts in a row per Ollama model with reasoning off; any reply resets it.
+_REASONING_OFF_TIMEOUTS: dict[str, int] = {}
+# A single timeout is often a cold load or a busy GPU, not a model that
+# reasons anyway; the warning waits for this many in a row.
+_REASONING_OFF_TIMEOUTS_BEFORE_WARNING = 3
+
+_REASONING_OFF_FIX = (
+    "Choose another model for Sentinel (the Sentinel Model, or the "
+    "Conversation model while Sentinel runs on it), or pull this model's "
+    "tag again."
+)
 
 
-def _ollama_model_with_reasoning_off(model: Any) -> str | None:
+def _reasoning_off_ollama_members(model: Any) -> tuple[set[str], int]:
     """
-    Return the Ollama model name when *model* is bound with reasoning off.
+    Return the Ollama model names bound with reasoning off, and the chain size.
 
     ``reasoning_field`` sets ``reasoning: False`` only for an Ollama model
-    that can think, so the bound config says both the provider and the
-    setting. A fallback chain (``FallbackChatModel``, which wraps even a
-    single provider) is looked through to its members, in order.
+    that can think, so a member's bound config says both the provider and the
+    setting. A ``FallbackChatModel`` (which wraps even a single provider) is
+    looked through to its members.
     """
     chain = getattr(model, "chain", None)
     members = [member for member, *_ in chain] if isinstance(chain, list) else []
-    for candidate in (model, *members):
+    names: set[str] = set()
+    for candidate in members or [model]:
         config = getattr(candidate, "config", None)
         configurable = config.get("configurable") if isinstance(config, dict) else None
         if (
@@ -923,8 +936,16 @@ def _ollama_model_with_reasoning_off(model: Any) -> str | None:
             and configurable.get("reasoning") is False
             and configurable.get("model")
         ):
-            return str(configurable["model"])
-    return None
+            names.add(str(configurable["model"]))
+    return names, max(len(members), 1)
+
+
+def _warn_reasoning_despite_off_once(name: str, kind: str, message: str) -> None:
+    key = (name, kind)
+    if key in _REASONING_DESPITE_OFF_WARNED:
+        return
+    _REASONING_DESPITE_OFF_WARNED.add(key)
+    LOGGER.warning(message)
 
 
 def _note_reasoning_despite_off(
@@ -935,43 +956,58 @@ def _note_reasoning_despite_off(
 
     Some Ollama builds ignore ``reasoning: False`` and write a <think> block
     into the reply, which makes Sentinel calls slow enough to time out with
-    nothing saying why (#1065). The fix is the user's: another Sentinel model,
-    or the model's tag pulled again.
+    nothing saying why (#1065). The fix is the user's: another model for
+    Sentinel, or the model's tag pulled again. A reply is blamed on the model
+    that wrote it (``response_metadata``); a timeout only on a chain of one
+    model, since a fallback chain does not say which member ran out of time.
     """
-    name = _ollama_model_with_reasoning_off(model)
-    if name is None:
+    names, size = _reasoning_off_ollama_members(model)
+    if not names:
         return
     if timed_out:
-        key = (name, "timeout")
-        if key in _REASONING_DESPITE_OFF_WARNED:
+        if size != 1:
             return
-        _REASONING_DESPITE_OFF_WARNED.add(key)
-        LOGGER.warning(
-            "Sentinel %s call to Ollama model %s timed out with reasoning "
-            "off. Some Ollama models and builds reason anyway, which makes "
-            "calls slow; if this repeats, choose another Sentinel model or "
-            "pull this model's tag again.",
-            category,
-            name,
-        )
+        (name,) = names
+        count = _REASONING_OFF_TIMEOUTS.get(name, 0) + 1
+        _REASONING_OFF_TIMEOUTS[name] = count
+        if count >= _REASONING_OFF_TIMEOUTS_BEFORE_WARNING:
+            _warn_reasoning_despite_off_once(
+                name,
+                "timeout",
+                f"Sentinel calls to Ollama model {name} timed out {count} times "
+                "in a row with reasoning off. Some Ollama models and builds "
+                "reason anyway, which makes calls slow. If this model does, "
+                + _REASONING_OFF_FIX,
+            )
         return
+    metadata = getattr(result, "response_metadata", None)
+    answered = (
+        metadata.get("model") or metadata.get("model_name")
+        if isinstance(metadata, dict)
+        else None
+    )
+    name = str(answered) if answered else (next(iter(names)) if size == 1 else "")
+    if name not in names:
+        return
+    _REASONING_OFF_TIMEOUTS.pop(name, None)
     content = getattr(result, "content", None)
     if not isinstance(content, str) or not (
         _THINK_BLOCK.search(content) or _ORPHAN_THINK.search(content)
     ):
         return
-    key = (name, "think")
-    if key in _REASONING_DESPITE_OFF_WARNED:
-        return
-    _REASONING_DESPITE_OFF_WARNED.add(key)
-    LOGGER.warning(
-        "Ollama model %s reasoned in a Sentinel %s reply although reasoning "
-        "is off. This model or build ignores the setting, which makes "
-        "Sentinel calls slow and can time them out. Choose another Sentinel "
-        "model, or pull this model's tag again.",
+    _warn_reasoning_despite_off_once(
         name,
-        category,
+        "think",
+        f"Ollama model {name} reasoned in a Sentinel {category} reply although "
+        "reasoning is off. This model or build ignores the setting, which "
+        "makes Sentinel calls slow and can time them out. " + _REASONING_OFF_FIX,
     )
+
+
+def reset_reasoning_despite_off_warnings() -> None:
+    """Forget the warnings and timeout counts (on entry setup)."""
+    _REASONING_DESPITE_OFF_WARNED.clear()
+    _REASONING_OFF_TIMEOUTS.clear()
 
 
 async def run_sentinel_model_call(  # noqa: PLR0913
