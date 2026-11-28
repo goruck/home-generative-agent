@@ -210,6 +210,7 @@ from .triage import (
     TRIAGE_SUPPRESS,
     SentinelTriageService,
     TriageDecision,
+    battery_at_floor,
     triage_memo_key,
 )
 from .trigger_scheduler import SentinelTriggerScheduler, TriggerRecord
@@ -2776,7 +2777,9 @@ class SentinelEngine:
         trigger_source: str,
     ) -> TriageDecision | None:
         """Return triage's decision on a finding, or None when it stopped it."""
-        if self._triage_still_suppressed(finding, snapshot, now):
+        if not battery_at_floor(finding) and self._triage_still_suppressed(
+            finding, snapshot, now
+        ):
             # Audited when the model answered; every repeat of a standing
             # condition would crowd out the audit trail.
             self._last_dispatch_reason = SUPPRESSION_REASON_TRIAGE_SUPPRESSED

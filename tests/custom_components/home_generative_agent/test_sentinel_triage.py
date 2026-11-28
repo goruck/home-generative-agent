@@ -12,10 +12,17 @@ from unittest.mock import patch
 import pytest
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from custom_components.home_generative_agent.const import (
+    SENTINEL_TRIAGE_BATTERY_FLOOR_PCT,
+)
 from custom_components.home_generative_agent.core.utils import SentinelLLMDeferredError
+from custom_components.home_generative_agent.sentinel.dynamic_rules import (
+    evaluate_dynamic_rules,
+)
 from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
 from custom_components.home_generative_agent.sentinel.triage import (
     TRIAGE_NOTIFY,
+    TRIAGE_REASON_BATTERY_FLOOR,
     TRIAGE_REASON_CAP,
     TRIAGE_REASON_DEFERRED,
     TRIAGE_REASON_LLM_NOTIFY,
@@ -25,6 +32,7 @@ from custom_components.home_generative_agent.sentinel.triage import (
     SentinelTriageService,
     TriageDecision,
     _build_prompt,
+    triage_memo_key,
 )
 
 if TYPE_CHECKING:
@@ -201,6 +209,136 @@ def test_prompt_allowlist_excludes_unlisted_evidence_keys() -> None:
     assert "some_value" not in prompt
     # The one allowed key is still present.
     assert "last_changed_age_seconds: 60" in prompt
+
+
+def _battery_finding(
+    levels: dict[str, Any],
+    triggering: list[str],
+    threshold: Any = 40.0,
+    template_id: str = "low_battery_sensors",
+) -> AnomalyFinding:
+    # Shaped as dynamic_rules builds it: typed by rule id, template in evidence.
+    return AnomalyFinding(
+        anomaly_id="battery-id",
+        type="low_battery_rule",
+        severity="medium",
+        confidence=0.8,
+        triggering_entities=triggering,
+        evidence={
+            "rule_id": "low_battery_rule",
+            "template_id": template_id,
+            "sensor_entity_ids": list(levels),
+            "sensor_states": {k: str(v) for k, v in levels.items()},
+            "sensor_levels": levels,
+            "threshold": threshold,
+        },
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+
+
+def test_low_battery_prompt_from_a_real_rule_finding() -> None:
+    """A finding built by the rule evaluator carries the level (#1085)."""
+    snapshot = _snapshot()
+    snapshot["entities"] = [
+        {
+            "entity_id": "sensor.front_lock_battery",
+            "domain": "sensor",
+            "state": "3",
+            "friendly_name": "Front lock battery",
+            "area": None,
+            "attributes": {"device_class": "battery", "unit_of_measurement": "%"},
+            "last_changed": "2025-01-01T10:00:00+00:00",
+            "last_updated": "2025-01-01T10:00:00+00:00",
+        }
+    ]
+    rule = {
+        "rule_id": "low_battery_front_lock_v1",
+        "template_id": "low_battery_sensors",
+        "params": {"sensor_entity_ids": ["sensor.front_lock_battery"], "threshold": 40},
+        "severity": "medium",
+        "confidence": 0.7,
+    }
+    findings = evaluate_dynamic_rules(snapshot, [rule])
+    assert len(findings) == 1
+    assert findings[0].type == "low_battery_front_lock_v1"
+
+    prompt = _build_prompt(findings[0], snapshot)
+
+    assert "battery_level_pct: 0" in prompt
+    assert "battery_threshold_pct: 40" in prompt
+    assert "front_lock" not in prompt.split("evidence:")[1]
+
+
+def test_low_battery_prompt_carries_level_and_threshold() -> None:
+    """The model is told how low the lowest triggering battery is (#1085)."""
+    finding = _battery_finding(
+        {"sensor.lock_battery": 3.0, "sensor.door_battery": 38.0},
+        ["sensor.lock_battery", "sensor.door_battery"],
+    )
+    prompt = _build_prompt(finding, _snapshot())
+
+    assert "battery_level_pct: 0" in prompt
+    assert "battery_threshold_pct: 40" in prompt
+    assert "lock_battery" not in prompt
+    assert "door_battery" not in prompt
+
+
+def test_low_battery_level_ignores_sensors_above_threshold() -> None:
+    """Only triggering sensors count toward the reported level."""
+    finding = _battery_finding(
+        {"sensor.a": 37.0, "sensor.b": 2.0},
+        ["sensor.a"],
+    )
+    prompt = _build_prompt(finding, _snapshot())
+
+    assert "battery_level_pct: 35" in prompt
+
+
+def test_low_battery_small_drop_keeps_the_triage_memo() -> None:
+    """A 1% lower reading is the same question; a much lower one is new."""
+    snapshot = _snapshot()
+    at_39 = _battery_finding({"sensor.a": 39.0}, ["sensor.a"])
+    at_36 = _battery_finding({"sensor.a": 36.0}, ["sensor.a"])
+    at_3 = _battery_finding({"sensor.a": 3.0}, ["sensor.a"])
+
+    assert triage_memo_key(at_39, snapshot) == triage_memo_key(at_36, snapshot)
+    assert triage_memo_key(at_39, snapshot) != triage_memo_key(at_3, snapshot)
+
+
+@pytest.mark.parametrize(
+    ("level", "threshold"),
+    [(float("nan"), float("inf")), (True, "40"), ("12", None)],
+)
+def test_low_battery_non_finite_or_non_numeric_values_are_left_out(
+    level: Any, threshold: Any
+) -> None:
+    """Only finite numbers reach the prompt."""
+    finding = _battery_finding({"sensor.a": level}, ["sensor.a"], threshold)
+    prompt = _build_prompt(finding, _snapshot())
+
+    assert "battery_level_pct" not in prompt
+    assert "battery_threshold_pct" not in prompt
+
+
+def test_low_battery_out_of_range_values_are_bounded() -> None:
+    """A reading or threshold outside 0-100 is clamped."""
+    finding = _battery_finding({"sensor.a": -7.0}, ["sensor.a"], 250.0)
+    prompt = _build_prompt(finding, _snapshot())
+
+    assert "battery_level_pct: 0" in prompt
+    assert "battery_threshold_pct: 100" in prompt
+
+
+def test_battery_fields_only_for_low_battery_findings() -> None:
+    """Another rule's threshold or levels never reach the prompt."""
+    finding = _battery_finding(
+        {"sensor.a": 5.0}, ["sensor.a"], template_id="sensor_threshold_condition"
+    )
+    prompt = _build_prompt(finding, _snapshot())
+
+    assert "battery_level_pct" not in prompt
+    assert "battery_threshold_pct" not in prompt
 
 
 def test_prompt_entity_count_and_actions_count_match_finding() -> None:
@@ -930,3 +1068,136 @@ async def test_a_cloud_model_is_never_capped_or_gapped() -> None:
     assert llm.calls == 2
     # gstack-timing-ok: the alternative is a 0.5 s gap; 0.3 s is a generous bound
     assert time.monotonic() - start < 0.3
+
+
+# ---------------------------------------------------------------------------
+# Low-battery floor (#1085)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("level", [0.0, 3.0, SENTINEL_TRIAGE_BATTERY_FLOOR_PCT])
+async def test_a_battery_at_or_below_the_floor_notifies_without_the_model(
+    level: float,
+) -> None:
+    """A nearly empty battery is never sent to triage, so it cannot be suppressed."""
+    llm = MockLLM(_SUPPRESS_REPLY)
+    health: dict[str, Any] = {}
+    svc = SentinelTriageService(llm, call_gap_s=0.0, health_stats=health)
+    svc.begin_run()
+
+    result = await svc.triage(
+        _battery_finding({"sensor.a": level}, ["sensor.a"]), _snapshot()
+    )
+
+    assert result.decision == TRIAGE_NOTIFY
+    assert result.reason_code == TRIAGE_REASON_BATTERY_FLOOR
+    assert result.triage_confidence is None
+    assert llm.calls == 0
+    assert health["triage_calls_last_run"] == 0
+    assert health["triage_passed_through_last_run"] == 0
+    # The health sensor leaves it out of the suppress rate; a model may not
+    # claim it.
+    assert TRIAGE_REASON_BATTERY_FLOOR in TRIAGE_REASONS_NOT_RUN
+
+
+@pytest.mark.asyncio
+async def test_a_battery_above_the_floor_is_still_triaged() -> None:
+    """Above the floor the model decides, and may suppress."""
+    llm = MockLLM(_SUPPRESS_REPLY)
+    svc = SentinelTriageService(llm, call_gap_s=0.0)
+    svc.begin_run()
+
+    result = await svc.triage(
+        _battery_finding(
+            {"sensor.a": SENTINEL_TRIAGE_BATTERY_FLOOR_PCT + 1}, ["sensor.a"]
+        ),
+        _snapshot(),
+    )
+
+    assert result.decision == TRIAGE_SUPPRESS
+    assert llm.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_the_floor_uses_the_lowest_triggering_sensor_only() -> None:
+    """A low sensor that did not trigger the finding does not skip triage."""
+    llm = MockLLM(_SUPPRESS_REPLY)
+    svc = SentinelTriageService(llm, call_gap_s=0.0)
+    svc.begin_run()
+
+    result = await svc.triage(
+        _battery_finding({"sensor.a": 30.0, "sensor.b": 2.0}, ["sensor.a"]),
+        _snapshot(),
+    )
+
+    assert result.decision == TRIAGE_SUPPRESS
+    assert llm.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_a_floor_battery_notifies_past_the_run_limit_and_uses_no_slot() -> None:
+    """The floor is checked before the run's limit and does not spend it."""
+    llm = MockLLM(_SUPPRESS_REPLY)
+    svc = SentinelTriageService(llm, max_per_run=1, call_gap_s=0.0)
+    svc.begin_run()
+
+    floor = await svc.triage(
+        _battery_finding({"sensor.a": 2.0}, ["sensor.a"]), _snapshot()
+    )
+    other = await svc.triage(_finding(), _snapshot())
+
+    assert floor.reason_code == TRIAGE_REASON_BATTERY_FLOOR
+    assert other.decision == TRIAGE_SUPPRESS
+    assert llm.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_the_floor_applies_only_to_low_battery_findings() -> None:
+    """Another template's low reading is triaged as before."""
+    llm = MockLLM(_SUPPRESS_REPLY)
+    svc = SentinelTriageService(llm, call_gap_s=0.0)
+    svc.begin_run()
+
+    result = await svc.triage(
+        _battery_finding(
+            {"sensor.a": 1.0}, ["sensor.a"], template_id="sensor_threshold_condition"
+        ),
+        _snapshot(),
+    )
+
+    assert result.decision == TRIAGE_SUPPRESS
+    assert llm.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_triage_off_still_reports_disabled_for_a_floor_battery() -> None:
+    """With triage off the decision stays triage_disabled."""
+    svc = SentinelTriageService(None)
+
+    result = await svc.triage(
+        _battery_finding({"sensor.a": 1.0}, ["sensor.a"]), _snapshot()
+    )
+
+    assert result.reason_code == "triage_disabled"
+
+
+@pytest.mark.asyncio
+async def test_a_floor_battery_after_a_deferral_passes_through() -> None:
+    """Once chat took the model, a floor battery is notified with no new call."""
+    llm = MockLLM(_SUPPRESS_REPLY)
+    svc = SentinelTriageService(llm, call_gap_s=0.0)
+    svc.begin_run()
+
+    with patch(
+        "custom_components.home_generative_agent.sentinel.triage.run_sentinel_model_call",
+        side_effect=SentinelLLMDeferredError("triage", "chat is active"),
+    ):
+        await svc.triage(_finding(), _snapshot())
+    floor = await svc.triage(
+        _battery_finding({"sensor.a": 2.0}, ["sensor.a"]), _snapshot()
+    )
+
+    # triage_deferred makes the engine skip its explanation call (#866).
+    assert floor.reason_code == TRIAGE_REASON_DEFERRED
+    assert floor.decision == TRIAGE_NOTIFY

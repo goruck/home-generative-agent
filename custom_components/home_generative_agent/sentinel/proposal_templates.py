@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from custom_components.home_generative_agent.const import (
+    LOW_BATTERY_SENSORS_TEMPLATE,
     SENTINEL_OCCUPANCY_ARMED_STATES,
 )
 
@@ -32,7 +33,7 @@ from .evidence_paths import (
 
 SUPPORTED_TEMPLATES = {
     "alarm_disarmed_open_entry",
-    "low_battery_sensors",
+    LOW_BATTERY_SENSORS_TEMPLATE,
     "motion_detected_at_night_while_alarm_disarmed",
     "motion_detected_at_night_while_away",
     "motion_detected_while_away",
@@ -753,8 +754,10 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
             )
         return NormalizationResult(
             normalized=NormalizedRule(
-                rule_id=_candidate_rule_id(candidate, default="low_battery_sensors"),
-                template_id="low_battery_sensors",
+                rule_id=_candidate_rule_id(
+                    candidate, default=LOW_BATTERY_SENSORS_TEMPLATE
+                ),
+                template_id=LOW_BATTERY_SENSORS_TEMPLATE,
                 params={
                     "sensor_entity_ids": battery_sensor_ids,
                     "threshold": _extract_threshold_percent(
@@ -975,8 +978,10 @@ def explain_normalize_candidate(  # noqa: C901, PLR0911, PLR0912, PLR0915
     ):
         return NormalizationResult(
             normalized=NormalizedRule(
-                rule_id=_candidate_rule_id(candidate, default="low_battery_sensors"),
-                template_id="low_battery_sensors",
+                rule_id=_candidate_rule_id(
+                    candidate, default=LOW_BATTERY_SENSORS_TEMPLATE
+                ),
+                template_id=LOW_BATTERY_SENSORS_TEMPLATE,
                 params={
                     "sensor_entity_ids": battery_sensor_ids,
                     "threshold": _extract_threshold_percent(

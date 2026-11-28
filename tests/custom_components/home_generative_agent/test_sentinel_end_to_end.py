@@ -49,7 +49,9 @@ from custom_components.home_generative_agent.sentinel.suppression import (
 )
 from custom_components.home_generative_agent.sentinel.triage import (
     TRIAGE_NOTIFY,
+    TRIAGE_REASON_BATTERY_FLOOR,
     TRIAGE_SUPPRESS,
+    SentinelTriageService,
     TriageDecision,
 )
 from custom_components.home_generative_agent.snapshot.schema import (
@@ -2646,3 +2648,74 @@ async def test_power_enrichment_gets_the_same_memory_every_run(
     assert len(seen) == 2
     assert isinstance(seen[0], dict)
     assert seen[0] is seen[1]
+
+
+class _SuppressingModel:
+    """Chat model stub that always answers suppress."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def ainvoke(self, _messages: list[Any]) -> Any:
+        self.calls += 1
+        return type(
+            "Result",
+            (),
+            {
+                "content": (
+                    '{"decision": "suppress", "reason_code": "routine",'
+                    ' "triage_confidence": 0.9, "summary": "routine"}'
+                )
+            },
+        )()
+
+
+def _battery_at(level: float) -> AnomalyFinding:
+    """Return a low-battery finding shaped as an approved rule builds it."""
+    return AnomalyFinding(
+        anomaly_id="low-battery-lock",
+        type="low_battery_lock_v1",
+        severity="medium",
+        confidence=0.7,
+        triggering_entities=["sensor.lock_battery"],
+        evidence={
+            "rule_id": "low_battery_lock_v1",
+            "template_id": "low_battery_sensors",
+            "sensor_entity_ids": ["sensor.lock_battery"],
+            "sensor_states": {"sensor.lock_battery": str(level)},
+            "sensor_levels": {"sensor.lock_battery": level},
+            "threshold": 40.0,
+        },
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+
+
+async def test_a_remembered_suppression_does_not_hold_a_battery_at_the_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A suppression at 12% does not silence the same battery at 10% (#1085).
+
+    Both show the model ``battery_level_pct: 10``, so the remembered answer
+    matches; the floor must still announce the nearly empty battery.
+    """
+    engine, _notifier, audit = _make_engine(
+        monkeypatch, _make_snapshot(), cooldown_minutes=0
+    )
+    model = _SuppressingModel()
+    cast("Any", engine)._triage_service = SentinelTriageService(
+        model, deployment="cloud", call_gap_s=0.0
+    )
+    now = datetime.now(UTC)
+
+    assert await _dispatch_triaged(engine, _battery_at(12.0), now) is False
+    assert model.calls == 1
+
+    delivered = await _dispatch_triaged(
+        engine, _battery_at(10.0), now + timedelta(minutes=5)
+    )
+
+    assert delivered is True
+    assert model.calls == 1
+    assert audit.calls[-1]["triage_reason_code"] == TRIAGE_REASON_BATTERY_FLOOR

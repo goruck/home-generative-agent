@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 from homeassistant.util import dt as dt_util
 
 from custom_components.home_generative_agent.const import (
+    LOW_BATTERY_SENSORS_TEMPLATE,
     RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
     SENTINEL_OCCUPANCY_ARMED_STATES,
@@ -174,7 +175,7 @@ def evaluate_dynamic_rules(  # noqa: PLR0913
         "alarm_disarmed_open_entry": lambda rule: _eval_alarm_disarmed_open_entry(
             snapshot, rule, entity_map
         ),
-        "low_battery_sensors": lambda rule: _eval_low_battery_sensors(
+        LOW_BATTERY_SENSORS_TEMPLATE: lambda rule: _eval_low_battery_sensors(
             rule, entity_map, run_unresolved, run_unreadable, now
         ),
         "motion_detected_at_night_while_alarm_disarmed": (

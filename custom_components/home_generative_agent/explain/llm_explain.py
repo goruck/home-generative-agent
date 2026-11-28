@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from custom_components.home_generative_agent.const import LOW_BATTERY_SENSORS_TEMPLATE
 from custom_components.home_generative_agent.core.utils import (
     SENTINEL_ADMISSION_TIMEOUT_S,
     SentinelLLMDeferredError,
@@ -196,7 +197,7 @@ _KNOWN_TYPE_LABELS = {
     "zwave_inclusion_active": "Z-Wave inclusion is active",
     "radio_coordinator_update_pending": "Radio coordinator update available",
     "appliance_power_duration": "Appliance power duration",
-    "low_battery_sensors": "Low battery",
+    LOW_BATTERY_SENSORS_TEMPLATE: "Low battery",
     "entity_state_duration": "Unchanged too long",
     "motion_detected_at_night_while_alarm_disarmed": "Motion at night, alarm disarmed",
     "alarm_state_mismatch": "Alarm state mismatch",
