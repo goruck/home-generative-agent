@@ -1180,3 +1180,24 @@ async def test_triage_off_still_reports_disabled_for_a_floor_battery() -> None:
     )
 
     assert result.reason_code == "triage_disabled"
+
+
+@pytest.mark.asyncio
+async def test_a_floor_battery_after_a_deferral_passes_through() -> None:
+    """Once chat took the model, a floor battery is notified with no new call."""
+    llm = MockLLM(_SUPPRESS_REPLY)
+    svc = SentinelTriageService(llm, call_gap_s=0.0)
+    svc.begin_run()
+
+    with patch(
+        "custom_components.home_generative_agent.sentinel.triage.run_sentinel_model_call",
+        side_effect=SentinelLLMDeferredError("triage", "chat is active"),
+    ):
+        await svc.triage(_finding(), _snapshot())
+    floor = await svc.triage(
+        _battery_finding({"sensor.a": 2.0}, ["sensor.a"]), _snapshot()
+    )
+
+    # triage_deferred makes the engine skip its explanation call (#866).
+    assert floor.reason_code == TRIAGE_REASON_DEFERRED
+    assert floor.decision == TRIAGE_NOTIFY

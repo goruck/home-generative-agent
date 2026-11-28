@@ -364,9 +364,11 @@ RECOMMENDED_SENTINEL_TRIAGE_MAX_PER_RUN: int = 5
 # them starts without cancelling anything (#866).
 SENTINEL_TRIAGE_CALL_GAP_S: float = 1.0
 # A low-battery finding whose lowest reading is at or below this level (%)
-# always notifies: triage is not asked, so a model cannot suppress a nearly
-# empty battery (#1085).
+# skips triage, so a model cannot suppress a nearly empty battery (#1085).
 SENTINEL_TRIAGE_BATTERY_FLOOR_PCT: float = 10.0
+# Template id of an approved low-battery rule; its findings are typed by the
+# rule's own id and carry this in evidence["template_id"].
+LOW_BATTERY_SENSORS_TEMPLATE = "low_battery_sensors"
 
 # ---- Sentinel baseline storage (Issue #265) ----
 CONF_SENTINEL_BASELINE_ENABLED = "sentinel_baseline_enabled"

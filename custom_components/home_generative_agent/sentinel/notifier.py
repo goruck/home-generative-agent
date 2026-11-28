@@ -47,6 +47,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_DAILY_DIGEST_TIME,
     CONF_SENTINEL_PERSISTENT_RECORD,
     CONF_SENTINEL_RESPONSE_LANGUAGE,
+    LOW_BATTERY_SENSORS_TEMPLATE,
     RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED,
     RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME,
     RECOMMENDED_SENTINEL_PERSISTENT_RECORD,
@@ -1018,7 +1019,7 @@ _KNOWN_TYPE_LABEL_KEYS = {
     "zwave_inclusion_active": "type_zwave_inclusion_active",
     "radio_coordinator_update_pending": "type_radio_coordinator_update_pending",
     "appliance_power_duration": "type_appliance_power_duration",
-    "low_battery_sensors": "type_low_battery_sensors",
+    LOW_BATTERY_SENSORS_TEMPLATE: "type_low_battery_sensors",
     "entity_state_duration": "type_entity_state_duration",
     "motion_detected_at_night_while_alarm_disarmed": (
         "type_motion_detected_at_night_while_alarm_disarmed"

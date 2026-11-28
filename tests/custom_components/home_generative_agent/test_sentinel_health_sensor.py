@@ -101,6 +101,12 @@ def test_compute_kpis_triage_rate_ignores_findings_the_model_never_saw() -> None
             "triage_decision": "notify",
             "triage_reason_code": "triage_disabled",
         },
+        # A battery at the floor was never sent to the model (#1085).
+        {
+            "finding": {},
+            "triage_decision": "notify",
+            "triage_reason_code": "triage_battery_floor",
+        },
         # No decision either: the call timed out or failed.
         {
             "finding": {},

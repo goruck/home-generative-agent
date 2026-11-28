@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from custom_components.home_generative_agent.const import LOW_BATTERY_SENSORS_TEMPLATE
+
 # Away/home/night context resolves through evidence_paths.presence_signal /
 # night_signal — the same functions the normalizer delegates to — so the
 # candidate key provably matches the normalizer's routing. The former local
@@ -1023,7 +1025,7 @@ def rule_semantic_key(  # noqa: C901, PLR0911, PLR0912, PLR0915
             "v1|subject=sensor|predicate=unavailable|night=any|home=any|scope=any|"
             f"entities={','.join(sensor_ids)}"
         )
-    if template_id == "low_battery_sensors":
+    if template_id == LOW_BATTERY_SENSORS_TEMPLATE:
         sensor_ids = sorted(set(_string_list(params.get("sensor_entity_ids"))))
         if not sensor_ids:
             return None

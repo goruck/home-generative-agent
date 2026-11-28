@@ -194,6 +194,7 @@ from .const import (
     HGA_CARD_STATIC_PATH,
     HGA_CARD_STATIC_PATH_LEGACY,
     HGA_FRONTEND_CARDS,
+    LOW_BATTERY_SENSORS_TEMPLATE,
     MODEL_CATEGORY_SPECS,
     NO_DATABASE_ENROLL_MESSAGE,
     NO_DATABASE_REMEDIATION,
@@ -977,7 +978,7 @@ async def _validate_low_battery_params(
     """
     battery_sensor_ids = (
         normalized.params.get("sensor_entity_ids")
-        if normalized.template_id == "low_battery_sensors"
+        if normalized.template_id == LOW_BATTERY_SENSORS_TEMPLATE
         else None
     )
     if (
