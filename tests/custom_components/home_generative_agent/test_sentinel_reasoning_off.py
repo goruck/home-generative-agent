@@ -34,8 +34,10 @@ _THINKING_REPLY = (
 
 
 @pytest.fixture(autouse=True)
-def _fresh_warnings() -> None:
+def _fresh_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
     reset_reasoning_despite_off_warnings()
+    # Tests time out back to back; production counts one per 5 minutes.
+    monkeypatch.setattr(utils, "_REASONING_OFF_TIMEOUT_SPACING_S", 0.0)
 
 
 def _member(
@@ -144,8 +146,77 @@ async def test_timeouts_in_a_row_with_reasoning_off_say_what_it_may_be(
     await _time_out(model, 2)
 
     [warning] = _warnings(caplog)
-    assert "timed out 3 times in a row with reasoning off" in warning
+    assert "timed out 3 times since its last reply, with reasoning off" in warning
     assert "qwen3:4b" in warning
+
+
+@pytest.mark.asyncio
+async def test_timeouts_close_together_count_once(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Calls queued behind an abandoned one time out together: one slow moment.
+
+    A timed-out call keeps running at the server, so the next calls of the
+    same run wait behind it and time out as well.
+    """
+    caplog.set_level(logging.WARNING)
+    monkeypatch.setattr(utils, "_REASONING_OFF_TIMEOUT_SPACING_S", 300.0)
+
+    await _time_out(_sentinel_model("A door.", delay=0.5), 4)
+
+    assert _warnings(caplog) == []
+
+
+@pytest.mark.asyncio
+async def test_empty_think_tags_are_not_reasoning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A model that honors "off" may still write an empty <think></think>."""
+    caplog.set_level(logging.WARNING)
+
+    await _call(_sentinel_model("<think>\n\n</think>A door."))
+    await _call(_sentinel_model("\n</think>A door."))
+
+    assert _warnings(caplog) == []
+
+
+@pytest.mark.asyncio
+async def test_a_single_model_is_named_whatever_name_the_server_echoes(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``qwen3`` may come back as ``qwen3:latest``; the reply is still its own."""
+    caplog.set_level(logging.WARNING)
+    member = _member(_THINKING_REPLY, model="qwen3")
+
+    def _echo_latest(_messages: Any) -> AIMessage:
+        return AIMessage(
+            content=_THINKING_REPLY, response_metadata={"model": "qwen3:latest"}
+        )
+
+    bound = RunnableLambda(_echo_latest).with_config(config=member.config)
+
+    await _call(_chain(bound))
+
+    [warning] = _warnings(caplog)
+    assert "Ollama model qwen3 " in warning
+
+
+@pytest.mark.asyncio
+async def test_a_tag_with_reasoning_on_elsewhere_in_the_chain_is_not_named(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The same tag reasoning on and off: the reply cannot say which wrote it."""
+    caplog.set_level(logging.WARNING)
+    model = _chain(
+        _member(_THINKING_REPLY, model="qwen3:4b", reasoning=True),
+        _member("A door.", model="qwen3:4b"),
+    )
+
+    await _call(model)
+
+    assert _warnings(caplog) == []
 
 
 @pytest.mark.asyncio

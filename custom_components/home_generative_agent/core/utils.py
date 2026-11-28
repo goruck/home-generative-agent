@@ -903,11 +903,25 @@ async def run_sentinel_llm_call_in_executor(  # noqa: PLR0913
 # keyed by (model, what was seen): each is logged once per setup of the entry
 # (async_setup_entry clears both), so a fix can be checked after a reload.
 _REASONING_DESPITE_OFF_WARNED: set[tuple[str, str]] = set()
-# Timeouts in a row per Ollama model with reasoning off; any reply resets it.
-_REASONING_OFF_TIMEOUTS: dict[str, int] = {}
+# Per Ollama model with reasoning off: timeouts since its last reply, and when
+# the last counted one happened (monotonic). Any reply resets it.
+_REASONING_OFF_TIMEOUTS: dict[str, tuple[int, float]] = {}
 # A single timeout is often a cold load or a busy GPU, not a model that
-# reasons anyway; the warning waits for this many in a row.
+# reasons anyway; the warning waits for this many.
 _REASONING_OFF_TIMEOUTS_BEFORE_WARNING = 3
+# Calls abandoned on a timeout keep running at the server, so the next calls
+# of the same run queue behind them and time out too: timeouts this close to
+# the last counted one are one slow moment, not more evidence.
+_REASONING_OFF_TIMEOUT_SPACING_S = 300.0
+# Reasoning text, not just the tags: a model that honors "off" may still
+# write an empty <think></think>.
+_THINK_TEXT = re.compile(
+    r"<think>\s*(?!</think>)\S.*?(?:</think>|$)", re.IGNORECASE | re.DOTALL
+)
+_ORPHAN_THINK_TEXT = re.compile(
+    r"\A\s*(?!</think>)(?:(?!<think>)\S)(?:(?!<think>).)*?</think>",
+    re.IGNORECASE | re.DOTALL,
+)
 
 _REASONING_OFF_FIX = (
     "Choose another model for Sentinel (the Sentinel Model, or the "
@@ -928,16 +942,20 @@ def _reasoning_off_ollama_members(model: Any) -> tuple[set[str], int]:
     chain = getattr(model, "chain", None)
     members = [member for member, *_ in chain] if isinstance(chain, list) else []
     names: set[str] = set()
+    ambiguous: set[str] = set()
     for candidate in members or [model]:
         config = getattr(candidate, "config", None)
         configurable = config.get("configurable") if isinstance(config, dict) else None
-        if (
-            isinstance(configurable, dict)
-            and configurable.get("reasoning") is False
-            and configurable.get("model")
-        ):
-            names.add(str(configurable["model"]))
-    return names, max(len(members), 1)
+        if not isinstance(configurable, dict) or not configurable.get("model"):
+            continue
+        name = str(configurable["model"])
+        if configurable.get("reasoning") is False:
+            names.add(name)
+        else:
+            # The same tag with reasoning on elsewhere in the chain: a reply
+            # naming it cannot say which member wrote it.
+            ambiguous.add(name)
+    return names - ambiguous, max(len(members), 1)
 
 
 def _warn_reasoning_despite_off_once(name: str, kind: str, message: str) -> None:
@@ -968,16 +986,20 @@ def _note_reasoning_despite_off(
         if size != 1:
             return
         (name,) = names
-        count = _REASONING_OFF_TIMEOUTS.get(name, 0) + 1
-        _REASONING_OFF_TIMEOUTS[name] = count
+        now = time.monotonic()
+        count, last = _REASONING_OFF_TIMEOUTS.get(name, (0, 0.0))
+        if count and now - last < _REASONING_OFF_TIMEOUT_SPACING_S:
+            return
+        count += 1
+        _REASONING_OFF_TIMEOUTS[name] = (count, now)
         if count >= _REASONING_OFF_TIMEOUTS_BEFORE_WARNING:
             _warn_reasoning_despite_off_once(
                 name,
                 "timeout",
                 f"Sentinel calls to Ollama model {name} timed out {count} times "
-                "in a row with reasoning off. Some Ollama models and builds "
-                "reason anyway, which makes calls slow. If this model does, "
-                + _REASONING_OFF_FIX,
+                "since its last reply, with reasoning off. The model may be too "
+                "slow, or it may reason anyway, as some Ollama models and builds "
+                "do. If it reasons anyway: " + _REASONING_OFF_FIX,
             )
         return
     metadata = getattr(result, "response_metadata", None)
@@ -986,13 +1008,18 @@ def _note_reasoning_despite_off(
         if isinstance(metadata, dict)
         else None
     )
-    name = str(answered) if answered else (next(iter(names)) if size == 1 else "")
-    if name not in names:
+    if size == 1:
+        # One model: the reply is its own, whatever name the server echoes
+        # (``qwen3`` may come back as ``qwen3:latest``).
+        name = next(iter(names))
+    elif answered and str(answered) in names:
+        name = str(answered)
+    else:
         return
     _REASONING_OFF_TIMEOUTS.pop(name, None)
     content = getattr(result, "content", None)
     if not isinstance(content, str) or not (
-        _THINK_BLOCK.search(content) or _ORPHAN_THINK.search(content)
+        _THINK_TEXT.search(content) or _ORPHAN_THINK_TEXT.search(content)
     ):
         return
     _warn_reasoning_despite_off_once(
