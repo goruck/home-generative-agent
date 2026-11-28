@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
+from homeassistant.util import dt as dt_util
 
-from custom_components.home_generative_agent.const import ACTION_PREFIX
+from custom_components.home_generative_agent.const import ACT_TRUST, ACTION_PREFIX
 from custom_components.home_generative_agent.notify.actions import (
     EVENT_SENTINEL_ASK_REQUESTED,
     EVENT_SENTINEL_EXECUTE_REQUESTED,
@@ -19,7 +21,12 @@ from custom_components.home_generative_agent.notify.actions import (
 )
 from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
 from custom_components.home_generative_agent.sentinel.suppression import (
+    SUPPRESSION_REASON_NOT_SUPPRESSED,
+    SUPPRESSION_REASON_PENDING_PROMPT,
     SuppressionState,
+    register_finding,
+    register_prompt,
+    should_suppress,
 )
 
 
@@ -510,6 +517,129 @@ async def test_dismiss_empty_triggering_entities_no_feedback() -> None:
 
     assert suppression.state.learned_cooldown_multipliers == {}
     assert suppression.save_calls == 1
+
+
+def _low_battery(anomaly_id: str = "lb-1") -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id=anomaly_id,
+        type="low_battery_front_lock_v1",
+        severity="low",
+        confidence=0.9,
+        triggering_entities=["sensor.front_lock_battery"],
+        evidence={"template_id": "low_battery_sensors"},
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_false_alarm_restarts_the_prompt_hold_from_the_press() -> None:
+    """A False Alarm keeps the alert's prompt, restarted at the press (#1084)."""
+    suppression = DummySuppressionManager()
+    finding = _low_battery()
+    suppression.state.pending_prompts[finding.anomaly_id] = "2026-01-01T00:00:00+00:00"
+    handler = ActionHandler(
+        hass=DummyHass(),  # type: ignore[arg-type]
+        suppression=suppression,  # type: ignore[arg-type]
+        audit_store=DummyAuditStore(),  # type: ignore[arg-type]
+    )
+    handler.register_finding(finding)
+    before = dt_util.utcnow()
+
+    await handler.handle_action(f"{ACTION_PREFIX}dismiss_{finding.anomaly_id}", {})
+
+    held = dt_util.parse_datetime(suppression.state.pending_prompts[finding.anomaly_id])
+    assert held is not None
+    assert held >= before
+
+
+@pytest.mark.asyncio
+async def test_false_alarm_holds_even_when_no_prompt_was_left() -> None:
+    """A press after the prompt expired (or for an unknown alert) still holds."""
+    suppression = DummySuppressionManager()
+    handler = ActionHandler(
+        hass=DummyHass(),  # type: ignore[arg-type]
+        suppression=suppression,  # type: ignore[arg-type]
+        audit_store=DummyAuditStore(),  # type: ignore[arg-type]
+    )
+
+    await handler.handle_action(f"{ACTION_PREFIX}dismiss_gone-1", {})
+
+    assert "gone-1" in suppression.state.pending_prompts
+
+
+@pytest.mark.asyncio
+async def test_a_dismissed_standing_alert_waits_as_long_as_an_ignored_one() -> None:
+    """
+    After False Alarm, a standing alert is not back before the prompt TTL.
+
+    Before #1084 the press cleared the prompt, so only the 30 min type and
+    entity cooldowns (doubled by the press) held it: back after about an hour,
+    while an ignored alert waited the 4 h prompt TTL.
+    """
+    cooldown = timedelta(minutes=30)
+    ttl = timedelta(hours=4)
+    alerted = dt_util.utcnow()
+    ignored = DummySuppressionManager()
+    dismissed = DummySuppressionManager()
+    finding = _low_battery()
+    for manager in (ignored, dismissed):
+        register_finding(manager.state, finding, alerted)
+        register_prompt(manager.state, finding, alerted)
+    handler = ActionHandler(
+        hass=DummyHass(),  # type: ignore[arg-type]
+        suppression=dismissed,  # type: ignore[arg-type]
+        audit_store=DummyAuditStore(),  # type: ignore[arg-type]
+    )
+    handler.register_finding(finding)
+    await handler.handle_action(f"{ACTION_PREFIX}dismiss_{finding.anomaly_id}", {})
+    pressed = dt_util.parse_datetime(
+        dismissed.state.pending_prompts[finding.anomaly_id]
+    )
+    assert pressed is not None
+
+    def decision(manager: DummySuppressionManager, at: datetime) -> str:
+        return should_suppress(
+            manager.state,
+            finding,
+            at,
+            cooldown,
+            cooldown,
+            pending_prompt_ttl=ttl,
+        ).reason_code
+
+    later = alerted + timedelta(hours=2)
+    assert decision(ignored, later) == SUPPRESSION_REASON_PENDING_PROMPT
+    assert decision(dismissed, later) == SUPPRESSION_REASON_PENDING_PROMPT
+    # The ignored one is due once its TTL ends; the dismissed one not before
+    # its own, counted from the press.
+    assert decision(ignored, alerted + ttl) == SUPPRESSION_REASON_NOT_SUPPRESSED
+    assert (
+        decision(dismissed, pressed + ttl - timedelta(seconds=1))
+        == SUPPRESSION_REASON_PENDING_PROMPT
+    )
+    assert decision(dismissed, pressed + ttl) == SUPPRESSION_REASON_NOT_SUPPRESSED
+
+
+@pytest.mark.asyncio
+async def test_other_actions_still_clear_the_prompt() -> None:
+    """Execute, Ask Agent and Trust taps clear the prompt: a recurrence is news."""
+    for action in ("execute", "handoff", ACT_TRUST):
+        suppression = DummySuppressionManager()
+        finding = _finding(anomaly_id="clr-1", is_sensitive=False)
+        suppression.state.pending_prompts[finding.anomaly_id] = (
+            "2026-01-01T00:00:00+00:00"
+        )
+        handler = ActionHandler(
+            hass=DummyHass(),  # type: ignore[arg-type]
+            suppression=suppression,  # type: ignore[arg-type]
+            audit_store=DummyAuditStore(),  # type: ignore[arg-type]
+        )
+        handler.register_finding(finding)
+
+        await handler.handle_action(f"{ACTION_PREFIX}{action}_{finding.anomaly_id}", {})
+
+        assert finding.anomaly_id not in suppression.state.pending_prompts, action
 
 
 @pytest.mark.asyncio

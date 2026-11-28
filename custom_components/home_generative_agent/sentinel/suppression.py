@@ -684,6 +684,17 @@ def resolve_prompt(state: SuppressionState, anomaly_id: str) -> None:
     state.pending_prompts.pop(anomaly_id, None)
 
 
+def renew_prompt(state: SuppressionState, anomaly_id: str, now: datetime) -> None:
+    """
+    Restart the pending-prompt hold for *anomaly_id* from *now*.
+
+    For a False Alarm press (#1084): the alert stays quiet for the whole
+    pending-prompt TTL after the press, as long as an unanswered alert does,
+    instead of coming back when the shorter cooldowns end.
+    """
+    state.pending_prompts[anomaly_id] = dt_util.as_utc(now).isoformat()
+
+
 def register_snooze(
     state: SuppressionState,
     finding_type: str,

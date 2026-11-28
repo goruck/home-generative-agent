@@ -218,7 +218,7 @@ When Sentinel notifications are enabled:
 |---|---|
 | `Execute` | Non-sensitive findings with suggested actions. Calls the conversation agent or fires `hga_sentinel_execute_requested`. |
 | `Ask Agent` | Sensitive findings with suggested actions. Hands the finding to the agent, which can verify a PIN or alarm code before acting. |
-| `False Alarm` | Marks the alert as a false positive (`user_response.false_positive = true` in audit). |
+| `False Alarm` | Marks the alert as a false positive (`user_response.false_positive = true` in audit) and lengthens that device's cooldown for the rule. The same alert then stays quiet for the pending-prompt time (`sentinel_pending_prompt_ttl_minutes`, 4 h) counted from the press, so a condition that is still true (a low battery, a door left open) comes back no sooner than if you had not answered ([#1084](https://github.com/goruck/home-generative-agent/issues/1084)). Its audit reason while held is `pending_prompt`. **Execute**, **Ask Agent** and **Trust device** end the hold instead: if the condition comes back after the action, it alerts once the cooldowns end. |
 | `Snooze 24 h` | Suppresses this finding type for 24 hours. |
 | `Snooze Always` | Suppresses this finding type permanently. A confirmation notification is sent first; the snooze is written only after the user taps **Confirm**. |
 

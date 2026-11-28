@@ -22,6 +22,7 @@ from custom_components.home_generative_agent.sentinel.models import (
 from custom_components.home_generative_agent.sentinel.suppression import (
     SuppressionManager,
     record_cooldown_feedback,
+    renew_prompt,
     resolve_prompt,
 )
 
@@ -90,7 +91,14 @@ class ActionHandler:
         action, anomaly_id = parts
         LOGGER.info("Handling sentinel action %s for %s.", action, anomaly_id)
         finding = self._pending_findings.get(anomaly_id)
-        resolve_prompt(self._suppression.state, anomaly_id)
+        if action == "dismiss":
+            # A False Alarm says "I have seen this": hold the alert at least as
+            # long as an unanswered one, not only for the shorter cooldowns, or
+            # a standing condition would come back sooner for answering (#1084).
+            renew_prompt(self._suppression.state, anomaly_id, dt_util.utcnow())
+        else:
+            # An action was taken: if the condition comes back, it is news.
+            resolve_prompt(self._suppression.state, anomaly_id)
 
         response = {
             "action": action,
