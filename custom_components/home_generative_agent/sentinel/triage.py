@@ -19,7 +19,9 @@ Design constraints (from sentinel_plan.md §6, §7)
     ``threshold_min``.
   - Only for a low-battery finding (#1085): ``battery_level_pct``, the
     lowest triggering reading rounded down to a step of 5, and
-    ``battery_threshold_pct``, the rule's threshold.
+    ``battery_threshold_pct``, the rule's threshold. A low-battery finding
+    at or below ``SENTINEL_TRIAGE_BATTERY_FLOOR_PCT`` is not sent at all: it
+    notifies with reason_code ``triage_battery_floor``.
   - **Never** included: raw entity state values, attribute strings, area
     names, or free-form evidence text.
 * Output schema: ``decision`` (``notify``|``suppress``), ``reason_code``,
@@ -65,6 +67,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_TRIAGE_MAX_PER_RUN,
+    SENTINEL_TRIAGE_BATTERY_FLOOR_PCT,
     SENTINEL_TRIAGE_CALL_GAP_S,
 )
 from custom_components.home_generative_agent.core.utils import (
@@ -115,10 +118,16 @@ TRIAGE_REASON_ERROR = "triage_error"
 TRIAGE_REASON_DISABLED = "triage_disabled"
 TRIAGE_REASON_DEFERRED = "triage_deferred"
 TRIAGE_REASON_CAP = "triage_cap"
+TRIAGE_REASON_BATTERY_FLOOR = "triage_battery_floor"
 
 # Reason codes of a finding the model never saw (#866).
 TRIAGE_REASONS_NOT_RUN: frozenset[str] = frozenset(
-    {TRIAGE_REASON_DISABLED, TRIAGE_REASON_DEFERRED, TRIAGE_REASON_CAP}
+    {
+        TRIAGE_REASON_DISABLED,
+        TRIAGE_REASON_DEFERRED,
+        TRIAGE_REASON_CAP,
+        TRIAGE_REASON_BATTERY_FLOOR,
+    }
 )
 # Reason codes without a model decision: the above, plus a call that timed
 # out or failed. The health sensor leaves these out of ``triage_suppress_rate``.
@@ -257,6 +266,27 @@ class SentinelTriageService:
             summary=summary,
         )
 
+    def _not_sent(self, finding: AnomalyFinding) -> TriageDecision | None:
+        """Return the decision on a finding never sent to the model, or None."""
+        if self._model is None:
+            return TriageDecision(
+                decision=TRIAGE_NOTIFY,
+                reason_code=TRIAGE_REASON_DISABLED,
+                triage_confidence=None,
+                summary="Triage disabled.",
+            )
+        lowest = _lowest_battery_reading(finding)
+        if lowest is not None and lowest <= SENTINEL_TRIAGE_BATTERY_FLOOR_PCT:
+            # A nearly empty battery is always announced (#1085): no model
+            # call, no slot of the run's limit, and it is not a pass-through.
+            return TriageDecision(
+                decision=TRIAGE_NOTIFY,
+                reason_code=TRIAGE_REASON_BATTERY_FLOOR,
+                triage_confidence=None,
+                summary="Battery at or below the floor; not triaged.",
+            )
+        return None
+
     async def triage(
         self,
         finding: AnomalyFinding,
@@ -268,13 +298,8 @@ class SentinelTriageService:
         Returns a ``TriageDecision``.  Fails-open on timeout or any
         exception: the caller treats an ``error`` decision as ``notify``.
         """
-        if self._model is None:
-            return TriageDecision(
-                decision=TRIAGE_NOTIFY,
-                reason_code=TRIAGE_REASON_DISABLED,
-                triage_confidence=None,
-                summary="Triage disabled.",
-            )
+        if (not_sent := self._not_sent(finding)) is not None:
+            return not_sent
         if self._run_deferred:
             # Chat took the model earlier this run; do not start a call its
             # next turn would cancel (#866).
@@ -444,27 +469,40 @@ _BATTERY_LEVEL_STEP = 5
 _LOW_BATTERY_TEMPLATE = "low_battery_sensors"
 
 
+def _lowest_battery_reading(finding: AnomalyFinding) -> float | None:
+    """
+    Return a low-battery finding's lowest triggering reading, or None.
+
+    A rule's finding is typed by its own rule id; the template it was
+    approved from is in its evidence, as the notifier reads it.
+    """
+    evidence = finding.evidence or {}
+    if evidence.get("template_id") != _LOW_BATTERY_TEMPLATE:
+        return None
+    levels = evidence.get("sensor_levels")
+    if not isinstance(levels, dict):
+        return None
+    triggering = set(finding.triggering_entities)
+    readings = [
+        number
+        for sensor_id, value in levels.items()
+        if sensor_id in triggering and (number := _finite_number(value)) is not None
+    ]
+    return min(readings) if readings else None
+
+
 def _battery_level(finding: AnomalyFinding) -> list[str]:
     """Return a low-battery finding's level and threshold as allowlisted lines."""
-    # A rule's finding is typed by its own rule id; the template it was
-    # approved from is in its evidence, as the notifier reads it.
     evidence = finding.evidence or {}
     if evidence.get("template_id") != _LOW_BATTERY_TEMPLATE:
         return []
-    levels = evidence.get("sensor_levels")
-    threshold = _finite_number(evidence.get("threshold"))
     lines: list[str] = []
-    if isinstance(levels, dict):
-        triggering = set(finding.triggering_entities)
-        readings = [
-            number
-            for sensor_id, value in levels.items()
-            if sensor_id in triggering and (number := _finite_number(value)) is not None
-        ]
-        if readings:
-            lowest = max(0.0, min(100.0, *readings))
-            stepped = int(lowest // _BATTERY_LEVEL_STEP) * _BATTERY_LEVEL_STEP
-            lines.append(f"battery_level_pct: {stepped}")
+    lowest = _lowest_battery_reading(finding)
+    if lowest is not None:
+        bounded_level = max(0.0, min(100.0, lowest))
+        stepped = int(bounded_level // _BATTERY_LEVEL_STEP) * _BATTERY_LEVEL_STEP
+        lines.append(f"battery_level_pct: {stepped}")
+    threshold = _finite_number(evidence.get("threshold"))
     if threshold is not None:
         bounded = max(0.0, min(100.0, threshold))
         lines.append(f"battery_threshold_pct: {bounded:.0f}")

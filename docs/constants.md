@@ -383,6 +383,7 @@ The model Sentinel's triage, discovery and explanation calls run on when a **Sen
 | `RECOMMENDED_SENTINEL_TRIAGE_TIMEOUT_SECONDS` | `sentinel_triage_timeout_seconds` | `10` (s) | Max wait for triage LLM response. On timeout the decision defaults to `notify`. |
 | `RECOMMENDED_SENTINEL_TRIAGE_MAX_PER_RUN` | `sentinel_triage_max_per_run` | `5` | Most findings one Sentinel run sends to the triage model; the rest pass through untriaged (`triage_cap`). The same limit caps a run's explanation calls. Local shared models only (`sentinel_calls_gated`); bounds the burst a model shared with chat sees (#866). |
 | `SENTINEL_TRIAGE_CALL_GAP_S` | — | `1.0` (s) | Pause between two Sentinel model calls (triage, explanation or discovery, across runs) on a local shared model, so a chat turn arriving between them starts without cancelling anything (#866). |
+| `SENTINEL_TRIAGE_BATTERY_FLOOR_PCT` | — | `10.0` (%) | A low-battery finding whose lowest triggering reading is at or below this level skips LLM triage and is always notified (`triage_battery_floor`), so a model cannot suppress a nearly empty battery (#1085). |
 
 ---
 
