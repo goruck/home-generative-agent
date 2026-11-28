@@ -195,6 +195,7 @@ from .suppression import (
     SuppressionManager,
     cooldown_stamps,
     false_alarm_cooldown,
+    prompt_is_dismissal,
     purge_expired_prompts,
     register_device_cooldown,
     register_finding,
@@ -2202,12 +2203,7 @@ class SentinelEngine:
             )
         )
         explain_enabled = bool(self._options.get(CONF_EXPLAIN_ENABLED, False))
-        pending_prompt_ttl = timedelta(
-            minutes=_coerce_int(
-                self._options.get(CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES),
-                default=RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
-            )
-        )
+        pending_prompt_ttl = pending_prompt_ttl_from(self._options)
 
         purged = purge_expired_prompts(
             self._suppression.state,
@@ -3173,6 +3169,9 @@ class SentinelEngine:
                     **suppress_kwargs,
                 ).reason_code
                 != SUPPRESSION_REASON_PENDING_PROMPT
+                # A False Alarm hold is not a reminder clock: the user said
+                # they have seen it, so it waits out the hold (#1084).
+                or prompt_is_dismissal(self._suppression.state, constituent.anomaly_id)
             ):
                 return False
             # The pending prompt is checked first: set it aside to see whether
@@ -3238,7 +3237,12 @@ class SentinelEngine:
         named = [] if sent is False else named
         if named:
             for constituent in named:
-                register_prompt(self._suppression.state, constituent, now)
+                # A False Alarm pressed on it while the push went out keeps
+                # the hold the press started (#1084).
+                if not prompt_is_dismissal(
+                    self._suppression.state, constituent.anomaly_id
+                ):
+                    register_prompt(self._suppression.state, constituent, now)
             await self._suppression.async_save()
         await _append_finding_audit(
             self._audit_store,
@@ -3652,6 +3656,16 @@ def _parse_rule_entity_exclusions(value: object | None) -> dict[str, _ExclusionS
     return exclusions
 
 
+def pending_prompt_ttl_from(options: Mapping[str, Any]) -> timedelta:
+    """Return the configured pending-prompt TTL (minutes option)."""
+    return timedelta(
+        minutes=_coerce_int(
+            options.get(CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES),
+            default=RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
+        )
+    )
+
+
 def _coerce_int(value: object | None, default: int) -> int:
     """Coerce option values to int with a deterministic fallback."""
     if isinstance(value, bool):
@@ -3730,12 +3744,7 @@ def _build_suppress_kwargs(
     )
 
     return {
-        "pending_prompt_ttl": timedelta(
-            minutes=_coerce_int(
-                options.get(CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES),
-                default=RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
-            )
-        ),
+        "pending_prompt_ttl": pending_prompt_ttl_from(options),
         "snapshot_timezone": timezone,
         "quiet_hours_start": quiet_start,
         "quiet_hours_end": quiet_end,

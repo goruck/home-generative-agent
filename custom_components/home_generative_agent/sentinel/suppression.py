@@ -129,6 +129,11 @@ class SuppressionState:
     # an alert waiting on a rule that stopped is visible (#802). Optional and
     # additive, like the above.
     owed_rule_idle: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Anomaly id -> the pending-prompt time a False Alarm press wrote (#1084).
+    # The hold is a dismissal only while pending_prompts still holds that same
+    # time: a new push, an answer or expiry replaces or removes it. Optional
+    # and additive, like the above.
+    dismissed_prompts: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SuppressionState:
@@ -159,6 +164,10 @@ class SuppressionState:
                 for kind, idle in _mapping(data.get("owed_rule_idle")).items()
                 if isinstance(idle, dict)
             },
+            dismissed_prompts={
+                str(anomaly_id): str(at)
+                for anomaly_id, at in _mapping(data.get("dismissed_prompts")).items()
+            },
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -180,6 +189,7 @@ class SuppressionState:
             "owed_rule_idle": {
                 kind: dict(idle) for kind, idle in self.owed_rule_idle.items()
             },
+            "dismissed_prompts": dict(self.dismissed_prompts),
         }
 
 
@@ -339,7 +349,9 @@ def purge_expired_prompts(
     """
     Remove expired pending prompts in-place.
 
-    Returns the number of entries removed (0 when nothing was purged).
+    Also drops False Alarm marks whose prompt is gone or was replaced (see
+    ``prompt_is_dismissal``); a mark left until the next save is inert.
+    Returns the number of pending prompts removed (0 when nothing was purged).
     """
     expired: list[str] = []
     for anomaly_id, last_seen_iso in state.pending_prompts.items():
@@ -353,6 +365,12 @@ def purge_expired_prompts(
 
     for anomaly_id in expired:
         del state.pending_prompts[anomaly_id]
+    for anomaly_id in [
+        anomaly_id
+        for anomaly_id in state.dismissed_prompts
+        if not prompt_is_dismissal(state, anomaly_id)
+    ]:
+        del state.dismissed_prompts[anomaly_id]
     return len(expired)
 
 
@@ -682,6 +700,47 @@ def register_prompt(
 def resolve_prompt(state: SuppressionState, anomaly_id: str) -> None:
     """Resolve an active prompt once user responds."""
     state.pending_prompts.pop(anomaly_id, None)
+    state.dismissed_prompts.pop(anomaly_id, None)
+
+
+def renew_prompt(state: SuppressionState, anomaly_id: str, now: datetime) -> None:
+    """
+    Restart the pending-prompt hold for *anomaly_id* from *now*.
+
+    For a False Alarm press (#1084): the alert stays quiet for the whole
+    pending-prompt TTL after the press, as long as an unanswered alert does,
+    instead of coming back when the shorter cooldowns end. The hold is marked
+    as a dismissal, so a grouped push does not name the alert as a reminder
+    while it runs (see ``prompt_is_dismissal``).
+    """
+    iso = dt_util.as_utc(now).isoformat()
+    state.pending_prompts[anomaly_id] = iso
+    state.dismissed_prompts[anomaly_id] = iso
+
+
+def prompt_is_live(
+    state: SuppressionState,
+    anomaly_id: str,
+    now: datetime,
+    *,
+    pending_prompt_ttl: timedelta,
+) -> bool:
+    """
+    Return True while *anomaly_id*'s pending prompt still holds it.
+
+    The engine purges an expired prompt only on its next run, so a prompt
+    still stored may already have ended.
+    """
+    last_seen = _parse_dt(state.pending_prompts.get(anomaly_id))
+    return last_seen is not None and not _is_pending_prompt_expired(
+        last_seen, now, pending_prompt_ttl=pending_prompt_ttl
+    )
+
+
+def prompt_is_dismissal(state: SuppressionState, anomaly_id: str) -> bool:
+    """Return True when *anomaly_id*'s pending prompt is a False Alarm hold."""
+    at = state.dismissed_prompts.get(anomaly_id)
+    return at is not None and state.pending_prompts.get(anomaly_id) == at
 
 
 def register_snooze(
