@@ -59,6 +59,7 @@ from custom_components.home_generative_agent.const import (
     CONF_SCHEMA_FIRST_YAML,
     CONF_TOOL_RELEVANCE_THRESHOLD,
     CONF_TOOL_RETRIEVAL_LIMIT,
+    DELAYED_COMMAND_REGEX,
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
     MAX_AFFIRMATIVE_FOLLOW_UP_WORDS,
     MAX_REFERENTIAL_FOLLOW_UP_WORDS,
@@ -112,10 +113,14 @@ from .helpers import (
     PIN_AWAITING_USER_REPLY,
     PIN_REFUSAL_ENDS_TURN,
     REMOTE_TOOL,
+    START_TIMER_INTENT,
+    START_TIMER_TOOL,
     active_llm_api_ids,
     base_tool_name,
+    command_sets_its_own_delay,
     declared_domains,
     declared_intent_service_calls,
+    delayed_command_text,
     drop_empty_args,
     entity_domain,
     format_tool,
@@ -123,6 +128,7 @@ from .helpers import (
     intent_target_states,
     is_actuating_intent,
     is_actuation_tool,
+    is_builtin_timer_tool,
     is_device_intent,
     is_intent_tool,
     is_on_off_intent,
@@ -638,6 +644,70 @@ def _critical_action_guard(  # noqa: PLR0913
     )
 
 
+_NESTED_DELAY_REFUSAL = (
+    "The command {command!r} still names its own delay. When the timer ends, "
+    "Home Assistant would start another timer and act only after twice the "
+    "wait. Call {tool} again with only the action in conversation_command "
+    "(for example 'Unlock the front door'), and the delay in hours, minutes "
+    "or seconds."
+)
+
+
+def _request_language_and_device(
+    ha_llm_api: Any, tool_name: str
+) -> tuple[str | None, str | None]:
+    """Return the language and device of the API the tool is routed to."""
+    apis = getattr(ha_llm_api, "apis", None) or {}
+    routed = (getattr(ha_llm_api, "routing_map", None) or {}).get(tool_name)
+    for api in ([apis[routed]] if routed in apis else []) + list(apis.values()):
+        llm_context = getattr(api, "llm_context", None)
+        if llm_context is not None:
+            return llm_context.language, llm_context.device_id
+    return None, None
+
+
+async def _nested_delay_refusal(
+    tool_name: str,
+    tool_args: dict[str, Any],
+    ctx: ToolExecutionContext,
+    tool_call: dict[str, Any],
+) -> ToolMessage | None:
+    """
+    Refuse a delayed command whose command names its delay again.
+
+    Before the PIN is asked for, so the user never approves a line that would
+    run late, and the model can call again at once with the delay taken out.
+    A remote Home Assistant's command runs on its own agent, which cannot be
+    read from here, so it is left to the PIN gate. Only the timer: the reply
+    names its arguments, and Home Assistant 2026.12's scheduled command takes
+    others.
+    """
+    if (
+        not is_builtin_timer_tool(tool_name)
+        or not runs_a_command_later(tool_name, tool_args)
+        or ctx.hass is None
+    ):
+        return None
+    origin = tool_origin(getattr(ctx, "ha_llm_api", None), tool_name)
+    if origin.remote or origin.ambiguous:
+        return None
+    command = delayed_command_text(tool_name, tool_args)
+    language, device_id = _request_language_and_device(ctx.ha_llm_api, tool_name)
+    if not await command_sets_its_own_delay(
+        ctx.hass, command, language=language, device_id=device_id
+    ):
+        return None
+    LOGGER.info("Refused %s: its command names its own delay", tool_name)
+    return _make_tool_error(
+        _NESTED_DELAY_REFUSAL.format(
+            command=sanitize_tool_text(command, limit=200),
+            tool=tool_name,
+        ),
+        tool_name,
+        tool_call.get("id") or "",
+    )
+
+
 async def _run_ha_tool(
     tool_name: str,
     tool_args: dict[str, Any],
@@ -645,6 +715,9 @@ async def _run_ha_tool(
     tool_call: dict[str, Any],
 ) -> ToolMessage:
     """Normalize arguments and execute an HA tool call."""
+    nested = await _nested_delay_refusal(tool_name, tool_args, ctx, tool_call)
+    if nested is not None:
+        return nested
     redirect, prepared_args = _prepare_tool_args(tool_name, tool_args, ctx, tool_call)
     if redirect:
         return redirect
@@ -1783,6 +1856,56 @@ async def _append_turn_on_tool(  # noqa: PLR0913
     if fetched is None:
         return candidates
     return [*candidates, fetched]
+
+
+def _query_wants_delayed_command(query: str) -> bool:
+    """Return True when the query asks for something to happen after a delay."""
+    return bool(re.search(DELAYED_COMMAND_REGEX, query[:_MAX_INTENT_SCAN_CHARS]))
+
+
+async def _append_timer_tool(
+    candidates: list[RawTool],
+    store: BaseStore,
+    config: RunnableConfig,
+    query: str,
+    live_tool_ids: set[tuple[str, str]] | None,
+) -> list[RawTool]:
+    """
+    Bind HassStartTimer on a request to act after a delay.
+
+    Home Assistant runs "lock the garage door in 30 seconds" as a timer given
+    the command. The timer's description ("Starts a new timer") shares no
+    words with the command, so the device tools took every actuation slot.
+    Field test 2026-11-27: the model called the timer tool it remembered from
+    an earlier turn, the call was rejected as not retrieved, and it offered to
+    lock the door at once instead. Appended outside the limit like
+    ``add_automation``. Only this house's, and only when it is live: Home
+    Assistant offers it to timer-capable satellites alone. The PIN gate holds
+    the call whatever its command (`runs_a_command_later`).
+    """
+    remote_ids = _remote_ids(config)
+    if not _query_wants_delayed_command(query) or _has_local_tool(
+        candidates, remote_ids, is_builtin_timer_tool
+    ):
+        return candidates
+    # Only the timer's own spelling counts: an intent script named
+    # HassStartTimer is another tool, and excluding it leaves the timer.
+    excluded_names = tool_exclusions(config.get("configurable", {}).get("options", {}))
+    excluded_apis = {
+        api_id
+        for api_id, names in excluded_names.items()
+        if any(is_builtin_timer_tool(n) for n in names)
+    }
+    allowed = _get_allowed_api_ids(config) - excluded_apis - remote_ids
+    fetched = None
+    # The namespaced name first: a bare lookup also matches an intent script's
+    # tool of that base name. The bare one is the timer before 2026.9.
+    for name in (START_TIMER_TOOL, START_TIMER_INTENT):
+        fetched = await _get_tool_by_name(store, config, name, allowed, live_tool_ids)
+        if fetched is not None and is_builtin_timer_tool(fetched["name"]):
+            break
+        fetched = None
+    return candidates if fetched is None else [*candidates, fetched]
 
 
 # At most this many of the previous turn's tools are kept bound (#920).
@@ -3556,6 +3679,11 @@ async def _retrieve_tools(  # noqa: PLR0915
         state["messages"],
         allowed_api_ids,
         live_tool_ids,
+    )
+
+    # 3h2. Bind the timer tool on a request to act after a delay.
+    all_candidates = await _append_timer_tool(
+        all_candidates, store, config, query, live_tool_ids
     )
 
     # 3i. Bind HassTurnOn and HassTurnOff together. After 3e, so an

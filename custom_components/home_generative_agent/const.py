@@ -1763,6 +1763,37 @@ AUTOMATION_ACTION_KEYWORDS_REGEX = (
     r"disable|toggle|notify|alert|send|announce|broadcast|remind|flash|"
     r"tell|text|warn)\b"
 )
+# A request to do something after a delay ("lock the door in 30 seconds",
+# "turn off the fan after an hour"). Home Assistant runs one through a timer
+# given a command, whose tool's description ("Starts a new timer") ranks far
+# below the device tools for the words of the command itself, so the tool is
+# bound on these phrasings. English only, like the automation markers above;
+# a miss leaves the tool to ranking, a false match costs one unused slot.
+_DELAY_UNIT_WORDS = (
+    r"one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen"
+)
+_DELAY_TENS = r"(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)"
+_DELAY_UNDER_HUNDRED = (
+    rf"(?:{_DELAY_TENS}(?:[\s-]+(?:{_DELAY_UNIT_WORDS}))?|{_DELAY_UNIT_WORDS})"
+)
+_DELAY_NUMBER = (
+    r"(?:\d+(?:[.,]\d+)?|"
+    # "one hundred", "a hundred and twenty"
+    rf"(?:a|one|two|three)\s+hundred(?:\s+(?:and\s+)?{_DELAY_UNDER_HUNDRED})?|"
+    rf"{_DELAY_UNDER_HUNDRED}|a|an|a\s+few|a\s+couple(?:\s+of)?|"
+    r"a\s+half|half\s+an?|an?\s+half)"
+)
+_DELAY_UNIT = r"(?:secs?|seconds?|mins?|minutes?|hrs?|hours?)"
+_DELAY_AMOUNT = rf"{_DELAY_NUMBER}(?:\s+and\s+a\s+half)?(?:\s+more)?[\s-]*{_DELAY_UNIT}"
+DELAYED_COMMAND_REGEX = (
+    r"(?i)\b(?:"
+    # "in 30 seconds", "after an hour", "in 5m", "in 2h30m" (typed units)
+    rf"(?:in|after)\s+(?:{_DELAY_AMOUNT}|\d+\s*[hms](?:\s*\d+\s*[hms]?){{0,2}})|"
+    # "10 minutes from now"
+    rf"{_DELAY_AMOUNT}\s+from\s+now"
+    r")\b"
+)
 
 # Referential follow-up signals: a turn that points back at the previous one
 # instead of naming its target ("turn it off", "do that again", "the other
